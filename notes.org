@@ -1,0 +1,22 @@
+#+title: Notes
+
+* 1. Download Models
+- Write a single script
+- In the ~models/~
+** Diarization
+- https://huggingface.co/BUT-FIT/diarizen-wavlm-large-s80-md-v2
+- https://huggingface.co/pyannote/speaker-diarization-community-1
+** Transcription
+- https://huggingface.co/openai/whisper-base.en
+
+* 2. CLI
+- Refer to models in ~models/~ directory
+- Refer to sound in audio directory
+- If run with no arguments, run ~whisper-base.en~, ~diarizen~, transcribe 
+** Interface
+- commandline arguments (Default to location)
+- 
+** Make pipeline 
+
+1. Diarization
+2. 
