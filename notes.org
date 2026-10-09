@@ -3,20 +3,35 @@
 * 1. Download Models
 - Write a single script
 - In the ~models/~
+  
 ** Diarization
 - https://huggingface.co/BUT-FIT/diarizen-wavlm-large-s80-md-v2
 - https://huggingface.co/pyannote/speaker-diarization-community-1
+** Embedding
+- https://huggingface.co/pyannote/wespeaker-voxceleb-resnet34-LM
 ** Transcription
+Systran/faster-whisper-base.en
 - https://huggingface.co/openai/whisper-base.en
 
 * 2. CLI
+- Use faster-whisper, pyannotate.audio
 - Refer to models in ~models/~ directory
-- Refer to sound in audio directory
+- Refer to sound in audio directory default ~sample-long.mp3~
 - If run with no arguments, run ~whisper-base.en~, ~diarizen~, transcribe 
+- create two outputs
+  - json with line by line information on the run
+  - human readable [hh:mm:ss] SPEAKER: spoken text
 ** Interface
 - commandline arguments (Default to location)
-- 
+- output status/thing to commandline
 ** Make pipeline 
 
 1. Diarization
-2. 
+2.
+*  Notes 
+- No gpu acceleration
+* Diarizen
+- needs separate embedding model (wespeaker-voxceleb)
+- repo bundles a fork of pyannotate.audio
+-  create second venv
+  
