@@ -84,7 +84,8 @@ TRANSCRIBERS = {
 }
 
 # name -> components + tuning. Anything other than the three component keys is
-# passed through as tuning (segmentation_step, beam_size, threads, ...).
+# passed through as tuning. `0` means "auto": threads -> physical cores,
+# transcribe_threads -> physical cores / transcribe_workers.
 PRESETS = {
     "speed": {
         "diarizer": "pyannote-seg3",
@@ -92,19 +93,30 @@ PRESETS = {
         "transcriber": "whisper-base-en",
         "segmentation_step": 0.3,
         "beam_size": 1,
-        "threads": 0,  # 0 => use all cores
+        "threads": 0,
+        "batch_size": 64,
+        "transcribe_workers": 4,
+        "transcribe_threads": 0,
     },
     "balanced": {
         "diarizer": "pyannote-seg3",
         "embedding": "wespeaker-resnet34",
         "transcriber": "whisper-turbo",
         "segmentation_step": 0.2,
+        "threads": 0,
+        "batch_size": 64,
+        "transcribe_workers": 4,
+        "transcribe_threads": 0,
     },
     "accuracy": {
         "diarizer": "diarizen-large",
         "embedding": "wespeaker-resnet34",
         "transcriber": "whisper-turbo",
         "segmentation_step": 0.1,
+        "threads": 0,
+        "batch_size": 64,
+        "transcribe_workers": 4,
+        "transcribe_threads": 0,
     },
 }
 

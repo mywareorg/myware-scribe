@@ -2,20 +2,47 @@
 """transiel - diarize and transcribe audio locally (CPU only)."""
 
 import argparse
+import importlib
 import io
 import json
 import os
 import sys
 import time
+import types
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-import soundfile as sf
-import torch
-import torchaudio
 
-from faster_whisper import WhisperModel
+def _physical_cores():
+    try:
+        import psutil
 
-import components
+        count = psutil.cpu_count(logical=False)
+        if count:
+            return count
+    except Exception:  # noqa: BLE001
+        pass
+    return max(1, (os.cpu_count() or 2) // 2)
+
+
+# Thread counts must be set before numpy/torch/CTranslate2 are imported so their
+# thread pools pick them up.
+PHYSICAL_CORES = _physical_cores()
+for _var in (
+    "OMP_NUM_THREADS",
+    "MKL_NUM_THREADS",
+    "OPENBLAS_NUM_THREADS",
+    "NUMEXPR_NUM_THREADS",
+    "VECLIB_MAXIMUM_THREADS",
+):
+    os.environ.setdefault(_var, str(PHYSICAL_CORES))
+
+import soundfile as sf  # noqa: E402
+import torch  # noqa: E402
+import torchaudio  # noqa: E402
+from faster_whisper import WhisperModel  # noqa: E402
+
+import components  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_AUDIO = REPO_ROOT / "audio" / "sample-long.mp3"
@@ -29,6 +56,40 @@ UNKNOWN = "UNKNOWN"
 
 BATCH_SIZE = 32
 CLUSTER_THRESHOLD = 0.6
+
+
+def detect_backends():
+    """Available torch accelerators, with the vendor name (cuda vs rocm)."""
+    backends = []
+    if torch.cuda.is_available():
+        backends.append("rocm" if getattr(torch.version, "hip", None) else "cuda")
+    if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
+        backends.append("mps")
+    if hasattr(torch, "xpu") and torch.xpu.is_available():
+        backends.append("xpu")
+    backends.append("cpu")
+    return backends
+
+
+def resolve_device(name):
+    """Resolve a device name to a torch.device ("auto" picks the best available)."""
+    if name == "auto":
+        if torch.cuda.is_available():
+            return torch.device("cuda")
+        if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
+            return torch.device("mps")
+        if hasattr(torch, "xpu") and torch.xpu.is_available():
+            return torch.device("xpu")
+        return torch.device("cpu")
+    return torch.device(name)
+
+
+def transcription_device(device):
+    """Device for faster-whisper. CTranslate2 supports CUDA (NVIDIA) only, so
+    AMD ROCm / Apple MPS / Intel XPU fall back to CPU for transcription."""
+    if device.type == "cuda" and getattr(torch.version, "hip", None) is None:
+        return "cuda"
+    return "cpu"
 
 
 def log(message):
@@ -72,7 +133,7 @@ def embedding_arg(descriptor):
     raise ValueError(f"unsupported embedding loader: {loader}")
 
 
-def build_config_parse(hub, segmentation_step, num_speakers):
+def build_config_parse(hub, segmentation_step, batch_size, num_speakers):
     """DiariZen config override: force N speakers and set the window overlap.
 
     DiariZen's default VBxClustering ignores min/max speakers, so we switch to
@@ -84,6 +145,7 @@ def build_config_parse(hub, segmentation_step, num_speakers):
     config = toml.load((Path(hub) / "config.toml").as_posix())
     inference_args = dict(config["inference"]["args"])
     inference_args["segmentation_step"] = segmentation_step
+    inference_args["batch_size"] = batch_size
 
     return {
         "inference": {"args": inference_args},
@@ -117,7 +179,10 @@ def diarize_diarizen(samples, sample_rate, hub, embedding, tuning, num_speakers)
         diarizen_hub=Path(hub),
         embedding_model=embedding,
         config_parse=build_config_parse(
-            hub, tuning.get("segmentation_step", 0.1), num_speakers
+            hub,
+            tuning.get("segmentation_step", 0.1),
+            tuning.get("batch_size", BATCH_SIZE),
+            num_speakers,
         ),
     )
     log("Diarizing...")
@@ -125,18 +190,100 @@ def diarize_diarizen(samples, sample_rate, hub, embedding, tuning, num_speakers)
     return turns_from_annotation(result)
 
 
-def diarize_pyannote(samples, sample_rate, segmentation, embedding, tuning, num_speakers):
+def load_pyannote_segmentation(seg_dir):
+    """Load a stock pyannote segmentation model with the DiariZen pyannote fork.
+
+    The fork's ``Model`` is a plain ``nn.Module`` and lacks Lightning's
+    ``save_hyperparameters``/``hparams`` that pyannote segmentation classes
+    (e.g. ``PyanNet``) rely on. We shim those, build the model from its
+    ``config.yaml``, fix the powerset class count to match the checkpoint, and
+    load the weights directly.
+    """
+    import yaml
+
+    from pyannote.audio.core.task import Problem, Resolution, Specifications
+    from pyannote.audio.utils.powerset import Powerset
+
+    seg_dir = Path(seg_dir)
+    config = yaml.safe_load((seg_dir / "config.yaml").read_text(encoding="utf-8"))
+
+    model_cfg = dict(config["model"])
+    target = model_cfg.pop("_target_")
+    module_name, class_name = target.rsplit(".", 1)
+    klass = getattr(importlib.import_module(module_name), class_name)
+
+    # Scope the shim to the segmentation class only (applying it to the shared
+    # base Model would shadow pytorch-lightning's save_hyperparameters for the
+    # WeSpeaker embedding, which relies on it).
+    if not hasattr(klass, "save_hyperparameters"):
+
+        def save_hyperparameters(self, *names):
+            locals_ = sys._getframe(1).f_locals
+            hparams = self.__dict__.get("hparams")
+            if hparams is None:
+                hparams = types.SimpleNamespace()
+                self.hparams = hparams
+            for name in names:
+                if name in locals_:
+                    setattr(hparams, name, locals_[name])
+
+        klass.save_hyperparameters = save_hyperparameters
+
+    model = klass(**model_cfg)
+
+    task_cfg = config.get("task", {})
+    max_chunk = task_cfg.get("max_speakers_per_chunk", 4)
+    max_frame = task_cfg.get("max_speakers_per_frame", 2)
+    duration = task_cfg.get("duration", 10.0)
+    model.specifications = Specifications(
+        problem=Problem.MULTI_LABEL_CLASSIFICATION
+        if max_frame is None
+        else Problem.MONO_LABEL_CLASSIFICATION,
+        resolution=Resolution.FRAME,
+        duration=duration,
+        min_duration=duration,
+        warm_up=0.0,
+        classes=[f"speaker#{i + 1}" for i in range(max_chunk)],
+        powerset_max_classes=max_frame,
+        permutation_invariant=True,
+    )
+    if model.specifications.powerset:
+        model.powerset = Powerset(max_chunk, max_frame)
+    if hasattr(model, "build"):
+        model.build()
+
+    checkpoint = torch.load(
+        str(seg_dir / "pytorch_model.bin"), map_location="cpu", weights_only=False
+    )
+    state = checkpoint.get("state_dict", checkpoint) if isinstance(checkpoint, dict) else checkpoint
+    model.load_state_dict(state, strict=True)
+    model.eval()
+    return model
+
+
+def diarize_pyannote(samples, sample_rate, segmentation, embedding, tuning, num_speakers, device):
     from pyannote.audio.pipelines import SpeakerDiarization
 
+    class PyannoteSpeakerDiarization(SpeakerDiarization):
+        # The DiariZen fork changed to_diarization() to return (feature, activations);
+        # its own apply() expects a plain feature, so unwrap it here.
+        def reconstruct(self, segmentations, hard_clusters, count):
+            result = super().reconstruct(segmentations, hard_clusters, count)
+            if isinstance(result, tuple):
+                result = result[0]
+            return result
+
     log(f"Loading pyannote segmentation: {segmentation}")
-    pipeline = SpeakerDiarization(
-        segmentation=str(segmentation),
+    segmentation_model = load_pyannote_segmentation(segmentation)
+    batch_size = tuning.get("batch_size", BATCH_SIZE)
+    pipeline = PyannoteSpeakerDiarization(
+        segmentation=segmentation_model,
         embedding=embedding,
         clustering="AgglomerativeClustering",
         segmentation_step=tuning.get("segmentation_step", 0.1),
-        embedding_batch_size=BATCH_SIZE,
-        segmentation_batch_size=BATCH_SIZE,
-        device=torch.device("cpu"),
+        embedding_batch_size=batch_size,
+        segmentation_batch_size=batch_size,
+        device=device,
     )
     pipeline.instantiate(
         {
@@ -153,7 +300,7 @@ def diarize_pyannote(samples, sample_rate, segmentation, embedding, tuning, num_
     return turns_from_annotation(result)
 
 
-def run_diarization(samples, sample_rate, descriptor, diarizer_path, embedding, tuning, num_speakers):
+def run_diarization(samples, sample_rate, descriptor, diarizer_path, embedding, tuning, num_speakers, device):
     backend = descriptor["backend"]
     if backend == "diarizen":
         return diarize_diarizen(
@@ -161,7 +308,7 @@ def run_diarization(samples, sample_rate, descriptor, diarizer_path, embedding, 
         )
     if backend == "pyannote":
         return diarize_pyannote(
-            samples, sample_rate, diarizer_path, embedding, tuning, num_speakers
+            samples, sample_rate, diarizer_path, embedding, tuning, num_speakers, device
         )
     raise ValueError(f"unknown diarization backend: {backend}")
 
@@ -190,36 +337,59 @@ def build_speaker_map(turns):
     return mapping
 
 
-def load_whisper(model_dir, device, compute_type):
+def load_whisper(model_dir, device, compute_type, cpu_threads, num_workers):
     if not Path(model_dir).is_dir():
         sys.exit(f"whisper model not found: {model_dir}")
     log(f"Loading whisper model: {model_dir}")
-    return WhisperModel(str(model_dir), device=device, compute_type=compute_type)
+    return WhisperModel(
+        str(model_dir),
+        device=device,
+        compute_type=compute_type,
+        cpu_threads=cpu_threads,
+        num_workers=num_workers,
+    )
 
 
-def transcribe_turns(model, samples, sample_rate, turns, beam_size, pad=CLIP_PAD_S):
+def _transcribe_clip(model, samples, sample_rate, turn, beam_size, pad):
+    total = len(samples)
+    start = max(0.0, turn["start"] - pad)
+    end = min(total / sample_rate, turn["end"] + pad)
+    clip = samples[int(start * sample_rate) : int(end * sample_rate)]
+    if len(clip) < int(0.15 * sample_rate):
+        return ""
+    segments, _ = model.transcribe(
+        clip,
+        language=LANGUAGE,
+        beam_size=beam_size,
+        condition_on_previous_text=False,
+        word_timestamps=False,
+    )
+    return " ".join(segment.text.strip() for segment in segments).strip()
+
+
+def transcribe_turns(model, samples, sample_rate, turns, beam_size, workers=1, pad=CLIP_PAD_S):
     """Transcribe each speaker turn independently.
 
     Speaker labels come from the diarization turn, so transcription timing never
-    influences speaker assignment.
+    influences speaker assignment. Turns are transcribed in parallel when
+    ``workers > 1`` (the model is built with matching ``num_workers``).
     """
-    log("Transcribing...")
-    total = len(samples)
-    for turn in turns:
-        start = max(0.0, turn["start"] - pad)
-        end = min(total / sample_rate, turn["end"] + pad)
-        clip = samples[int(start * sample_rate) : int(end * sample_rate)]
-        if len(clip) < int(0.15 * sample_rate):
-            turn["text"] = ""
-            continue
-        segments, _ = model.transcribe(
-            clip,
-            language=LANGUAGE,
-            beam_size=beam_size,
-            condition_on_previous_text=False,
-            word_timestamps=False,
-        )
-        turn["text"] = " ".join(segment.text.strip() for segment in segments).strip()
+    log(f"Transcribing ({workers} worker(s))...")
+    if workers > 1 and len(turns) > 1:
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            futures = {
+                executor.submit(
+                    _transcribe_clip, model, samples, sample_rate, turn, beam_size, pad
+                ): index
+                for index, turn in enumerate(turns)
+            }
+            for future in as_completed(futures):
+                turns[futures[future]]["text"] = future.result()
+    else:
+        for turn in turns:
+            turn["text"] = _transcribe_clip(
+                model, samples, sample_rate, turn, beam_size, pad
+            )
     return turns
 
 
@@ -306,9 +476,15 @@ def main():
         default=None,
         help="output basename (default: <audio-stem>-transcribe)",
     )
-    parser.add_argument("--device", default="cpu", help="torch/ct2 device (default: cpu)")
     parser.add_argument(
-        "--compute-type", default="int8", help="ct2 compute type (default: int8)"
+        "--device",
+        default="auto",
+        help="torch device: auto|cpu|cuda|mps|xpu (default: auto)",
+    )
+    parser.add_argument(
+        "--compute-type",
+        default="auto",
+        help="ct2 compute type; 'auto' picks float16 on cuda, int8 otherwise",
     )
     args = parser.parse_args()
 
@@ -331,9 +507,24 @@ def main():
     out_json = output_base.with_suffix(".json")
 
     tuning = resolved["tuning"]
-    threads = tuning.get("threads") or os.cpu_count() or 1
+    threads = tuning.get("threads") or PHYSICAL_CORES
     torch.set_num_threads(threads)
+    try:
+        torch.set_num_interop_threads(1)
+    except RuntimeError:
+        pass
     beam_size = tuning.get("beam_size", 5)
+    batch_size = tuning.get("batch_size", BATCH_SIZE)
+    workers = tuning.get("transcribe_workers", 4) or 1
+    transcribe_threads = tuning.get("transcribe_threads", 0) or max(1, PHYSICAL_CORES // workers)
+
+    backends = detect_backends()
+    diarization_device = resolve_device(args.device)
+    transcribe_device = transcription_device(diarization_device)
+    if args.compute_type == "auto":
+        compute_type = "float16" if transcribe_device == "cuda" else "int8"
+    else:
+        compute_type = args.compute_type
 
     diarizer_path = (
         Path(args.diarizen_hub)
@@ -351,6 +542,9 @@ def main():
     log(f"  diarizer:   {resolved['diarizer_name']} ({resolved['diarizer']['backend']})")
     log(f"  embedding:  {resolved['embedding_name']}")
     log(f"  transcriber:{resolved['transcriber_name']}")
+    log(f"  backends:   {', '.join(backends)}")
+    log(f"  diarization device:  {diarization_device}")
+    log(f"  transcription device: {transcribe_device} ({compute_type})")
     log(f"Audio: {audio_path}")
 
     timings = {}
@@ -370,6 +564,7 @@ def main():
         embedding,
         tuning,
         components.NUM_SPEAKERS,
+        diarization_device,
     )
     turns = clean_turns(raw_turns)
     timings["diarization_s"] = round(time.perf_counter() - start, 3)
@@ -380,8 +575,12 @@ def main():
     )
 
     start = time.perf_counter()
-    model = load_whisper(whisper_dir, args.device, args.compute_type)
-    turns = transcribe_turns(model, samples, sample_rate, turns, beam_size)
+    model = load_whisper(
+        whisper_dir, transcribe_device, compute_type, transcribe_threads, workers
+    )
+    turns = transcribe_turns(
+        model, samples, sample_rate, turns, beam_size, workers=workers
+    )
     timings["transcription_s"] = round(time.perf_counter() - start, 3)
 
     lines = build_lines(turns, speaker_map)
@@ -403,9 +602,17 @@ def main():
         },
         "run": {
             "device": args.device,
-            "compute_type": args.compute_type,
+            "diarization_device": str(diarization_device),
+            "transcription_device": transcribe_device,
+            "backends": backends,
+            "compute_type": compute_type,
             "num_speakers": components.NUM_SPEAKERS,
             "beam_size": beam_size,
+            "threads": threads,
+            "batch_size": batch_size,
+            "transcribe_workers": workers,
+            "transcribe_threads": transcribe_threads,
+            "physical_cores": PHYSICAL_CORES,
             "tuning": tuning,
             "merge_gap_s": MERGE_GAP_S,
             "min_turn_s": MIN_TURN_S,

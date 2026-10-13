@@ -48,4 +48,17 @@
 - override slots: --diarizer / --embedding / --transcriber
 - preset shortcuts: --speed / --balanced / --accuracy (or --preset NAME)
 - raw path overrides: --whisper-model / --diarizen-hub / --diarizen-embedding
+* GPU
+- bootstrap --vendor auto|cpu|cuda|rocm|mps (or TORCH_INDEX) picks torch wheels
+- torch (diarization/embedding) runs on cuda/rocm/mps; --device auto
+- CTranslate2 (whisper) is NVIDIA CUDA only -> CPU elsewhere
+- threading: OMP/MKL set to physical cores; parallel whisper workers
+* Comparison
+|----------+------|
+| preset   | time |
+|----------+------|
+| speed    | 3.36 |
+| balance  | 12.1 |
+| accuracy | 22.4 |
+|----------+------|
 

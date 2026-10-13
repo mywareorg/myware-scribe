@@ -36,19 +36,27 @@ influences speaker assignment. It writes two outputs:
 
 - **Python 3.11** (`python3.11`, or `py -3.11` on Windows). The vendored
   DiariZen pins `torch==2.1.1`, which has no Python 3.12 wheels.
-- No GPU and no system FFmpeg are required. Audio is decoded with `soundfile`.
+- No system FFmpeg is required (audio is decoded with `soundfile`).
+- GPU is optional and vendor-selectable (see Setup). No GPU is needed.
 
 ## Setup
 
 ```bash
-python scripts/bootstrap.py
+python scripts/bootstrap.py                  # auto-detect CPU/CUDA/ROCm/MPS
+python scripts/bootstrap.py --vendor cuda    # or cpu|rocm|mps
 ```
 
 This creates `.venv` and installs the pinned runtime dependencies plus the
-vendored DiariZen source and its bundled pyannote.audio fork. Set the `PYTHON`
-environment variable to point at a specific 3.11 interpreter if needed.
+vendored DiariZen source and its bundled pyannote.audio fork. `--vendor` selects
+the torch wheel channel (`auto` picks macOS→mps, `nvidia-smi`→cuda,
+`/opt/rocm`→rocm, else cpu); override the wheel index explicitly with the
+`TORCH_INDEX` environment variable. Set `PYTHON` to point at a specific 3.11
+interpreter. On Windows the script uses `py -3.11` by default.
 
-On Windows the same command works (the script uses `py -3.11` by default).
+**GPU support:** diarization/embedding use PyTorch and run on NVIDIA (CUDA),
+AMD (ROCm) or Apple (MPS). Transcription uses CTranslate2, which only supports
+**NVIDIA CUDA** — on other vendors transcription runs on CPU. `transiel`
+resolves this automatically (`--device auto`).
 
 ## Download models
 
