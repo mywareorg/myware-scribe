@@ -7,6 +7,7 @@ import io
 import json
 import os
 import sys
+import threading
 import time
 import types
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -57,6 +58,33 @@ UNKNOWN = "UNKNOWN"
 BATCH_SIZE = 32
 CLUSTER_THRESHOLD = 0.6
 
+# Progress (fraction of the whole run) boundaries for each stage.
+STAGE_BOUNDS = {
+    "loading": (0.00, 0.05),
+    "diarization": (0.05, 0.65),
+    "transcription": (0.65, 0.95),
+    "writing": (0.95, 1.00),
+}
+
+PROGRESS_JSON = False
+
+
+def emit(event):
+    """Emit a machine-readable progress event on stdout (when --progress-json)."""
+    if PROGRESS_JSON:
+        print(json.dumps(event), flush=True)
+
+
+def emit_stage(stage, progress, label=None):
+    emit(
+        {
+            "event": "stage",
+            "stage": stage,
+            "label": label if label is not None else stage,
+            "progress": round(float(progress), 4),
+        }
+    )
+
 
 def detect_backends():
     """Available torch accelerators, with the vendor name (cuda vs rocm)."""
@@ -93,7 +121,7 @@ def transcription_device(device):
 
 
 def log(message):
-    print(message, flush=True)
+    print(message, file=sys.stderr if PROGRESS_JSON else sys.stdout, flush=True)
 
 
 def format_timestamp(seconds):
@@ -387,6 +415,18 @@ def transcribe_turns(model, samples, sample_rate, turns, beam_size, workers=1, p
     ``workers > 1`` (the model is built with matching ``num_workers``).
     """
     log(f"Transcribing ({workers} worker(s))...")
+    total = len(turns)
+    lo, hi = STAGE_BOUNDS["transcription"]
+    progress = {"done": 0}
+    lock = threading.Lock()
+
+    def bump():
+        with lock:
+            progress["done"] += 1
+            done = progress["done"]
+        if total:
+            emit_stage("transcription", lo + (hi - lo) * (done / total), "Transcribing")
+
     if workers > 1 and len(turns) > 1:
         with ThreadPoolExecutor(max_workers=workers) as executor:
             futures = {
@@ -397,11 +437,13 @@ def transcribe_turns(model, samples, sample_rate, turns, beam_size, workers=1, p
             }
             for future in as_completed(futures):
                 turns[futures[future]]["segments"] = future.result()
+                bump()
     else:
         for turn in turns:
             turn["segments"] = _transcribe_clip(
                 model, samples, sample_rate, turn, beam_size, pad
             )
+            bump()
     return turns
 
 
@@ -502,7 +544,15 @@ def main():
         default="auto",
         help="ct2 compute type; 'auto' picks float16 on cuda, int8 otherwise",
     )
+    parser.add_argument(
+        "--progress-json",
+        action="store_true",
+        help="emit line-delimited JSON progress events on stdout (logs to stderr)",
+    )
     args = parser.parse_args()
+
+    global PROGRESS_JSON
+    PROGRESS_JSON = args.progress_json
 
     try:
         resolved = components.resolve(
@@ -565,6 +615,8 @@ def main():
 
     timings = {}
 
+    emit_stage("loading", 0.0, "Loading models")
+
     start = time.perf_counter()
     samples, sample_rate = load_audio(audio_path)
     duration = len(samples) / sample_rate
@@ -572,6 +624,7 @@ def main():
     log(f"Duration: {format_timestamp(duration)}")
 
     start = time.perf_counter()
+    emit_stage("diarization", STAGE_BOUNDS["diarization"][0], "Diarizing")
     raw_turns = run_diarization(
         samples,
         sample_rate,
@@ -585,12 +638,14 @@ def main():
     turns = clean_turns(raw_turns)
     timings["diarization_s"] = round(time.perf_counter() - start, 3)
     speaker_map = build_speaker_map(turns)
+    emit_stage("diarization", STAGE_BOUNDS["diarization"][1], "Diarized")
     log(
         f"Detected {len(speaker_map)} speaker(s), "
         f"{len(turns)} turn(s) ({len(raw_turns)} raw)"
     )
 
     start = time.perf_counter()
+    emit_stage("transcription", STAGE_BOUNDS["transcription"][0], "Loading whisper model")
     model = load_whisper(
         whisper_dir, transcribe_device, compute_type, transcribe_threads, workers
     )
@@ -601,6 +656,7 @@ def main():
 
     lines = build_lines(turns, speaker_map)
 
+    emit_stage("writing", STAGE_BOUNDS["writing"][0], "Writing output")
     txt = "".join(f"[{line['time']}] {line['speaker']}: {line['text']}\n" for line in lines)
     out_txt.write_text(txt, encoding="utf-8")
 
@@ -641,6 +697,9 @@ def main():
     }
     out_json.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
 
+    emit_stage("writing", STAGE_BOUNDS["writing"][1], "Done")
+    emit({"event": "done", "txt": str(out_txt), "json": str(out_json)})
+
     log("")
     for line in lines:
         log(f"[{line['time']}] {line['speaker']}: {line['text']}")
@@ -651,4 +710,12 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except SystemExit as exc:
+        if exc.code not in (0, None):
+            emit({"event": "error", "message": str(exc.code)})
+        raise
+    except Exception as exc:  # noqa: BLE001
+        emit({"event": "error", "message": str(exc)})
+        raise

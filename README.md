@@ -99,6 +99,21 @@ options: `--output`, `--device`, `--compute-type`. The number of speakers is fix
 On CPU, diarization dominates the runtime. Long files are slow because each
 speaker turn is transcribed separately.
 
+## GUI
+
+A minimal Rust/iced desktop front-end wraps the CLI (it spawns
+`scripts/transiel.py` and reads a JSON progress stream):
+
+```bash
+cargo run --release --manifest-path gui/Cargo.toml
+```
+
+It provides Select File, Save Location (folder), a Speed/Balanced/Accuracy
+preset picker, Start/Cancel, a stage-labelled progress bar, and the transcript
+on completion. The CLI must be set up first (`scripts/bootstrap.py` +
+`scripts/model-download.py`); the GUI locates the repo via `TRANSIEL_ROOT` or by
+searching upward for `scripts/transiel.py`.
+
 ## Licenses
 
 - The DiariZen model weights are released under **CC BY-NC 4.0** and are

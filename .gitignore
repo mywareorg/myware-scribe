@@ -3,3 +3,4 @@ models/
 __pycache__/
 *-transcribe.txt
 *-transcribe.json
+gui/target/
