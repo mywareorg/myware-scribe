@@ -2,31 +2,33 @@
 """transiel - diarize and transcribe audio locally (CPU only)."""
 
 import argparse
+import io
 import json
-import subprocess
+import os
 import sys
-import tempfile
 import time
 from pathlib import Path
 
+import soundfile as sf
 import torch
 import torchaudio
 
 from faster_whisper import WhisperModel
-from pyannote.audio import Pipeline
-from pyannote.audio.pipelines.utils.hook import ProgressHook
+
+import components
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-MODELS_DIR = REPO_ROOT / "models"
 DEFAULT_AUDIO = REPO_ROOT / "audio" / "sample-long.mp3"
-DEFAULT_WHISPER = MODELS_DIR / "faster-whisper-base.en"
-DEFAULT_DIARIZATION = MODELS_DIR / "speaker-diarization-community-1"
-DEFAULT_DIARIZEN_HUB = MODELS_DIR / "diarizen-wavlm-large-s80-md-v2"
-DEFAULT_DIARIZEN_EMBEDDING = MODELS_DIR / "wespeaker-voxceleb-resnet34-LM" / "pytorch_model.bin"
-DEFAULT_DIARIZEN_PYTHON = REPO_ROOT / ".venv-diarizen" / "bin" / "python"
-DIARIZEN_RUNNER = REPO_ROOT / "scripts" / "diarizen_diarize.py"
 
+SAMPLE_RATE = 16000
+LANGUAGE = "en"
+MERGE_GAP_S = 1.0
+MIN_TURN_S = 0.4
+CLIP_PAD_S = 0.1
 UNKNOWN = "UNKNOWN"
+
+BATCH_SIZE = 32
+CLUSTER_THRESHOLD = 0.6
 
 
 def log(message):
@@ -40,87 +42,143 @@ def format_timestamp(seconds):
     return f"{hours:02d}:{minutes:02d}:{secs:02d}"
 
 
-def load_audio(path, target_sr=16000):
-    waveform, sample_rate = torchaudio.load(str(path))
-    if waveform.shape[0] > 1:
-        waveform = waveform.mean(dim=0, keepdim=True)
+def load_audio(path, target_sr=SAMPLE_RATE):
+    samples, sample_rate = sf.read(str(path), dtype="float32", always_2d=True)
+    mono = samples.mean(axis=1)
     if sample_rate != target_sr:
-        waveform = torchaudio.functional.resample(waveform, sample_rate, target_sr)
-    return waveform, target_sr
+        mono = torchaudio.functional.resample(
+            torch.from_numpy(mono), sample_rate, target_sr
+        ).numpy()
+    return mono, target_sr
 
 
-def run_diarization_diarizen(audio_path, hub, embedding, python, num_speakers, min_speakers, max_speakers):
-    if not Path(python).is_file():
-        sys.exit(
-            f"DiariZen interpreter not found: {python}\n"
-            "Run scripts/setup-diarizen.sh to create the dedicated environment."
-        )
-    if not Path(hub).is_dir():
-        sys.exit(f"DiariZen hub not found: {hub}")
-    if not Path(embedding).is_file():
-        sys.exit(
-            f"embedding model not found: {embedding}\n"
-            "Run scripts/model-download.py to fetch pyannote/wespeaker-voxceleb-resnet34-LM."
-        )
-
-    log(f"Loading DiariZen model: {hub}")
-    with tempfile.TemporaryDirectory() as tmp:
-        turns_json = Path(tmp) / "turns.json"
-        cmd = [
-            str(python),
-            str(DIARIZEN_RUNNER),
-            "--hub", str(hub),
-            "--embedding", str(embedding),
-            "--audio", str(audio_path),
-            "--output-json", str(turns_json),
-        ]
-        if num_speakers is not None:
-            cmd += ["--num-speakers", str(num_speakers)]
-        else:
-            if min_speakers is not None:
-                cmd += ["--min-speakers", str(min_speakers)]
-            if max_speakers is not None:
-                cmd += ["--max-speakers", str(max_speakers)]
-
-        log("Diarizing (DiariZen)...")
-        result = subprocess.run(cmd, capture_output=True, text=True)
-        if result.returncode != 0:
-            sys.exit(f"DiariZen diarization failed:\n{result.stderr}")
-        turns = json.loads(turns_json.read_text(encoding="utf-8"))["turns"]
-
-    turns.sort(key=lambda t: (t["start"], t["end"]))
-    return turns
+def audio_bytes(samples, sample_rate=SAMPLE_RATE):
+    buffer = io.BytesIO()
+    sf.write(buffer, samples, sample_rate, format="WAV")
+    buffer.seek(0)
+    return buffer
 
 
-def run_diarization(audio, model_dir, num_speakers, min_speakers, max_speakers):
-    if not Path(model_dir).is_dir():
-        sys.exit(f"diarization model not found: {model_dir}")
+def embedding_arg(descriptor):
+    """Map an embedding descriptor to what the pyannote fork expects.
 
-    log(f"Loading diarization model: {model_dir}")
-    pipeline = Pipeline.from_pretrained(str(model_dir))
-    pipeline.to(torch.device("cpu"))
-    kwargs = {}
-    if num_speakers is not None:
-        kwargs["num_speakers"] = num_speakers
-    else:
-        if min_speakers is not None:
-            kwargs["min_speakers"] = min_speakers
-        if max_speakers is not None:
-            kwargs["max_speakers"] = max_speakers
+    Passed as a ``{"checkpoint": ...}`` mapping so the fork loads the pyannote
+    model checkpoint instead of misrouting the path to its ONNX loader.
+    """
+    loader = descriptor["loader"]
+    path = components.model_path(descriptor)
+    if loader == "pyannote":
+        return {"checkpoint": str((path / "pytorch_model.bin").resolve())}
+    raise ValueError(f"unsupported embedding loader: {loader}")
 
-    log("Diarizing...")
-    with ProgressHook() as hook:
-        output = pipeline(audio, hook=hook)
 
-    annotation = getattr(output, "exclusive_speaker_diarization", None)
-    if annotation is None:
-        annotation = getattr(output, "speaker_diarization", output)
+def build_config_parse(hub, segmentation_step, num_speakers):
+    """DiariZen config override: force N speakers and set the window overlap.
 
+    DiariZen's default VBxClustering ignores min/max speakers, so we switch to
+    AgglomerativeClustering with min_clusters == max_clusters, which searches the
+    dendrogram for the exact requested number of clusters.
+    """
+    import toml
+
+    config = toml.load((Path(hub) / "config.toml").as_posix())
+    inference_args = dict(config["inference"]["args"])
+    inference_args["segmentation_step"] = segmentation_step
+
+    return {
+        "inference": {"args": inference_args},
+        "clustering": {
+            "args": {
+                "method": "AgglomerativeClustering",
+                "min_speakers": num_speakers,
+                "max_speakers": num_speakers,
+                "ahc_threshold": CLUSTER_THRESHOLD,
+                "min_cluster_size": 1,
+            }
+        },
+    }
+
+
+def turns_from_annotation(annotation):
     turns = []
     for segment, _, label in annotation.itertracks(yield_label=True):
-        turns.append({"start": segment.start, "end": segment.end, "label": label})
+        turns.append(
+            {"start": float(segment.start), "end": float(segment.end), "label": str(label)}
+        )
     turns.sort(key=lambda t: (t["start"], t["end"]))
     return turns
+
+
+def diarize_diarizen(samples, sample_rate, hub, embedding, tuning, num_speakers):
+    from diarizen.pipelines.inference import DiariZenPipeline
+
+    log(f"Loading DiariZen model: {hub}")
+    pipeline = DiariZenPipeline(
+        diarizen_hub=Path(hub),
+        embedding_model=embedding,
+        config_parse=build_config_parse(
+            hub, tuning.get("segmentation_step", 0.1), num_speakers
+        ),
+    )
+    log("Diarizing...")
+    result = pipeline(audio_bytes(samples, sample_rate))
+    return turns_from_annotation(result)
+
+
+def diarize_pyannote(samples, sample_rate, segmentation, embedding, tuning, num_speakers):
+    from pyannote.audio.pipelines import SpeakerDiarization
+
+    log(f"Loading pyannote segmentation: {segmentation}")
+    pipeline = SpeakerDiarization(
+        segmentation=str(segmentation),
+        embedding=embedding,
+        clustering="AgglomerativeClustering",
+        segmentation_step=tuning.get("segmentation_step", 0.1),
+        embedding_batch_size=BATCH_SIZE,
+        segmentation_batch_size=BATCH_SIZE,
+        device=torch.device("cpu"),
+    )
+    pipeline.instantiate(
+        {
+            "segmentation": {"min_duration_off": 0.0},
+            "clustering": {
+                "method": "centroid",
+                "min_cluster_size": 1,
+                "threshold": CLUSTER_THRESHOLD,
+            },
+        }
+    )
+    log("Diarizing...")
+    result = pipeline(audio_bytes(samples, sample_rate), num_speakers=num_speakers)
+    return turns_from_annotation(result)
+
+
+def run_diarization(samples, sample_rate, descriptor, diarizer_path, embedding, tuning, num_speakers):
+    backend = descriptor["backend"]
+    if backend == "diarizen":
+        return diarize_diarizen(
+            samples, sample_rate, diarizer_path, embedding, tuning, num_speakers
+        )
+    if backend == "pyannote":
+        return diarize_pyannote(
+            samples, sample_rate, diarizer_path, embedding, tuning, num_speakers
+        )
+    raise ValueError(f"unknown diarization backend: {backend}")
+
+
+def clean_turns(turns, max_gap=MERGE_GAP_S, min_duration=MIN_TURN_S):
+    """Merge near-adjacent same-speaker turns and drop ultra-short fragments."""
+    merged = []
+    for turn in sorted(turns, key=lambda t: (t["start"], t["end"])):
+        if (
+            merged
+            and merged[-1]["label"] == turn["label"]
+            and turn["start"] - merged[-1]["end"] <= max_gap
+        ):
+            merged[-1]["end"] = max(merged[-1]["end"], turn["end"])
+        else:
+            merged.append(dict(turn))
+    return [t for t in merged if t["end"] - t["start"] >= min_duration]
 
 
 def build_speaker_map(turns):
@@ -132,71 +190,64 @@ def build_speaker_map(turns):
     return mapping
 
 
-def assign_speaker(segment, turns, mapping):
-    best_label = None
-    best_overlap = 0.0
-    for turn in turns:
-        overlap = min(segment["end"], turn["end"]) - max(segment["start"], turn["start"])
-        if overlap > best_overlap:
-            best_overlap = overlap
-            best_label = turn["label"]
-
-    if best_label is not None:
-        return mapping.get(best_label, UNKNOWN)
-
-    nearest_label = None
-    nearest_distance = None
-    for turn in turns:
-        if turn["end"] < segment["start"]:
-            distance = segment["start"] - turn["end"]
-        elif turn["start"] > segment["end"]:
-            distance = turn["start"] - segment["end"]
-        else:
-            distance = 0.0
-        if nearest_distance is None or distance < nearest_distance:
-            nearest_distance = distance
-            nearest_label = turn["label"]
-
-    return mapping.get(nearest_label, UNKNOWN) if nearest_label else UNKNOWN
-
-
-def run_transcription(samples, model_dir, device, compute_type):
+def load_whisper(model_dir, device, compute_type):
     if not Path(model_dir).is_dir():
         sys.exit(f"whisper model not found: {model_dir}")
-
     log(f"Loading whisper model: {model_dir}")
-    model = WhisperModel(str(model_dir), device=device, compute_type=compute_type)
+    return WhisperModel(str(model_dir), device=device, compute_type=compute_type)
 
+
+def transcribe_turns(model, samples, sample_rate, turns, beam_size, pad=CLIP_PAD_S):
+    """Transcribe each speaker turn independently.
+
+    Speaker labels come from the diarization turn, so transcription timing never
+    influences speaker assignment.
+    """
     log("Transcribing...")
-    segments_iter, info = model.transcribe(samples, language="en")
+    total = len(samples)
+    for turn in turns:
+        start = max(0.0, turn["start"] - pad)
+        end = min(total / sample_rate, turn["end"] + pad)
+        clip = samples[int(start * sample_rate) : int(end * sample_rate)]
+        if len(clip) < int(0.15 * sample_rate):
+            turn["text"] = ""
+            continue
+        segments, _ = model.transcribe(
+            clip,
+            language=LANGUAGE,
+            beam_size=beam_size,
+            condition_on_previous_text=False,
+            word_timestamps=False,
+        )
+        turn["text"] = " ".join(segment.text.strip() for segment in segments).strip()
+    return turns
 
-    segments = []
-    for seg in segments_iter:
-        segments.append(
+
+def build_lines(turns, mapping):
+    lines = []
+    for turn in turns:
+        text = turn.get("text", "").strip()
+        if not text:
+            continue
+        lines.append(
             {
-                "start": seg.start,
-                "end": seg.end,
-                "text": seg.text.strip(),
-                "avg_logprob": seg.avg_logprob,
-                "no_speech_prob": seg.no_speech_prob,
-                "compression_ratio": seg.compression_ratio,
-                "temperature": seg.temperature,
+                "time": format_timestamp(turn["start"]),
+                "start": turn["start"],
+                "end": turn["end"],
+                "speaker": mapping.get(turn["label"], UNKNOWN),
+                "text": text,
             }
         )
-
-    metadata = {
-        "language": info.language,
-        "language_probability": info.language_probability,
-        "duration": info.duration,
-        "duration_after_vad": info.duration_after_vad,
-    }
-    return segments, metadata
+    return lines
 
 
 def main():
     parser = argparse.ArgumentParser(
         prog="transiel",
         description="Diarize and transcribe audio locally (CPU only).",
+        epilog=(
+            "components: run 'python scripts/components.py --list' to see names"
+        ),
     )
     parser.add_argument(
         "audio",
@@ -204,36 +255,51 @@ def main():
         default=str(DEFAULT_AUDIO),
         help="audio file to process (default: audio/sample-long.mp3)",
     )
+    preset_group = parser.add_mutually_exclusive_group()
+    preset_group.add_argument(
+        "--preset",
+        choices=list(components.PRESETS),
+        default=None,
+        help=f"component preset (default: {components.DEFAULT_PRESET})",
+    )
+    preset_group.add_argument(
+        "--speed",
+        dest="preset",
+        action="store_const",
+        const="speed",
+        help="shortcut for --preset speed",
+    )
+    preset_group.add_argument(
+        "--balanced",
+        dest="preset",
+        action="store_const",
+        const="balanced",
+        help="shortcut for --preset balanced",
+    )
+    preset_group.add_argument(
+        "--accuracy",
+        dest="preset",
+        action="store_const",
+        const="accuracy",
+        help="shortcut for --preset accuracy (default)",
+    )
+    parser.add_argument("--diarizer", help="diarizer component name (overrides preset)")
+    parser.add_argument("--embedding", help="embedding component name (overrides preset)")
+    parser.add_argument("--transcriber", help="transcriber component name (overrides preset)")
     parser.add_argument(
         "--whisper-model",
-        default=str(DEFAULT_WHISPER),
-        help="path to a faster-whisper (CTranslate2) model directory",
-    )
-    parser.add_argument(
-        "--backend",
-        choices=["diarizen", "community"],
-        default="diarizen",
-        help="diarization backend (default: diarizen)",
-    )
-    parser.add_argument(
-        "--diarization-model",
-        default=str(DEFAULT_DIARIZATION),
-        help="path to a pyannote diarization pipeline directory (community backend)",
+        default=None,
+        help="raw path to a faster-whisper model directory (overrides transcriber)",
     )
     parser.add_argument(
         "--diarizen-hub",
-        default=str(DEFAULT_DIARIZEN_HUB),
-        help="path to the DiariZen model directory",
+        default=None,
+        help="raw path to the diarization model directory (overrides diarizer)",
     )
     parser.add_argument(
         "--diarizen-embedding",
-        default=str(DEFAULT_DIARIZEN_EMBEDDING),
-        help="path to the DiariZen speaker embedding model file",
-    )
-    parser.add_argument(
-        "--diarizen-python",
-        default=str(DEFAULT_DIARIZEN_PYTHON),
-        help="interpreter of the dedicated DiariZen environment",
+        default=None,
+        help="raw path to the embedding checkpoint (overrides embedding)",
     )
     parser.add_argument(
         "--output",
@@ -244,10 +310,17 @@ def main():
     parser.add_argument(
         "--compute-type", default="int8", help="ct2 compute type (default: int8)"
     )
-    parser.add_argument("--num-speakers", type=int, default=2)
-    parser.add_argument("--min-speakers", type=int, default=None)
-    parser.add_argument("--max-speakers", type=int, default=None)
     args = parser.parse_args()
+
+    try:
+        resolved = components.resolve(
+            args.preset or components.DEFAULT_PRESET,
+            args.diarizer,
+            args.embedding,
+            args.transcriber,
+        )
+    except KeyError as exc:
+        sys.exit(str(exc))
 
     audio_path = Path(args.audio).resolve()
     if not audio_path.is_file():
@@ -257,81 +330,87 @@ def main():
     out_txt = output_base.with_suffix(".txt")
     out_json = output_base.with_suffix(".json")
 
-    timings = {}
+    tuning = resolved["tuning"]
+    threads = tuning.get("threads") or os.cpu_count() or 1
+    torch.set_num_threads(threads)
+    beam_size = tuning.get("beam_size", 5)
 
+    diarizer_path = (
+        Path(args.diarizen_hub)
+        if args.diarizen_hub
+        else components.model_path(resolved["diarizer"])
+    )
+    embedding = (
+        {"checkpoint": str(Path(args.diarizen_embedding).resolve())}
+        if args.diarizen_embedding
+        else embedding_arg(resolved["embedding"])
+    )
+    whisper_dir = Path(args.whisper_model) if args.whisper_model else components.model_path(resolved["transcriber"])
+
+    log(f"Preset: {resolved['preset']}")
+    log(f"  diarizer:   {resolved['diarizer_name']} ({resolved['diarizer']['backend']})")
+    log(f"  embedding:  {resolved['embedding_name']}")
+    log(f"  transcriber:{resolved['transcriber_name']}")
     log(f"Audio: {audio_path}")
+
+    timings = {}
 
     start = time.perf_counter()
     samples, sample_rate = load_audio(audio_path)
-    duration = samples.shape[1] / sample_rate
+    duration = len(samples) / sample_rate
     timings["load_audio_s"] = round(time.perf_counter() - start, 3)
     log(f"Duration: {format_timestamp(duration)}")
 
     start = time.perf_counter()
-    if args.backend == "diarizen":
-        turns = run_diarization_diarizen(
-            audio_path,
-            args.diarizen_hub,
-            args.diarizen_embedding,
-            args.diarizen_python,
-            args.num_speakers,
-            args.min_speakers,
-            args.max_speakers,
-        )
-    else:
-        turns = run_diarization(
-            {"waveform": samples, "sample_rate": sample_rate},
-            args.diarization_model,
-            args.num_speakers,
-            args.min_speakers,
-            args.max_speakers,
-        )
+    raw_turns = run_diarization(
+        samples,
+        sample_rate,
+        resolved["diarizer"],
+        diarizer_path,
+        embedding,
+        tuning,
+        components.NUM_SPEAKERS,
+    )
+    turns = clean_turns(raw_turns)
     timings["diarization_s"] = round(time.perf_counter() - start, 3)
     speaker_map = build_speaker_map(turns)
-    log(f"Detected {len(speaker_map)} speaker(s), {len(turns)} turn(s)")
+    log(
+        f"Detected {len(speaker_map)} speaker(s), "
+        f"{len(turns)} turn(s) ({len(raw_turns)} raw)"
+    )
 
     start = time.perf_counter()
-    segments, whisper_meta = run_transcription(
-        samples[0].numpy(), args.whisper_model, args.device, args.compute_type
-    )
+    model = load_whisper(whisper_dir, args.device, args.compute_type)
+    turns = transcribe_turns(model, samples, sample_rate, turns, beam_size)
     timings["transcription_s"] = round(time.perf_counter() - start, 3)
 
-    for segment in segments:
-        segment["speaker"] = assign_speaker(segment, turns, speaker_map)
-
-    lines = [
-        {
-            "time": format_timestamp(segment["start"]),
-            "start": segment["start"],
-            "end": segment["end"],
-            "speaker": segment["speaker"],
-            "text": segment["text"],
-        }
-        for segment in segments
-    ]
+    lines = build_lines(turns, speaker_map)
 
     txt = "".join(f"[{line['time']}] {line['speaker']}: {line['text']}\n" for line in lines)
     out_txt.write_text(txt, encoding="utf-8")
 
     payload = {
         "audio": {"path": str(audio_path), "duration": duration},
+        "components": {
+            "preset": resolved["preset"],
+            "diarizer": resolved["diarizer_name"],
+            "embedding": resolved["embedding_name"],
+            "transcriber": resolved["transcriber_name"],
+        },
         "models": {
-            "whisper": str(Path(args.whisper_model).resolve()),
-            "diarization": (
-                str(Path(args.diarizen_hub).resolve())
-                if args.backend == "diarizen"
-                else str(Path(args.diarization_model).resolve())
-            ),
+            "whisper": str(whisper_dir.resolve()),
+            "diarization": str(Path(diarizer_path).resolve()),
         },
         "run": {
-            "backend": args.backend,
             "device": args.device,
             "compute_type": args.compute_type,
-            "num_speakers": args.num_speakers,
-            "min_speakers": args.min_speakers,
-            "max_speakers": args.max_speakers,
+            "num_speakers": components.NUM_SPEAKERS,
+            "beam_size": beam_size,
+            "tuning": tuning,
+            "merge_gap_s": MERGE_GAP_S,
+            "min_turn_s": MIN_TURN_S,
+            "clip_pad_s": CLIP_PAD_S,
             "timings": timings,
-            "whisper": whisper_meta,
         },
         "speakers": speaker_map,
         "diarization": turns,

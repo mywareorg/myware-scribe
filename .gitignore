@@ -1,7 +1,5 @@
 models/
 .venv/
-.venv-diarizen/
 __pycache__/
 *-transcribe.txt
 *-transcribe.json
-sample-long-transcribe.*

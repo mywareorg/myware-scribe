@@ -1,3 +1,10 @@
+torch==2.1.1
+torchaudio==2.1.1
+numpy==1.26.4
+faster-whisper==1.2.1
+soundfile==0.14.0
+toml==0.10.2
+accelerate==1.6.0
+psutil
 huggingface_hub
-faster-whisper
-pyannote.audio
+tqdm

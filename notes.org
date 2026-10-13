@@ -6,12 +6,13 @@
   
 ** Diarization
 - https://huggingface.co/BUT-FIT/diarizen-wavlm-large-s80-md-v2
-- https://huggingface.co/pyannote/speaker-diarization-community-1
+- https://huggingface.co/BUT-FIT/diarizen-wavlm-base-s80-md
+- https://huggingface.co/pyannote/segmentation-3.0 (gated, needs token)
 ** Embedding
 - https://huggingface.co/pyannote/wespeaker-voxceleb-resnet34-LM
 ** Transcription
-Systran/faster-whisper-base.en
-- https://huggingface.co/openai/whisper-base.en
+- deepdml/faster-whisper-large-v3-turbo-ct2 (default)
+- Systran/faster-whisper-base.en (faster option)
 
 * 2. CLI
 - Use faster-whisper, pyannotate.audio
@@ -26,12 +27,25 @@ Systran/faster-whisper-base.en
 - output status/thing to commandline
 ** Make pipeline 
 
-1. Diarization
-2.
+1. Diarization (force N speakers)
+2. Clean turns (merge same-speaker, drop short)
+3. Transcribe each turn independently
+4. Write .txt + .json
 *  Notes 
 - No gpu acceleration
 * Diarizen
 - needs separate embedding model (wespeaker-voxceleb)
 - repo bundles a fork of pyannotate.audio
--  create second venv
-  
+- single venv (Python 3.11); see scripts/bootstrap.py
+- VBxClustering ignores min/max speakers -> use AgglomerativeClustering
+- transcribe per speaker turn so whisper timing never sets the speaker
+* Components
+- registry in scripts/components.py (--list to print)
+- presets: speed / balanced / accuracy (default accuracy)
+- speed: pyannote-seg3 + wespeaker-resnet34 + whisper-base.en (gated seg3)
+- balanced: pyannote-seg3 + wespeaker-resnet34 + whisper-turbo (gated seg3)
+- accuracy: diarizen-large + wespeaker-resnet34 + whisper-turbo (no token)
+- override slots: --diarizer / --embedding / --transcriber
+- preset shortcuts: --speed / --balanced / --accuracy (or --preset NAME)
+- raw path overrides: --whisper-model / --diarizen-hub / --diarizen-embedding
+
