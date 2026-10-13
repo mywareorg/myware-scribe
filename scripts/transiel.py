@@ -351,12 +351,17 @@ def load_whisper(model_dir, device, compute_type, cpu_threads, num_workers):
 
 
 def _transcribe_clip(model, samples, sample_rate, turn, beam_size, pad):
+    """Transcribe a single speaker turn, returning one entry per Whisper segment.
+
+    Segment timestamps are offset back to absolute file time (the clip starts at
+    ``turn.start - pad``). Empty segments are dropped.
+    """
     total = len(samples)
     start = max(0.0, turn["start"] - pad)
     end = min(total / sample_rate, turn["end"] + pad)
     clip = samples[int(start * sample_rate) : int(end * sample_rate)]
     if len(clip) < int(0.15 * sample_rate):
-        return ""
+        return []
     segments, _ = model.transcribe(
         clip,
         language=LANGUAGE,
@@ -364,11 +369,18 @@ def _transcribe_clip(model, samples, sample_rate, turn, beam_size, pad):
         condition_on_previous_text=False,
         word_timestamps=False,
     )
-    return " ".join(segment.text.strip() for segment in segments).strip()
+    result = []
+    for segment in segments:
+        text = segment.text.strip()
+        if text:
+            result.append(
+                {"start": start + float(segment.start), "end": start + float(segment.end), "text": text}
+            )
+    return result
 
 
 def transcribe_turns(model, samples, sample_rate, turns, beam_size, workers=1, pad=CLIP_PAD_S):
-    """Transcribe each speaker turn independently.
+    """Transcribe each speaker turn independently, one entry per Whisper segment.
 
     Speaker labels come from the diarization turn, so transcription timing never
     influences speaker assignment. Turns are transcribed in parallel when
@@ -384,30 +396,34 @@ def transcribe_turns(model, samples, sample_rate, turns, beam_size, workers=1, p
                 for index, turn in enumerate(turns)
             }
             for future in as_completed(futures):
-                turns[futures[future]]["text"] = future.result()
+                turns[futures[future]]["segments"] = future.result()
     else:
         for turn in turns:
-            turn["text"] = _transcribe_clip(
+            turn["segments"] = _transcribe_clip(
                 model, samples, sample_rate, turn, beam_size, pad
             )
     return turns
 
 
 def build_lines(turns, mapping):
+    """One line per Whisper segment, tagged with the turn's speaker."""
     lines = []
     for turn in turns:
-        text = turn.get("text", "").strip()
-        if not text:
-            continue
-        lines.append(
-            {
-                "time": format_timestamp(turn["start"]),
-                "start": turn["start"],
-                "end": turn["end"],
-                "speaker": mapping.get(turn["label"], UNKNOWN),
-                "text": text,
-            }
-        )
+        speaker = mapping.get(turn["label"], UNKNOWN)
+        for segment in turn.get("segments", []):
+            text = segment["text"].strip()
+            if not text:
+                continue
+            lines.append(
+                {
+                    "time": format_timestamp(segment["start"]),
+                    "start": segment["start"],
+                    "end": segment["end"],
+                    "speaker": speaker,
+                    "text": text,
+                }
+            )
+    lines.sort(key=lambda line: (line["start"], line["end"]))
     return lines
 
 
