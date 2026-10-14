@@ -178,7 +178,7 @@ impl App {
                 Task::none()
             }
             Message::PresetChanged(preset) => {
-                if matches!(self.status, Status::Running) {
+                if matches!(self.status, Status::Running) || self.input.is_none() {
                     return Task::none();
                 }
                 self.preset = preset;
@@ -451,18 +451,23 @@ impl App {
         let can_start = !running && has_input;
         let can_cancel = running;
 
-        let preset_widget: Element<Message> = if can_preset {
-            pick_list(Preset::ALL, Some(self.preset), Message::PresetChanged).into()
-        } else {
-            text(self.preset.to_string())
-                .color(Color::from_rgb(0.55, 0.55, 0.55))
-                .into()
-        };
+        let preset = pick_list(Preset::ALL, Some(self.preset), Message::PresetChanged).style(
+            move |theme, status| {
+                let mut style = iced::widget::pick_list::default(theme, status);
+                if !can_preset {
+                    let grey = Color::from_rgb(0.55, 0.55, 0.55);
+                    style.text_color = grey;
+                    style.handle_color = grey;
+                    style.background = Color::from_rgb(0.9, 0.9, 0.9).into();
+                }
+                style
+            },
+        );
 
         let controls = row![
             button("Select File").on_press_maybe(can_select.then_some(Message::PickInput)),
             button("Save Location").on_press_maybe(can_output.then_some(Message::PickOutput)),
-            preset_widget,
+            preset,
             button("Start").on_press_maybe(can_start.then_some(Message::Start)),
             button("Cancel").on_press_maybe(can_cancel.then_some(Message::Cancel)),
         ]
