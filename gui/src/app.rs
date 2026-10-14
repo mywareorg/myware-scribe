@@ -371,10 +371,9 @@ pub enum Message {
     RenameName(usize, String),
     RenameSave,
     RenameCancel,
+    RenameMove(bool),
+    RenameSubmit,
     RenameSpeaker(String),
-    SelectLine(usize),
-    MergeLine,
-    SplitLine,
     ZoomIn,
     ZoomOut,
     ZoomReset,
@@ -385,10 +384,8 @@ pub enum Message {
     WaveZoom(f32),
     HelpChoice(HelpKind),
     CloseHelp,
+    Noop,
     TranscriptHover(bool),
-    TipEnter(&'static str),
-    TipExit(&'static str),
-    TipShow(&'static str, u64),
     OpenSummary,
     TimestampsToggled(bool),
     JoinSpeakerToggled(bool),
@@ -452,6 +449,7 @@ pub struct App {
     summary_open: bool,
     rename_open: bool,
     rename_fields: Vec<(String, String)>,
+    rename_focus: usize,
     stats: Option<backend::Stats>,
     timestamps: bool,
     join_speaker: bool,
@@ -466,7 +464,6 @@ pub struct App {
     transcript_viewport: f32,
     transcript_content: f32,
     transcript_hover: bool,
-    selected_line: Option<usize>,
     font_scale: f32,
     timestamp_gutter: bool,
     follow_playhead: bool,
@@ -483,9 +480,6 @@ pub struct App {
     window_dirty: bool,
     last_window_change: Option<Instant>,
     waveform_zoom: f32,
-    hovered_tip: Option<&'static str>,
-    shown_tip: Option<&'static str>,
-    tip_seq: u64,
     events: Arc<Mutex<VecDeque<Event>>>,
     pid: Arc<AtomicU32>,
     cancelled: Arc<AtomicBool>,
@@ -531,6 +525,7 @@ impl App {
             summary_open: false,
             rename_open: false,
             rename_fields: Vec::new(),
+            rename_focus: 0,
             stats: None,
             timestamps: settings.timestamps.unwrap_or(true),
             join_speaker: settings.join_speaker.unwrap_or(false),
@@ -549,7 +544,6 @@ impl App {
             transcript_viewport: 0.0,
             transcript_content: 0.0,
             transcript_hover: false,
-            selected_line: None,
             font_scale: settings.font_scale.unwrap_or(1.0),
             timestamp_gutter: settings.timestamp_gutter.unwrap_or(false),
             follow_playhead: settings.follow_playhead.unwrap_or(false),
@@ -569,9 +563,6 @@ impl App {
             },
             window_dirty: false,
             last_window_change: None,
-            hovered_tip: None,
-            shown_tip: None,
-            tip_seq: 0,
             events: Arc::new(Mutex::new(VecDeque::new())),
             pid: Arc::new(AtomicU32::new(0)),
             cancelled: Arc::new(AtomicBool::new(false)),
@@ -686,7 +677,9 @@ impl App {
     fn key_press(key: Key, modifiers: Modifiers) -> Option<Message> {
         use keyboard::key::Named;
         match key {
+            Key::Named(Named::Tab) => Some(Message::RenameMove(true)),
             Key::Named(Named::Enter) if modifiers.command() => Some(Message::Start),
+            Key::Named(Named::Enter) => Some(Message::RenameSubmit),
             Key::Named(Named::Escape) => Some(Message::Escape),
             Key::Named(Named::Space) => Some(Message::ShortcutPlay),
             Key::Named(Named::ArrowRight) => Some(Message::SeekBy(5.0)),
@@ -845,11 +838,12 @@ impl App {
                 Task::none()
             }
             Message::RenameSpeaker(name) => {
-                self.open_rename();
-                if let Some(field) = self.rename_fields.iter_mut().find(|(old, _)| *old == name) {
-                    field.1 = name.clone();
+                let focus = self.open_rename();
+                if let Some(index) = self.rename_fields.iter().position(|(old, _)| *old == name) {
+                    self.rename_focus = index;
+                    return text_input::focus(rename_id(index));
                 }
-                Task::none()
+                focus
             }
             Message::RenameName(index, value) => {
                 if let Some(field) = self.rename_fields.get_mut(index) {
@@ -857,20 +851,22 @@ impl App {
                 }
                 Task::none()
             }
-            Message::SelectLine(index) => {
-                self.selected_line = if self.selected_line == Some(index) {
-                    None
+            Message::RenameMove(forward) => {
+                if !self.rename_open || self.rename_fields.is_empty() {
+                    return Task::none();
+                }
+                let count = self.rename_fields.len();
+                self.rename_focus = if forward {
+                    (self.rename_focus + 1) % count
                 } else {
-                    Some(index)
+                    (self.rename_focus + count - 1) % count
                 };
-                Task::none()
+                text_input::focus(rename_id(self.rename_focus))
             }
-            Message::MergeLine => {
-                self.merge_selected();
-                Task::none()
-            }
-            Message::SplitLine => {
-                self.split_selected();
+            Message::RenameSubmit => {
+                if self.rename_open {
+                    self.apply_rename();
+                }
                 Task::none()
             }
             Message::ZoomIn => {
@@ -913,39 +909,16 @@ impl App {
             }
             Message::HelpChoice(kind) => {
                 self.help_open = Some(kind);
+                self.toast = None;
                 Task::none()
             }
             Message::CloseHelp => {
                 self.help_open = None;
                 Task::none()
             }
+            Message::Noop => Task::none(),
             Message::TranscriptHover(value) => {
                 self.transcript_hover = value;
-                Task::none()
-            }
-            Message::TipEnter(label) => {
-                self.tip_seq = self.tip_seq.wrapping_add(1);
-                let seq = self.tip_seq;
-                self.hovered_tip = Some(label);
-                self.shown_tip = None;
-                Task::perform(
-                    async move {
-                        tokio::time::sleep(Duration::from_millis(250)).await;
-                    },
-                    move |_| Message::TipShow(label, seq),
-                )
-            }
-            Message::TipExit(label) => {
-                if self.hovered_tip == Some(label) {
-                    self.hovered_tip = None;
-                    self.shown_tip = None;
-                }
-                Task::none()
-            }
-            Message::TipShow(label, seq) => {
-                if self.hovered_tip == Some(label) && self.tip_seq == seq {
-                    self.shown_tip = Some(label);
-                }
                 Task::none()
             }
             Message::Escape => {
@@ -1071,6 +1044,7 @@ impl App {
             Message::OpenSummary => {
                 if self.stats.is_some() {
                     self.summary_open = true;
+                    self.toast = None;
                 }
                 Task::none()
             }
@@ -1078,10 +1052,7 @@ impl App {
                 self.summary_open = false;
                 Task::none()
             }
-            Message::OpenRename => {
-                self.open_rename();
-                Task::none()
-            }
+            Message::OpenRename => self.open_rename(),
             Message::ImportChoice(kind) => match kind {
                 ImportKind::Transcription => Task::perform(
                     async {
@@ -1149,6 +1120,7 @@ impl App {
                     .any(|item| matches!(item.status, ItemStatus::Pending));
                 if will_batch && self.queue.len() > 1 {
                     self.batch_warning = true;
+                    self.toast = None;
                 } else {
                     self.start();
                 }
@@ -1245,75 +1217,27 @@ impl App {
     }
 
     /// Populate the rename dialog from the distinct speakers in the transcript.
-    fn open_rename(&mut self) {
+    /// Fields start empty (the current name is the placeholder); saving an empty
+    /// field keeps the original name. Focuses the first field.
+    fn open_rename(&mut self) -> Task<Message> {
         let mut seen: Vec<String> = Vec::new();
         for line in &self.lines {
             if !line.speaker.is_empty() && !seen.contains(&line.speaker) {
                 seen.push(line.speaker.clone());
             }
         }
-        self.rename_fields = seen.into_iter().map(|name| (name.clone(), name)).collect();
+        self.rename_fields = seen
+            .into_iter()
+            .map(|name| (name, String::new()))
+            .collect();
+        self.rename_focus = 0;
         self.rename_open = true;
-    }
-
-    fn merge_selected(&mut self) {
-        let Some(index) = self.selected_line else { return };
-        if index + 1 >= self.lines.len() {
-            return;
+        self.toast = None;
+        if self.rename_fields.is_empty() {
+            Task::none()
+        } else {
+            text_input::focus(rename_id(0))
         }
-        let next = self.lines.remove(index + 1);
-        if let Some(line) = self.lines.get_mut(index) {
-            let extra = next.raw.split_once(": ").map(|(_, t)| t).unwrap_or(&next.raw);
-            line.raw = format!("{} {}", line.raw.trim_end(), extra.trim());
-        }
-        self.refresh_transcript();
-    }
-
-    fn split_selected(&mut self) {
-        let Some(index) = self.selected_line else { return };
-        let at = self.playhead;
-        let Some(line) = self.lines.get(index) else { return };
-        let (start, end) = match line.start {
-            Some(start) => (start, self.line_end(index).unwrap_or(at.max(start))),
-            None => return,
-        };
-        if at <= start + 0.1 || at >= end - 0.1 {
-            return;
-        }
-        let head = line.raw.clone();
-        let speaker = line.speaker.clone();
-        let confidence = line.confidence;
-        let (_, text) = head.split_once(": ").unwrap_or(("", head.as_str()));
-        let words: Vec<&str> = text.split_whitespace().collect();
-        if words.len() < 2 {
-            return;
-        }
-        let mid = words.len() / 2;
-        let left = words[..mid].join(" ");
-        let right = words[mid..].join(" ");
-        let left_raw = format_line(&speaker, &left);
-        let right_raw = format_line(&speaker, &right);
-        if let Some(line) = self.lines.get_mut(index) {
-            line.raw = left_raw;
-            line.start = Some(start);
-        }
-        self.lines.insert(
-            index + 1,
-            DocLine {
-                raw: right_raw,
-                speaker,
-                confidence,
-                start: Some(at),
-            },
-        );
-        self.refresh_transcript();
-    }
-
-    fn line_end(&self, index: usize) -> Option<f32> {
-        self.lines
-            .get(index + 1)
-            .and_then(|next| next.start)
-            .or(self.timeline_duration)
     }
 
     fn refresh_transcript(&mut self) {
@@ -1375,7 +1299,6 @@ impl App {
         self.output_txt = None;
         self.stats = None;
         self.rename_open = false;
-        self.selected_line = None;
         self.cancelled.store(false, Ordering::SeqCst);
         self.run_next();
     }
@@ -1769,9 +1692,7 @@ impl App {
                 };
                 col = col.push(line_element(
                     line,
-                    idx,
                     tint,
-                    self.selected_line == Some(idx),
                     &query,
                     scheme.search_hl,
                     &scheme,
@@ -1795,7 +1716,7 @@ impl App {
         if self.transcript_hover && !self.lines.is_empty() {
             stack![
                 content,
-                container(self.transcript_controls())
+                container(self.transcript_controls(&scheme))
                     .width(Length::Fill)
                     .height(Length::Fill)
                     .align_x(iced::Alignment::End)
@@ -1809,36 +1730,52 @@ impl App {
     }
 
     /// Overlay controls shown while hovering the transcript.
-    fn transcript_controls(&self) -> Element<'_, Message> {
-        let follow = if self.follow_playhead {
-            "Follow \u{2713}"
+    fn transcript_controls(&self, scheme: &Scheme) -> Element<'_, Message> {
+        let gutter: Element<Message> = if self.timestamp_gutter {
+            row![icon(ICON_CHECK, 12.0), text("Time")]
+                .spacing(4)
+                .align_y(iced::Alignment::Center)
+                .into()
         } else {
-            "Follow"
+            text("Time").into()
         };
-        let gutter = if self.timestamp_gutter {
-            "Time \u{2713}"
+        let follow: Element<Message> = if self.follow_playhead {
+            row![icon(ICON_CHECK, 12.0), text("Follow")]
+                .spacing(4)
+                .align_y(iced::Alignment::Center)
+                .into()
         } else {
-            "Time"
+            text("Follow").into()
         };
         row![
-            button("A\u{2212}")
-                .on_press(Message::ZoomOut)
-                .style(pill_button_secondary),
-            button("A+")
-                .on_press(Message::ZoomIn)
-                .style(pill_button_secondary),
-            button(gutter)
-                .on_press(Message::ToggleGutter)
-                .style(pill_button_secondary),
-            button(follow)
-                .on_press(Message::ToggleFollowPlayhead)
-                .style(pill_button_secondary),
-            button("Merge")
-                .on_press(Message::MergeLine)
-                .style(pill_button_secondary),
-            button("Split")
-                .on_press(Message::SplitLine)
-                .style(pill_button_secondary),
+            self.tip(
+                button(icon(ICON_ZOOM_IN, 14.0))
+                    .on_press(Message::ZoomIn)
+                    .style(pill_button_secondary),
+                "Zoom text in",
+                scheme,
+            ),
+            self.tip(
+                button(icon(ICON_ZOOM_OUT, 14.0))
+                    .on_press(Message::ZoomOut)
+                    .style(pill_button_secondary),
+                "Zoom text out",
+                scheme,
+            ),
+            self.tip(
+                button(gutter)
+                    .on_press(Message::ToggleGutter)
+                    .style(pill_button_secondary),
+                "Show an absolute timestamp gutter",
+                scheme,
+            ),
+            self.tip(
+                button(follow)
+                    .on_press(Message::ToggleFollowPlayhead)
+                    .style(pill_button_secondary),
+                "Keep the transcript centered on the playhead",
+                scheme,
+            ),
         ]
         .spacing(6)
         .align_y(iced::Alignment::Center)
@@ -1950,29 +1887,16 @@ impl App {
         let playing = self.player.as_ref().is_some_and(|player| player.is_playing());
         let glyph = if ready { scheme.ink } else { MUTED };
 
+        let play_icon = if playing { ICON_PAUSE } else { ICON_PLAY };
         let play_button: Element<Message> = if ready {
-            button(
-                canvas(PlayPause {
-                    playing,
-                    color: glyph,
-                })
-                .width(Length::Fixed(12.0))
-                .height(Length::Fixed(12.0)),
-            )
-            .on_press(Message::PlayerToggle)
-            .style(pill_button_secondary)
-            .into()
+            button(icon_colored(play_icon, 14.0, glyph))
+                .on_press(Message::PlayerToggle)
+                .style(pill_button_secondary)
+                .into()
         } else {
-            button(
-                canvas(PlayPause {
-                    playing: false,
-                    color: glyph,
-                })
-                .width(Length::Fixed(12.0))
-                .height(Length::Fixed(12.0)),
-            )
-            .style(greyed_button)
-            .into()
+            button(icon_colored(ICON_PLAY, 14.0, glyph))
+                .style(greyed_button)
+                .into()
         };
 
         let time_color = if ready { scheme.ink } else { MUTED };
@@ -2041,40 +1965,33 @@ impl App {
             .into()
     }
 
-    /// Wrap `content` with a tooltip that only appears after a hover delay.
+    /// Wrap `content` with a tooltip.
     fn tip<'a>(
         &self,
         content: impl Into<Element<'a, Message>>,
         label: &'static str,
         scheme: &Scheme,
     ) -> Element<'a, Message> {
-        let wrapped = mouse_area(content)
-            .on_enter(Message::TipEnter(label))
-            .on_exit(Message::TipExit(label));
-        if self.shown_tip == Some(label) {
-            let background = scheme.dialog_bg;
-            let text_color = scheme.ink;
-            let border_color = scheme.track;
-            tooltip(
-                wrapped,
-                container(text(label).size(12))
-                    .padding(6)
-                    .style(move |_theme| container::Style {
-                        background: Some(background.into()),
-                        text_color: Some(text_color),
-                        border: iced::border::Border {
-                            color: border_color,
-                            width: 1.0,
-                            radius: 6.0.into(),
-                        },
-                        ..container::Style::default()
-                    }),
-                tooltip::Position::Top,
-            )
-            .into()
-        } else {
-            wrapped.into()
-        }
+        let background = scheme.dialog_bg;
+        let text_color = scheme.ink;
+        let border_color = scheme.track;
+        tooltip(
+            content,
+            container(text(label).size(12))
+                .padding(6)
+                .style(move |_theme| container::Style {
+                    background: Some(background.into()),
+                    text_color: Some(text_color),
+                    border: iced::border::Border {
+                        color: border_color,
+                        width: 1.0,
+                        radius: 6.0.into(),
+                    },
+                    ..container::Style::default()
+                }),
+            tooltip::Position::Top,
+        )
+        .into()
     }
 
     pub fn view(&self) -> Element<'_, Message> {
@@ -2134,7 +2051,7 @@ impl App {
                 button(
                     row![
                         text("Advanced"),
-                        text('\u{e800}').font(Font::with_name("Iced-Icons")).size(12),
+                        icon(ICON_CARET_DOWN, 12.0),
                     ]
                     .spacing(4)
                     .align_y(iced::Alignment::Center),
@@ -2156,22 +2073,12 @@ impl App {
         let mut queue_list = column![].spacing(4).width(Length::Fill);
         for (index, item) in self.queue.iter().enumerate() {
             let glyph: Element<Message> = match &item.status {
-                ItemStatus::Pending => {
-                    let color = scheme.ink;
-                    text("\u{2022}").style(move |_theme| text::Style { color: Some(color) }).into()
-                }
-                ItemStatus::Running => arrow_glyph(scheme.blue),
+                ItemStatus::Pending => icon_colored(ICON_CIRCLE_FILL, 9.0, scheme.ink),
+                ItemStatus::Running => icon_colored(ICON_ARROW_RIGHT, 14.0, scheme.blue),
                 ItemStatus::Done(_) => {
-                    let color = Color::from_rgb(0.3, 0.72, 0.42);
-                    text('\u{f00c}')
-                        .font(Font::with_name("Iced-Icons"))
-                        .style(move |_theme| text::Style { color: Some(color) })
-                        .into()
+                    icon_colored(ICON_CHECK, 14.0, Color::from_rgb(0.3, 0.72, 0.42))
                 }
-                ItemStatus::Failed(_) => {
-                    let color = scheme.pink;
-                    text("\u{00d7}").style(move |_theme| text::Style { color: Some(color) }).into()
-                }
+                ItemStatus::Failed(_) => icon_colored(ICON_X, 14.0, scheme.pink),
             };
             let name = item
                 .path
@@ -2220,7 +2127,7 @@ impl App {
             }
 
             item_row = item_row.push(self.tip(
-                button("\u{00d7}")
+                button(icon(ICON_X, 13.0))
                     .on_press_maybe(can_add.then_some(Message::RemoveItem(index)))
                     .style(pill_button_secondary),
                 "Remove from queue",
@@ -2412,9 +2319,6 @@ impl App {
                         (!running && self.stats.is_some()).then_some(Message::OpenSummary)
                     )
                     .style(color_button(scheme.pink, scheme.ink)),
-                pick_list(ImportKind::ALL, None::<ImportKind>, Message::ImportChoice)
-                    .placeholder("Import\u{2026}")
-                    .style(pill_pick),
                 self.tip(
                     button("Rename Speakers")
                         .on_press_maybe(
@@ -2425,6 +2329,9 @@ impl App {
                     &scheme,
                 ),
                 horizontal_space(),
+                pick_list(ImportKind::ALL, None::<ImportKind>, Message::ImportChoice)
+                    .placeholder("Import\u{2026}")
+                    .style(pill_pick),
             ]
             .spacing(8)
             .align_y(iced::Alignment::Center)
@@ -2452,18 +2359,22 @@ impl App {
             base = base.push(self.console_panel(&scheme));
         }
 
+        let console_label: Element<Message> = if self.console_open {
+            row![icon(ICON_CHECK, 12.0), text("Console")]
+                .spacing(4)
+                .align_y(iced::Alignment::Center)
+                .into()
+        } else {
+            text("Console").into()
+        };
         base = base.push(
             container(
                 row![
                     self.search_element(&scheme),
                     horizontal_space(),
-                    button(if self.console_open {
-                        "Console \u{2713}"
-                    } else {
-                        "Console"
-                    })
-                    .on_press(Message::ToggleConsole)
-                    .style(pill_button_secondary),
+                    button(console_label)
+                        .on_press(Message::ToggleConsole)
+                        .style(pill_button_secondary),
                     pick_list(HelpKind::ALL, None::<HelpKind>, Message::HelpChoice)
                         .placeholder("Help\u{2026}")
                         .style(pill_pick),
@@ -2525,16 +2436,7 @@ impl App {
                 ..container::Style::default()
             });
 
-            let overlay = container(dialog)
-                .center(Length::Fill)
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .style(|_theme| container::Style {
-                    background: Some(Color::from_rgba(0.0, 0.0, 0.0, 0.4).into()),
-                    ..container::Style::default()
-                });
-
-            return stack![base, overlay].into();
+            return modal_overlay(base, dialog);
         }
 
         if self.summary_open {
@@ -2559,15 +2461,7 @@ impl App {
                     border: iced::border::rounded(16.0),
                     ..container::Style::default()
                 });
-            let overlay = container(dialog)
-                .center(Length::Fill)
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .style(|_theme| container::Style {
-                    background: Some(Color::from_rgba(0.0, 0.0, 0.0, 0.4).into()),
-                    ..container::Style::default()
-                });
-            return stack![base, overlay].into();
+            return modal_overlay(base, dialog);
         }
 
         if let Some(kind) = self.help_open {
@@ -2609,15 +2503,7 @@ impl App {
                     border: iced::border::rounded(16.0),
                     ..container::Style::default()
                 });
-            let overlay = container(dialog)
-                .center(Length::Fill)
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .style(|_theme| container::Style {
-                    background: Some(Color::from_rgba(0.0, 0.0, 0.0, 0.4).into()),
-                    ..container::Style::default()
-                });
-            return stack![base, overlay].into();
+            return modal_overlay(base, dialog);
         }
 
         if !self.rename_open {
@@ -2632,7 +2518,8 @@ impl App {
             col = col.push(
                 row![
                     text(original.clone()).width(Length::Fixed(120.0)),
-                    text_input("new name", value)
+                    text_input(original.as_str(), value)
+                        .id(rename_id(index))
                         .on_input(move |text| Message::RenameName(index, text))
                         .width(Length::Fill)
                         .style(pill_input),
@@ -2664,16 +2551,7 @@ impl App {
                 ..container::Style::default()
             });
 
-        let overlay = container(dialog)
-            .center(Length::Fill)
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .style(|_theme| container::Style {
-                background: Some(Color::from_rgba(0.0, 0.0, 0.0, 0.4).into()),
-                ..container::Style::default()
-            });
-
-        stack![base, overlay].into()
+        modal_overlay(base, dialog)
     }
 }
 
@@ -2949,94 +2827,57 @@ impl Player {
     }
 }
 
-/// Play/pause glyph drawn on a canvas (the bundled font has no such icon).
-struct PlayPause {
-    playing: bool,
-    color: Color,
-}
-
-impl canvas::Program<Message> for PlayPause {
-    type State = ();
-
-    fn draw(
-        &self,
-        _state: &(),
-        renderer: &Renderer,
-        _theme: &Theme,
-        bounds: Rectangle,
-        _cursor: mouse::Cursor,
-    ) -> Vec<canvas::Geometry> {
-        let mut frame = canvas::Frame::new(renderer, bounds.size());
-        let w = bounds.width;
-        let h = bounds.height;
-        if self.playing {
-            let bar = w * 0.28;
-            frame.fill_rectangle(
-                Point::new(w * 0.18, h * 0.14),
-                Size::new(bar, h * 0.72),
-                self.color,
-            );
-            frame.fill_rectangle(
-                Point::new(w * 0.54, h * 0.14),
-                Size::new(bar, h * 0.72),
-                self.color,
-            );
-        } else {
-            let path = canvas::Path::new(|path| {
-                path.move_to(Point::new(w * 0.24, h * 0.12));
-                path.line_to(Point::new(w * 0.84, h * 0.5));
-                path.line_to(Point::new(w * 0.24, h * 0.88));
-                path.close();
-            });
-            frame.fill(&path, self.color);
-        }
-        vec![frame.into_geometry()]
-    }
-}
-
-struct RightArrow {
-    color: Color,
-}
-
-impl<Message> canvas::Program<Message> for RightArrow {
-    type State = ();
-
-    fn draw(
-        &self,
-        _state: &(),
-        renderer: &Renderer,
-        _theme: &Theme,
-        bounds: Rectangle,
-        _cursor: mouse::Cursor,
-    ) -> Vec<canvas::Geometry> {
-        let mut frame = canvas::Frame::new(renderer, bounds.size());
-        let w = bounds.width;
-        let h = bounds.height;
-        let cy = h / 2.0;
-        let head_len = w * 0.55;
-        let head_half = h * 0.42;
-        let shaft_half = h * 0.14;
-        let shaft = canvas::Path::rectangle(
-            Point::new(0.0, cy - shaft_half),
-            Size::new(w - head_len, shaft_half * 2.0),
-        );
-        let head = canvas::Path::new(|path| {
-            path.move_to(Point::new(w - head_len, cy - head_half));
-            path.line_to(Point::new(w, cy));
-            path.line_to(Point::new(w - head_len, cy + head_half));
-            path.close();
-        });
-        frame.fill(&shaft, self.color);
-        frame.fill(&head, self.color);
-        vec![frame.into_geometry()]
-    }
-}
-
-fn arrow_glyph(color: Color) -> Element<'static, Message> {
-    canvas(RightArrow { color })
-        .width(Length::Fixed(14.0))
-        .height(Length::Fixed(14.0))
+/// A Bootstrap Icons glyph rendered as an element.
+fn icon(code: char, size: f32) -> Element<'static, Message> {
+    text(code.to_string())
+        .font(Font::with_name("bootstrap-icons"))
+        .size(size)
         .into()
+}
+
+/// A Bootstrap Icons glyph with an explicit colour.
+fn icon_colored(code: char, size: f32, color: Color) -> Element<'static, Message> {
+    text(code.to_string())
+        .font(Font::with_name("bootstrap-icons"))
+        .size(size)
+        .style(move |_theme| text::Style { color: Some(color) })
+        .into()
+}
+
+// Bootstrap Icons codepoints (see assets/bootstrap-icons.json).
+const ICON_PLAY: char = '\u{f4f4}';
+const ICON_PAUSE: char = '\u{f4c3}';
+const ICON_ARROW_RIGHT: char = '\u{f138}';
+const ICON_CIRCLE_FILL: char = '\u{f287}';
+const ICON_CHECK: char = '\u{f633}';
+const ICON_X: char = '\u{f659}';
+const ICON_CARET_DOWN: char = '\u{f229}';
+const ICON_ZOOM_IN: char = '\u{f62c}';
+const ICON_ZOOM_OUT: char = '\u{f62d}';
+
+/// Layer `dialog` over `base` behind a dimming backdrop that swallows clicks,
+/// so a visible modal blocks everything outside it.
+fn modal_overlay<'a>(
+    base: impl Into<Element<'a, Message>>,
+    dialog: impl Into<Element<'a, Message>>,
+) -> Element<'a, Message> {
+    let base = base.into();
+    let dialog = dialog.into();
+    let backdrop = mouse_area(
+        container(horizontal_space())
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .style(|_theme| container::Style {
+                background: Some(Color::from_rgba(0.0, 0.0, 0.0, 0.4).into()),
+                ..container::Style::default()
+            }),
+    )
+    .on_press(Message::Noop);
+    let centered = container(dialog)
+        .center(Length::Fill)
+        .width(Length::Fill)
+        .height(Length::Fill);
+    stack![base, backdrop, centered].into()
 }
 
 /// Parse "[time] Speaker: text" transcript lines into the render model.
@@ -3099,13 +2940,8 @@ fn transcript_id() -> scrollable::Id {
     scrollable::Id::new("transcript")
 }
 
-/// Build a transcript line from a speaker and text.
-fn format_line(speaker: &str, text: &str) -> String {
-    if speaker.is_empty() {
-        text.to_string()
-    } else {
-        format!("{speaker}: {text}")
-    }
+fn rename_id(index: usize) -> text_input::Id {
+    text_input::Id::new(format!("rename-{index}"))
 }
 
 fn scrollbar_style(theme: &iced::Theme, status: scrollable::Status) -> scrollable::Style {
@@ -3154,9 +2990,7 @@ fn sms_row(
 #[allow(clippy::too_many_arguments)]
 fn line_element(
     line: &DocLine,
-    idx: usize,
     tint: Option<Color>,
-    selected: bool,
     query: &str,
     highlight: Color,
     scheme: &Scheme,
@@ -3220,25 +3054,14 @@ fn line_element(
         );
     }
 
-    let body = mouse_area(rich_text(styled_spans(&rest, query, None, highlight, size)))
-        .on_press(Message::SelectLine(idx));
-    content = content.push(body);
+    content = content.push(rich_text(styled_spans(&rest, query, None, highlight, size)));
 
-    let border = if selected {
-        iced::border::Border {
-            color: scheme.blue,
-            width: 1.0,
-            radius: 4.0.into(),
-        }
-    } else {
-        iced::border::rounded(4.0)
-    };
     container(content)
         .width(Length::Fill)
         .padding([2, 4])
         .style(move |_theme| container::Style {
             background: tint.map(Into::into),
-            border,
+            border: iced::border::rounded(4.0),
             ..container::Style::default()
         })
         .into()

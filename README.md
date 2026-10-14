@@ -144,4 +144,6 @@ searching upward for `scripts/transiel.py`.
 
 - The DiariZen model weights are released under **CC BY-NC 4.0** and are
   **non-commercial**. See `third_party/DiariZen/MODEL_LICENSE`.
+- The GUI bundles **Bootstrap Icons** (`gui/assets/bootstrap-icons.ttf`), MIT
+  licensed, for its UI glyphs.
 - Other components retain their own licenses (MIT/Apache/CC-BY).

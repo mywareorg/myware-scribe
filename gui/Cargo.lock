@@ -4037,7 +4037,6 @@ dependencies = [
  "rodio",
  "serde",
  "serde_json",
- "tokio",
 ]
 
 [[package]]
