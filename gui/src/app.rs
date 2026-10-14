@@ -464,19 +464,28 @@ impl App {
             },
         );
 
-        let controls = row![
-            button("Select File").on_press_maybe(can_select.then_some(Message::PickInput)),
-            button("Save Location").on_press_maybe(can_output.then_some(Message::PickOutput)),
-            preset,
-            button("Start").on_press_maybe(can_start.then_some(Message::Start)),
-            button("Cancel").on_press_maybe(can_cancel.then_some(Message::Cancel)),
+        let controls = column![
+            row![
+                button("Select File").on_press_maybe(can_select.then_some(Message::PickInput)),
+                text(input.clone()),
+            ]
+            .spacing(8),
+            row![
+                button("Save Location").on_press_maybe(can_output.then_some(Message::PickOutput)),
+                text(output.clone()),
+            ]
+            .spacing(8),
+            row![text("Preset:"), preset].spacing(8),
+            row![
+                button("Start").on_press_maybe(can_start.then_some(Message::Start)),
+                button("Cancel").on_press_maybe(can_cancel.then_some(Message::Cancel)),
+            ]
+            .spacing(8),
         ]
         .spacing(8);
 
         let base = column![
             controls,
-            text(format!("Input: {input}")),
-            text(format!("Output: {output}")),
             progress_bar(0.0..=1.0, self.progress),
             text(self.status_line()),
             container(
