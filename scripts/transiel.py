@@ -794,7 +794,7 @@ def main():
         lines = join_speaker_lines(lines)
 
     emit_stage("writing", STAGE_BOUNDS["writing"][0], "Writing output")
-    txt = "".join(f"{format_line(line, args.timestamps)}\n" for line in lines)
+    txt = "".join(f"{format_line(line, True)}\n" for line in lines)
     out_txt.write_text(txt, encoding="utf-8")
 
     payload = {
