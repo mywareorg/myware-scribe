@@ -1,6 +1,6 @@
 models/
 .venv/
 __pycache__/
-*-transcribe.txt
-*-transcribe.json
+*-transcribed.txt
+*-transcribed.json
 gui/target/

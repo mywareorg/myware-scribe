@@ -67,7 +67,7 @@ pub fn output_base(output_dir: Option<&Path>, input: &Path) -> PathBuf {
         .map(|p| p.to_path_buf())
         .or_else(|| input.parent().map(|p| p.to_path_buf()))
         .unwrap_or_else(|| PathBuf::from("."));
-    dir.join(format!("{stem}-transcribe"))
+    dir.join(format!("{stem}-transcribed"))
 }
 
 pub fn kill(pid: u32) {

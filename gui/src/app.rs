@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use iced::keyboard::{self, Key, Modifiers};
 use iced::widget::{
     button, column, container, pick_list, progress_bar, rich_text, row, scrollable, stack, text,
     text_input,
@@ -71,6 +72,8 @@ pub enum Message {
     RenameName2(String),
     RenameSave,
     RenameCancel,
+    RenameMove(bool),
+    RenameActivate,
 }
 
 pub struct App {
@@ -84,6 +87,8 @@ pub struct App {
     transcript: String,
     output_txt: Option<PathBuf>,
     rename_open: bool,
+    rename_focus: usize,
+    focus_pending: bool,
     name1: String,
     name2: String,
     events: Arc<Mutex<VecDeque<Event>>>,
@@ -110,6 +115,8 @@ impl App {
             transcript: String::new(),
             output_txt: None,
             rename_open: false,
+            rename_focus: 0,
+            focus_pending: false,
             name1: String::new(),
             name2: String::new(),
             events: Arc::new(Mutex::new(VecDeque::new())),
@@ -119,7 +126,18 @@ impl App {
     }
 
     pub fn subscription(&self) -> Subscription<Message> {
-        iced::time::every(Duration::from_millis(100)).map(|_| Message::Tick)
+        Subscription::batch([
+            iced::time::every(Duration::from_millis(100)).map(|_| Message::Tick),
+            keyboard::on_key_press(Self::key_press),
+        ])
+    }
+
+    fn key_press(key: Key, modifiers: Modifiers) -> Option<Message> {
+        match key {
+            Key::Named(keyboard::key::Named::Tab) => Some(Message::RenameMove(modifiers.shift())),
+            Key::Named(keyboard::key::Named::Enter) => Some(Message::RenameActivate),
+            _ => None,
+        }
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
@@ -160,6 +178,9 @@ impl App {
                 Task::none()
             }
             Message::PresetChanged(preset) => {
+                if matches!(self.status, Status::Running) {
+                    return Task::none();
+                }
                 self.preset = preset;
                 Task::none()
             }
@@ -173,7 +194,12 @@ impl App {
             }
             Message::Tick => {
                 self.drain_events();
-                Task::none()
+                if self.focus_pending && self.rename_open {
+                    self.focus_pending = false;
+                    self.focus_task()
+                } else {
+                    Task::none()
+                }
             }
             Message::Close => iced::exit(),
             Message::RenameName1(value) => {
@@ -192,6 +218,45 @@ impl App {
                 self.rename_open = false;
                 Task::none()
             }
+            Message::RenameMove(back) => {
+                if !self.rename_open {
+                    return Task::none();
+                }
+                const COUNT: usize = 4;
+                self.rename_focus = if back {
+                    (self.rename_focus + COUNT - 1) % COUNT
+                } else {
+                    (self.rename_focus + 1) % COUNT
+                };
+                self.focus_task()
+            }
+            Message::RenameActivate => {
+                if !self.rename_open {
+                    return Task::none();
+                }
+                match self.rename_focus {
+                    0 | 1 => {
+                        self.rename_focus = (self.rename_focus + 1) % 4;
+                        self.focus_task()
+                    }
+                    2 => {
+                        self.apply_rename();
+                        Task::none()
+                    }
+                    _ => {
+                        self.rename_open = false;
+                        Task::none()
+                    }
+                }
+            }
+        }
+    }
+
+    fn focus_task(&self) -> Task<Message> {
+        match self.rename_focus {
+            0 => text_input::focus(name1_id()),
+            1 => text_input::focus(name2_id()),
+            _ => Task::none(),
         }
     }
 
@@ -300,6 +365,8 @@ impl App {
                     self.name1.clear();
                     self.name2.clear();
                     self.rename_open = true;
+                    self.rename_focus = 0;
+                    self.focus_pending = true;
                 }
                 Event::Error { message } => {
                     self.stage = "error".to_string();
@@ -328,11 +395,18 @@ impl App {
     }
 
     fn status_line(&self) -> String {
-        let base = format!("{} — {}", self.stage, self.status_text());
+        let status = format!("{} — {}", self.stage, self.status_text());
         match self.elapsed() {
-            Some(elapsed) => format!("{base} · {elapsed}"),
-            None => base,
+            Some(elapsed) => format!("{elapsed} · {status}"),
+            None => status,
         }
+    }
+
+    /// Full path of the human-readable output file for the current selection.
+    fn output_file(&self) -> Option<PathBuf> {
+        let input = self.input.as_ref()?;
+        let base = backend::output_base(self.output_dir.as_deref(), input);
+        Some(PathBuf::from(format!("{}.txt", base.display())))
     }
 
     /// Transcript lines with the timestamp and speaker name in bold.
@@ -360,18 +434,37 @@ impl App {
             .as_ref()
             .map(|p| p.display().to_string())
             .unwrap_or_else(|| "(none)".to_string());
-        let output = self
-            .output_dir
-            .as_ref()
-            .map(|p| p.display().to_string())
-            .unwrap_or_else(|| "(default: audio directory)".to_string());
+        let output = match self.output_file() {
+            Some(path) => path.display().to_string(),
+            None => self
+                .output_dir
+                .as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| "(default: audio directory)".to_string()),
+        };
+
+        let running = matches!(self.status, Status::Running);
+        let has_input = self.input.is_some();
+        let can_select = !running;
+        let can_output = !running && has_input;
+        let can_preset = !running && has_input;
+        let can_start = !running && has_input;
+        let can_cancel = running;
+
+        let preset_widget: Element<Message> = if can_preset {
+            pick_list(Preset::ALL, Some(self.preset), Message::PresetChanged).into()
+        } else {
+            text(self.preset.to_string())
+                .color(Color::from_rgb(0.55, 0.55, 0.55))
+                .into()
+        };
 
         let controls = row![
-            button("Select File").on_press(Message::PickInput),
-            button("Save Location").on_press(Message::PickOutput),
-            pick_list(Preset::ALL, Some(self.preset), Message::PresetChanged),
-            button("Start").on_press(Message::Start),
-            button("Cancel").on_press(Message::Cancel),
+            button("Select File").on_press_maybe(can_select.then_some(Message::PickInput)),
+            button("Save Location").on_press_maybe(can_output.then_some(Message::PickOutput)),
+            preset_widget,
+            button("Start").on_press_maybe(can_start.then_some(Message::Start)),
+            button("Cancel").on_press_maybe(can_cancel.then_some(Message::Cancel)),
         ]
         .spacing(8);
 
@@ -418,14 +511,28 @@ impl App {
             column![
                 text("Rename speakers"),
                 text_input("SPEAKER 1", &self.name1)
+                    .id(name1_id())
                     .on_input(Message::RenameName1)
                     .width(Length::Fill),
                 text_input("SPEAKER 2", &self.name2)
+                    .id(name2_id())
                     .on_input(Message::RenameName2)
                     .width(Length::Fill),
                 row![
-                    button("Cancel").on_press(Message::RenameCancel),
-                    button("Save").on_press(Message::RenameSave),
+                    button("Cancel")
+                        .on_press(Message::RenameCancel)
+                        .style(if self.rename_focus == 3 {
+                            button::primary
+                        } else {
+                            button::secondary
+                        }),
+                    button("Save")
+                        .on_press(Message::RenameSave)
+                        .style(if self.rename_focus == 2 {
+                            button::primary
+                        } else {
+                            button::secondary
+                        }),
                 ]
                 .spacing(8),
             ]
@@ -461,4 +568,12 @@ fn format_secs(secs: f64) -> String {
     } else {
         format!("{minutes}:{seconds:02}")
     }
+}
+
+fn name1_id() -> text_input::Id {
+    text_input::Id::new("rename-name1")
+}
+
+fn name2_id() -> text_input::Id {
+    text_input::Id::new("rename-name2")
 }

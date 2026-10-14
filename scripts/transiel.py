@@ -578,7 +578,7 @@ def main():
     parser.add_argument(
         "--output",
         default=None,
-        help="output basename (default: <audio-stem>-transcribe)",
+        help="output basename (default: <audio-stem>-transcribed)",
     )
     parser.add_argument(
         "--device",
@@ -619,7 +619,7 @@ def main():
     if not audio_path.is_file():
         sys.exit(f"audio file not found: {audio_path}")
 
-    output_base = Path(args.output) if args.output else REPO_ROOT / f"{audio_path.stem}-transcribe"
+    output_base = Path(args.output) if args.output else REPO_ROOT / f"{audio_path.stem}-transcribed"
     out_txt = output_base.with_suffix(".txt")
     out_json = output_base.with_suffix(".json")
 

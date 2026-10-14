@@ -20,8 +20,8 @@ speaker turns, then transcribes each speaker turn independently. Because the
 speaker label comes from the diarization turn, transcription timing never
 influences speaker assignment. It writes two outputs:
 
-- `<audio-stem>-transcribe.txt` — human readable `[hh:mm:ss] SPEAKER N: text`
-- `<audio-stem>-transcribe.json` — the same lines plus diarization turns,
+- `<audio-stem>-transcribed.txt` — human readable `[hh:mm:ss] SPEAKER N: text`
+- `<audio-stem>-transcribed.json` — the same lines plus diarization turns,
   components, model paths, timings and run parameters for debugging.
 
 ## What is in the repository
