@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use iced::keyboard::{self, Key, Modifiers};
 use iced::widget::{
     button, column, container, horizontal_space, mouse_area, pick_list, progress_bar, rich_text,
-    row, scrollable, stack, text, text_input,
+    row, scrollable, stack, text, text_input, toggler,
 };
 use iced::{font, Color, Element, Font, Length, Subscription, Task};
 
@@ -76,6 +76,10 @@ pub enum Message {
     RenameActivate,
     OpenSummary,
     DurationProbed(Option<f64>),
+    TimestampsToggled(bool),
+    JoinSpeakerToggled(bool),
+    ToggleAdvanced,
+    SmsToggled(bool),
 }
 
 pub struct App {
@@ -97,6 +101,10 @@ pub struct App {
     name2: String,
     duration: Option<f64>,
     stats: Option<backend::Stats>,
+    timestamps: bool,
+    join_speaker: bool,
+    advanced_open: bool,
+    sms_mode: bool,
     events: Arc<Mutex<VecDeque<Event>>>,
     pid: Arc<AtomicU32>,
     cancelled: Arc<AtomicBool>,
@@ -129,6 +137,10 @@ impl App {
             name2: String::new(),
             duration: None,
             stats: None,
+            timestamps: true,
+            join_speaker: false,
+            advanced_open: false,
+            sms_mode: false,
             events: Arc::new(Mutex::new(VecDeque::new())),
             pid: Arc::new(AtomicU32::new(0)),
             cancelled: Arc::new(AtomicBool::new(false)),
@@ -172,6 +184,22 @@ impl App {
             }
             Message::DurationProbed(seconds) => {
                 self.duration = seconds;
+                Task::none()
+            }
+            Message::TimestampsToggled(value) => {
+                self.timestamps = value;
+                Task::none()
+            }
+            Message::JoinSpeakerToggled(value) => {
+                self.join_speaker = value;
+                Task::none()
+            }
+            Message::ToggleAdvanced => {
+                self.advanced_open = !self.advanced_open;
+                Task::none()
+            }
+            Message::SmsToggled(value) => {
+                self.sms_mode = value;
                 Task::none()
             }
             Message::OpenSummary => {
@@ -332,6 +360,8 @@ impl App {
             input,
             base,
             self.preset.arg(),
+            self.timestamps,
+            self.join_speaker,
             self.events.clone(),
             self.pid.clone(),
             self.cancelled.clone(),
@@ -434,12 +464,10 @@ impl App {
                     format!("Total run time: {}", format_secs(s.run_seconds)),
                     format!("Audio length: {}", format_secs(s.audio_seconds)),
                     format!("Speed: {:.1}\u{00d7} realtime", speed),
-                    format!("Speakers: {}", s.speakers),
                     format!("Segments: {}", s.lines),
                     format!("Preset: {}", s.preset),
                     format!("Diarizer: {}", s.diarizer),
                     format!("Transcriber: {}", s.transcriber),
-                    format!("Device: {}", s.device),
                 ]
             }
             None => vec!["No completed run yet.".to_string()],
@@ -492,6 +520,38 @@ impl App {
         spans
     }
 
+    /// Transcript view: normal (rich text) or SMS-style bubbles.
+    fn transcript_element(&self) -> Element<'_, Message> {
+        if self.sms_mode {
+            let mut sides: Vec<String> = Vec::new();
+            let mut col = column![].spacing(6).padding(8).width(Length::Fill);
+            for line in self.transcript.lines() {
+                let (label, text) = split_label(line);
+                if label.is_empty() && text.is_empty() {
+                    continue;
+                }
+                let index = match sides.iter().position(|s| s == &label) {
+                    Some(i) => i,
+                    None => {
+                        sides.push(label.clone());
+                        sides.len() - 1
+                    }
+                };
+                col = col.push(sms_row(&text, index % 2 == 0));
+            }
+            scrollable(col)
+                .height(Length::Fill)
+                .width(Length::Fill)
+                .into()
+        } else {
+            scrollable(rich_text(self.transcript_spans()))
+                .height(Length::Fill)
+                .width(Length::Fill)
+                .style(scrollbar_style)
+                .into()
+        }
+    }
+
     pub fn view(&self) -> Element<'_, Message> {
         let input = self
             .input
@@ -540,7 +600,7 @@ impl App {
             .into()
         };
 
-        let controls = column![
+        let mut controls = column![
             row![
                 button("Select File").on_press_maybe(can_select.then_some(Message::PickInput)),
                 text(input.clone()),
@@ -554,9 +614,52 @@ impl App {
             ]
             .spacing(8)
             .align_y(iced::Alignment::Center),
-            row![text("Preset:"), preset]
+            row![
+                text("Preset:"),
+                preset,
+                button(if self.advanced_open {
+                    "Advanced \u{25b4}"
+                } else {
+                    "Advanced \u{25be}"
+                })
+                .on_press(Message::ToggleAdvanced),
+            ]
+            .spacing(8)
+            .align_y(iced::Alignment::Center),
+        ]
+        .spacing(16);
+
+        if self.advanced_open {
+            controls = controls.push(
+                column![
+                    row![
+                        text("Timestamps"),
+                        horizontal_space(),
+                        toggler(self.timestamps).on_toggle(Message::TimestampsToggled),
+                    ]
+                    .spacing(8)
+                    .align_y(iced::Alignment::Center),
+                    row![
+                        text("Join Speakers"),
+                        horizontal_space(),
+                        toggler(self.join_speaker).on_toggle(Message::JoinSpeakerToggled),
+                    ]
+                    .spacing(8)
+                    .align_y(iced::Alignment::Center),
+                    row![
+                        text("SMS Mode"),
+                        horizontal_space(),
+                        toggler(self.sms_mode).on_toggle(Message::SmsToggled),
+                    ]
+                    .spacing(8)
+                    .align_y(iced::Alignment::Center),
+                ]
                 .spacing(8)
-                .align_y(iced::Alignment::Center),
+                .padding([0, 2]),
+            );
+        }
+
+        controls = controls.push(
             row![
                 button("Start").on_press_maybe(can_start.then_some(Message::Start)),
                 button("Summary")
@@ -565,8 +668,7 @@ impl App {
             ]
             .spacing(8)
             .align_y(iced::Alignment::Center),
-        ]
-        .spacing(16);
+        );
 
         let base = column![
             controls,
@@ -592,30 +694,13 @@ impl App {
             ]
             .spacing(8)
             .align_y(iced::Alignment::Center),
-            container(
-                scrollable(rich_text(self.transcript_spans()))
-                    .height(Length::Fill)
-                    .width(Length::Fill)
-                    .style(|theme, status| {
-                        let mut style = scrollable::default(theme, status);
-                        let visible = matches!(
-                            status,
-                            scrollable::Status::Hovered { .. } | scrollable::Status::Dragged { .. }
-                        );
-                        style.vertical_rail.scroller.color = if visible {
-                            Color::from_rgba(0.0, 0.0, 0.0, 0.5)
-                        } else {
-                            Color::TRANSPARENT
-                        };
-                        style
-                    }),
-            )
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .style(|_theme| container::Style {
-                background: Some(Color::WHITE.into()),
-                ..container::Style::default()
-            }),
+            container(self.transcript_element())
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .style(|_theme| container::Style {
+                    background: Some(Color::WHITE.into()),
+                    ..container::Style::default()
+                }),
             row![button("Close").on_press(Message::Close)],
         ]
         .spacing(8)
@@ -699,4 +784,50 @@ fn name1_id() -> text_input::Id {
 
 fn name2_id() -> text_input::Id {
     text_input::Id::new("rename-name2")
+}
+
+fn scrollbar_style(theme: &iced::Theme, status: scrollable::Status) -> scrollable::Style {
+    let mut style = scrollable::default(theme, status);
+    let visible = matches!(
+        status,
+        scrollable::Status::Hovered { .. } | scrollable::Status::Dragged { .. }
+    );
+    style.vertical_rail.scroller.color = if visible {
+        Color::from_rgba(0.0, 0.0, 0.0, 0.5)
+    } else {
+        Color::TRANSPARENT
+    };
+    style
+}
+
+fn split_label(line: &str) -> (String, String) {
+    let rest = match line.strip_prefix('[').and_then(|s| s.find("] ").map(|i| &s[i + 2..])) {
+        Some(stripped) => stripped,
+        None => line,
+    };
+    match rest.split_once(": ") {
+        Some((label, text)) => (label.trim().to_string(), text.trim().to_string()),
+        None => (String::new(), String::new()),
+    }
+}
+
+fn sms_row(content: &str, left: bool) -> Element<'static, Message> {
+    let bubble = container(text(content.to_string()).color(Color::BLACK))
+        .width(Length::Fill)
+        .align_x(if left {
+            iced::Alignment::Start
+        } else {
+            iced::Alignment::End
+        })
+        .padding(6)
+        .style(|_theme| container::Style {
+            background: Some(Color::from_rgb(0.9, 0.93, 1.0).into()),
+            border: iced::border::rounded(8.0),
+            ..container::Style::default()
+        });
+    if left {
+        row![bubble, horizontal_space()].spacing(8).into()
+    } else {
+        row![horizontal_space(), bubble].spacing(8).into()
+    }
 }

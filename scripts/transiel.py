@@ -179,11 +179,13 @@ def log(message):
     print(message, file=sys.stderr if PROGRESS_JSON else sys.stdout, flush=True)
 
 
-def format_timestamp(seconds):
+def format_timestamp(seconds, use_hours=False):
     total = int(seconds)
     hours, rem = divmod(total, 3600)
     minutes, secs = divmod(rem, 60)
-    return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+    if use_hours or hours:
+        return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+    return f"{minutes:02d}:{secs:02d}"
 
 
 def load_audio(path, target_sr=SAMPLE_RATE):
@@ -514,7 +516,7 @@ def transcribe_turns(model, samples, sample_rate, turns, beam_size, workers=1, p
     return turns
 
 
-def build_lines(turns, mapping):
+def build_lines(turns, mapping, use_hours=False):
     """One line per Whisper segment, tagged with the turn's speaker."""
     lines = []
     for turn in turns:
@@ -525,7 +527,7 @@ def build_lines(turns, mapping):
                 continue
             lines.append(
                 {
-                    "time": format_timestamp(segment["start"]),
+                    "time": format_timestamp(segment["start"], use_hours),
                     "start": segment["start"],
                     "end": segment["end"],
                     "speaker": speaker,
@@ -534,6 +536,24 @@ def build_lines(turns, mapping):
             )
     lines.sort(key=lambda line: (line["start"], line["end"]))
     return lines
+
+
+def format_line(line, timestamps):
+    if timestamps:
+        return f"[{line['time']}] {line['speaker']}: {line['text']}"
+    return f"{line['speaker']}: {line['text']}"
+
+
+def join_speaker_lines(lines):
+    """Merge adjacent lines that share a speaker into a single line."""
+    merged = []
+    for line in lines:
+        if merged and merged[-1]["speaker"] == line["speaker"]:
+            merged[-1]["text"] = f"{merged[-1]['text']} {line['text']}".strip()
+            merged[-1]["end"] = line["end"]
+        else:
+            merged.append(dict(line))
+    return merged
 
 
 def main():
@@ -620,6 +640,17 @@ def main():
         "--auto-tune",
         action="store_true",
         help="ignore preset batch/worker tuning and derive them from hardware",
+    )
+    parser.add_argument(
+        "--timestamps",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="include [hh:mm:ss] timestamps in the human-readable output",
+    )
+    parser.add_argument(
+        "--join-speaker",
+        action="store_true",
+        help="merge adjacent lines that share a speaker into one line",
     )
     args = parser.parse_args()
 
@@ -758,10 +789,12 @@ def main():
     )
     timings["transcription_s"] = round(time.perf_counter() - start, 3)
 
-    lines = build_lines(turns, speaker_map)
+    lines = build_lines(turns, speaker_map, use_hours=duration >= 3600)
+    if args.join_speaker:
+        lines = join_speaker_lines(lines)
 
     emit_stage("writing", STAGE_BOUNDS["writing"][0], "Writing output")
-    txt = "".join(f"[{line['time']}] {line['speaker']}: {line['text']}\n" for line in lines)
+    txt = "".join(f"{format_line(line, args.timestamps)}\n" for line in lines)
     out_txt.write_text(txt, encoding="utf-8")
 
     payload = {
@@ -791,6 +824,8 @@ def main():
             "physical_cores": PHYSICAL_CORES,
             "auto_tune": args.auto_tune,
             "auto": auto,
+            "timestamps": args.timestamps,
+            "join_speaker": args.join_speaker,
             "tuning": tuning,
             "merge_gap_s": MERGE_GAP_S,
             "min_turn_s": MIN_TURN_S,
@@ -822,7 +857,7 @@ def main():
 
     log("")
     for line in lines:
-        log(f"[{line['time']}] {line['speaker']}: {line['text']}")
+        log(format_line(line, args.timestamps))
 
     log("")
     log(f"Wrote {out_txt}")

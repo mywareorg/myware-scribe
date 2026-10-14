@@ -132,6 +132,8 @@ pub fn spawn(
     input: PathBuf,
     base: PathBuf,
     preset: &'static str,
+    timestamps: bool,
+    join_speaker: bool,
     events: Arc<Mutex<VecDeque<Event>>>,
     pid: Arc<AtomicU32>,
     cancelled: Arc<AtomicBool>,
@@ -149,6 +151,13 @@ pub fn spawn(
             .arg("--progress-json")
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+
+        if !timestamps {
+            command.arg("--no-timestamps");
+        }
+        if join_speaker {
+            command.arg("--join-speaker");
+        }
 
         #[cfg(windows)]
         {
