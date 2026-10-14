@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -6,10 +6,28 @@ use std::sync::{Arc, Mutex};
 
 #[derive(Debug, Clone, Default, serde::Deserialize)]
 #[serde(default)]
+pub struct Turn {
+    pub start: f32,
+    pub end: f32,
+    pub speaker: String,
+}
+
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(default)]
+pub struct SpeakerStat {
+    pub seconds: f32,
+    pub segments: usize,
+    pub words: usize,
+}
+
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(default)]
 pub struct Stats {
     pub audio_seconds: f64,
     pub run_seconds: f64,
     pub speakers: usize,
+    pub num_speakers: Option<i32>,
+    pub cache_hit: bool,
     pub turns: usize,
     pub lines: usize,
     pub preset: String,
@@ -18,6 +36,7 @@ pub struct Stats {
     pub transcriber: String,
     pub device: String,
     pub transcription_device: String,
+    pub speaker_stats: HashMap<String, SpeakerStat>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -25,6 +44,21 @@ pub struct Stats {
 pub enum Event {
     #[serde(rename = "stage")]
     Stage { stage: String, label: String, progress: f32 },
+    #[serde(rename = "meta")]
+    Meta { audio: String, duration: f32 },
+    #[serde(rename = "turns")]
+    Turns {
+        speakers: HashMap<String, String>,
+        turns: Vec<Turn>,
+    },
+    #[serde(rename = "line")]
+    Line {
+        start: f32,
+        end: f32,
+        speaker: String,
+        text: String,
+        confidence: f32,
+    },
     #[serde(rename = "done")]
     Done {
         txt: String,
@@ -66,14 +100,29 @@ pub fn read_transcript(path: &Path) -> Option<String> {
 
 /// Probe the duration (seconds) of an audio file using the venv's soundfile.
 pub fn probe_duration(path: &Path) -> Option<f64> {
+    probe_audio(path, 1).map(|(duration, _)| duration)
+}
+
+/// Probe duration (seconds) and a downsampled waveform (RMS peaks) for an audio file.
+pub fn probe_audio(path: &Path, buckets: usize) -> Option<(f64, Vec<f32>)> {
     let root = repo_root()?;
     let python = venv_python(&root);
     if !python.is_file() {
         return None;
     }
-    let script = "import sys, soundfile as sf; print(sf.info(sys.argv[1]).duration)";
+    let script = "import sys, numpy as np, soundfile as sf\n\
+d, sr = sf.read(sys.argv[1], dtype='float32', always_2d=True)\n\
+m = d.mean(axis=1)\n\
+n = int(sys.argv[2])\n\
+edges = np.linspace(0, len(m), n + 1).astype(int)\n\
+rms = [float(np.sqrt(np.mean(np.square(m[edges[i]:max(edges[i]+1, edges[i+1])])))) for i in range(n)]\n\
+print(len(m) / sr)\n\
+print(','.join(str(x) for x in rms))";
     let mut command = Command::new(&python);
-    command.args(["-c", script]).arg(path);
+    command
+        .args(["-c", script])
+        .arg(path)
+        .arg(buckets.to_string());
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -83,7 +132,15 @@ pub fn probe_duration(path: &Path) -> Option<f64> {
     if !output.status.success() {
         return None;
     }
-    String::from_utf8_lossy(&output.stdout).trim().parse().ok()
+    let text = String::from_utf8_lossy(&output.stdout);
+    let mut lines = text.lines();
+    let duration: f64 = lines.next()?.trim().parse().ok()?;
+    let peaks: Vec<f32> = lines
+        .next()?
+        .split(',')
+        .filter_map(|value| value.trim().parse().ok())
+        .collect();
+    Some((duration, peaks))
 }
 
 /// Locate the repository root (directory containing scripts/transiel.py).

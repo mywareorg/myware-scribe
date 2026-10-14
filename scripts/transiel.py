@@ -109,6 +109,34 @@ def start_creep(stage, label, stop):
     return thread
 
 
+CACHE_DIR = REPO_ROOT / ".cache" / "diarization"
+
+
+def cache_key(audio_path, diarizer_name, num_speakers):
+    import hashlib
+
+    digest = hashlib.sha256()
+    with open(audio_path, "rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return f"{digest.hexdigest()[:16]}-{diarizer_name}-{num_speakers or 'auto'}"
+
+
+def cache_read(key):
+    path = CACHE_DIR / f"{key}.json"
+    if path.is_file():
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001
+            return None
+    return None
+
+
+def cache_write(key, turns):
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    (CACHE_DIR / f"{key}.json").write_text(json.dumps(turns), encoding="utf-8")
+
+
 def detect_backends():
     """Available torch accelerators, with the vendor name (cuda vs rocm)."""
     backends = []
@@ -232,13 +260,16 @@ def build_config_parse(hub, segmentation_step, batch_size, num_speakers):
     inference_args["segmentation_step"] = segmentation_step
     inference_args["batch_size"] = batch_size
 
+    min_speakers = num_speakers if num_speakers else 1
+    max_speakers = num_speakers if num_speakers else 20
+
     return {
         "inference": {"args": inference_args},
         "clustering": {
             "args": {
                 "method": "AgglomerativeClustering",
-                "min_speakers": num_speakers,
-                "max_speakers": num_speakers,
+                "min_speakers": min_speakers,
+                "max_speakers": max_speakers,
                 "ahc_threshold": CLUSTER_THRESHOLD,
                 "min_cluster_size": 1,
             }
@@ -387,7 +418,26 @@ def diarize_pyannote(samples, sample_rate, segmentation, embedding, tuning, num_
         }
     )
     log("Diarizing...")
-    result = pipeline(audio_bytes(samples, sample_rate), num_speakers=num_speakers)
+    lo, hi = STAGE_BOUNDS["diarization"]
+    substeps = {
+        "segmentation": (0.0, 0.45),
+        "speaker_counting": (0.45, 0.5),
+        "embeddings": (0.5, 0.95),
+        "discrete_diarization": (0.95, 1.0),
+    }
+
+    def hook(step_name, _artifact=None, total=None, completed=None, **_kwargs):
+        frac = substeps.get(step_name, (0.0, 0.0))
+        within = frac[0]
+        if total and completed:
+            within = frac[0] + (frac[1] - frac[0]) * (completed / total)
+        emit_stage("diarization", lo + (hi - lo) * within, "Diarizing")
+
+    result = pipeline(
+        audio_bytes(samples, sample_rate),
+        num_speakers=num_speakers,
+        hook=hook,
+    )
     turns = turns_from_annotation(result)
     # Release the diarization model/buffers before Whisper is loaded.
     del pipeline, result
@@ -471,12 +521,17 @@ def _transcribe_clip(model, samples, sample_rate, turn, beam_size, pad):
         text = segment.text.strip()
         if text:
             result.append(
-                {"start": start + float(segment.start), "end": start + float(segment.end), "text": text}
+                {
+                    "start": start + float(segment.start),
+                    "end": start + float(segment.end),
+                    "text": text,
+                    "confidence": float(getattr(segment, "avg_logprob", 0.0)),
+                }
             )
     return result
 
 
-def transcribe_turns(model, samples, sample_rate, turns, beam_size, workers=1, pad=CLIP_PAD_S):
+def transcribe_turns(model, samples, sample_rate, turns, beam_size, workers=1, mapping=None, pad=CLIP_PAD_S):
     """Transcribe each speaker turn independently, one entry per Whisper segment.
 
     Speaker labels come from the diarization turn, so transcription timing never
@@ -489,10 +544,25 @@ def transcribe_turns(model, samples, sample_rate, turns, beam_size, workers=1, p
     progress = {"done": 0}
     lock = threading.Lock()
 
-    def bump():
+    def emit_lines(turn):
+        speaker = (mapping or {}).get(turn["label"], turn["label"])
+        for segment in turn.get("segments", []):
+            emit(
+                {
+                    "event": "line",
+                    "start": round(segment["start"], 3),
+                    "end": round(segment["end"], 3),
+                    "speaker": speaker,
+                    "text": segment["text"],
+                    "confidence": round(segment.get("confidence", 0.0), 4),
+                }
+            )
+
+    def complete(index):
         with lock:
             progress["done"] += 1
             done = progress["done"]
+        emit_lines(turns[index])
         if total:
             emit_stage("transcription", lo + (hi - lo) * (done / total), "Transcribing")
 
@@ -505,14 +575,15 @@ def transcribe_turns(model, samples, sample_rate, turns, beam_size, workers=1, p
                 for index, turn in enumerate(turns)
             }
             for future in as_completed(futures):
-                turns[futures[future]]["segments"] = future.result()
-                bump()
+                index = futures[future]
+                turns[index]["segments"] = future.result()
+                complete(index)
     else:
-        for turn in turns:
+        for index, turn in enumerate(turns):
             turn["segments"] = _transcribe_clip(
                 model, samples, sample_rate, turn, beam_size, pad
             )
-            bump()
+            complete(index)
     return turns
 
 
@@ -652,6 +723,23 @@ def main():
         action="store_true",
         help="merge adjacent lines that share a speaker into one line",
     )
+    parser.add_argument(
+        "--num-speakers",
+        type=int,
+        default=2,
+        help="force this many speakers (default: 2)",
+    )
+    parser.add_argument(
+        "--auto-speakers",
+        action="store_true",
+        help="let the diarizer decide the number of speakers",
+    )
+    parser.add_argument(
+        "--cache",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="cache diarization results to speed up re-runs",
+    )
     args = parser.parse_args()
 
     global PROGRESS_JSON
@@ -743,6 +831,7 @@ def main():
 
     timings = {}
     run_start = time.perf_counter()
+    num_speakers = None if args.auto_speakers else args.num_speakers
 
     emit_stage("loading", 0.0, "Loading models")
 
@@ -751,28 +840,46 @@ def main():
     duration = len(samples) / sample_rate
     timings["load_audio_s"] = round(time.perf_counter() - start, 3)
     log(f"Duration: {format_timestamp(duration)}")
+    emit({"event": "meta", "audio": str(audio_path), "duration": round(duration, 3)})
 
     start = time.perf_counter()
     emit_stage("diarization", STAGE_BOUNDS["diarization"][0], "Diarizing")
-    creep_stop = threading.Event()
-    creep = start_creep("diarization", "Diarizing", creep_stop)
-    try:
-        raw_turns = run_diarization(
-            samples,
-            sample_rate,
-            resolved["diarizer"],
-            diarizer_path,
-            embedding,
-            tuning,
-            components.NUM_SPEAKERS,
-            diarization_device,
-        )
-    finally:
-        creep_stop.set()
-        creep.join(timeout=1.0)
+    cache_hit = False
+    key = cache_key(audio_path, resolved["diarizer_name"], num_speakers)
+    cached = cache_read(key) if args.cache else None
+    if cached is not None:
+        raw_turns = cached
+        cache_hit = True
+        log("Using cached diarization.")
+    else:
+        creep_stop = threading.Event()
+        creep = None
+        if resolved["diarizer"]["backend"] == "diarizen":
+            creep = start_creep("diarization", "Diarizing", creep_stop)
+        try:
+            raw_turns = run_diarization(
+                samples,
+                sample_rate,
+                resolved["diarizer"],
+                diarizer_path,
+                embedding,
+                tuning,
+                num_speakers,
+                diarization_device,
+            )
+        finally:
+            creep_stop.set()
+            if creep is not None:
+                creep.join(timeout=1.0)
+        if args.cache:
+            cache_write(key, raw_turns)
     turns = clean_turns(raw_turns)
     timings["diarization_s"] = round(time.perf_counter() - start, 3)
     speaker_map = build_speaker_map(turns)
+    emit({"event": "turns", "speakers": speaker_map, "turns": [
+        {"start": t["start"], "end": t["end"], "speaker": speaker_map.get(t["label"], t["label"])}
+        for t in turns
+    ]})
     emit_stage("diarization", STAGE_BOUNDS["diarization"][1], "Diarized")
     log(
         f"Detected {len(speaker_map)} speaker(s), "
@@ -785,7 +892,7 @@ def main():
         whisper_dir, transcribe_device, compute_type, transcribe_threads, workers
     )
     turns = transcribe_turns(
-        model, samples, sample_rate, turns, beam_size, workers=workers
+        model, samples, sample_rate, turns, beam_size, workers=workers, mapping=speaker_map
     )
     timings["transcription_s"] = round(time.perf_counter() - start, 3)
 
@@ -815,7 +922,7 @@ def main():
             "transcription_device": transcribe_device,
             "backends": backends,
             "compute_type": compute_type,
-            "num_speakers": components.NUM_SPEAKERS,
+            "num_speakers": num_speakers,
             "beam_size": beam_size,
             "threads": threads,
             "batch_size": batch_size,
@@ -839,11 +946,25 @@ def main():
     out_json.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
 
     emit_stage("writing", STAGE_BOUNDS["writing"][1], "Done")
+
+    speaker_stats = {}
+    for line in lines:
+        stat = speaker_stats.setdefault(
+            line["speaker"], {"seconds": 0.0, "segments": 0, "words": 0}
+        )
+        stat["seconds"] += max(0.0, line["end"] - line["start"])
+        stat["segments"] += 1
+        stat["words"] += len(line["text"].split())
+    for stat in speaker_stats.values():
+        stat["seconds"] = round(stat["seconds"], 2)
+
     emit({"event": "done", "txt": str(out_txt), "json": str(out_json),
           "stats": {
               "audio_seconds": round(duration, 2),
               "run_seconds": round(time.perf_counter() - run_start, 2),
               "speakers": len(speaker_map),
+              "num_speakers": num_speakers,
+              "cache_hit": cache_hit,
               "turns": len(turns),
               "lines": len(lines),
               "preset": resolved["preset"],
@@ -852,6 +973,7 @@ def main():
               "transcriber": resolved["transcriber_name"],
               "device": str(diarization_device),
               "transcription_device": transcribe_device,
+              "speaker_stats": speaker_stats,
               "timings": timings,
           }})
 

@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use iced::keyboard::{self, Key, Modifiers};
+use serde::{Deserialize, Serialize};
 use iced::widget::{
     button, column, container, horizontal_space, mouse_area, pick_list, progress_bar, rich_text,
     row, scrollable, stack, text, text_input, toggler,
@@ -38,6 +39,63 @@ impl Preset {
             Preset::Speed => "speed",
             Preset::Balanced => "balanced",
             Preset::Accuracy => "accuracy",
+        }
+    }
+
+    fn from_arg(value: &str) -> Option<Preset> {
+        match value {
+            "speed" => Some(Preset::Speed),
+            "balanced" => Some(Preset::Balanced),
+            "accuracy" => Some(Preset::Accuracy),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Default, Serialize, Deserialize)]
+struct Settings {
+    preset: Option<String>,
+    timestamps: Option<bool>,
+    join_speaker: Option<bool>,
+    sms_mode: Option<bool>,
+    dark_mode: Option<bool>,
+}
+
+struct Scheme {
+    panel_bg: Color,
+    dialog_bg: Color,
+    track: Color,
+    blue: Color,
+    pink: Color,
+    ink: Color,
+    sms0: Color,
+    sms1: Color,
+}
+
+impl Scheme {
+    fn for_theme(dark: bool) -> Scheme {
+        if dark {
+            Scheme {
+                panel_bg: Color::from_rgb(0.094, 0.094, 0.145),
+                dialog_bg: Color::from_rgb(0.118, 0.118, 0.180),
+                track: Color::from_rgb(0.067, 0.067, 0.106),
+                blue: Color::from_rgb(0.537, 0.706, 0.980),
+                pink: Color::from_rgb(0.953, 0.545, 0.659),
+                ink: Color::from_rgb(0.067, 0.067, 0.106),
+                sms0: Color::from_rgb(0.537, 0.706, 0.980),
+                sms1: Color::from_rgb(0.796, 0.651, 0.969),
+            }
+        } else {
+            Scheme {
+                panel_bg: Color::from_rgb(0.96, 0.97, 0.995),
+                dialog_bg: Color::from_rgb(0.99, 0.99, 1.0),
+                track: Color::from_rgb(0.88, 0.88, 0.93),
+                blue: Color::from_rgb(0.357, 0.808, 0.980),
+                pink: Color::from_rgb(0.961, 0.663, 0.722),
+                ink: Color::from_rgb(0.13, 0.13, 0.17),
+                sms0: Color::from_rgb(0.357, 0.808, 0.980),
+                sms1: Color::from_rgb(0.961, 0.663, 0.722),
+            }
         }
     }
 }
@@ -80,6 +138,7 @@ pub enum Message {
     JoinSpeakerToggled(bool),
     ToggleAdvanced,
     SmsToggled(bool),
+    DarkToggled(bool),
     PickImport,
     ImportPicked(Option<PathBuf>),
     ImportLoaded(Option<String>),
@@ -108,6 +167,7 @@ pub struct App {
     join_speaker: bool,
     advanced_open: bool,
     sms_mode: bool,
+    dark_mode: bool,
     events: Arc<Mutex<VecDeque<Event>>>,
     pid: Arc<AtomicU32>,
     cancelled: Arc<AtomicBool>,
@@ -121,10 +181,15 @@ impl Default for App {
 
 impl App {
     pub fn new() -> Self {
+        let settings = Self::load_settings();
         Self {
             input: None,
             output_dir: None,
-            preset: Preset::default(),
+            preset: settings
+                .preset
+                .as_deref()
+                .and_then(Preset::from_arg)
+                .unwrap_or_default(),
             stage: "idle".to_string(),
             progress: 0.0,
             progress_shown: 0.0,
@@ -140,18 +205,71 @@ impl App {
             name2: String::new(),
             duration: None,
             stats: None,
-            timestamps: true,
-            join_speaker: false,
+            timestamps: settings.timestamps.unwrap_or(true),
+            join_speaker: settings.join_speaker.unwrap_or(false),
             advanced_open: false,
-            sms_mode: false,
+            sms_mode: settings.sms_mode.unwrap_or(false),
+            dark_mode: settings.dark_mode.unwrap_or(false),
             events: Arc::new(Mutex::new(VecDeque::new())),
             pid: Arc::new(AtomicU32::new(0)),
             cancelled: Arc::new(AtomicBool::new(false)),
         }
     }
 
+    fn settings_path() -> Option<PathBuf> {
+        if cfg!(windows) {
+            std::env::var("APPDATA")
+                .ok()
+                .map(|base| PathBuf::from(base).join("transiel").join("settings.json"))
+        } else {
+            let base = std::env::var("XDG_CONFIG_HOME")
+                .ok()
+                .or_else(|| std::env::var("HOME").ok().map(|home| format!("{home}/.config")))?;
+            Some(PathBuf::from(base).join("transiel").join("settings.json"))
+        }
+    }
+
+    fn load_settings() -> Settings {
+        Self::settings_path()
+            .and_then(|path| std::fs::read_to_string(path).ok())
+            .and_then(|text| serde_json::from_str(&text).ok())
+            .unwrap_or_default()
+    }
+
+    fn save_settings(&self) {
+        let Some(path) = Self::settings_path() else {
+            return;
+        };
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let settings = Settings {
+            preset: Some(self.preset.arg().to_string()),
+            timestamps: Some(self.timestamps),
+            join_speaker: Some(self.join_speaker),
+            sms_mode: Some(self.sms_mode),
+            dark_mode: Some(self.dark_mode),
+        };
+        if let Ok(text) = serde_json::to_string_pretty(&settings) {
+            let _ = std::fs::write(path, text);
+        }
+    }
+
     pub fn theme(&self) -> iced::Theme {
-        iced::Theme::CatppuccinMocha
+        if self.dark_mode {
+            iced::Theme::CatppuccinMocha
+        } else {
+            iced::Theme::custom(
+                "Transgender".to_string(),
+                iced::theme::Palette {
+                    background: Color::WHITE,
+                    text: Color::from_rgb(0.13, 0.13, 0.17),
+                    primary: Color::from_rgb(0.357, 0.808, 0.980),
+                    success: Color::from_rgb(0.357, 0.808, 0.980),
+                    danger: Color::from_rgb(0.961, 0.663, 0.722),
+                },
+            )
+        }
     }
 
     pub fn subscription(&self) -> Subscription<Message> {
@@ -205,10 +323,12 @@ impl App {
             }
             Message::TimestampsToggled(value) => {
                 self.timestamps = value;
+                self.save_settings();
                 Task::none()
             }
             Message::JoinSpeakerToggled(value) => {
                 self.join_speaker = value;
+                self.save_settings();
                 Task::none()
             }
             Message::ToggleAdvanced => {
@@ -217,6 +337,12 @@ impl App {
             }
             Message::SmsToggled(value) => {
                 self.sms_mode = value;
+                self.save_settings();
+                Task::none()
+            }
+            Message::DarkToggled(value) => {
+                self.dark_mode = value;
+                self.save_settings();
                 Task::none()
             }
             Message::PickImport => Task::perform(
@@ -276,6 +402,7 @@ impl App {
                     return Task::none();
                 }
                 self.preset = preset;
+                self.save_settings();
                 Task::none()
             }
             Message::Start => {
@@ -458,6 +585,9 @@ impl App {
                     self.progress = progress.clamp(0.0, 1.0);
                 }
                 Event::Log { .. } => {}
+                Event::Meta { .. } => {}
+                Event::Turns { .. } => {}
+                Event::Line { .. } => {}
                 Event::Done { txt, stats, .. } => {
                     self.stage = "done".to_string();
                     self.progress = 1.0;
@@ -562,6 +692,7 @@ impl App {
     /// Transcript view: normal (rich text) or SMS-style bubbles.
     fn transcript_element(&self) -> Element<'_, Message> {
         if self.sms_mode {
+            let scheme = Scheme::for_theme(self.dark_mode);
             let mut sides: Vec<String> = Vec::new();
             let mut col = column![].spacing(6).padding(8).width(Length::Fill);
             for line in self.transcript.lines() {
@@ -576,7 +707,12 @@ impl App {
                         sides.len() - 1
                     }
                 };
-                col = col.push(sms_row(line.trim(), index % 2 == 0, sms_color(index)));
+                col = col.push(sms_row(
+                    line.trim(),
+                    index % 2 == 0,
+                    sms_color(index, &scheme),
+                    scheme.ink,
+                ));
             }
             scrollable(col)
                 .height(Length::Fill)
@@ -592,6 +728,7 @@ impl App {
     }
 
     pub fn view(&self) -> Element<'_, Message> {
+        let scheme = Scheme::for_theme(self.dark_mode);
         let input = self
             .input
             .as_ref()
@@ -646,7 +783,7 @@ impl App {
             row![
                 button("Select File")
                     .on_press_maybe(can_select.then_some(Message::PickInput))
-                    .style(color_button(Color::from_rgb(0.537, 0.706, 0.980))),
+                    .style(color_button(scheme.blue, scheme.ink)),
                 text(input.clone()),
             ]
             .spacing(8)
@@ -655,7 +792,7 @@ impl App {
             row![
                 button("Save Location")
                     .on_press_maybe(can_output.then_some(Message::PickOutput))
-                    .style(color_button(Color::from_rgb(0.537, 0.706, 0.980))),
+                    .style(color_button(scheme.blue, scheme.ink)),
                 text(output.clone()),
             ]
             .spacing(8)
@@ -703,6 +840,13 @@ impl App {
                     ]
                     .spacing(8)
                     .align_y(iced::Alignment::Center),
+                    row![
+                        text("Dark theme"),
+                        horizontal_space(),
+                        toggler(self.dark_mode).on_toggle(Message::DarkToggled),
+                    ]
+                    .spacing(8)
+                    .align_y(iced::Alignment::Center),
                 ]
                 .spacing(8)
                 .padding([0, 2]),
@@ -713,21 +857,22 @@ impl App {
             row![
                 button("Start")
                     .on_press_maybe(can_start.then_some(Message::Start))
-                    .style(color_button(Color::from_rgb(0.651, 0.890, 0.631))),
+                    .style(color_button(scheme.blue, scheme.ink)),
                 button("Summary")
                     .on_press_maybe(
                         (!running && self.stats.is_some()).then_some(Message::OpenSummary)
                     )
-                    .style(color_button(Color::from_rgb(0.796, 0.651, 0.969))),
+                    .style(color_button(scheme.pink, scheme.ink)),
                 button("Cancel")
                     .on_press_maybe(can_cancel.then_some(Message::Cancel))
-                    .style(color_button(Color::from_rgb(0.953, 0.545, 0.659))),
+                    .style(color_button(scheme.pink, scheme.ink)),
             ]
             .spacing(8)
             .align_y(iced::Alignment::Center),
         );
 
         let base = column![
+            text("Transiel").size(32),
             controls,
             row![
                 text(self.elapsed().unwrap_or_default()).width(Length::Fixed(70.0)),
@@ -735,9 +880,9 @@ impl App {
                     progress_bar(0.0..=1.0, self.progress_shown)
                         .width(Length::Fill)
                         .height(Length::Fixed(28.0))
-                        .style(|_theme| progress_bar::Style {
-                            background: Color::from_rgb(0.09, 0.09, 0.15).into(),
-                            bar: Color::from_rgb(0.537, 0.706, 0.980).into(),
+                        .style(move |_theme| progress_bar::Style {
+                            background: scheme.track.into(),
+                            bar: scheme.blue.into(),
                             border: iced::border::rounded(14.0),
                         }),
                     container(text(format!("{} — {}", self.stage, self.status_text())))
@@ -751,19 +896,23 @@ impl App {
             container(self.transcript_element())
                 .width(Length::Fill)
                 .height(Length::Fill)
-                .style(|_theme| container::Style {
-                    background: Some(Color::from_rgb(0.094, 0.094, 0.145).into()),
+                .style(move |_theme| container::Style {
+                    background: Some(scheme.panel_bg.into()),
                     border: iced::border::rounded(16.0),
                     ..container::Style::default()
                 }),
-            row![
-                button("Import Transcription")
-                    .on_press_maybe((!running).then_some(Message::PickImport))
-                    .style(color_button(Color::from_rgb(0.580, 0.886, 0.835))),
-                button("Close").on_press(Message::Close).style(pill_button_secondary),
-            ]
-            .spacing(8)
-            .align_y(iced::Alignment::Center),
+            container(
+                row![
+                    button("Import Transcription")
+                        .on_press_maybe((!running).then_some(Message::PickImport))
+                        .style(color_button(scheme.blue, scheme.ink)),
+                    button("Close").on_press(Message::Close).style(pill_button_secondary),
+                ]
+                .spacing(8)
+                .align_y(iced::Alignment::Center),
+            )
+            .width(Length::Fill)
+            .align_x(iced::Alignment::End),
         ]
         .spacing(8)
         .padding(12);
@@ -792,20 +941,24 @@ impl App {
                 .style(pill_input),
         );
         col = col.push(
-            row![
-                button("Cancel")
-                    .on_press(Message::RenameCancel)
-                    .style(color_button(Color::from_rgb(0.953, 0.545, 0.659))),
-                button("Save")
-                    .on_press(Message::RenameSave)
-                    .style(color_button(Color::from_rgb(0.651, 0.890, 0.631))),
-            ]
-            .spacing(8),
+            container(
+                row![
+                    button("Save")
+                        .on_press(Message::RenameSave)
+                        .style(color_button(scheme.blue, scheme.ink)),
+                    button("Cancel")
+                        .on_press(Message::RenameCancel)
+                        .style(color_button(scheme.pink, scheme.ink)),
+                ]
+                .spacing(8),
+            )
+            .width(Length::Fill)
+            .align_x(iced::Alignment::End),
         );
         let dialog = container(col.width(Length::Fixed(380.0)))
             .padding(16)
-            .style(|_theme| container::Style {
-                background: Some(Color::from_rgb(0.118, 0.118, 0.180).into()),
+            .style(move |_theme| container::Style {
+                background: Some(scheme.dialog_bg.into()),
                 border: iced::border::rounded(16.0),
                 ..container::Style::default()
             });
@@ -868,8 +1021,8 @@ fn split_label(line: &str) -> (String, String) {
     }
 }
 
-fn sms_row(content: &str, left: bool, color: Color) -> Element<'static, Message> {
-    let bubble = container(rich_text(line_spans(content, Some(crust()))))
+fn sms_row(content: &str, left: bool, color: Color, ink: Color) -> Element<'static, Message> {
+    let bubble = container(rich_text(line_spans(content, Some(ink))))
         .width(Length::Fill)
         .align_x(iced::Alignment::Start)
         .padding(6)
@@ -885,14 +1038,11 @@ fn sms_row(content: &str, left: bool, color: Color) -> Element<'static, Message>
     }
 }
 
-fn sms_color(index: usize) -> Color {
-    match index % 6 {
-        0 => Color::from_rgb(0.537, 0.706, 0.980),
-        1 => Color::from_rgb(0.651, 0.890, 0.631),
-        2 => Color::from_rgb(0.796, 0.651, 0.969),
-        3 => Color::from_rgb(0.980, 0.702, 0.529),
-        4 => Color::from_rgb(0.580, 0.886, 0.835),
-        _ => Color::from_rgb(0.949, 0.886, 0.686),
+fn sms_color(index: usize, scheme: &Scheme) -> Color {
+    if index % 2 == 0 {
+        scheme.sms0
+    } else {
+        scheme.sms1
     }
 }
 
@@ -916,16 +1066,12 @@ fn pill_pick(theme: &iced::Theme, status: pick_list::Status) -> pick_list::Style
     style
 }
 
-fn crust() -> Color {
-    Color::from_rgb(0.067, 0.067, 0.106)
-}
-
-fn color_button(bg: Color) -> impl Fn(&iced::Theme, button::Status) -> button::Style {
+fn color_button(bg: Color, ink: Color) -> impl Fn(&iced::Theme, button::Status) -> button::Style {
     move |_theme, status| {
         let (bg, text) = match status {
-            button::Status::Hovered => (Color { a: 0.85, ..bg }, crust()),
-            button::Status::Disabled => (Color { a: 0.35, ..bg }, Color { a: 0.6, ..crust() }),
-            _ => (bg, crust()),
+            button::Status::Hovered => (Color { a: 0.85, ..bg }, ink),
+            button::Status::Disabled => (Color { a: 0.35, ..bg }, Color { a: 0.6, ..ink }),
+            _ => (bg, ink),
         };
         button::Style {
             background: Some(bg.into()),
