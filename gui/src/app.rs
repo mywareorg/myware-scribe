@@ -186,6 +186,54 @@ impl fmt::Display for Speed {
     }
 }
 
+/// Options in the "Import…" dropdown.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImportKind {
+    Transcription,
+    Audio,
+}
+
+impl ImportKind {
+    const ALL: [ImportKind; 2] = [ImportKind::Transcription, ImportKind::Audio];
+
+    fn label(self) -> &'static str {
+        match self {
+            ImportKind::Transcription => "Transcription",
+            ImportKind::Audio => "Audio",
+        }
+    }
+}
+
+impl fmt::Display for ImportKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.label())
+    }
+}
+
+/// Options in the "Help…" dropdown.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HelpKind {
+    About,
+    Shortcuts,
+}
+
+impl HelpKind {
+    const ALL: [HelpKind; 2] = [HelpKind::About, HelpKind::Shortcuts];
+
+    fn label(self) -> &'static str {
+        match self {
+            HelpKind::About => "About",
+            HelpKind::Shortcuts => "Shortcuts",
+        }
+    }
+}
+
+impl fmt::Display for HelpKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.label())
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Preset {
     #[default]
@@ -234,6 +282,11 @@ struct Settings {
     cache: Option<bool>,
     confidence: Option<bool>,
     lock_text: Option<bool>,
+    font_scale: Option<f32>,
+    timestamp_gutter: Option<bool>,
+    follow_playhead: Option<bool>,
+    playback_speed: Option<f32>,
+    waveform_zoom: Option<f32>,
     window_width: Option<f32>,
     window_height: Option<f32>,
     window_x: Option<f32>,
@@ -315,12 +368,27 @@ pub enum Message {
     Cancel,
     Tick,
     Close,
-    RenameName1(String),
-    RenameName2(String),
+    RenameName(usize, String),
     RenameSave,
     RenameCancel,
-    RenameMove(bool),
-    RenameActivate,
+    RenameSpeaker(String),
+    SelectLine(usize),
+    MergeLine,
+    SplitLine,
+    ZoomIn,
+    ZoomOut,
+    ZoomReset,
+    ToggleGutter,
+    ToggleFollowPlayhead,
+    ToggleConsole,
+    DismissToast,
+    WaveZoom(f32),
+    HelpChoice(HelpKind),
+    CloseHelp,
+    TranscriptHover(bool),
+    TipEnter(&'static str),
+    TipExit(&'static str),
+    TipShow(&'static str, u64),
     OpenSummary,
     TimestampsToggled(bool),
     JoinSpeakerToggled(bool),
@@ -341,16 +409,15 @@ pub enum Message {
     FindPrev,
     FindNext,
     SpeedChanged(Speed),
-    EditLine(usize),
-    EditText(String),
-    EditSave,
-    EditCancel,
     Escape,
     ShortcutPlay,
     SeekBy(f32),
-    PickImport,
     ImportPicked(Option<PathBuf>),
     ImportLoaded(Option<String>),
+    ImportChoice(ImportKind),
+    AudioPicked(Option<PathBuf>),
+    OpenRename,
+    CloseSummary,
     AddFiles,
     FilesPicked(Option<Vec<PathBuf>>),
     AddFolder,
@@ -382,11 +449,9 @@ pub struct App {
     timeline_duration: Option<f32>,
     player: Option<Player>,
     output_txt: Option<PathBuf>,
+    summary_open: bool,
     rename_open: bool,
-    rename_focus: usize,
-    focus_pending: bool,
-    name1: String,
-    name2: String,
+    rename_fields: Vec<(String, String)>,
     stats: Option<backend::Stats>,
     timestamps: bool,
     join_speaker: bool,
@@ -400,17 +465,27 @@ pub struct App {
     lock_line: Option<usize>,
     transcript_viewport: f32,
     transcript_content: f32,
+    transcript_hover: bool,
+    selected_line: Option<usize>,
+    font_scale: f32,
+    timestamp_gutter: bool,
+    follow_playhead: bool,
+    console_open: bool,
+    console_lines: Vec<String>,
+    toast: Option<(String, Instant)>,
+    help_open: Option<HelpKind>,
     search_query: String,
     search_index: usize,
     playback_speed: f32,
     last_tick: Option<Instant>,
-    edit_open: bool,
-    edit_index: Option<usize>,
-    edit_text: String,
     window_size: Size,
     window_position: Option<Point>,
     window_dirty: bool,
     last_window_change: Option<Instant>,
+    waveform_zoom: f32,
+    hovered_tip: Option<&'static str>,
+    shown_tip: Option<&'static str>,
+    tip_seq: u64,
     events: Arc<Mutex<VecDeque<Event>>>,
     pid: Arc<AtomicU32>,
     cancelled: Arc<AtomicBool>,
@@ -453,11 +528,9 @@ impl App {
             timeline_duration: None,
             player: None,
             output_txt: None,
+            summary_open: false,
             rename_open: false,
-            rename_focus: 0,
-            focus_pending: false,
-            name1: String::new(),
-            name2: String::new(),
+            rename_fields: Vec::new(),
             stats: None,
             timestamps: settings.timestamps.unwrap_or(true),
             join_speaker: settings.join_speaker.unwrap_or(false),
@@ -475,13 +548,20 @@ impl App {
             lock_line: None,
             transcript_viewport: 0.0,
             transcript_content: 0.0,
+            transcript_hover: false,
+            selected_line: None,
+            font_scale: settings.font_scale.unwrap_or(1.0),
+            timestamp_gutter: settings.timestamp_gutter.unwrap_or(false),
+            follow_playhead: settings.follow_playhead.unwrap_or(false),
+            console_open: false,
+            console_lines: Vec::new(),
+            toast: None,
+            help_open: None,
+            waveform_zoom: settings.waveform_zoom.unwrap_or(1.0),
             search_query: String::new(),
             search_index: 0,
-            playback_speed: 1.0,
+            playback_speed: settings.playback_speed.unwrap_or(1.0),
             last_tick: None,
-            edit_open: false,
-            edit_index: None,
-            edit_text: String::new(),
             window_size: Self::window_size_from(&settings),
             window_position: match (settings.window_x, settings.window_y) {
                 (Some(x), Some(y)) => Some(Point::new(x, y)),
@@ -489,6 +569,9 @@ impl App {
             },
             window_dirty: false,
             last_window_change: None,
+            hovered_tip: None,
+            shown_tip: None,
+            tip_seq: 0,
             events: Arc::new(Mutex::new(VecDeque::new())),
             pid: Arc::new(AtomicU32::new(0)),
             cancelled: Arc::new(AtomicBool::new(false)),
@@ -536,6 +619,11 @@ impl App {
             cache: Some(self.cache),
             confidence: Some(self.confidence),
             lock_text: Some(self.lock_text),
+            font_scale: Some(self.font_scale),
+            timestamp_gutter: Some(self.timestamp_gutter),
+            follow_playhead: Some(self.follow_playhead),
+            playback_speed: Some(self.playback_speed),
+            waveform_zoom: Some(self.waveform_zoom),
             window_width: Some(self.window_size.width),
             window_height: Some(self.window_size.height),
             window_x: self.window_position.map(|point| point.x),
@@ -598,9 +686,7 @@ impl App {
     fn key_press(key: Key, modifiers: Modifiers) -> Option<Message> {
         use keyboard::key::Named;
         match key {
-            Key::Named(Named::Tab) => Some(Message::RenameMove(modifiers.shift())),
             Key::Named(Named::Enter) if modifiers.command() => Some(Message::Start),
-            Key::Named(Named::Enter) => Some(Message::RenameActivate),
             Key::Named(Named::Escape) => Some(Message::Escape),
             Key::Named(Named::Space) => Some(Message::ShortcutPlay),
             Key::Named(Named::ArrowRight) => Some(Message::SeekBy(5.0)),
@@ -608,6 +694,9 @@ impl App {
             Key::Character(character) if modifiers.command() => match character.as_str() {
                 "o" => Some(Message::AddFiles),
                 "f" => Some(Message::FocusFind),
+                "=" | "+" => Some(Message::ZoomIn),
+                "-" | "_" => Some(Message::ZoomOut),
+                "0" => Some(Message::ZoomReset),
                 _ => None,
             },
             _ => None,
@@ -755,52 +844,113 @@ impl App {
                 }
                 Task::none()
             }
-            Message::EditLine(index) => {
-                if let Some(line) = self.lines.get(index) {
-                    self.edit_text = line.raw.clone();
-                    self.edit_index = Some(index);
-                    self.edit_open = true;
-                    return text_input::focus(edit_id());
+            Message::RenameSpeaker(name) => {
+                self.open_rename();
+                if let Some(field) = self.rename_fields.iter_mut().find(|(old, _)| *old == name) {
+                    field.1 = name.clone();
                 }
                 Task::none()
             }
-            Message::EditText(value) => {
-                self.edit_text = value;
-                Task::none()
-            }
-            Message::EditCancel => {
-                self.edit_open = false;
-                self.edit_index = None;
-                Task::none()
-            }
-            Message::EditSave => {
-                if let Some(index) = self.edit_index.take() {
-                    if let Some(line) = self.lines.get_mut(index) {
-                        line.speaker = speaker_of(&self.edit_text);
-                        line.raw = self.edit_text.clone();
-                    }
-                    self.transcript = self
-                        .lines
-                        .iter()
-                        .map(|line| line.raw.as_str())
-                        .collect::<Vec<_>>()
-                        .join("\n");
-                    if !self.transcript.is_empty() {
-                        self.transcript.push('\n');
-                    }
-                    if let Some(path) = &self.output_txt {
-                        let _ = std::fs::write(path, &self.transcript);
-                    }
+            Message::RenameName(index, value) => {
+                if let Some(field) = self.rename_fields.get_mut(index) {
+                    field.1 = value;
                 }
-                self.edit_open = false;
+                Task::none()
+            }
+            Message::SelectLine(index) => {
+                self.selected_line = if self.selected_line == Some(index) {
+                    None
+                } else {
+                    Some(index)
+                };
+                Task::none()
+            }
+            Message::MergeLine => {
+                self.merge_selected();
+                Task::none()
+            }
+            Message::SplitLine => {
+                self.split_selected();
+                Task::none()
+            }
+            Message::ZoomIn => {
+                self.font_scale = (self.font_scale + 0.1).min(2.5);
+                self.save_settings();
+                Task::none()
+            }
+            Message::ZoomOut => {
+                self.font_scale = (self.font_scale - 0.1).max(0.6);
+                self.save_settings();
+                Task::none()
+            }
+            Message::ZoomReset => {
+                self.font_scale = 1.0;
+                self.save_settings();
+                Task::none()
+            }
+            Message::ToggleGutter => {
+                self.timestamp_gutter = !self.timestamp_gutter;
+                self.save_settings();
+                Task::none()
+            }
+            Message::ToggleFollowPlayhead => {
+                self.follow_playhead = !self.follow_playhead;
+                self.save_settings();
+                Task::none()
+            }
+            Message::ToggleConsole => {
+                self.console_open = !self.console_open;
+                Task::none()
+            }
+            Message::DismissToast => {
+                self.toast = None;
+                Task::none()
+            }
+            Message::WaveZoom(factor) => {
+                self.waveform_zoom = factor.clamp(1.0, 16.0);
+                self.save_settings();
+                Task::none()
+            }
+            Message::HelpChoice(kind) => {
+                self.help_open = Some(kind);
+                Task::none()
+            }
+            Message::CloseHelp => {
+                self.help_open = None;
+                Task::none()
+            }
+            Message::TranscriptHover(value) => {
+                self.transcript_hover = value;
+                Task::none()
+            }
+            Message::TipEnter(label) => {
+                self.tip_seq = self.tip_seq.wrapping_add(1);
+                let seq = self.tip_seq;
+                self.hovered_tip = Some(label);
+                self.shown_tip = None;
+                Task::perform(
+                    async move {
+                        tokio::time::sleep(Duration::from_millis(250)).await;
+                    },
+                    move |_| Message::TipShow(label, seq),
+                )
+            }
+            Message::TipExit(label) => {
+                if self.hovered_tip == Some(label) {
+                    self.hovered_tip = None;
+                    self.shown_tip = None;
+                }
+                Task::none()
+            }
+            Message::TipShow(label, seq) => {
+                if self.hovered_tip == Some(label) && self.tip_seq == seq {
+                    self.shown_tip = Some(label);
+                }
                 Task::none()
             }
             Message::Escape => {
                 if self.batch_warning {
                     self.batch_warning = false;
-                } else if self.edit_open {
-                    self.edit_open = false;
-                    self.edit_index = None;
                 } else if self.rename_open {
                     self.rename_open = false;
                 } else if !self.search_query.is_empty() {
@@ -812,7 +962,7 @@ impl App {
                 Task::none()
             }
             Message::ShortcutPlay => {
-                if self.edit_open || self.rename_open {
+                if self.rename_open {
                     return Task::none();
                 }
                 let ready = self.timeline_duration.unwrap_or(0.0) > 0.0;
@@ -837,7 +987,7 @@ impl App {
                 Task::none()
             }
             Message::SeekBy(delta) => {
-                if self.edit_open || self.rename_open {
+                if self.rename_open {
                     return Task::none();
                 }
                 if self.timeline_duration.is_some() {
@@ -851,14 +1001,6 @@ impl App {
                 }
                 Task::none()
             }
-            Message::PickImport => Task::perform(
-                async {
-                    rfd::FileDialog::new()
-                        .add_filter("Transcript", &["txt", "json"])
-                        .pick_file()
-                },
-                Message::ImportPicked,
-            ),
             Message::ImportPicked(path) => match path {
                 Some(path) => Task::perform(
                     async move { backend::read_transcript(&path) },
@@ -928,9 +1070,48 @@ impl App {
             }
             Message::OpenSummary => {
                 if self.stats.is_some() {
-                    self.rename_open = true;
-                    self.rename_focus = 0;
-                    self.focus_pending = false;
+                    self.summary_open = true;
+                }
+                Task::none()
+            }
+            Message::CloseSummary => {
+                self.summary_open = false;
+                Task::none()
+            }
+            Message::OpenRename => {
+                self.open_rename();
+                Task::none()
+            }
+            Message::ImportChoice(kind) => match kind {
+                ImportKind::Transcription => Task::perform(
+                    async {
+                        rfd::FileDialog::new()
+                            .add_filter("Transcript", &["txt", "json"])
+                            .pick_file()
+                    },
+                    Message::ImportPicked,
+                ),
+                ImportKind::Audio => Task::perform(
+                    async {
+                        rfd::FileDialog::new()
+                            .add_filter("Audio/Video", AUDIO_EXTS)
+                            .pick_file()
+                    },
+                    Message::AudioPicked,
+                ),
+            },
+            Message::AudioPicked(path) => {
+                if let Some(path) = path {
+                    self.player = None;
+                    self.peaks = Arc::new(Vec::new());
+                    self.peaks_for = Some(path.clone());
+                    self.playhead = 0.0;
+                    self.timeline_duration = None;
+                    let probe = path.clone();
+                    return Task::perform(
+                        async move { backend::probe_audio(&probe, TIMELINE_BUCKETS) },
+                        move |result| Message::TimelineLoaded(path.clone(), result),
+                    );
                 }
                 Task::none()
             }
@@ -1042,21 +1223,16 @@ impl App {
                     self.window_dirty = false;
                     self.save_settings();
                 }
-                if self.focus_pending && self.rename_open {
-                    self.focus_pending = false;
-                    tasks.push(self.focus_task());
+                if self
+                    .toast
+                    .as_ref()
+                    .is_some_and(|(_, at)| at.elapsed() > Duration::from_secs(4))
+                {
+                    self.toast = None;
                 }
                 Task::batch(tasks)
             }
             Message::Close => iced::exit(),
-            Message::RenameName1(value) => {
-                self.name1 = value;
-                Task::none()
-            }
-            Message::RenameName2(value) => {
-                self.name2 = value;
-                Task::none()
-            }
             Message::RenameSave => {
                 self.apply_rename();
                 Task::none()
@@ -1065,45 +1241,93 @@ impl App {
                 self.rename_open = false;
                 Task::none()
             }
-            Message::RenameMove(back) => {
-                if !self.rename_open {
-                    return Task::none();
-                }
-                const COUNT: usize = 4;
-                self.rename_focus = if back {
-                    (self.rename_focus + COUNT - 1) % COUNT
-                } else {
-                    (self.rename_focus + 1) % COUNT
-                };
-                self.focus_task()
-            }
-            Message::RenameActivate => {
-                if !self.rename_open {
-                    return Task::none();
-                }
-                match self.rename_focus {
-                    0 | 1 => {
-                        self.rename_focus = (self.rename_focus + 1) % 4;
-                        self.focus_task()
-                    }
-                    2 => {
-                        self.apply_rename();
-                        Task::none()
-                    }
-                    _ => {
-                        self.rename_open = false;
-                        Task::none()
-                    }
-                }
-            }
         }
     }
 
-    fn focus_task(&self) -> Task<Message> {
-        match self.rename_focus {
-            0 => text_input::focus(name1_id()),
-            1 => text_input::focus(name2_id()),
-            _ => Task::none(),
+    /// Populate the rename dialog from the distinct speakers in the transcript.
+    fn open_rename(&mut self) {
+        let mut seen: Vec<String> = Vec::new();
+        for line in &self.lines {
+            if !line.speaker.is_empty() && !seen.contains(&line.speaker) {
+                seen.push(line.speaker.clone());
+            }
+        }
+        self.rename_fields = seen.into_iter().map(|name| (name.clone(), name)).collect();
+        self.rename_open = true;
+    }
+
+    fn merge_selected(&mut self) {
+        let Some(index) = self.selected_line else { return };
+        if index + 1 >= self.lines.len() {
+            return;
+        }
+        let next = self.lines.remove(index + 1);
+        if let Some(line) = self.lines.get_mut(index) {
+            let extra = next.raw.split_once(": ").map(|(_, t)| t).unwrap_or(&next.raw);
+            line.raw = format!("{} {}", line.raw.trim_end(), extra.trim());
+        }
+        self.refresh_transcript();
+    }
+
+    fn split_selected(&mut self) {
+        let Some(index) = self.selected_line else { return };
+        let at = self.playhead;
+        let Some(line) = self.lines.get(index) else { return };
+        let (start, end) = match line.start {
+            Some(start) => (start, self.line_end(index).unwrap_or(at.max(start))),
+            None => return,
+        };
+        if at <= start + 0.1 || at >= end - 0.1 {
+            return;
+        }
+        let head = line.raw.clone();
+        let speaker = line.speaker.clone();
+        let confidence = line.confidence;
+        let (_, text) = head.split_once(": ").unwrap_or(("", head.as_str()));
+        let words: Vec<&str> = text.split_whitespace().collect();
+        if words.len() < 2 {
+            return;
+        }
+        let mid = words.len() / 2;
+        let left = words[..mid].join(" ");
+        let right = words[mid..].join(" ");
+        let left_raw = format_line(&speaker, &left);
+        let right_raw = format_line(&speaker, &right);
+        if let Some(line) = self.lines.get_mut(index) {
+            line.raw = left_raw;
+            line.start = Some(start);
+        }
+        self.lines.insert(
+            index + 1,
+            DocLine {
+                raw: right_raw,
+                speaker,
+                confidence,
+                start: Some(at),
+            },
+        );
+        self.refresh_transcript();
+    }
+
+    fn line_end(&self, index: usize) -> Option<f32> {
+        self.lines
+            .get(index + 1)
+            .and_then(|next| next.start)
+            .or(self.timeline_duration)
+    }
+
+    fn refresh_transcript(&mut self) {
+        self.transcript = self
+            .lines
+            .iter()
+            .map(|line| line.raw.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        if !self.transcript.is_empty() {
+            self.transcript.push('\n');
+        }
+        if let Some(path) = &self.output_txt {
+            let _ = std::fs::write(path, &self.transcript);
         }
     }
 
@@ -1151,8 +1375,7 @@ impl App {
         self.output_txt = None;
         self.stats = None;
         self.rename_open = false;
-        self.name1.clear();
-        self.name2.clear();
+        self.selected_line = None;
         self.cancelled.store(false, Ordering::SeqCst);
         self.run_next();
     }
@@ -1170,6 +1393,7 @@ impl App {
             self.stage = "done".to_string();
             self.progress = 1.0;
             self.progress_shown = 1.0;
+            self.toast = Some(("Queue complete".to_string(), Instant::now()));
             return;
         };
 
@@ -1247,26 +1471,20 @@ impl App {
     }
 
     fn apply_rename(&mut self) {
-        let name1 = if self.name1.trim().is_empty() {
-            "SPEAKER 1".to_string()
-        } else {
-            self.name1.trim().to_string()
-        };
-        let name2 = if self.name2.trim().is_empty() {
-            "SPEAKER 2".to_string()
-        } else {
-            self.name2.trim().to_string()
-        };
+        let mapping: Vec<(String, String)> = self
+            .rename_fields
+            .iter()
+            .filter(|(old, new)| !new.trim().is_empty() && new.trim() != old)
+            .map(|(old, new)| (old.clone(), new.trim().to_string()))
+            .collect();
 
-        self.transcript = self
-            .transcript
-            .replace("SPEAKER 1", &name1)
-            .replace("SPEAKER 2", &name2);
-        self.lines = parse_lines(&self.transcript);
-
-        if let Some(path) = &self.output_txt {
-            let _ = std::fs::write(path, &self.transcript);
+        for line in &mut self.lines {
+            if let Some((_, new)) = mapping.iter().find(|(old, _)| *old == line.speaker) {
+                line.raw = line.raw.replacen(&line.speaker, new, 1);
+                line.speaker = new.clone();
+            }
         }
+        self.refresh_transcript();
         self.rename_open = false;
     }
 
@@ -1284,7 +1502,13 @@ impl App {
                     self.stage = if label.is_empty() { stage } else { label };
                     self.progress = progress.clamp(0.0, 1.0);
                 }
-                Event::Log { .. } => {}
+                Event::Log { message } => {
+                    self.console_lines.push(message);
+                    if self.console_lines.len() > 500 {
+                        let excess = self.console_lines.len() - 500;
+                        self.console_lines.drain(0..excess);
+                    }
+                }
                 Event::Meta { audio, duration } => {
                     self.meta_duration = Some(duration);
                     let path = PathBuf::from(audio);
@@ -1349,21 +1573,13 @@ impl App {
                         if self.queue.len() == 1 {
                             self.batch = false;
                             self.status = Status::Done;
-                            self.name1.clear();
-                            self.name2.clear();
-                            self.rename_open = true;
-                            self.rename_focus = 0;
-                            self.focus_pending = true;
+                            self.toast = Some(("Queue complete".to_string(), Instant::now()));
                         } else {
                             self.run_next();
                         }
                     } else {
                         self.status = Status::Done;
-                        self.name1.clear();
-                        self.name2.clear();
-                        self.rename_open = true;
-                        self.rename_focus = 0;
-                        self.focus_pending = true;
+                        self.toast = Some(("Queue complete".to_string(), Instant::now()));
                     }
                 }
                 Event::Error { message } => {
@@ -1445,6 +1661,40 @@ impl App {
         None
     }
 
+    /// Rough remaining-time estimate for the running item, from its progress.
+    fn item_eta(&self, progress: f32) -> Option<String> {
+        let start = self.run_start?;
+        if progress <= 0.03 {
+            return None;
+        }
+        let elapsed = start.elapsed().as_secs_f64();
+        let eta = elapsed * (1.0 - progress as f64) / progress as f64;
+        if eta < 1.0 {
+            None
+        } else {
+            Some(format_secs(eta))
+        }
+    }
+
+    /// Collapsible console showing backend log output.
+    fn console_panel(&self, scheme: &Scheme) -> Element<'static, Message> {
+        let background = scheme.track;
+        let mut col = column![].spacing(1).padding(4);
+        for line in &self.console_lines {
+            col = col.push(text(line.clone()).size(12));
+        }
+        container(scrollable(col).height(Length::Fill).width(Length::Fill))
+            .width(Length::Fill)
+            .height(Length::Fixed(150.0))
+            .padding(8)
+            .style(move |_theme| container::Style {
+                background: Some(background.into()),
+                border: iced::border::rounded(8.0),
+                ..container::Style::default()
+            })
+            .into()
+    }
+
     /// Line indices (into `self.lines`) containing the current search query.
     fn matching_lines(&self) -> Vec<usize> {
         let query = self.search_query.trim().to_lowercase();
@@ -1469,6 +1719,7 @@ impl App {
             self.matching_lines()
         };
         let active_line = matches.get(self.search_index).copied();
+        let size = 16.0 * self.font_scale;
         let mut col = column![].spacing(2).padding(8).width(Length::Fill);
         let mut sides: Vec<String> = Vec::new();
         for (idx, line) in self.lines.iter().enumerate() {
@@ -1496,7 +1747,7 @@ impl App {
                     (self.confidence && line.low_confidence())
                         .then_some(if left { scheme.warn_tint } else { scheme.warn_tint_alt })
                 };
-                col = col.push(mouse_area(sms_row(
+                col = col.push(sms_row(
                     line.raw.trim(),
                     left,
                     sms_color(index, &scheme),
@@ -1504,8 +1755,8 @@ impl App {
                     tint,
                     &query,
                     scheme.search_hl,
-                ))
-                .on_press(Message::EditLine(idx)));
+                    size,
+                ));
             } else {
                 let tint = if matched {
                     Some(if Some(idx) == active_line {
@@ -1516,19 +1767,82 @@ impl App {
                 } else {
                     (self.confidence && line.low_confidence()).then_some(scheme.warn_tint)
                 };
-                col = col.push(
-                    mouse_area(line_row(&line.raw, tint, &query, scheme.search_hl))
-                        .on_press(Message::EditLine(idx)),
-                );
+                col = col.push(line_element(
+                    line,
+                    idx,
+                    tint,
+                    self.selected_line == Some(idx),
+                    &query,
+                    scheme.search_hl,
+                    &scheme,
+                    size,
+                    self.timestamp_gutter,
+                ));
             }
         }
-        scrollable(col)
+
+        let list = scrollable(col)
             .id(transcript_id())
             .on_scroll(Message::TranscriptScrolled)
             .height(Length::Fill)
             .width(Length::Fill)
-            .style(scrollbar_style)
+            .style(scrollbar_style);
+
+        let content = mouse_area(list)
+            .on_enter(Message::TranscriptHover(true))
+            .on_exit(Message::TranscriptHover(false));
+
+        if self.transcript_hover && !self.lines.is_empty() {
+            stack![
+                content,
+                container(self.transcript_controls())
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .align_x(iced::Alignment::End)
+                    .align_y(iced::Alignment::End)
+                    .padding(10),
+            ]
             .into()
+        } else {
+            content.into()
+        }
+    }
+
+    /// Overlay controls shown while hovering the transcript.
+    fn transcript_controls(&self) -> Element<'_, Message> {
+        let follow = if self.follow_playhead {
+            "Follow \u{2713}"
+        } else {
+            "Follow"
+        };
+        let gutter = if self.timestamp_gutter {
+            "Time \u{2713}"
+        } else {
+            "Time"
+        };
+        row![
+            button("A\u{2212}")
+                .on_press(Message::ZoomOut)
+                .style(pill_button_secondary),
+            button("A+")
+                .on_press(Message::ZoomIn)
+                .style(pill_button_secondary),
+            button(gutter)
+                .on_press(Message::ToggleGutter)
+                .style(pill_button_secondary),
+            button(follow)
+                .on_press(Message::ToggleFollowPlayhead)
+                .style(pill_button_secondary),
+            button("Merge")
+                .on_press(Message::MergeLine)
+                .style(pill_button_secondary),
+            button("Split")
+                .on_press(Message::SplitLine)
+                .style(pill_button_secondary),
+        ]
+        .spacing(6)
+        .align_y(iced::Alignment::Center)
+        .into()
     }
 
     /// Index of the last line whose start time is at or before `t`.
@@ -1561,15 +1875,49 @@ impl App {
             wave: scheme.blue,
             playhead_color: scheme.ink,
             enabled,
+            zoom: self.waveform_zoom,
         };
         let strip = canvas(program)
             .width(Length::Fill)
             .height(Length::Fixed(TIMELINE_HEIGHT));
+        let mut column = column![].spacing(4).width(Length::Fill);
         if enabled {
-            with_tip(strip, "Click or drag to seek", scheme)
+            column = column.push(self.tip(strip, "Click/drag to seek, scroll to zoom", scheme));
+            column = column.push(self.timeline_legend(scheme));
         } else {
-            strip.into()
+            column = column.push(strip);
         }
+        column.into()
+    }
+
+    /// Colour swatches + names for the speakers on the timeline.
+    fn timeline_legend(&self, scheme: &Scheme) -> Element<'_, Message> {
+        let mut order: Vec<&str> = Vec::new();
+        for turn in &self.turns {
+            if !order.iter().any(|name| *name == turn.speaker.as_str()) {
+                order.push(turn.speaker.as_str());
+            }
+        }
+        let mut row = row![].spacing(12).align_y(iced::Alignment::Center);
+        for (index, name) in order.iter().enumerate() {
+            let color = speaker_palette(index, scheme);
+            row = row.push(
+                row![
+                    container(horizontal_space())
+                        .width(Length::Fixed(12.0))
+                        .height(Length::Fixed(12.0))
+                        .style(move |_theme| container::Style {
+                            background: Some(color.into()),
+                            border: iced::border::rounded(3.0),
+                            ..container::Style::default()
+                        }),
+                    text((*name).to_string()).size(12),
+                ]
+                .spacing(4)
+                .align_y(iced::Alignment::Center),
+            );
+        }
+        row.into()
     }
 
     fn speaker_turns(&self, scheme: &Scheme) -> Vec<TimelineTurn> {
@@ -1660,17 +2008,14 @@ impl App {
             .into()
         };
 
-        with_tip(
-            row![play_button, time, speed]
-                .spacing(8)
-                .align_y(iced::Alignment::Center),
-            "Play or pause the current audio",
-            scheme,
-        )
+        row![play_button, time, speed]
+            .spacing(8)
+            .align_y(iced::Alignment::Center)
+            .into()
     }
 
     /// Find controls, always shown on the player row.
-    fn search_element(&self, scheme: &Scheme) -> Element<'_, Message> {
+    fn search_element(&self, _scheme: &Scheme) -> Element<'_, Message> {
         let count = self.matching_lines().len();
         let status = if self.search_query.trim().is_empty() {
             String::new()
@@ -1690,13 +2035,46 @@ impl App {
         let next = button("Next")
             .on_press(Message::FindNext)
             .style(pill_button_secondary);
-        with_tip(
-            row![query_input, text(status).size(12), prev, next]
-                .spacing(8)
-                .align_y(iced::Alignment::Center),
-            "Find text in the transcript",
-            scheme,
-        )
+        row![query_input, text(status).size(12), prev, next]
+            .spacing(8)
+            .align_y(iced::Alignment::Center)
+            .into()
+    }
+
+    /// Wrap `content` with a tooltip that only appears after a hover delay.
+    fn tip<'a>(
+        &self,
+        content: impl Into<Element<'a, Message>>,
+        label: &'static str,
+        scheme: &Scheme,
+    ) -> Element<'a, Message> {
+        let wrapped = mouse_area(content)
+            .on_enter(Message::TipEnter(label))
+            .on_exit(Message::TipExit(label));
+        if self.shown_tip == Some(label) {
+            let background = scheme.dialog_bg;
+            let text_color = scheme.ink;
+            let border_color = scheme.track;
+            tooltip(
+                wrapped,
+                container(text(label).size(12))
+                    .padding(6)
+                    .style(move |_theme| container::Style {
+                        background: Some(background.into()),
+                        text_color: Some(text_color),
+                        border: iced::border::Border {
+                            color: border_color,
+                            width: 1.0,
+                            radius: 6.0.into(),
+                        },
+                        ..container::Style::default()
+                    }),
+                tooltip::Position::Top,
+            )
+            .into()
+        } else {
+            wrapped.into()
+        }
     }
 
     pub fn view(&self) -> Element<'_, Message> {
@@ -1743,13 +2121,9 @@ impl App {
 
         let mut controls = column![
             row![
-                with_tip(
-                    button("Save Location")
-                        .on_press_maybe(can_output.then_some(Message::PickOutput))
-                        .style(color_button(scheme.blue, scheme.ink)),
-                    "Choose where transcripts are written (Default: audio source directory)",
-                    &scheme,
-                ),
+                button("Save Location")
+                    .on_press_maybe(can_output.then_some(Message::PickOutput))
+                    .style(color_button(scheme.blue, scheme.ink)),
                 text(output.clone()),
             ]
             .spacing(8)
@@ -1757,26 +2131,22 @@ impl App {
             row![
                 text("Preset:"),
                 preset,
-                with_tip(
-                    button(
-                        row![
-                            text("Advanced"),
-                            text('\u{e800}').font(Font::with_name("Iced-Icons")).size(12),
-                        ]
-                        .spacing(4)
-                        .align_y(iced::Alignment::Center),
-                    )
-                    .on_press_maybe(can_advanced.then_some(Message::ToggleAdvanced))
-                    .style(move |theme: &iced::Theme, status| {
-                        if can_advanced {
-                            pill_button_secondary(theme, status)
-                        } else {
-                            greyed_button(theme, status)
-                        }
-                    }),
-                    "Show extra options",
-                    &scheme,
-                ),
+                button(
+                    row![
+                        text("Advanced"),
+                        text('\u{e800}').font(Font::with_name("Iced-Icons")).size(12),
+                    ]
+                    .spacing(4)
+                    .align_y(iced::Alignment::Center),
+                )
+                .on_press_maybe(can_advanced.then_some(Message::ToggleAdvanced))
+                .style(move |theme: &iced::Theme, status| {
+                    if can_advanced {
+                        pill_button_secondary(theme, status)
+                    } else {
+                        greyed_button(theme, status)
+                    }
+                }),
             ]
             .spacing(8)
             .align_y(iced::Alignment::Center),
@@ -1816,47 +2186,60 @@ impl App {
                 Some(secs) => format!("[{}]", format_secs(secs)),
                 None => "[--:--]".to_string(),
             };
-            queue_list = queue_list.push(
-                row![
-                    glyph,
-                    text(duration),
-                    text(format!("{name}{detail}")).width(Length::Fill),
-                    with_tip(
-                        button("\u{00d7}")
-                            .on_press_maybe(can_add.then_some(Message::RemoveItem(index)))
-                            .style(pill_button_secondary),
-                        "Remove from queue",
-                        &scheme,
-                    ),
-                ]
-                .spacing(8)
-                .align_y(iced::Alignment::Center),
-            );
+            let mut item_row = row![
+                glyph,
+                text(duration),
+                text(format!("{name}{detail}")).width(Length::Fill),
+            ]
+            .spacing(8)
+            .align_y(iced::Alignment::Center);
+
+            match &item.status {
+                ItemStatus::Running => {
+                    item_row = item_row.push(
+                        progress_bar(0.0..=1.0, self.progress)
+                            .width(Length::Fixed(90.0))
+                            .height(Length::Fixed(10.0))
+                            .style(move |_theme| progress_bar::Style {
+                                background: scheme.track.into(),
+                                bar: scheme.blue.into(),
+                                border: iced::border::rounded(5.0),
+                            }),
+                    );
+                    item_row = item_row.push(
+                        text(format!("{:.0}%", self.progress * 100.0)).size(12),
+                    );
+                    if let Some(eta) = self.item_eta(self.progress) {
+                        item_row = item_row.push(text(format!("\u{223c}{eta}")).size(12));
+                    }
+                }
+                ItemStatus::Done(_) => {
+                    item_row = item_row.push(text("100%").size(12));
+                }
+                _ => {}
+            }
+
+            item_row = item_row.push(self.tip(
+                button("\u{00d7}")
+                    .on_press_maybe(can_add.then_some(Message::RemoveItem(index)))
+                    .style(pill_button_secondary),
+                "Remove from queue",
+                &scheme,
+            ));
+            queue_list = queue_list.push(item_row);
         }
 
         let mut queue_col = column![
             row![
-                with_tip(
-                    button("Add File(s)")
-                        .on_press_maybe(can_add.then_some(Message::AddFiles))
-                        .style(color_button(scheme.blue, scheme.ink)),
-                    "Add one or more audio or video files to the queue",
-                    &scheme,
-                ),
-                with_tip(
-                    button("Add Folder")
-                        .on_press_maybe(can_add.then_some(Message::AddFolder))
-                        .style(color_button(scheme.blue, scheme.ink)),
-                    "Queue every audio or video file in a folder",
-                    &scheme,
-                ),
-                with_tip(
-                    button("Clear")
-                        .on_press_maybe((!running && has_queue).then_some(Message::ClearQueue))
-                        .style(color_button(scheme.pink, scheme.ink)),
-                    "Remove all queued files",
-                    &scheme,
-                ),
+                button("Add File(s)")
+                    .on_press_maybe(can_add.then_some(Message::AddFiles))
+                    .style(color_button(scheme.blue, scheme.ink)),
+                button("Add Folder")
+                    .on_press_maybe(can_add.then_some(Message::AddFolder))
+                    .style(color_button(scheme.blue, scheme.ink)),
+                button("Clear")
+                    .on_press_maybe((!running && has_queue).then_some(Message::ClearQueue))
+                    .style(color_button(scheme.pink, scheme.ink)),
             ]
             .spacing(8)
             .align_y(iced::Alignment::Center),
@@ -1877,7 +2260,7 @@ impl App {
         if self.advanced_open && can_advanced {
             controls = controls.push(
                 column![
-                    with_tip(
+                    self.tip(
                         row![
                             text("Confidence"),
                             horizontal_space(),
@@ -1888,7 +2271,7 @@ impl App {
                         "Tint lines the model transcribed with low confidence",
                         &scheme,
                     ),
-                    with_tip(
+                    self.tip(
                         row![
                             text("Dark theme"),
                             horizontal_space(),
@@ -1899,7 +2282,7 @@ impl App {
                         "Use the dark (Catppuccin Mocha) theme",
                         &scheme,
                     ),
-                    with_tip(
+                    self.tip(
                         row![
                             text("Diarization cache"),
                             horizontal_space(),
@@ -1910,7 +2293,7 @@ impl App {
                         "Reuse diarization results for unchanged audio",
                         &scheme,
                     ),
-                    with_tip(
+                    self.tip(
                         row![
                             text("Join Speakers"),
                             horizontal_space(),
@@ -1921,7 +2304,7 @@ impl App {
                         "Merge consecutive lines from the same speaker",
                         &scheme,
                     ),
-                    with_tip(
+                    self.tip(
                         row![
                             text("Lock Text to Playback"),
                             horizontal_space(),
@@ -1932,7 +2315,7 @@ impl App {
                         "Scroll the transcript to follow the playhead",
                         &scheme,
                     ),
-                    with_tip(
+                    self.tip(
                         row![
                             text("SMS Mode"),
                             horizontal_space(),
@@ -1943,7 +2326,7 @@ impl App {
                         "Show the transcript as chat bubbles",
                         &scheme,
                     ),
-                    with_tip(
+                    self.tip(
                         row![
                             text("Speakers"),
                             horizontal_space(),
@@ -1959,7 +2342,7 @@ impl App {
                         "Expected number of speakers",
                         &scheme,
                     ),
-                    with_tip(
+                    self.tip(
                         row![
                             text("Timestamps"),
                             horizontal_space(),
@@ -1978,29 +2361,31 @@ impl App {
 
         controls = controls.push(
             row![
-                with_tip(
-                    button(if pending { "Start Queue" } else { "Start" })
-                        .on_press_maybe(can_start.then_some(Message::Start))
-                        .style(color_button(scheme.blue, scheme.ink)),
-                    "Transcribe the queued files in order",
-                    &scheme,
-                ),
-                with_tip(
-                    button("Cancel")
-                        .on_press_maybe(can_cancel.then_some(Message::Cancel))
-                        .style(color_button(scheme.pink, scheme.ink)),
-                    "Stop the current run",
-                    &scheme,
-                ),
+                button(if pending { "Start Queue" } else { "Start" })
+                    .on_press_maybe(can_start.then_some(Message::Start))
+                    .style(color_button(scheme.blue, scheme.ink)),
+                button("Cancel")
+                    .on_press_maybe(can_cancel.then_some(Message::Cancel))
+                    .style(color_button(scheme.pink, scheme.ink)),
             ]
             .spacing(8)
             .align_y(iced::Alignment::Center),
         );
 
+        let total_items = self.queue.len().max(1) as f32;
+        let done_items = self
+            .queue
+            .iter()
+            .filter(|item| matches!(item.status, ItemStatus::Done(_) | ItemStatus::Failed(_)))
+            .count() as f32;
+        let current_fraction = if running { self.progress_shown } else { 0.0 };
+        let global_progress =
+            ((done_items + current_fraction) / total_items).clamp(0.0, 1.0);
+
         let status_row = row![
             text(self.elapsed().unwrap_or_default()).width(Length::Fixed(70.0)),
             stack![
-                progress_bar(0.0..=1.0, self.progress_shown)
+                progress_bar(0.0..=1.0, global_progress)
                     .width(Length::Fill)
                     .height(Length::Fixed(28.0))
                     .style(move |_theme| progress_bar::Style {
@@ -2022,15 +2407,31 @@ impl App {
         middle = middle.push(
             row![
                 self.player_element(&scheme),
+                button("Summary")
+                    .on_press_maybe(
+                        (!running && self.stats.is_some()).then_some(Message::OpenSummary)
+                    )
+                    .style(color_button(scheme.pink, scheme.ink)),
+                pick_list(ImportKind::ALL, None::<ImportKind>, Message::ImportChoice)
+                    .placeholder("Import\u{2026}")
+                    .style(pill_pick),
+                self.tip(
+                    button("Rename Speakers")
+                        .on_press_maybe(
+                            (!running && !self.lines.is_empty()).then_some(Message::OpenRename)
+                        )
+                        .style(color_button(scheme.blue, scheme.ink)),
+                    "Rename speakers across the transcript",
+                    &scheme,
+                ),
                 horizontal_space(),
-                self.search_element(&scheme),
             ]
             .spacing(8)
             .align_y(iced::Alignment::Center)
             .width(Length::Fill),
         );
 
-        let base = column![
+        let mut base = column![
             text("Transiel").size(32),
             queue_col,
             controls,
@@ -2043,38 +2444,57 @@ impl App {
                     border: iced::border::rounded(16.0),
                     ..container::Style::default()
                 }),
+        ]
+        .spacing(8)
+        .padding(12);
+
+        if self.console_open {
+            base = base.push(self.console_panel(&scheme));
+        }
+
+        base = base.push(
             container(
                 row![
-                    with_tip(
-                        button("Summary")
-                            .on_press_maybe(
-                                (!running && self.stats.is_some()).then_some(Message::OpenSummary)
-                            )
-                            .style(color_button(scheme.pink, scheme.ink)),
-                        "Show the last run summary and rename speakers",
-                        &scheme,
-                    ),
+                    self.search_element(&scheme),
                     horizontal_space(),
-                    with_tip(
-                        button("Import Transcription")
-                            .on_press_maybe((!running).then_some(Message::PickImport))
-                            .style(color_button(scheme.blue, scheme.ink)),
-                        "Open an existing transcript (.txt or .json)",
-                        &scheme,
-                    ),
-                    with_tip(
-                        button("Close").on_press(Message::Close).style(pill_button_secondary),
-                        "Quit transiel",
-                        &scheme,
-                    ),
+                    button(if self.console_open {
+                        "Console \u{2713}"
+                    } else {
+                        "Console"
+                    })
+                    .on_press(Message::ToggleConsole)
+                    .style(pill_button_secondary),
+                    pick_list(HelpKind::ALL, None::<HelpKind>, Message::HelpChoice)
+                        .placeholder("Help\u{2026}")
+                        .style(pill_pick),
+                    button("Close").on_press(Message::Close).style(pill_button_secondary),
                 ]
                 .spacing(8)
                 .align_y(iced::Alignment::Center),
             )
             .width(Length::Fill),
-        ]
-        .spacing(8)
-        .padding(12);
+        );
+
+        if let Some((message, _)) = &self.toast {
+            let toast = mouse_area(
+                container(text(message.clone()).size(13))
+                    .padding([8, 14])
+                    .style(move |_theme| container::Style {
+                        background: Some(scheme.blue.into()),
+                        text_color: Some(scheme.ink),
+                        border: iced::border::rounded(PILL),
+                        ..container::Style::default()
+                    }),
+            )
+            .on_press(Message::DismissToast);
+            let overlay = container(toast)
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .align_x(iced::Alignment::End)
+                .align_y(iced::Alignment::Start)
+                .padding(20);
+            return stack![base, overlay].into();
+        }
 
         if self.batch_warning {
             let dialog = container(
@@ -2117,40 +2537,28 @@ impl App {
             return stack![base, overlay].into();
         }
 
-        if self.edit_open {
-            let dialog = container(
-                column![
-                    text("Edit line").size(20),
-                    text_input("Speaker: text", &self.edit_text)
-                        .id(edit_id())
-                        .on_input(Message::EditText)
-                        .on_submit(Message::EditSave)
-                        .width(Length::Fill)
-                        .style(pill_input),
-                    container(
-                        row![
-                            button("Save")
-                                .on_press(Message::EditSave)
-                                .style(color_button(scheme.blue, scheme.ink)),
-                            button("Cancel")
-                                .on_press(Message::EditCancel)
-                                .style(color_button(scheme.pink, scheme.ink)),
-                        ]
-                        .spacing(8),
-                    )
-                    .width(Length::Fill)
-                    .align_x(iced::Alignment::End),
-                ]
-                .spacing(12)
-                .width(Length::Fixed(520.0)),
-            )
-            .padding(16)
-            .style(move |_theme| container::Style {
-                background: Some(scheme.dialog_bg.into()),
-                border: iced::border::rounded(16.0),
-                ..container::Style::default()
-            });
-
+        if self.summary_open {
+            let mut col = column![text("Summary").size(20)].spacing(8);
+            for line in self.stats_lines() {
+                col = col.push(text(line));
+            }
+            col = col.push(
+                container(
+                    row![button("Close")
+                        .on_press(Message::CloseSummary)
+                        .style(color_button(scheme.blue, scheme.ink))]
+                    .spacing(8),
+                )
+                .width(Length::Fill)
+                .align_x(iced::Alignment::End),
+            );
+            let dialog = container(col.width(Length::Fixed(380.0)))
+                .padding(16)
+                .style(move |_theme| container::Style {
+                    background: Some(scheme.dialog_bg.into()),
+                    border: iced::border::rounded(16.0),
+                    ..container::Style::default()
+                });
             let overlay = container(dialog)
                 .center(Length::Fill)
                 .width(Length::Fill)
@@ -2159,7 +2567,56 @@ impl App {
                     background: Some(Color::from_rgba(0.0, 0.0, 0.0, 0.4).into()),
                     ..container::Style::default()
                 });
+            return stack![base, overlay].into();
+        }
 
+        if let Some(kind) = self.help_open {
+            let body: Vec<String> = match kind {
+                HelpKind::About => vec![
+                    "transiel".to_string(),
+                    "Local speaker diarization + transcription.".to_string(),
+                    "Diarization: DiariZen / pyannote.  Transcription: faster-whisper.".to_string(),
+                    "Runs fully offline once models are downloaded.".to_string(),
+                ],
+                HelpKind::Shortcuts => vec![
+                    "Ctrl+O           Add files".to_string(),
+                    "Ctrl+F           Find".to_string(),
+                    "Ctrl+Enter       Start queue".to_string(),
+                    "Ctrl + / - / 0   Transcript font zoom".to_string(),
+                    "Space            Play / pause".to_string(),
+                    "Left / Right     Seek \u{00b1}5s".to_string(),
+                    "Esc              Dismiss".to_string(),
+                ],
+            };
+            let mut col = column![text(kind.label()).size(20)].spacing(8);
+            for line in body {
+                col = col.push(text(line));
+            }
+            col = col.push(
+                container(
+                    row![button("Close")
+                        .on_press(Message::CloseHelp)
+                        .style(color_button(scheme.blue, scheme.ink))]
+                    .spacing(8),
+                )
+                .width(Length::Fill)
+                .align_x(iced::Alignment::End),
+            );
+            let dialog = container(col.width(Length::Fixed(460.0)))
+                .padding(16)
+                .style(move |_theme| container::Style {
+                    background: Some(scheme.dialog_bg.into()),
+                    border: iced::border::rounded(16.0),
+                    ..container::Style::default()
+                });
+            let overlay = container(dialog)
+                .center(Length::Fill)
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .style(|_theme| container::Style {
+                    background: Some(Color::from_rgba(0.0, 0.0, 0.0, 0.4).into()),
+                    ..container::Style::default()
+                });
             return stack![base, overlay].into();
         }
 
@@ -2167,25 +2624,23 @@ impl App {
             return base.into();
         }
 
-        let mut col = column![text("Summary").size(20)].spacing(8);
-        for line in self.stats_lines() {
-            col = col.push(text(line));
+        let mut col = column![text("Rename Speakers").size(20)].spacing(8);
+        if self.rename_fields.is_empty() {
+            col = col.push(text("No speakers to rename."));
         }
-        col = col.push(text("Rename Speakers").size(20));
-        col = col.push(
-            text_input("SPEAKER 1", &self.name1)
-                .id(name1_id())
-                .on_input(Message::RenameName1)
-                .width(Length::Fill)
-                .style(pill_input),
-        );
-        col = col.push(
-            text_input("SPEAKER 2", &self.name2)
-                .id(name2_id())
-                .on_input(Message::RenameName2)
-                .width(Length::Fill)
-                .style(pill_input),
-        );
+        for (index, (original, value)) in self.rename_fields.iter().enumerate() {
+            col = col.push(
+                row![
+                    text(original.clone()).width(Length::Fixed(120.0)),
+                    text_input("new name", value)
+                        .on_input(move |text| Message::RenameName(index, text))
+                        .width(Length::Fill)
+                        .style(pill_input),
+                ]
+                .spacing(8)
+                .align_y(iced::Alignment::Center),
+            );
+        }
         col = col.push(
             container(
                 row![
@@ -2245,14 +2700,33 @@ struct Timeline {
     wave: Color,
     playhead_color: Color,
     enabled: bool,
+    zoom: f32,
 }
 
 impl Timeline {
+    fn visible_left(&self) -> f32 {
+        let z = self.zoom.max(1.0);
+        let span = 1.0 / z;
+        let center = if self.duration > 0.0 {
+            (self.playhead / self.duration).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        (center - span / 2.0).clamp(0.0, (1.0 - span).max(0.0))
+    }
+
+    fn x_of(&self, fraction: f32, width: f32) -> f32 {
+        let span = 1.0 / self.zoom.max(1.0);
+        ((fraction - self.visible_left()) / span) * width
+    }
+
     fn time_at(&self, x: f32, width: f32) -> f32 {
         if width <= 0.0 || self.duration <= 0.0 {
             return 0.0;
         }
-        (x / width).clamp(0.0, 1.0) * self.duration
+        let span = 1.0 / self.zoom.max(1.0);
+        let fraction = (self.visible_left() + (x / width) * span).clamp(0.0, 1.0);
+        fraction * self.duration
     }
 }
 
@@ -2293,6 +2767,18 @@ impl canvas::Program<Message> for Timeline {
                     }
                 }
             }
+            canvas::Event::Mouse(mouse::Event::WheelScrolled { delta })
+                if cursor.position_in(bounds).is_some() =>
+            {
+                let amount = match delta {
+                    mouse::ScrollDelta::Lines { y, .. } => y,
+                    mouse::ScrollDelta::Pixels { y, .. } => y / 40.0,
+                };
+                if amount != 0.0 {
+                    let next = (self.zoom * (1.0 + 0.15 * amount)).clamp(1.0, 16.0);
+                    return (Status::Captured, Some(Message::WaveZoom(next)));
+                }
+            }
             _ => {}
         }
         (Status::Ignored, None)
@@ -2324,17 +2810,25 @@ impl canvas::Program<Message> for Timeline {
                 .copied()
                 .fold(0.0_f32, f32::max)
                 .max(1e-6);
-            let bar_width = width / count as f32;
             let half = mid * 0.92;
-            for (index, peak) in self.peaks.iter().enumerate() {
-                let amplitude = (peak / peak_max).clamp(0.0, 1.0) * half;
+            let span = 1.0 / self.zoom.max(1.0);
+            let left = self.visible_left();
+            let i0 = ((left * count as f32).floor() as isize - 1).max(0) as usize;
+            let i1 = (((left + span) * count as f32).ceil() as usize + 1).min(count);
+            let bar = (width / (count as f32 * span)).max(0.7);
+            for index in i0..i1 {
+                let fraction = index as f32 / count as f32;
+                let x = (fraction - left) / span * width;
+                if x < -bar || x > width {
+                    continue;
+                }
+                let amplitude = (self.peaks[index] / peak_max).clamp(0.0, 1.0) * half;
                 if amplitude <= 0.0 {
                     continue;
                 }
-                let x = index as f32 * bar_width;
                 frame.fill_rectangle(
                     Point::new(x, mid - amplitude),
-                    Size::new(bar_width.max(0.7), amplitude * 2.0),
+                    Size::new(bar, amplitude * 2.0),
                     self.wave,
                 );
             }
@@ -2342,15 +2836,20 @@ impl canvas::Program<Message> for Timeline {
 
         if self.duration > 0.0 {
             for turn in self.turns.iter() {
-                let x0 = (turn.start / self.duration).clamp(0.0, 1.0) * width;
-                let x1 = (turn.end / self.duration).clamp(0.0, 1.0) * width;
+                let x0 = self.x_of(turn.start / self.duration, width);
+                let x1 = self.x_of(turn.end / self.duration, width);
+                if x1 < 0.0 || x0 > width {
+                    continue;
+                }
+                let left = x0.max(0.0);
+                let right = x1.min(width);
                 frame.fill_rectangle(
-                    Point::new(x0, height - band_height),
-                    Size::new((x1 - x0).max(1.0), band_height),
+                    Point::new(left, height - band_height),
+                    Size::new((right - left).max(1.0), band_height),
                     turn.color,
                 );
             }
-            let x = (self.playhead / self.duration).clamp(0.0, 1.0) * width;
+            let x = self.x_of((self.playhead / self.duration).clamp(0.0, 1.0), width);
             frame.fill_rectangle(
                 Point::new((x - 1.0).max(0.0), 0.0),
                 Size::new(2.0, height),
@@ -2540,33 +3039,6 @@ fn arrow_glyph(color: Color) -> Element<'static, Message> {
         .into()
 }
 
-fn with_tip<'a>(
-    content: impl Into<Element<'a, Message>>,
-    label: &'static str,
-    scheme: &Scheme,
-) -> Element<'a, Message> {
-    let background = scheme.dialog_bg;
-    let text_color = scheme.ink;
-    let border_color = scheme.track;
-    tooltip(
-        content,
-        container(text(label).size(12))
-            .padding(6)
-            .style(move |_theme| container::Style {
-                background: Some(background.into()),
-                text_color: Some(text_color),
-                border: iced::border::Border {
-                    color: border_color,
-                    width: 1.0,
-                    radius: 6.0.into(),
-                },
-                ..container::Style::default()
-            }),
-        tooltip::Position::Top,
-    )
-    .into()
-}
-
 /// Parse "[time] Speaker: text" transcript lines into the render model.
 fn parse_lines(text: &str) -> Vec<DocLine> {
     text.lines()
@@ -2619,24 +3091,21 @@ fn format_secs(secs: f64) -> String {
     }
 }
 
-fn name1_id() -> text_input::Id {
-    text_input::Id::new("rename-name1")
-}
-
-fn name2_id() -> text_input::Id {
-    text_input::Id::new("rename-name2")
-}
-
 fn find_id() -> text_input::Id {
     text_input::Id::new("find-query")
 }
 
-fn edit_id() -> text_input::Id {
-    text_input::Id::new("edit-line")
-}
-
 fn transcript_id() -> scrollable::Id {
     scrollable::Id::new("transcript")
+}
+
+/// Build a transcript line from a speaker and text.
+fn format_line(speaker: &str, text: &str) -> String {
+    if speaker.is_empty() {
+        text.to_string()
+    } else {
+        format!("{speaker}: {text}")
+    }
 }
 
 fn scrollbar_style(theme: &iced::Theme, status: scrollable::Status) -> scrollable::Style {
@@ -2661,15 +3130,16 @@ fn sms_row(
     tint: Option<Color>,
     query: &str,
     highlight: Color,
+    size: f32,
 ) -> Element<'static, Message> {
     let background = tint.unwrap_or(color);
-    let bubble = container(rich_text(styled_spans(content, query, Some(ink), highlight)))
+    let bubble = container(rich_text(styled_spans(content, query, Some(ink), highlight, size)))
         .width(Length::Fill)
         .align_x(iced::Alignment::Start)
         .padding(6)
         .style(move |_theme| container::Style {
             background: Some(background.into()),
-            border: iced::border::rounded(PILL),
+            border: iced::border::rounded(8.0),
             ..container::Style::default()
         });
     if left {
@@ -2679,24 +3149,99 @@ fn sms_row(
     }
 }
 
-fn line_row(
-    line: &str,
+/// A transcript line with an optional timestamp gutter, a clickable speaker
+/// label (rename) and a clickable body (select for merge/split).
+#[allow(clippy::too_many_arguments)]
+fn line_element(
+    line: &DocLine,
+    idx: usize,
     tint: Option<Color>,
+    selected: bool,
     query: &str,
     highlight: Color,
+    scheme: &Scheme,
+    size: f32,
+    show_gutter: bool,
 ) -> Element<'static, Message> {
-    let content = rich_text(styled_spans(line, query, None, highlight));
-    let mut row = container(content)
-        .width(Length::Fill)
-        .padding([2, 4]);
-    if let Some(color) = tint {
-        row = row.style(move |_theme| container::Style {
-            background: Some(color.into()),
-            border: iced::border::rounded(4.0),
-            ..container::Style::default()
-        });
+    let bold = Font {
+        weight: font::Weight::Bold,
+        ..Font::default()
+    };
+    let muted = MUTED;
+    let ink = scheme.ink;
+
+    let speaker = line.speaker.clone();
+    let pos = if speaker.is_empty() {
+        0
+    } else {
+        line.raw.find(&speaker).unwrap_or(0)
+    };
+    let prefix = line.raw[..pos].trim().to_string();
+    let rest = if speaker.is_empty() {
+        line.raw.clone()
+    } else {
+        line.raw[pos + speaker.len()..].to_string()
+    };
+
+    let mut content = row![]
+        .spacing(6)
+        .align_y(iced::Alignment::Start)
+        .width(Length::Fill);
+
+    if show_gutter {
+        let time = line
+            .start
+            .map(|s| format_secs(s as f64))
+            .unwrap_or_default();
+        content = content.push(
+            text(time)
+                .size(size * 0.82)
+                .width(Length::Fixed(58.0))
+                .style(move |_theme| text::Style { color: Some(muted) }),
+        );
+    } else if !prefix.is_empty() {
+        content = content.push(
+            text(prefix)
+                .size(size * 0.82)
+                .style(move |_theme| text::Style { color: Some(muted) }),
+        );
     }
-    row.into()
+
+    if !speaker.is_empty() {
+        content = content.push(
+            button(text(speaker.clone()).size(size).font(bold))
+                .on_press(Message::RenameSpeaker(speaker.clone()))
+                .style(move |_theme, _status| button::Style {
+                    background: None,
+                    text_color: ink,
+                    border: iced::border::Border::default(),
+                    ..button::Style::default()
+                }),
+        );
+    }
+
+    let body = mouse_area(rich_text(styled_spans(&rest, query, None, highlight, size)))
+        .on_press(Message::SelectLine(idx));
+    content = content.push(body);
+
+    let border = if selected {
+        iced::border::Border {
+            color: scheme.blue,
+            width: 1.0,
+            radius: 4.0.into(),
+        }
+    } else {
+        iced::border::rounded(4.0)
+    };
+    container(content)
+        .width(Length::Fill)
+        .padding([2, 4])
+        .style(move |_theme| container::Style {
+            background: tint.map(Into::into),
+            border,
+            ..container::Style::default()
+        })
+        .into()
 }
 
 fn sms_color(index: usize, scheme: &Scheme) -> Color {
@@ -2799,6 +3344,7 @@ fn styled_spans(
     query: &str,
     color: Option<Color>,
     highlight: Color,
+    size: f32,
 ) -> Vec<text::Span<'static, Message>> {
     let bold = Font {
         weight: font::Weight::Bold,
@@ -2839,7 +3385,7 @@ fn styled_spans(
         if a >= b || !raw.is_char_boundary(a) || !raw.is_char_boundary(b) {
             continue;
         }
-        let mut span = text::Span::new(raw[a..b].to_string());
+        let mut span = text::Span::new(raw[a..b].to_string()).size(size);
         if a < head_len {
             span = span.font(bold);
         }
@@ -2852,7 +3398,7 @@ fn styled_spans(
         spans.push(span);
     }
     if spans.is_empty() {
-        spans.push(text::Span::new(raw.to_string()));
+        spans.push(text::Span::new(raw.to_string()).size(size));
     }
     spans
 }

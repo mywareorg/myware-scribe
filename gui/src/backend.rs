@@ -277,10 +277,17 @@ pub fn spawn(
         let stderr = child.stderr.take();
 
         if let Some(stderr) = stderr {
+            let events = events.clone();
             std::thread::spawn(move || {
                 use std::io::BufRead;
                 let reader = std::io::BufReader::new(stderr);
-                for _ in reader.lines() {}
+                for line in reader.lines() {
+                    let Ok(line) = line else { break };
+                    let line = line.trim();
+                    if !line.is_empty() {
+                        push(&events, Event::Log { message: line.to_string() });
+                    }
+                }
             });
         }
 

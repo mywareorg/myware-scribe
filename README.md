@@ -101,23 +101,42 @@ is not replicated beyond the free memory. Force it for any preset with `--auto-t
 Override any slot with `--diarizer`, `--embedding`, `--transcriber`. Raw path
 overrides: `--whisper-model`, `--diarizen-hub`, `--diarizen-embedding`. Other
 options: `--output`, `--device`, `--compute-type`, `--auto-tune`. The number of
-speakers is fixed at 2.
+speakers can be fixed with `--num-speakers` or auto-detected with
+`--auto-speakers`.
 
 On CPU, diarization dominates the runtime. Long files are slow because each
 speaker turn is transcribed separately.
 
 ## GUI
 
-A minimal Rust/iced desktop front-end wraps the CLI (it spawns
+A Rust/iced desktop front-end wraps the CLI (it spawns
 `scripts/transiel.py` and reads a JSON progress stream):
 
 ```bash
 cargo run --release --manifest-path gui/Cargo.toml
 ```
 
-It provides Select File, Save Location (folder), a Speed/Balanced/Accuracy
-preset picker, Start/Cancel, a stage-labelled progress bar, and the transcript
-on completion. The CLI must be set up first (`scripts/bootstrap.py` +
+Features:
+
+- **Queue**: add files (multi-select) or a folder, per-file durations, per-item
+  progress + ETA; the main bar shows overall queue progress. A completion toast
+  appears when the queue finishes.
+- **Controls**: preset picker (Speed/Balanced/Accuracy), Speakers count (1–5,
+  default 2), Save Location, Start/Cancel; Advanced panel with Confidence tint,
+  Dark theme, Diarization cache, Join Speakers, Lock Text to Playback, SMS Mode,
+  Speakers, Timestamps. All settings persist across sessions.
+- **Transcript**: per-line view with confidence tinting, live streaming during a
+  run, Find (with match highlight), click a speaker name to rename it
+  everywhere, hover overlay for font zoom / timestamp gutter / merge / split,
+  and an optional timestamp gutter. SMS "chat bubble" mode available.
+- **Timeline & player**: waveform + speaker-band strip with a draggable
+  playhead, scroll-to-zoom, and a speaker legend; play/pause, time, and speed
+  (`.5x/1x/1.5x/2x`) with speed-synced playhead.
+- **Import…** dropdown to load a transcript (`.txt`/`.json`) or an audio file
+  (playback only); **Help…** dropdown (About / keyboard shortcuts).
+- **Console**: toggle a panel showing backend log output.
+
+The CLI must be set up first (`scripts/bootstrap.py` +
 `scripts/model-download.py`); the GUI locates the repo via `TRANSIEL_ROOT` or by
 searching upward for `scripts/transiel.py`.
 
