@@ -37,6 +37,33 @@ pub enum Event {
     Error { message: String },
 }
 
+/// Load a transcript from a .txt or .json file as "[time] speaker: text" lines.
+pub fn read_transcript(path: &Path) -> Option<String> {
+    let contents = std::fs::read_to_string(path).ok()?;
+    let is_json = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.eq_ignore_ascii_case("json"))
+        .unwrap_or(false);
+    if !is_json {
+        return Some(contents);
+    }
+    let value: serde_json::Value = serde_json::from_str(&contents).ok()?;
+    let lines = value.get("lines")?.as_array()?;
+    let mut out = String::new();
+    for line in lines {
+        let time = line.get("time").and_then(|v| v.as_str()).unwrap_or("");
+        let speaker = line.get("speaker").and_then(|v| v.as_str()).unwrap_or("");
+        let text = line.get("text").and_then(|v| v.as_str()).unwrap_or("");
+        if speaker.is_empty() {
+            out.push_str(&format!("{text}\n"));
+        } else {
+            out.push_str(&format!("[{time}] {speaker}: {text}\n"));
+        }
+    }
+    Some(out)
+}
+
 /// Probe the duration (seconds) of an audio file using the venv's soundfile.
 pub fn probe_duration(path: &Path) -> Option<f64> {
     let root = repo_root()?;

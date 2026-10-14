@@ -80,6 +80,9 @@ pub enum Message {
     JoinSpeakerToggled(bool),
     ToggleAdvanced,
     SmsToggled(bool),
+    PickImport,
+    ImportPicked(Option<PathBuf>),
+    ImportLoaded(Option<String>),
 }
 
 pub struct App {
@@ -147,6 +150,10 @@ impl App {
         }
     }
 
+    pub fn theme(&self) -> iced::Theme {
+        iced::Theme::CatppuccinMocha
+    }
+
     pub fn subscription(&self) -> Subscription<Message> {
         Subscription::batch([
             iced::time::every(Duration::from_millis(100)).map(|_| Message::Tick),
@@ -165,7 +172,17 @@ impl App {
     pub fn update(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::PickInput => Task::perform(
-                async { rfd::FileDialog::new().pick_file() },
+                async {
+                    rfd::FileDialog::new()
+                        .add_filter(
+                            "Audio/Video",
+                            &[
+                                "mp3", "wav", "m4a", "aac", "flac", "ogg", "opus", "wma", "mp4",
+                                "mkv", "mov", "webm", "avi",
+                            ],
+                        )
+                        .pick_file()
+                },
                 Message::InputPicked,
             ),
             Message::InputPicked(path) => {
@@ -200,6 +217,28 @@ impl App {
             }
             Message::SmsToggled(value) => {
                 self.sms_mode = value;
+                Task::none()
+            }
+            Message::PickImport => Task::perform(
+                async {
+                    rfd::FileDialog::new()
+                        .add_filter("Transcript", &["txt", "json"])
+                        .pick_file()
+                },
+                Message::ImportPicked,
+            ),
+            Message::ImportPicked(path) => match path {
+                Some(path) => Task::perform(
+                    async move { backend::read_transcript(&path) },
+                    Message::ImportLoaded,
+                ),
+                None => Task::none(),
+            },
+            Message::ImportLoaded(text) => {
+                if let Some(text) = text {
+                    self.transcript = text;
+                    self.sms_mode = true;
+                }
                 Task::none()
             }
             Message::OpenSummary => {
@@ -448,7 +487,7 @@ impl App {
         match self.duration {
             Some(secs) => format!("Duration: {}", format_secs(secs)),
             None if self.input.is_some() => "Duration: …".to_string(),
-            None => String::new(),
+            None => "Duration: N/A".to_string(),
         }
     }
 
@@ -511,10 +550,10 @@ impl App {
         for line in self.transcript.lines() {
             match line.split_once(": ") {
                 Some((head, rest)) => {
-                    spans.push(text::Span::new(format!("{head}: ")).font(bold).color(Color::BLACK));
-                    spans.push(text::Span::new(format!("{rest}\n")).color(Color::BLACK));
+                    spans.push(text::Span::new(format!("{head}: ")).font(bold));
+                    spans.push(text::Span::new(format!("{rest}\n")));
                 }
-                None => spans.push(text::Span::new(format!("{line}\n")).color(Color::BLACK)),
+                None => spans.push(text::Span::new(format!("{line}\n"))),
             }
         }
         spans
@@ -526,8 +565,8 @@ impl App {
             let mut sides: Vec<String> = Vec::new();
             let mut col = column![].spacing(6).padding(8).width(Length::Fill);
             for line in self.transcript.lines() {
-                let (label, text) = split_label(line);
-                if label.is_empty() && text.is_empty() {
+                let (label, _) = split_label(line);
+                if label.is_empty() && line.trim().is_empty() {
                     continue;
                 }
                 let index = match sides.iter().position(|s| s == &label) {
@@ -537,7 +576,7 @@ impl App {
                         sides.len() - 1
                     }
                 };
-                col = col.push(sms_row(&text, index % 2 == 0));
+                col = col.push(sms_row(line.trim(), index % 2 == 0, sms_color(index)));
             }
             scrollable(col)
                 .height(Length::Fill)
@@ -576,7 +615,9 @@ impl App {
         let can_cancel = running;
 
         let preset: Element<Message> = if can_preset {
-            pick_list(Preset::ALL, Some(self.preset), Message::PresetChanged).into()
+            pick_list(Preset::ALL, Some(self.preset), Message::PresetChanged)
+                .style(pill_pick)
+                .into()
         } else {
             // Keep the real pick_list (so iced draws its arrow) but put a
             // click-capturing layer on top so it cannot be opened.
@@ -586,6 +627,7 @@ impl App {
                 style.text_color = grey;
                 style.handle_color = grey;
                 style.background = Color::from_rgb(0.9, 0.9, 0.9).into();
+                style.border.radius = PILL.into();
                 style
             };
             stack![
@@ -602,14 +644,18 @@ impl App {
 
         let mut controls = column![
             row![
-                button("Select File").on_press_maybe(can_select.then_some(Message::PickInput)),
+                button("Select File")
+                    .on_press_maybe(can_select.then_some(Message::PickInput))
+                    .style(color_button(Color::from_rgb(0.537, 0.706, 0.980))),
                 text(input.clone()),
             ]
             .spacing(8)
             .align_y(iced::Alignment::Center),
             text(self.duration_label()),
             row![
-                button("Save Location").on_press_maybe(can_output.then_some(Message::PickOutput)),
+                button("Save Location")
+                    .on_press_maybe(can_output.then_some(Message::PickOutput))
+                    .style(color_button(Color::from_rgb(0.537, 0.706, 0.980))),
                 text(output.clone()),
             ]
             .spacing(8)
@@ -617,12 +663,16 @@ impl App {
             row![
                 text("Preset:"),
                 preset,
-                button(if self.advanced_open {
-                    "Advanced \u{25b4}"
-                } else {
-                    "Advanced \u{25be}"
-                })
-                .on_press(Message::ToggleAdvanced),
+                button(
+                    row![
+                        text("Advanced"),
+                        text('\u{e800}').font(Font::with_name("Iced-Icons")).size(12),
+                    ]
+                    .spacing(4)
+                    .align_y(iced::Alignment::Center),
+                )
+                .on_press(Message::ToggleAdvanced)
+                .style(pill_button_secondary),
             ]
             .spacing(8)
             .align_y(iced::Alignment::Center),
@@ -661,10 +711,17 @@ impl App {
 
         controls = controls.push(
             row![
-                button("Start").on_press_maybe(can_start.then_some(Message::Start)),
+                button("Start")
+                    .on_press_maybe(can_start.then_some(Message::Start))
+                    .style(color_button(Color::from_rgb(0.651, 0.890, 0.631))),
                 button("Summary")
-                    .on_press_maybe((!running && self.stats.is_some()).then_some(Message::OpenSummary)),
-                button("Cancel").on_press_maybe(can_cancel.then_some(Message::Cancel)),
+                    .on_press_maybe(
+                        (!running && self.stats.is_some()).then_some(Message::OpenSummary)
+                    )
+                    .style(color_button(Color::from_rgb(0.796, 0.651, 0.969))),
+                button("Cancel")
+                    .on_press_maybe(can_cancel.then_some(Message::Cancel))
+                    .style(color_button(Color::from_rgb(0.953, 0.545, 0.659))),
             ]
             .spacing(8)
             .align_y(iced::Alignment::Center),
@@ -679,16 +736,13 @@ impl App {
                         .width(Length::Fill)
                         .height(Length::Fixed(28.0))
                         .style(|_theme| progress_bar::Style {
-                            background: Color::from_rgb(0.9, 0.9, 0.9).into(),
-                            bar: Color::from_rgb(0.29, 0.53, 0.91).into(),
-                            border: iced::border::rounded(6.0),
+                            background: Color::from_rgb(0.09, 0.09, 0.15).into(),
+                            bar: Color::from_rgb(0.537, 0.706, 0.980).into(),
+                            border: iced::border::rounded(14.0),
                         }),
-                    container(
-                        text(format!("{} — {}", self.stage, self.status_text()))
-                            .color(Color::from_rgb(0.1, 0.1, 0.1)),
-                    )
-                    .center_x(Length::Fill)
-                    .center_y(Length::Fill),
+                    container(text(format!("{} — {}", self.stage, self.status_text())))
+                        .center_x(Length::Fill)
+                        .center_y(Length::Fill),
                 ]
                 .width(Length::Fill),
             ]
@@ -698,10 +752,18 @@ impl App {
                 .width(Length::Fill)
                 .height(Length::Fill)
                 .style(|_theme| container::Style {
-                    background: Some(Color::WHITE.into()),
+                    background: Some(Color::from_rgb(0.094, 0.094, 0.145).into()),
+                    border: iced::border::rounded(16.0),
                     ..container::Style::default()
                 }),
-            row![button("Close").on_press(Message::Close)],
+            row![
+                button("Import Transcription")
+                    .on_press_maybe((!running).then_some(Message::PickImport))
+                    .style(color_button(Color::from_rgb(0.580, 0.886, 0.835))),
+                button("Close").on_press(Message::Close).style(pill_button_secondary),
+            ]
+            .spacing(8)
+            .align_y(iced::Alignment::Center),
         ]
         .spacing(8)
         .padding(12);
@@ -719,37 +781,32 @@ impl App {
             text_input("SPEAKER 1", &self.name1)
                 .id(name1_id())
                 .on_input(Message::RenameName1)
-                .width(Length::Fill),
+                .width(Length::Fill)
+                .style(pill_input),
         );
         col = col.push(
             text_input("SPEAKER 2", &self.name2)
                 .id(name2_id())
                 .on_input(Message::RenameName2)
-                .width(Length::Fill),
+                .width(Length::Fill)
+                .style(pill_input),
         );
         col = col.push(
             row![
                 button("Cancel")
                     .on_press(Message::RenameCancel)
-                    .style(if self.rename_focus == 3 {
-                        button::primary
-                    } else {
-                        button::secondary
-                    }),
+                    .style(color_button(Color::from_rgb(0.953, 0.545, 0.659))),
                 button("Save")
                     .on_press(Message::RenameSave)
-                    .style(if self.rename_focus == 2 {
-                        button::primary
-                    } else {
-                        button::secondary
-                    }),
+                    .style(color_button(Color::from_rgb(0.651, 0.890, 0.631))),
             ]
             .spacing(8),
         );
         let dialog = container(col.width(Length::Fixed(380.0)))
             .padding(16)
             .style(|_theme| container::Style {
-                background: Some(Color::WHITE.into()),
+                background: Some(Color::from_rgb(0.118, 0.118, 0.180).into()),
+                border: iced::border::rounded(16.0),
                 ..container::Style::default()
             });
 
@@ -811,17 +868,13 @@ fn split_label(line: &str) -> (String, String) {
     }
 }
 
-fn sms_row(content: &str, left: bool) -> Element<'static, Message> {
-    let bubble = container(text(content.to_string()).color(Color::BLACK))
+fn sms_row(content: &str, left: bool, color: Color) -> Element<'static, Message> {
+    let bubble = container(rich_text(line_spans(content, Some(crust()))))
         .width(Length::Fill)
-        .align_x(if left {
-            iced::Alignment::Start
-        } else {
-            iced::Alignment::End
-        })
+        .align_x(iced::Alignment::Start)
         .padding(6)
-        .style(|_theme| container::Style {
-            background: Some(Color::from_rgb(0.9, 0.93, 1.0).into()),
+        .style(move |_theme| container::Style {
+            background: Some(color.into()),
             border: iced::border::rounded(8.0),
             ..container::Style::default()
         });
@@ -830,4 +883,85 @@ fn sms_row(content: &str, left: bool) -> Element<'static, Message> {
     } else {
         row![horizontal_space(), bubble].spacing(8).into()
     }
+}
+
+fn sms_color(index: usize) -> Color {
+    match index % 6 {
+        0 => Color::from_rgb(0.537, 0.706, 0.980),
+        1 => Color::from_rgb(0.651, 0.890, 0.631),
+        2 => Color::from_rgb(0.796, 0.651, 0.969),
+        3 => Color::from_rgb(0.980, 0.702, 0.529),
+        4 => Color::from_rgb(0.580, 0.886, 0.835),
+        _ => Color::from_rgb(0.949, 0.886, 0.686),
+    }
+}
+
+const PILL: f32 = 1000.0;
+
+fn pill_button_secondary(theme: &iced::Theme, status: button::Status) -> button::Style {
+    let mut style = button::secondary(theme, status);
+    style.border.radius = PILL.into();
+    style
+}
+
+fn pill_input(theme: &iced::Theme, status: text_input::Status) -> text_input::Style {
+    let mut style = text_input::default(theme, status);
+    style.border.radius = PILL.into();
+    style
+}
+
+fn pill_pick(theme: &iced::Theme, status: pick_list::Status) -> pick_list::Style {
+    let mut style = pick_list::default(theme, status);
+    style.border.radius = PILL.into();
+    style
+}
+
+fn crust() -> Color {
+    Color::from_rgb(0.067, 0.067, 0.106)
+}
+
+fn color_button(bg: Color) -> impl Fn(&iced::Theme, button::Status) -> button::Style {
+    move |_theme, status| {
+        let (bg, text) = match status {
+            button::Status::Hovered => (Color { a: 0.85, ..bg }, crust()),
+            button::Status::Disabled => (Color { a: 0.35, ..bg }, Color { a: 0.6, ..crust() }),
+            _ => (bg, crust()),
+        };
+        button::Style {
+            background: Some(bg.into()),
+            text_color: text,
+            border: iced::border::rounded(PILL),
+            ..button::Style::default()
+        }
+    }
+}
+
+fn line_spans(line: &str, color: Option<Color>) -> Vec<text::Span<'static, Message>> {
+    let bold = Font {
+        weight: font::Weight::Bold,
+        ..Font::default()
+    };
+    let mut spans = Vec::new();
+    match line.split_once(": ") {
+        Some((head, rest)) => {
+            let mut h = text::Span::new(format!("{head}: ")).font(bold);
+            if let Some(c) = color {
+                h = h.color(c);
+            }
+            spans.push(h);
+            let mut r = text::Span::new(rest.to_string());
+            if let Some(c) = color {
+                r = r.color(c);
+            }
+            spans.push(r);
+        }
+        None => {
+            let mut s = text::Span::new(line.to_string());
+            if let Some(c) = color {
+                s = s.color(c);
+            }
+            spans.push(s);
+        }
+    }
+    spans
 }
