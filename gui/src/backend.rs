@@ -4,17 +4,59 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(default)]
+pub struct Stats {
+    pub audio_seconds: f64,
+    pub run_seconds: f64,
+    pub speakers: usize,
+    pub turns: usize,
+    pub lines: usize,
+    pub preset: String,
+    pub diarizer: String,
+    pub embedding: String,
+    pub transcriber: String,
+    pub device: String,
+    pub transcription_device: String,
+}
+
 #[derive(Debug, serde::Deserialize)]
 #[serde(tag = "event")]
 pub enum Event {
     #[serde(rename = "stage")]
     Stage { stage: String, label: String, progress: f32 },
     #[serde(rename = "done")]
-    Done { txt: String, json: String },
+    Done {
+        txt: String,
+        json: String,
+        stats: Stats,
+    },
     #[serde(rename = "log")]
     Log { message: String },
     #[serde(rename = "error")]
     Error { message: String },
+}
+
+/// Probe the duration (seconds) of an audio file using the venv's soundfile.
+pub fn probe_duration(path: &Path) -> Option<f64> {
+    let root = repo_root()?;
+    let python = venv_python(&root);
+    if !python.is_file() {
+        return None;
+    }
+    let script = "import sys, soundfile as sf; print(sf.info(sys.argv[1]).duration)";
+    let mut command = Command::new(&python);
+    command.args(["-c", script]).arg(path);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x0800_0000);
+    }
+    let output = command.output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&output.stdout).trim().parse().ok()
 }
 
 /// Locate the repository root (directory containing scripts/transiel.py).

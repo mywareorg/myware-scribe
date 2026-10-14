@@ -7,8 +7,8 @@ use std::time::{Duration, Instant};
 
 use iced::keyboard::{self, Key, Modifiers};
 use iced::widget::{
-    button, column, container, pick_list, progress_bar, rich_text, row, scrollable, stack, text,
-    text_input,
+    button, column, container, horizontal_space, mouse_area, pick_list, progress_bar, rich_text,
+    row, scrollable, stack, text, text_input,
 };
 use iced::{font, Color, Element, Font, Length, Subscription, Task};
 
@@ -74,6 +74,8 @@ pub enum Message {
     RenameCancel,
     RenameMove(bool),
     RenameActivate,
+    OpenSummary,
+    DurationProbed(Option<f64>),
 }
 
 pub struct App {
@@ -82,7 +84,9 @@ pub struct App {
     preset: Preset,
     stage: String,
     progress: f32,
+    progress_shown: f32,
     run_start: Option<Instant>,
+    elapsed_final: Option<f64>,
     status: Status,
     transcript: String,
     output_txt: Option<PathBuf>,
@@ -91,6 +95,8 @@ pub struct App {
     focus_pending: bool,
     name1: String,
     name2: String,
+    duration: Option<f64>,
+    stats: Option<backend::Stats>,
     events: Arc<Mutex<VecDeque<Event>>>,
     pid: Arc<AtomicU32>,
     cancelled: Arc<AtomicBool>,
@@ -110,7 +116,9 @@ impl App {
             preset: Preset::default(),
             stage: "idle".to_string(),
             progress: 0.0,
+            progress_shown: 0.0,
             run_start: None,
+            elapsed_final: None,
             status: Status::Idle,
             transcript: String::new(),
             output_txt: None,
@@ -119,6 +127,8 @@ impl App {
             focus_pending: false,
             name1: String::new(),
             name2: String::new(),
+            duration: None,
+            stats: None,
             events: Arc::new(Mutex::new(VecDeque::new())),
             pid: Arc::new(AtomicU32::new(0)),
             cancelled: Arc::new(AtomicBool::new(false)),
@@ -151,7 +161,24 @@ impl App {
                     if self.output_dir.is_none() {
                         self.output_dir = path.parent().map(|p| p.to_path_buf());
                     }
-                    self.input = Some(path);
+                    self.duration = None;
+                    self.input = Some(path.clone());
+                    return Task::perform(
+                        async move { backend::probe_duration(&path) },
+                        Message::DurationProbed,
+                    );
+                }
+                Task::none()
+            }
+            Message::DurationProbed(seconds) => {
+                self.duration = seconds;
+                Task::none()
+            }
+            Message::OpenSummary => {
+                if self.stats.is_some() {
+                    self.rename_open = true;
+                    self.rename_focus = 0;
+                    self.focus_pending = false;
                 }
                 Task::none()
             }
@@ -194,6 +221,9 @@ impl App {
             }
             Message::Tick => {
                 self.drain_events();
+                // Ease the displayed bar toward the latest reported progress.
+                self.progress_shown += (self.progress - self.progress_shown) * 0.25;
+                self.progress_shown = self.progress_shown.clamp(0.0, 1.0);
                 if self.focus_pending && self.rename_open {
                     self.focus_pending = false;
                     self.focus_task()
@@ -285,9 +315,12 @@ impl App {
         self.status = Status::Running;
         self.stage = "starting".to_string();
         self.progress = 0.0;
+        self.progress_shown = 0.0;
         self.run_start = Some(Instant::now());
+        self.elapsed_final = None;
         self.transcript.clear();
         self.output_txt = None;
+        self.stats = None;
         self.rename_open = false;
         self.name1.clear();
         self.name2.clear();
@@ -314,7 +347,9 @@ impl App {
         self.status = Status::Cancelled;
         self.stage = "cancelled".to_string();
         self.progress = 0.0;
+        self.progress_shown = 0.0;
         self.run_start = None;
+        self.elapsed_final = None;
     }
 
     fn apply_rename(&mut self) {
@@ -354,10 +389,13 @@ impl App {
                     self.progress = progress.clamp(0.0, 1.0);
                 }
                 Event::Log { .. } => {}
-                Event::Done { txt, .. } => {
+                Event::Done { txt, stats, .. } => {
                     self.stage = "done".to_string();
                     self.progress = 1.0;
+                    self.progress_shown = 1.0;
+                    self.elapsed_final = self.run_start.map(|s| s.elapsed().as_secs_f64());
                     self.status = Status::Done;
+                    self.stats = Some(stats);
                     if let Ok(contents) = std::fs::read_to_string(&txt) {
                         self.transcript = contents;
                     }
@@ -376,6 +414,38 @@ impl App {
         }
     }
 
+    fn duration_label(&self) -> String {
+        match self.duration {
+            Some(secs) => format!("Duration: {}", format_secs(secs)),
+            None if self.input.is_some() => "Duration: …".to_string(),
+            None => String::new(),
+        }
+    }
+
+    fn stats_lines(&self) -> Vec<String> {
+        match &self.stats {
+            Some(s) => {
+                let speed = if s.run_seconds > 0.0 {
+                    s.audio_seconds / s.run_seconds
+                } else {
+                    0.0
+                };
+                vec![
+                    format!("Total run time: {}", format_secs(s.run_seconds)),
+                    format!("Audio length: {}", format_secs(s.audio_seconds)),
+                    format!("Speed: {:.1}\u{00d7} realtime", speed),
+                    format!("Speakers: {}", s.speakers),
+                    format!("Segments: {}", s.lines),
+                    format!("Preset: {}", s.preset),
+                    format!("Diarizer: {}", s.diarizer),
+                    format!("Transcriber: {}", s.transcriber),
+                    format!("Device: {}", s.device),
+                ]
+            }
+            None => vec!["No completed run yet.".to_string()],
+        }
+    }
+
     fn status_text(&self) -> String {
         match &self.status {
             Status::Idle => "idle".to_string(),
@@ -387,19 +457,13 @@ impl App {
     }
 
     fn elapsed(&self) -> Option<String> {
-        if !matches!(self.status, Status::Running | Status::Done) {
-            return None;
+        if let Some(secs) = self.elapsed_final {
+            return Some(format_secs(secs));
         }
-        let start = self.run_start?;
-        Some(format_secs(start.elapsed().as_secs_f64()))
-    }
-
-    fn status_line(&self) -> String {
-        let status = format!("{} — {}", self.stage, self.status_text());
-        match self.elapsed() {
-            Some(elapsed) => format!("{elapsed} · {status}"),
-            None => status,
+        if matches!(self.status, Status::Running) {
+            return self.run_start.map(|start| format_secs(start.elapsed().as_secs_f64()));
         }
+        None
     }
 
     /// Full path of the human-readable output file for the current selection.
@@ -451,18 +515,30 @@ impl App {
         let can_start = !running && has_input;
         let can_cancel = running;
 
-        let preset = pick_list(Preset::ALL, Some(self.preset), Message::PresetChanged).style(
-            move |theme, status| {
-                let mut style = iced::widget::pick_list::default(theme, status);
-                if !can_preset {
-                    let grey = Color::from_rgb(0.55, 0.55, 0.55);
-                    style.text_color = grey;
-                    style.handle_color = grey;
-                    style.background = Color::from_rgb(0.9, 0.9, 0.9).into();
-                }
+        let preset: Element<Message> = if can_preset {
+            pick_list(Preset::ALL, Some(self.preset), Message::PresetChanged).into()
+        } else {
+            // Keep the real pick_list (so iced draws its arrow) but put a
+            // click-capturing layer on top so it cannot be opened.
+            let greyed = |theme: &iced::Theme, status: pick_list::Status| {
+                let mut style = pick_list::default(theme, status);
+                let grey = Color::from_rgb(0.55, 0.55, 0.55);
+                style.text_color = grey;
+                style.handle_color = grey;
+                style.background = Color::from_rgb(0.9, 0.9, 0.9).into();
                 style
-            },
-        );
+            };
+            stack![
+                pick_list(Preset::ALL, Some(self.preset), Message::PresetChanged).style(greyed),
+                mouse_area(
+                    container(horizontal_space())
+                        .width(Length::Fill)
+                        .height(Length::Fill),
+                )
+                .on_press(Message::Tick),
+            ]
+            .into()
+        };
 
         let controls = column![
             row![
@@ -471,6 +547,7 @@ impl App {
             ]
             .spacing(8)
             .align_y(iced::Alignment::Center),
+            text(self.duration_label()),
             row![
                 button("Save Location").on_press_maybe(can_output.then_some(Message::PickOutput)),
                 text(output.clone()),
@@ -482,6 +559,8 @@ impl App {
                 .align_y(iced::Alignment::Center),
             row![
                 button("Start").on_press_maybe(can_start.then_some(Message::Start)),
+                button("Summary")
+                    .on_press_maybe((!running && self.stats.is_some()).then_some(Message::OpenSummary)),
                 button("Cancel").on_press_maybe(can_cancel.then_some(Message::Cancel)),
             ]
             .spacing(8)
@@ -491,8 +570,28 @@ impl App {
 
         let base = column![
             controls,
-            progress_bar(0.0..=1.0, self.progress),
-            text(self.status_line()),
+            row![
+                text(self.elapsed().unwrap_or_default()).width(Length::Fixed(70.0)),
+                stack![
+                    progress_bar(0.0..=1.0, self.progress_shown)
+                        .width(Length::Fill)
+                        .height(Length::Fixed(28.0))
+                        .style(|_theme| progress_bar::Style {
+                            background: Color::from_rgb(0.9, 0.9, 0.9).into(),
+                            bar: Color::from_rgb(0.29, 0.53, 0.91).into(),
+                            border: iced::border::rounded(6.0),
+                        }),
+                    container(
+                        text(format!("{} — {}", self.stage, self.status_text()))
+                            .color(Color::from_rgb(0.1, 0.1, 0.1)),
+                    )
+                    .center_x(Length::Fill)
+                    .center_y(Length::Fill),
+                ]
+                .width(Length::Fill),
+            ]
+            .spacing(8)
+            .align_y(iced::Alignment::Center),
             container(
                 scrollable(rich_text(self.transcript_spans()))
                     .height(Length::Fill)
@@ -526,43 +625,48 @@ impl App {
             return base.into();
         }
 
-        let dialog = container(
-            column![
-                text("Rename speakers"),
-                text_input("SPEAKER 1", &self.name1)
-                    .id(name1_id())
-                    .on_input(Message::RenameName1)
-                    .width(Length::Fill),
-                text_input("SPEAKER 2", &self.name2)
-                    .id(name2_id())
-                    .on_input(Message::RenameName2)
-                    .width(Length::Fill),
-                row![
-                    button("Cancel")
-                        .on_press(Message::RenameCancel)
-                        .style(if self.rename_focus == 3 {
-                            button::primary
-                        } else {
-                            button::secondary
-                        }),
-                    button("Save")
-                        .on_press(Message::RenameSave)
-                        .style(if self.rename_focus == 2 {
-                            button::primary
-                        } else {
-                            button::secondary
-                        }),
-                ]
-                .spacing(8),
+        let mut col = column![text("Summary").size(20)].spacing(8);
+        for line in self.stats_lines() {
+            col = col.push(text(line));
+        }
+        col = col.push(text("Rename speakers").size(20));
+        col = col.push(
+            text_input("SPEAKER 1", &self.name1)
+                .id(name1_id())
+                .on_input(Message::RenameName1)
+                .width(Length::Fill),
+        );
+        col = col.push(
+            text_input("SPEAKER 2", &self.name2)
+                .id(name2_id())
+                .on_input(Message::RenameName2)
+                .width(Length::Fill),
+        );
+        col = col.push(
+            row![
+                button("Cancel")
+                    .on_press(Message::RenameCancel)
+                    .style(if self.rename_focus == 3 {
+                        button::primary
+                    } else {
+                        button::secondary
+                    }),
+                button("Save")
+                    .on_press(Message::RenameSave)
+                    .style(if self.rename_focus == 2 {
+                        button::primary
+                    } else {
+                        button::secondary
+                    }),
             ]
-            .spacing(8)
-            .width(Length::Fixed(320.0)),
-        )
-        .padding(16)
-        .style(|_theme| container::Style {
-            background: Some(Color::WHITE.into()),
-            ..container::Style::default()
-        });
+            .spacing(8),
+        );
+        let dialog = container(col.width(Length::Fixed(380.0)))
+            .padding(16)
+            .style(|_theme| container::Style {
+                background: Some(Color::WHITE.into()),
+                ..container::Style::default()
+            });
 
         let overlay = container(dialog)
             .center(Length::Fill)

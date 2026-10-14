@@ -6,6 +6,7 @@ import gc
 import importlib
 import io
 import json
+import math
 import os
 import sys
 import threading
@@ -86,6 +87,26 @@ def emit_stage(stage, progress, label=None):
             "progress": round(float(progress), 4),
         }
     )
+
+
+def start_creep(stage, label, stop):
+    """Emit time-smoothed progress for a stage with no measurable sub-progress.
+
+    Approaches the stage's upper bound asymptotically (capped below it) so the
+    bar keeps moving without overrunning the real completion.
+    """
+    lo, hi = STAGE_BOUNDS[stage]
+
+    def run():
+        start = time.perf_counter()
+        tau = 25.0
+        while not stop.wait(0.5):
+            frac = 1.0 - math.exp(-(time.perf_counter() - start) / tau)
+            emit_stage(stage, lo + (hi - lo) * frac * 0.9, label)
+
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    return thread
 
 
 def detect_backends():
@@ -690,6 +711,7 @@ def main():
     log(f"Audio: {audio_path}")
 
     timings = {}
+    run_start = time.perf_counter()
 
     emit_stage("loading", 0.0, "Loading models")
 
@@ -701,16 +723,22 @@ def main():
 
     start = time.perf_counter()
     emit_stage("diarization", STAGE_BOUNDS["diarization"][0], "Diarizing")
-    raw_turns = run_diarization(
-        samples,
-        sample_rate,
-        resolved["diarizer"],
-        diarizer_path,
-        embedding,
-        tuning,
-        components.NUM_SPEAKERS,
-        diarization_device,
-    )
+    creep_stop = threading.Event()
+    creep = start_creep("diarization", "Diarizing", creep_stop)
+    try:
+        raw_turns = run_diarization(
+            samples,
+            sample_rate,
+            resolved["diarizer"],
+            diarizer_path,
+            embedding,
+            tuning,
+            components.NUM_SPEAKERS,
+            diarization_device,
+        )
+    finally:
+        creep_stop.set()
+        creep.join(timeout=1.0)
     turns = clean_turns(raw_turns)
     timings["diarization_s"] = round(time.perf_counter() - start, 3)
     speaker_map = build_speaker_map(turns)
@@ -776,7 +804,21 @@ def main():
     out_json.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
 
     emit_stage("writing", STAGE_BOUNDS["writing"][1], "Done")
-    emit({"event": "done", "txt": str(out_txt), "json": str(out_json)})
+    emit({"event": "done", "txt": str(out_txt), "json": str(out_json),
+          "stats": {
+              "audio_seconds": round(duration, 2),
+              "run_seconds": round(time.perf_counter() - run_start, 2),
+              "speakers": len(speaker_map),
+              "turns": len(turns),
+              "lines": len(lines),
+              "preset": resolved["preset"],
+              "diarizer": resolved["diarizer_name"],
+              "embedding": resolved["embedding_name"],
+              "transcriber": resolved["transcriber_name"],
+              "device": str(diarization_device),
+              "transcription_device": transcribe_device,
+              "timings": timings,
+          }})
 
     log("")
     for line in lines:
