@@ -9,7 +9,7 @@ use iced::keyboard::{self, Key, Modifiers};
 use serde::{Deserialize, Serialize};
 use iced::widget::{
     button, canvas, column, container, horizontal_space, mouse_area, pick_list, progress_bar,
-    rich_text, row, scrollable, slider, stack, text, text_input, toggler, tooltip,
+    rich_text, row, scrollable, stack, text, text_input, toggler, tooltip,
 };
 use iced::{
     font, mouse, Color, Element, Font, Length, Point, Rectangle, Renderer, Size, Subscription,
@@ -132,6 +132,52 @@ impl SpeakerOpt {
 }
 
 impl fmt::Display for SpeakerOpt {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.label())
+    }
+}
+
+/// Playback speed multiplier options.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Speed {
+    X1,
+    X2,
+    X4,
+    X8,
+}
+
+impl Speed {
+    const ALL: [Speed; 4] = [Speed::X1, Speed::X2, Speed::X4, Speed::X8];
+
+    fn factor(self) -> f32 {
+        match self {
+            Speed::X1 => 1.0,
+            Speed::X2 => 2.0,
+            Speed::X4 => 4.0,
+            Speed::X8 => 8.0,
+        }
+    }
+
+    fn from_factor(factor: f32) -> Self {
+        match factor as i32 {
+            2 => Speed::X2,
+            4 => Speed::X4,
+            8 => Speed::X8,
+            _ => Speed::X1,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Speed::X1 => "1x",
+            Speed::X2 => "2x",
+            Speed::X4 => "4x",
+            Speed::X8 => "8x",
+        }
+    }
+}
+
+impl fmt::Display for Speed {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.label())
     }
@@ -282,16 +328,16 @@ pub enum Message {
     CacheToggled(bool),
     ConfidenceToggled(bool),
     LockTextToggled(bool),
+    TranscriptScrolled(scrollable::Viewport),
     WindowEvent(iced::window::Event),
     TimelineLoaded(PathBuf, Option<(f64, Vec<f32>)>),
     Seek(f32),
     PlayerToggle,
-    ToggleSearch,
+    FocusFind,
     SearchChanged(String),
-    ReplaceChanged(String),
     FindPrev,
     FindNext,
-    ReplaceAll,
+    SpeedChanged(Speed),
     EditLine(usize),
     EditText(String),
     EditSave,
@@ -349,10 +395,11 @@ pub struct App {
     confidence: bool,
     lock_text: bool,
     lock_line: Option<usize>,
-    search_open: bool,
+    transcript_viewport: f32,
+    transcript_content: f32,
     search_query: String,
-    replace_query: String,
     search_index: usize,
+    playback_speed: f32,
     edit_open: bool,
     edit_index: Option<usize>,
     edit_text: String,
@@ -422,10 +469,11 @@ impl App {
             confidence: settings.confidence.unwrap_or(true),
             lock_text: settings.lock_text.unwrap_or(false),
             lock_line: None,
-            search_open: false,
+            transcript_viewport: 0.0,
+            transcript_content: 0.0,
             search_query: String::new(),
-            replace_query: String::new(),
             search_index: 0,
+            playback_speed: 1.0,
             edit_open: false,
             edit_index: None,
             edit_text: String::new(),
@@ -554,7 +602,7 @@ impl App {
             Key::Named(Named::ArrowLeft) => Some(Message::SeekBy(-5.0)),
             Key::Character(character) if modifiers.command() => match character.as_str() {
                 "o" => Some(Message::AddFiles),
-                "f" => Some(Message::ToggleSearch),
+                "f" => Some(Message::FocusFind),
                 _ => None,
             },
             _ => None,
@@ -611,6 +659,11 @@ impl App {
                 self.save_settings();
                 Task::none()
             }
+            Message::TranscriptScrolled(viewport) => {
+                self.transcript_viewport = viewport.bounds().height;
+                self.transcript_content = viewport.content_bounds().height;
+                Task::none()
+            }
             Message::WindowEvent(event) => {
                 match event {
                     iced::window::Event::Resized(size) => {
@@ -653,26 +706,16 @@ impl App {
                         }
                     }
                     if let Some(player) = &self.player {
+                        player.set_speed(self.playback_speed);
                         player.toggle();
                     }
                 }
                 Task::none()
             }
-            Message::ToggleSearch => {
-                self.search_open = !self.search_open;
-                if self.search_open {
-                    text_input::focus(find_id())
-                } else {
-                    Task::none()
-                }
-            }
+            Message::FocusFind => text_input::focus(find_id()),
             Message::SearchChanged(query) => {
                 self.search_query = query;
                 self.search_index = 0;
-                Task::none()
-            }
-            Message::ReplaceChanged(value) => {
-                self.replace_query = value;
                 Task::none()
             }
             Message::FindNext => {
@@ -689,23 +732,10 @@ impl App {
                 }
                 Task::none()
             }
-            Message::ReplaceAll => {
-                if !self.search_query.is_empty() {
-                    for line in &mut self.lines {
-                        line.raw = line.raw.replace(&self.search_query, &self.replace_query);
-                    }
-                    self.transcript = self
-                        .lines
-                        .iter()
-                        .map(|line| line.raw.as_str())
-                        .collect::<Vec<_>>()
-                        .join("\n");
-                    if !self.transcript.is_empty() {
-                        self.transcript.push('\n');
-                    }
-                    if let Some(path) = &self.output_txt {
-                        let _ = std::fs::write(path, &self.transcript);
-                    }
+            Message::SpeedChanged(speed) => {
+                self.playback_speed = speed.factor();
+                if let Some(player) = &self.player {
+                    player.set_speed(self.playback_speed);
                 }
                 Task::none()
             }
@@ -757,15 +787,16 @@ impl App {
                     self.edit_index = None;
                 } else if self.rename_open {
                     self.rename_open = false;
-                } else if self.search_open {
-                    self.search_open = false;
+                } else if !self.search_query.is_empty() {
+                    self.search_query.clear();
+                    self.search_index = 0;
                 } else if matches!(self.status, Status::Running) {
                     self.cancel();
                 }
                 Task::none()
             }
             Message::ShortcutPlay => {
-                if self.search_open || self.edit_open || self.rename_open {
+                if self.edit_open || self.rename_open {
                     return Task::none();
                 }
                 let ready = self.timeline_duration.unwrap_or(0.0) > 0.0;
@@ -776,13 +807,14 @@ impl App {
                         }
                     }
                     if let Some(player) = &self.player {
+                        player.set_speed(self.playback_speed);
                         player.toggle();
                     }
                 }
                 Task::none()
             }
             Message::SeekBy(delta) => {
-                if self.search_open || self.edit_open || self.rename_open {
+                if self.edit_open || self.rename_open {
                     return Task::none();
                 }
                 if self.timeline_duration.is_some() {
@@ -948,11 +980,23 @@ impl App {
                         self.lock_line = index;
                         if let Some(line) = index {
                             let total = self.lines.len().max(1) as f32;
-                            let y = (line as f32 / total).clamp(0.0, 1.0);
-                            tasks.push(scrollable::snap_to(
-                                transcript_id(),
-                                scrollable::RelativeOffset { x: 0.0, y },
-                            ));
+                            let content = self.transcript_content;
+                            let viewport = self.transcript_viewport;
+                            if content > 0.0 && viewport > 0.0 {
+                                let line_height = content / total;
+                                let y = (line as f32 * line_height - 0.30 * viewport)
+                                    .clamp(0.0, (content - viewport).max(0.0));
+                                tasks.push(scrollable::scroll_to(
+                                    transcript_id(),
+                                    scrollable::AbsoluteOffset { x: 0.0, y },
+                                ));
+                            } else {
+                                let y = (line as f32 / total).clamp(0.0, 1.0);
+                                tasks.push(scrollable::snap_to(
+                                    transcript_id(),
+                                    scrollable::RelativeOffset { x: 0.0, y },
+                                ));
+                            }
                         }
                     }
                 }
@@ -1390,11 +1434,7 @@ impl App {
     /// Transcript view: per-line (confidence/search tinted) or SMS bubbles.
     fn transcript_element(&self) -> Element<'_, Message> {
         let scheme = Scheme::for_theme(self.dark_mode);
-        let query = if self.search_open {
-            self.search_query.trim().to_string()
-        } else {
-            String::new()
-        };
+        let query = self.search_query.trim().to_string();
         let matches = if query.is_empty() {
             Vec::new()
         } else {
@@ -1456,6 +1496,7 @@ impl App {
         }
         scrollable(col)
             .id(transcript_id())
+            .on_scroll(Message::TranscriptScrolled)
             .height(Length::Fill)
             .width(Length::Fill)
             .style(scrollbar_style)
@@ -1522,7 +1563,7 @@ impl App {
             .collect()
     }
 
-    /// Bottom-left playback controls: play/pause, time, scrubber.
+    /// Playback controls: play/pause, time, and a speed selector.
     fn player_element(&self, scheme: &Scheme) -> Element<'_, Message> {
         let duration = self.timeline_duration.unwrap_or(0.0).max(0.0);
         let ready = duration > 0.0 && self.peaks_for.is_some();
@@ -1543,10 +1584,14 @@ impl App {
             format_secs(duration as f64)
         ))
         .size(12);
-        let scrubber = slider(0.0..=duration.max(0.001), self.playhead, Message::Seek)
-            .width(Length::Fixed(160.0));
+        let speed = pick_list(
+            Speed::ALL,
+            Some(Speed::from_factor(self.playback_speed)),
+            Message::SpeedChanged,
+        )
+        .style(pill_pick);
         with_tip(
-            row![play_button, time, scrubber]
+            row![play_button, time, speed]
                 .spacing(8)
                 .align_y(iced::Alignment::Center),
             "Play or pause the current audio",
@@ -1554,7 +1599,7 @@ impl App {
         )
     }
 
-    /// Find / replace bar shown above the transcript when search is open.
+    /// Find controls, always shown on the player row.
     fn search_element(&self, scheme: &Scheme) -> Element<'_, Message> {
         let count = self.matching_lines().len();
         let status = if self.search_query.trim().is_empty() {
@@ -1567,11 +1612,7 @@ impl App {
         let query_input = text_input("Find", &self.search_query)
             .id(find_id())
             .on_input(Message::SearchChanged)
-            .width(Length::Fill)
-            .style(pill_input);
-        let replace_input = text_input("Replace with", &self.replace_query)
-            .on_input(Message::ReplaceChanged)
-            .width(Length::Fill)
+            .width(Length::Fixed(220.0))
             .style(pill_input);
         let prev = button("Prev")
             .on_press(Message::FindPrev)
@@ -1579,25 +1620,11 @@ impl App {
         let next = button("Next")
             .on_press(Message::FindNext)
             .style(pill_button_secondary);
-        let replace_all = button("Replace All")
-            .on_press(Message::ReplaceAll)
-            .style(color_button(scheme.blue, scheme.ink));
-        let close = button("\u{00d7}")
-            .on_press(Message::ToggleSearch)
-            .style(pill_button_secondary);
         with_tip(
-            row![
-                query_input,
-                text(status).size(12),
-                prev,
-                next,
-                replace_input,
-                replace_all,
-                close,
-            ]
-            .spacing(8)
-            .align_y(iced::Alignment::Center),
-            "Find and replace text in the transcript",
+            row![query_input, text(status).size(12), prev, next]
+                .spacing(8)
+                .align_y(iced::Alignment::Center),
+            "Find text in the transcript",
             scheme,
         )
     }
@@ -1678,13 +1705,6 @@ impl App {
                     .on_press(Message::ToggleAdvanced)
                     .style(pill_button_secondary),
                     "Show extra options",
-                    &scheme,
-                ),
-                with_tip(
-                    button("Find")
-                        .on_press(Message::ToggleSearch)
-                        .style(pill_button_secondary),
-                    "Find and replace text in the transcript",
                     &scheme,
                 ),
             ]
@@ -1952,13 +1972,23 @@ impl App {
         }
 
         let mut middle = column![status_row].spacing(8).width(Length::Fill);
-        if let Some(timeline) = self.timeline_element(&scheme) {
+        let timeline = self.timeline_element(&scheme);
+        let mut playback = if timeline.is_some() {
+            row![self.player_element(&scheme), horizontal_space()]
+                .spacing(8)
+                .align_y(iced::Alignment::Center)
+                .width(Length::Fill)
+        } else {
+            row![horizontal_space()]
+                .spacing(8)
+                .align_y(iced::Alignment::Center)
+                .width(Length::Fill)
+        };
+        playback = playback.push(self.search_element(&scheme));
+        if let Some(timeline) = timeline {
             middle = middle.push(timeline);
-            middle = middle.push(self.player_element(&scheme));
         }
-        if self.search_open {
-            middle = middle.push(self.search_element(&scheme));
-        }
+        middle = middle.push(playback);
 
         let base = column![
             text("Transiel").size(32),
@@ -2300,20 +2330,37 @@ fn speaker_palette(index: usize, scheme: &Scheme) -> Color {
 struct Player {
     _stream: OutputStream,
     sink: Sink,
+    path: PathBuf,
 }
 
 impl Player {
     fn new(path: &Path) -> Option<Player> {
         let (stream, handle) = OutputStream::try_default().ok()?;
         let sink = Sink::try_new(&handle).ok()?;
-        let file = std::fs::File::open(path).ok()?;
-        let decoder = Decoder::new(std::io::BufReader::new(file)).ok()?;
+        let decoder = Self::decoder(path)?;
         sink.append(decoder);
         sink.pause();
         Some(Player {
             _stream: stream,
             sink,
+            path: path.to_path_buf(),
         })
+    }
+
+    fn decoder(path: &Path) -> Option<Decoder<std::io::BufReader<std::fs::File>>> {
+        let file = std::fs::File::open(path).ok()?;
+        Decoder::new(std::io::BufReader::new(file)).ok()
+    }
+
+    /// Re-append the source after it has been fully consumed, so the sink is
+    /// seekable again instead of staying stuck at the end.
+    fn rebuild_if_empty(&self) {
+        if self.sink.empty() {
+            if let Some(decoder) = Self::decoder(&self.path) {
+                self.sink.append(decoder);
+                self.sink.pause();
+            }
+        }
     }
 
     fn is_playing(&self) -> bool {
@@ -2329,10 +2376,11 @@ impl Player {
     }
 
     fn toggle(&self) {
+        self.rebuild_if_empty();
         if self.sink.empty() {
-            let _ = self.sink.try_seek(Duration::from_secs(0));
-            self.sink.play();
-        } else if self.sink.is_paused() {
+            return;
+        }
+        if self.sink.is_paused() {
             self.sink.play();
         } else {
             self.sink.pause();
@@ -2340,7 +2388,12 @@ impl Player {
     }
 
     fn seek(&self, seconds: f32) {
+        self.rebuild_if_empty();
         let _ = self.sink.try_seek(Duration::from_secs_f32(seconds.max(0.0)));
+    }
+
+    fn set_speed(&self, factor: f32) {
+        self.sink.set_speed(factor.max(0.1));
     }
 }
 
