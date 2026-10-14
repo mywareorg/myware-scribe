@@ -69,6 +69,7 @@ struct DocLine {
     raw: String,
     speaker: String,
     confidence: f32,
+    start: Option<f32>,
 }
 
 impl DocLine {
@@ -183,6 +184,7 @@ struct Settings {
     num_speakers: Option<i32>,
     cache: Option<bool>,
     confidence: Option<bool>,
+    lock_text: Option<bool>,
     window_width: Option<f32>,
     window_height: Option<f32>,
     window_x: Option<f32>,
@@ -279,6 +281,7 @@ pub enum Message {
     SpeakerCountChanged(SpeakerOpt),
     CacheToggled(bool),
     ConfidenceToggled(bool),
+    LockTextToggled(bool),
     WindowEvent(iced::window::Event),
     TimelineLoaded(PathBuf, Option<(f64, Vec<f32>)>),
     Seek(f32),
@@ -344,6 +347,8 @@ pub struct App {
     num_speakers: Option<i32>,
     cache: bool,
     confidence: bool,
+    lock_text: bool,
+    lock_line: Option<usize>,
     search_open: bool,
     search_query: String,
     replace_query: String,
@@ -415,6 +420,8 @@ impl App {
             },
             cache: settings.cache.unwrap_or(true),
             confidence: settings.confidence.unwrap_or(true),
+            lock_text: settings.lock_text.unwrap_or(false),
+            lock_line: None,
             search_open: false,
             search_query: String::new(),
             replace_query: String::new(),
@@ -475,6 +482,7 @@ impl App {
             num_speakers: Some(self.num_speakers.unwrap_or(0)),
             cache: Some(self.cache),
             confidence: Some(self.confidence),
+            lock_text: Some(self.lock_text),
             window_width: Some(self.window_size.width),
             window_height: Some(self.window_size.height),
             window_x: self.window_position.map(|point| point.x),
@@ -594,6 +602,12 @@ impl App {
             }
             Message::ConfidenceToggled(value) => {
                 self.confidence = value;
+                self.save_settings();
+                Task::none()
+            }
+            Message::LockTextToggled(value) => {
+                self.lock_text = value;
+                self.lock_line = None;
                 self.save_settings();
                 Task::none()
             }
@@ -928,6 +942,20 @@ impl App {
                         self.playhead = self.timeline_duration.unwrap_or(self.playhead);
                     }
                 }
+                if self.lock_text {
+                    let index = self.line_for_playhead(self.playhead);
+                    if index != self.lock_line {
+                        self.lock_line = index;
+                        if let Some(line) = index {
+                            let total = self.lines.len().max(1) as f32;
+                            let y = (line as f32 / total).clamp(0.0, 1.0);
+                            tasks.push(scrollable::snap_to(
+                                transcript_id(),
+                                scrollable::RelativeOffset { x: 0.0, y },
+                            ));
+                        }
+                    }
+                }
                 if self.window_dirty
                     && self
                         .last_window_change
@@ -1215,6 +1243,7 @@ impl App {
                         raw: raw.clone(),
                         speaker,
                         confidence,
+                        start: Some(start),
                     });
                     if !self.transcript.is_empty() && !self.transcript.ends_with('\n') {
                         self.transcript.push('\n');
@@ -1426,10 +1455,24 @@ impl App {
             }
         }
         scrollable(col)
+            .id(transcript_id())
             .height(Length::Fill)
             .width(Length::Fill)
             .style(scrollbar_style)
             .into()
+    }
+
+    /// Index of the last line whose start time is at or before `t`.
+    fn line_for_playhead(&self, t: f32) -> Option<usize> {
+        let mut result = None;
+        for (index, line) in self.lines.iter().enumerate() {
+            match line.start {
+                Some(start) if start <= t => result = Some(index),
+                Some(_) => break,
+                None => {}
+            }
+        }
+        result
     }
 
     /// Waveform/speaker timeline strip, or `None` before audio is probed.
@@ -1790,6 +1833,17 @@ impl App {
                     ),
                     with_tip(
                         row![
+                            text("Lock Text to Playback"),
+                            horizontal_space(),
+                            toggler(self.lock_text).on_toggle(Message::LockTextToggled),
+                        ]
+                        .spacing(8)
+                        .align_y(iced::Alignment::Center),
+                        "Scroll the transcript to follow the playhead",
+                        &scheme,
+                    ),
+                    with_tip(
+                        row![
                             text("SMS Mode"),
                             horizontal_space(),
                             toggler(self.sms_mode).on_toggle(Message::SmsToggled),
@@ -1900,6 +1954,7 @@ impl App {
         let mut middle = column![status_row].spacing(8).width(Length::Fill);
         if let Some(timeline) = self.timeline_element(&scheme) {
             middle = middle.push(timeline);
+            middle = middle.push(self.player_element(&scheme));
         }
         if self.search_open {
             middle = middle.push(self.search_element(&scheme));
@@ -1920,8 +1975,6 @@ impl App {
                 }),
             container(
                 row![
-                    self.player_element(&scheme),
-                    horizontal_space(),
                     with_tip(
                         button("Import Transcription")
                             .on_press_maybe((!running).then_some(Message::PickImport))
@@ -1938,7 +1991,8 @@ impl App {
                 .spacing(8)
                 .align_y(iced::Alignment::Center),
             )
-            .width(Length::Fill),
+            .width(Length::Fill)
+            .align_x(iced::Alignment::End),
         ]
         .spacing(8)
         .padding(12);
@@ -2414,8 +2468,24 @@ fn parse_lines(text: &str) -> Vec<DocLine> {
             raw: line.to_string(),
             speaker: speaker_of(line),
             confidence: 1.0,
+            start: parse_time_prefix(line),
         })
         .collect()
+}
+
+/// Parse a leading "[mm:ss]" / "[h:mm:ss]" timestamp into seconds.
+fn parse_time_prefix(raw: &str) -> Option<f32> {
+    let inner = raw.strip_prefix('[')?;
+    let end = inner.find(']')?;
+    let stamp = &inner[..end];
+    let mut seconds = 0.0f32;
+    let mut seen = false;
+    for part in stamp.split(':') {
+        let value: f32 = part.trim().parse().ok()?;
+        seconds = seconds * 60.0 + value;
+        seen = true;
+    }
+    seen.then_some(seconds)
 }
 
 /// Extract the speaker label from a rendered transcript line.
@@ -2457,6 +2527,10 @@ fn find_id() -> text_input::Id {
 
 fn edit_id() -> text_input::Id {
     text_input::Id::new("edit-line")
+}
+
+fn transcript_id() -> scrollable::Id {
+    scrollable::Id::new("transcript")
 }
 
 fn scrollbar_style(theme: &iced::Theme, status: scrollable::Status) -> scrollable::Style {
