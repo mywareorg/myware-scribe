@@ -74,12 +74,14 @@ TRANSCRIBERS = {
         "local": "faster-whisper-large-v3-turbo-ct2",
         "required_files": ["model.bin", "config.json", "tokenizer.json"],
         "gated": False,
+        "mem_mb": 1700,
     },
     "whisper-base-en": {
         "model": "Systran/faster-whisper-base.en",
         "local": "faster-whisper-base.en",
         "required_files": ["model.bin", "config.json", "tokenizer.json"],
         "gated": False,
+        "mem_mb": 160,
     },
 }
 
@@ -114,8 +116,8 @@ PRESETS = {
         "transcriber": "whisper-turbo",
         "segmentation_step": 0.1,
         "threads": 0,
-        "batch_size": 64,
-        "transcribe_workers": 4,
+        "batch_size": 0,  # 0 => auto (from available memory)
+        "transcribe_workers": 0,  # 0 => auto (from available memory + model size)
         "transcribe_threads": 0,
     },
 }

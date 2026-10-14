@@ -45,6 +45,10 @@
 - speed: pyannote-seg3 + wespeaker-resnet34 + whisper-base.en (gated seg3)
 - balanced: pyannote-seg3 + wespeaker-resnet34 + whisper-turbo (gated seg3)
 - accuracy: diarizen-large + wespeaker-resnet34 + whisper-turbo (no token)
+- auto-tuning: batch_size / transcribe_workers=0 => derived from CPU/RAM/device
+- --auto-tune forces hardware-derived values for any preset
+- workers capped by memory budget (model mem + headroom) to avoid OOM
+- diarization pipeline is freed (del + gc) before whisper is loaded
 - override slots: --diarizer / --embedding / --transcriber
 - preset shortcuts: --speed / --balanced / --accuracy (or --preset NAME)
 - raw path overrides: --whisper-model / --diarizen-hub / --diarizen-embedding

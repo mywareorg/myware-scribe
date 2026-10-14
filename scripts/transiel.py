@@ -2,6 +2,7 @@
 """transiel - diarize and transcribe audio locally (CPU only)."""
 
 import argparse
+import gc
 import importlib
 import io
 import json
@@ -38,6 +39,7 @@ for _var in (
 ):
     os.environ.setdefault(_var, str(PHYSICAL_CORES))
 
+import psutil  # noqa: E402
 import soundfile as sf  # noqa: E402
 import torch  # noqa: E402
 import torchaudio  # noqa: E402
@@ -118,6 +120,38 @@ def transcription_device(device):
     if device.type == "cuda" and getattr(torch.version, "hip", None) is None:
         return "cuda"
     return "cpu"
+
+
+def auto_tuning(transcriber, transcribe_device, available_mb, total_mb, physical_cores):
+    """Pick batch size / transcription workers from the available hardware.
+
+    Keeps a headroom for the OS/desktop, and never replicates a model more times
+    than the memory budget allows (the main OOM risk on big models).
+    """
+    model_mb = int(transcriber.get("mem_mb") or 512)
+    # Per-worker cost = model + working buffers.
+    per_worker_mb = model_mb + 512
+    headroom_mb = max(4096, int(0.30 * total_mb))
+    budget_mb = max(0, available_mb - headroom_mb)
+
+    if transcribe_device == "cuda":
+        workers = 1
+    else:
+        workers = max(1, min(physical_cores, budget_mb // max(1, per_worker_mb)))
+    transcribe_threads = max(1, physical_cores // workers)
+
+    if budget_mb < 4096:
+        batch_size = 16
+    elif budget_mb < 8192:
+        batch_size = 32
+    else:
+        batch_size = 64
+
+    return {
+        "transcribe_workers": int(workers),
+        "transcribe_threads": int(transcribe_threads),
+        "batch_size": int(batch_size),
+    }
 
 
 def log(message):
@@ -215,7 +249,13 @@ def diarize_diarizen(samples, sample_rate, hub, embedding, tuning, num_speakers)
     )
     log("Diarizing...")
     result = pipeline(audio_bytes(samples, sample_rate))
-    return turns_from_annotation(result)
+    turns = turns_from_annotation(result)
+    # Release the diarization model/buffers before Whisper is loaded.
+    del pipeline, result
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    return turns
 
 
 def load_pyannote_segmentation(seg_dir):
@@ -325,7 +365,13 @@ def diarize_pyannote(samples, sample_rate, segmentation, embedding, tuning, num_
     )
     log("Diarizing...")
     result = pipeline(audio_bytes(samples, sample_rate), num_speakers=num_speakers)
-    return turns_from_annotation(result)
+    turns = turns_from_annotation(result)
+    # Release the diarization model/buffers before Whisper is loaded.
+    del pipeline, result
+    gc.collect()
+    if device.type == "cuda":
+        torch.cuda.empty_cache()
+    return turns
 
 
 def run_diarization(samples, sample_rate, descriptor, diarizer_path, embedding, tuning, num_speakers, device):
@@ -549,6 +595,11 @@ def main():
         action="store_true",
         help="emit line-delimited JSON progress events on stdout (logs to stderr)",
     )
+    parser.add_argument(
+        "--auto-tune",
+        action="store_true",
+        help="ignore preset batch/worker tuning and derive them from hardware",
+    )
     args = parser.parse_args()
 
     global PROGRESS_JSON
@@ -572,18 +623,6 @@ def main():
     out_txt = output_base.with_suffix(".txt")
     out_json = output_base.with_suffix(".json")
 
-    tuning = resolved["tuning"]
-    threads = tuning.get("threads") or PHYSICAL_CORES
-    torch.set_num_threads(threads)
-    try:
-        torch.set_num_interop_threads(1)
-    except RuntimeError:
-        pass
-    beam_size = tuning.get("beam_size", 5)
-    batch_size = tuning.get("batch_size", BATCH_SIZE)
-    workers = tuning.get("transcribe_workers", 4) or 1
-    transcribe_threads = tuning.get("transcribe_threads", 0) or max(1, PHYSICAL_CORES // workers)
-
     backends = detect_backends()
     diarization_device = resolve_device(args.device)
     transcribe_device = transcription_device(diarization_device)
@@ -591,6 +630,43 @@ def main():
         compute_type = "float16" if transcribe_device == "cuda" else "int8"
     else:
         compute_type = args.compute_type
+
+    vm = psutil.virtual_memory()
+    auto = auto_tuning(
+        resolved["transcriber"],
+        transcribe_device,
+        vm.available // (1024 * 1024),
+        vm.total // (1024 * 1024),
+        PHYSICAL_CORES,
+    )
+
+    tuning = dict(resolved["tuning"])
+    if args.auto_tune:
+        tuning["batch_size"] = 0
+        tuning["transcribe_workers"] = 0
+        tuning["transcribe_threads"] = 0
+
+    batch_size = tuning.get("batch_size") or auto["batch_size"]
+    workers = tuning.get("transcribe_workers") or auto["transcribe_workers"]
+    transcribe_threads = tuning.get("transcribe_threads") or max(
+        1, PHYSICAL_CORES // max(1, workers)
+    )
+    tuning["batch_size"] = batch_size
+    tuning["transcribe_workers"] = workers
+    tuning["transcribe_threads"] = transcribe_threads
+
+    threads = tuning.get("threads") or PHYSICAL_CORES
+    torch.set_num_threads(threads)
+    try:
+        torch.set_num_interop_threads(1)
+    except RuntimeError:
+        pass
+    beam_size = tuning.get("beam_size", 5)
+    log(
+        f"Auto tuning: batch_size={batch_size}, transcribe_workers={workers}, "
+        f"transcribe_threads={transcribe_threads} "
+        f"(physical_cores={PHYSICAL_CORES}, available={vm.available // (1024 * 1024)} MB)"
+    )
 
     diarizer_path = (
         Path(args.diarizen_hub)
@@ -685,6 +761,8 @@ def main():
             "transcribe_workers": workers,
             "transcribe_threads": transcribe_threads,
             "physical_cores": PHYSICAL_CORES,
+            "auto_tune": args.auto_tune,
+            "auto": auto,
             "tuning": tuning,
             "merge_gap_s": MERGE_GAP_S,
             "min_turn_s": MIN_TURN_S,

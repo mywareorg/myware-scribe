@@ -91,10 +91,17 @@ Presets (default `speed`):
   segmentation step, greedy decoding, all CPU cores. Needs the gated `segmentation-3.0`.
 - **balanced** — `pyannote-seg3` + `wespeaker-resnet34` + `whisper-turbo`.
 - **accuracy** — `diarizen-large` + `wespeaker-resnet34` + `whisper-turbo` (token-free).
+  Its batch size and transcription workers are auto-tuned from the available memory.
+
+Hardware auto-tuning: when a tuning value is `0`/absent (batch size, transcription
+workers/threads), it is derived from the detected CPU, RAM and device — e.g. the
+number of transcription workers is capped so the model (~1.6 GB for `whisper-turbo`)
+is not replicated beyond the free memory. Force it for any preset with `--auto-tune`.
 
 Override any slot with `--diarizer`, `--embedding`, `--transcriber`. Raw path
 overrides: `--whisper-model`, `--diarizen-hub`, `--diarizen-embedding`. Other
-options: `--output`, `--device`, `--compute-type`. The number of speakers is fixed at 2.
+options: `--output`, `--device`, `--compute-type`, `--auto-tune`. The number of
+speakers is fixed at 2.
 
 On CPU, diarization dominates the runtime. Long files are slow because each
 speaker turn is transcribed separately.
