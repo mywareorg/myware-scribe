@@ -469,20 +469,25 @@ impl App {
                 button("Select File").on_press_maybe(can_select.then_some(Message::PickInput)),
                 text(input.clone()),
             ]
-            .spacing(8),
+            .spacing(8)
+            .align_y(iced::Alignment::Center),
             row![
                 button("Save Location").on_press_maybe(can_output.then_some(Message::PickOutput)),
                 text(output.clone()),
             ]
-            .spacing(8),
-            row![text("Preset:"), preset].spacing(8),
+            .spacing(8)
+            .align_y(iced::Alignment::Center),
+            row![text("Preset:"), preset]
+                .spacing(8)
+                .align_y(iced::Alignment::Center),
             row![
                 button("Start").on_press_maybe(can_start.then_some(Message::Start)),
                 button("Cancel").on_press_maybe(can_cancel.then_some(Message::Cancel)),
             ]
-            .spacing(8),
+            .spacing(8)
+            .align_y(iced::Alignment::Center),
         ]
-        .spacing(8);
+        .spacing(16);
 
         let base = column![
             controls,
