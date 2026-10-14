@@ -41,7 +41,7 @@
 - transcribe per speaker turn so whisper timing never sets the speaker
 * Components
 - registry in scripts/components.py (--list to print)
-- presets: speed / balanced / accuracy (default accuracy)
+- presets: speed / balanced / accuracy (default speed)
 - speed: pyannote-seg3 + wespeaker-resnet34 + whisper-base.en (gated seg3)
 - balanced: pyannote-seg3 + wespeaker-resnet34 + whisper-turbo (gated seg3)
 - accuracy: diarizen-large + wespeaker-resnet34 + whisper-turbo (no token)

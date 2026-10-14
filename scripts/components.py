@@ -120,7 +120,7 @@ PRESETS = {
     },
 }
 
-DEFAULT_PRESET = "accuracy"
+DEFAULT_PRESET = "speed"
 
 _CATEGORIES = {
     "diarizer": DIARIZERS,

@@ -3,18 +3,21 @@ use std::fmt;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use iced::widget::{button, column, pick_list, progress_bar, row, text, text_editor};
-use iced::{Element, Length, Subscription, Task};
+use iced::widget::{
+    button, column, container, pick_list, progress_bar, rich_text, row, scrollable, stack, text,
+    text_input,
+};
+use iced::{font, Color, Element, Font, Length, Subscription, Task};
 
 use crate::backend::{self, Event};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Preset {
+    #[default]
     Speed,
     Balanced,
-    #[default]
     Accuracy,
 }
 
@@ -63,6 +66,11 @@ pub enum Message {
     Start,
     Cancel,
     Tick,
+    Close,
+    RenameName1(String),
+    RenameName2(String),
+    RenameSave,
+    RenameCancel,
 }
 
 pub struct App {
@@ -71,8 +79,13 @@ pub struct App {
     preset: Preset,
     stage: String,
     progress: f32,
+    run_start: Option<Instant>,
     status: Status,
-    transcript: text_editor::Content,
+    transcript: String,
+    output_txt: Option<PathBuf>,
+    rename_open: bool,
+    name1: String,
+    name2: String,
     events: Arc<Mutex<VecDeque<Event>>>,
     pid: Arc<AtomicU32>,
     cancelled: Arc<AtomicBool>,
@@ -92,8 +105,13 @@ impl App {
             preset: Preset::default(),
             stage: "idle".to_string(),
             progress: 0.0,
+            run_start: None,
             status: Status::Idle,
-            transcript: text_editor::Content::new(),
+            transcript: String::new(),
+            output_txt: None,
+            rename_open: false,
+            name1: String::new(),
+            name2: String::new(),
             events: Arc::new(Mutex::new(VecDeque::new())),
             pid: Arc::new(AtomicU32::new(0)),
             cancelled: Arc::new(AtomicBool::new(false)),
@@ -157,6 +175,23 @@ impl App {
                 self.drain_events();
                 Task::none()
             }
+            Message::Close => iced::exit(),
+            Message::RenameName1(value) => {
+                self.name1 = value;
+                Task::none()
+            }
+            Message::RenameName2(value) => {
+                self.name2 = value;
+                Task::none()
+            }
+            Message::RenameSave => {
+                self.apply_rename();
+                Task::none()
+            }
+            Message::RenameCancel => {
+                self.rename_open = false;
+                Task::none()
+            }
         }
     }
 
@@ -185,7 +220,12 @@ impl App {
         self.status = Status::Running;
         self.stage = "starting".to_string();
         self.progress = 0.0;
-        self.transcript = text_editor::Content::new();
+        self.run_start = Some(Instant::now());
+        self.transcript.clear();
+        self.output_txt = None;
+        self.rename_open = false;
+        self.name1.clear();
+        self.name2.clear();
         self.cancelled.store(false, Ordering::SeqCst);
 
         backend::spawn(
@@ -208,6 +248,31 @@ impl App {
         self.cancelled.store(true, Ordering::SeqCst);
         self.status = Status::Cancelled;
         self.stage = "cancelled".to_string();
+        self.progress = 0.0;
+        self.run_start = None;
+    }
+
+    fn apply_rename(&mut self) {
+        let name1 = if self.name1.trim().is_empty() {
+            "SPEAKER 1".to_string()
+        } else {
+            self.name1.trim().to_string()
+        };
+        let name2 = if self.name2.trim().is_empty() {
+            "SPEAKER 2".to_string()
+        } else {
+            self.name2.trim().to_string()
+        };
+
+        self.transcript = self
+            .transcript
+            .replace("SPEAKER 1", &name1)
+            .replace("SPEAKER 2", &name2);
+
+        if let Some(path) = &self.output_txt {
+            let _ = std::fs::write(path, &self.transcript);
+        }
+        self.rename_open = false;
     }
 
     fn drain_events(&mut self) {
@@ -229,8 +294,12 @@ impl App {
                     self.progress = 1.0;
                     self.status = Status::Done;
                     if let Ok(contents) = std::fs::read_to_string(&txt) {
-                        self.transcript = text_editor::Content::with_text(&contents);
+                        self.transcript = contents;
                     }
+                    self.output_txt = Some(PathBuf::from(&txt));
+                    self.name1.clear();
+                    self.name2.clear();
+                    self.rename_open = true;
                 }
                 Event::Error { message } => {
                     self.stage = "error".to_string();
@@ -248,6 +317,41 @@ impl App {
             Status::Cancelled => "cancelled".to_string(),
             Status::Error(message) => format!("error: {message}"),
         }
+    }
+
+    fn elapsed(&self) -> Option<String> {
+        if !matches!(self.status, Status::Running | Status::Done) {
+            return None;
+        }
+        let start = self.run_start?;
+        Some(format_secs(start.elapsed().as_secs_f64()))
+    }
+
+    fn status_line(&self) -> String {
+        let base = format!("{} — {}", self.stage, self.status_text());
+        match self.elapsed() {
+            Some(elapsed) => format!("{base} · {elapsed}"),
+            None => base,
+        }
+    }
+
+    /// Transcript lines with the timestamp and speaker name in bold.
+    fn transcript_spans(&self) -> Vec<text::Span<'static, Message>> {
+        let bold = Font {
+            weight: font::Weight::Bold,
+            ..Font::default()
+        };
+        let mut spans: Vec<text::Span<'static, Message>> = Vec::new();
+        for line in self.transcript.lines() {
+            match line.split_once(": ") {
+                Some((head, rest)) => {
+                    spans.push(text::Span::new(format!("{head}: ")).font(bold).color(Color::BLACK));
+                    spans.push(text::Span::new(format!("{rest}\n")).color(Color::BLACK));
+                }
+                None => spans.push(text::Span::new(format!("{line}\n")).color(Color::BLACK)),
+            }
+        }
+        spans
     }
 
     pub fn view(&self) -> Element<'_, Message> {
@@ -271,16 +375,90 @@ impl App {
         ]
         .spacing(8);
 
-        column![
+        let base = column![
             controls,
             text(format!("Input: {input}")),
             text(format!("Output: {output}")),
             progress_bar(0.0..=1.0, self.progress),
-            text(format!("{} — {}", self.stage, self.status_text())),
-            text_editor(&self.transcript).height(Length::Fill),
+            text(self.status_line()),
+            container(
+                scrollable(rich_text(self.transcript_spans()))
+                    .height(Length::Fill)
+                    .width(Length::Fill)
+                    .style(|theme, status| {
+                        let mut style = scrollable::default(theme, status);
+                        let visible = matches!(
+                            status,
+                            scrollable::Status::Hovered { .. } | scrollable::Status::Dragged { .. }
+                        );
+                        style.vertical_rail.scroller.color = if visible {
+                            Color::from_rgba(0.0, 0.0, 0.0, 0.5)
+                        } else {
+                            Color::TRANSPARENT
+                        };
+                        style
+                    }),
+            )
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .style(|_theme| container::Style {
+                background: Some(Color::WHITE.into()),
+                ..container::Style::default()
+            }),
+            row![button("Close").on_press(Message::Close)],
         ]
         .spacing(8)
-        .padding(12)
-        .into()
+        .padding(12);
+
+        if !self.rename_open {
+            return base.into();
+        }
+
+        let dialog = container(
+            column![
+                text("Rename speakers"),
+                text_input("SPEAKER 1", &self.name1)
+                    .on_input(Message::RenameName1)
+                    .width(Length::Fill),
+                text_input("SPEAKER 2", &self.name2)
+                    .on_input(Message::RenameName2)
+                    .width(Length::Fill),
+                row![
+                    button("Cancel").on_press(Message::RenameCancel),
+                    button("Save").on_press(Message::RenameSave),
+                ]
+                .spacing(8),
+            ]
+            .spacing(8)
+            .width(Length::Fixed(320.0)),
+        )
+        .padding(16)
+        .style(|_theme| container::Style {
+            background: Some(Color::WHITE.into()),
+            ..container::Style::default()
+        });
+
+        let overlay = container(dialog)
+            .center(Length::Fill)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .style(|_theme| container::Style {
+                background: Some(Color::from_rgba(0.0, 0.0, 0.0, 0.4).into()),
+                ..container::Style::default()
+            });
+
+        stack![base, overlay].into()
+    }
+}
+
+fn format_secs(secs: f64) -> String {
+    let total = secs.max(0.0).round() as u64;
+    let hours = total / 3600;
+    let minutes = (total % 3600) / 60;
+    let seconds = total % 60;
+    if hours > 0 {
+        format!("{hours}:{minutes:02}:{seconds:02}")
+    } else {
+        format!("{minutes}:{seconds:02}")
     }
 }

@@ -85,7 +85,7 @@ All other models are public.
 .venv/bin/python scripts/transiel.py --diarizer diarizen-base --transcriber whisper-base-en audio.mp3
 ```
 
-Presets (default `accuracy`):
+Presets (default `speed`):
 
 - **speed** — `pyannote-seg3` + `wespeaker-resnet34` + `whisper-base-en`; larger
   segmentation step, greedy decoding, all CPU cores. Needs the gated `segmentation-3.0`.
