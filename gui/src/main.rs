@@ -7,5 +7,6 @@ fn main() -> iced::Result {
     iced::application("transiel", App::update, App::view)
         .theme(App::theme)
         .subscription(App::subscription)
+        .window(App::window_settings())
         .run()
 }

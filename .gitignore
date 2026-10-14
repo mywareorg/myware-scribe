@@ -4,3 +4,4 @@ __pycache__/
 *-transcribed.txt
 *-transcribed.json
 gui/target/
+.cache/

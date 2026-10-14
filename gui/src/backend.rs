@@ -41,6 +41,7 @@ pub struct Stats {
 
 #[derive(Debug, serde::Deserialize)]
 #[serde(tag = "event")]
+#[allow(dead_code)]
 pub enum Event {
     #[serde(rename = "stage")]
     Stage { stage: String, label: String, progress: f32 },
@@ -218,6 +219,8 @@ pub fn spawn(
     preset: &'static str,
     timestamps: bool,
     join_speaker: bool,
+    num_speakers: Option<i32>,
+    cache: bool,
     events: Arc<Mutex<VecDeque<Event>>>,
     pid: Arc<AtomicU32>,
     cancelled: Arc<AtomicBool>,
@@ -241,6 +244,17 @@ pub fn spawn(
         }
         if join_speaker {
             command.arg("--join-speaker");
+        }
+        match num_speakers {
+            Some(count) => {
+                command.arg("--num-speakers").arg(count.to_string());
+            }
+            None => {
+                command.arg("--auto-speakers");
+            }
+        }
+        if !cache {
+            command.arg("--no-cache");
         }
 
         #[cfg(windows)]
