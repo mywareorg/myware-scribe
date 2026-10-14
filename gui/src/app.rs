@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 use std::fmt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -14,6 +14,43 @@ use iced::widget::{
 use iced::{font, Color, Element, Font, Length, Subscription, Task};
 
 use crate::backend::{self, Event};
+
+const AUDIO_EXTS: &[&str] = &[
+    "mp3", "wav", "m4a", "aac", "flac", "ogg", "opus", "wma", "mp4", "mkv", "mov", "webm", "avi",
+];
+
+#[derive(Debug, Clone, PartialEq)]
+enum ItemStatus {
+    Pending,
+    Running,
+    Done(PathBuf),
+    Failed(String),
+}
+
+#[derive(Debug, Clone)]
+struct QueueItem {
+    path: PathBuf,
+    status: ItemStatus,
+}
+
+fn is_audio(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .map(|e| AUDIO_EXTS.iter().any(|ext| e.eq_ignore_ascii_case(ext)))
+        .unwrap_or(false)
+}
+
+fn audio_files_in(dir: &Path) -> Vec<PathBuf> {
+    let mut files: Vec<PathBuf> = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.is_file() && is_audio(path))
+        .collect();
+    files.sort();
+    files
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Preset {
@@ -142,6 +179,12 @@ pub enum Message {
     PickImport,
     ImportPicked(Option<PathBuf>),
     ImportLoaded(Option<String>),
+    AddFiles,
+    FilesPicked(Option<Vec<PathBuf>>),
+    AddFolder,
+    FolderPicked(Option<PathBuf>),
+    RemoveItem(usize),
+    ClearQueue,
 }
 
 pub struct App {
@@ -171,6 +214,9 @@ pub struct App {
     events: Arc<Mutex<VecDeque<Event>>>,
     pid: Arc<AtomicU32>,
     cancelled: Arc<AtomicBool>,
+    queue: Vec<QueueItem>,
+    batch: bool,
+    current: Option<usize>,
 }
 
 impl Default for App {
@@ -213,6 +259,9 @@ impl App {
             events: Arc::new(Mutex::new(VecDeque::new())),
             pid: Arc::new(AtomicU32::new(0)),
             cancelled: Arc::new(AtomicBool::new(false)),
+            queue: Vec::new(),
+            batch: false,
+            current: None,
         }
     }
 
@@ -367,6 +416,50 @@ impl App {
                 }
                 Task::none()
             }
+            Message::AddFiles => Task::perform(
+                async {
+                    rfd::FileDialog::new()
+                        .add_filter("Audio/Video", AUDIO_EXTS)
+                        .pick_files()
+                },
+                Message::FilesPicked,
+            ),
+            Message::FilesPicked(paths) => {
+                if let Some(paths) = paths {
+                    self.add_paths(paths);
+                }
+                Task::none()
+            }
+            Message::AddFolder => Task::perform(
+                async { rfd::FileDialog::new().pick_folder() },
+                Message::FolderPicked,
+            ),
+            Message::FolderPicked(dir) => {
+                if let Some(dir) = dir {
+                    self.add_paths(audio_files_in(&dir));
+                }
+                Task::none()
+            }
+            Message::RemoveItem(index) => {
+                if !matches!(self.status, Status::Running) && index < self.queue.len() {
+                    self.queue.remove(index);
+                    if let Some(current) = self.current.as_mut() {
+                        if *current == index {
+                            self.current = None;
+                        } else if *current > index {
+                            *current -= 1;
+                        }
+                    }
+                }
+                Task::none()
+            }
+            Message::ClearQueue => {
+                if !matches!(self.status, Status::Running) {
+                    self.queue.clear();
+                    self.current = None;
+                }
+                Task::none()
+            }
             Message::OpenSummary => {
                 if self.stats.is_some() {
                     self.rename_open = true;
@@ -484,7 +577,96 @@ impl App {
         }
     }
 
+    fn add_paths(&mut self, paths: Vec<PathBuf>) {
+        for path in paths {
+            if self.queue.iter().any(|item| item.path == path) {
+                continue;
+            }
+            self.queue.push(QueueItem {
+                path,
+                status: ItemStatus::Pending,
+            });
+        }
+    }
+
     fn start(&mut self) {
+        if self
+            .queue
+            .iter()
+            .any(|item| matches!(item.status, ItemStatus::Pending))
+        {
+            self.batch = true;
+            self.transcript.clear();
+            self.output_txt = None;
+            self.stats = None;
+            self.rename_open = false;
+            self.name1.clear();
+            self.name2.clear();
+            self.cancelled.store(false, Ordering::SeqCst);
+            self.run_next();
+        } else {
+            self.batch = false;
+            self.start_single();
+        }
+    }
+
+    /// Run the next pending queue item, or finish the batch when none remain.
+    fn run_next(&mut self) {
+        let Some(index) = self
+            .queue
+            .iter()
+            .position(|item| matches!(item.status, ItemStatus::Pending))
+        else {
+            self.batch = false;
+            self.current = None;
+            self.status = Status::Done;
+            self.stage = "done".to_string();
+            self.progress = 1.0;
+            self.progress_shown = 1.0;
+            return;
+        };
+
+        let input = self.queue[index].path.clone();
+
+        let Some(root) = backend::repo_root() else {
+            self.queue[index].status =
+                ItemStatus::Failed("cannot locate repo root".to_string());
+            return self.run_next();
+        };
+        let python = backend::venv_python(&root);
+        if !python.is_file() {
+            self.queue[index].status =
+                ItemStatus::Failed("python not found; run scripts/bootstrap.py".to_string());
+            return self.run_next();
+        }
+
+        let base = backend::output_base(self.output_dir.as_deref(), &input);
+
+        self.queue[index].status = ItemStatus::Running;
+        self.current = Some(index);
+        self.status = Status::Running;
+        self.stage = "starting".to_string();
+        self.progress = 0.0;
+        self.progress_shown = 0.0;
+        self.run_start = Some(Instant::now());
+        self.elapsed_final = None;
+        self.cancelled.store(false, Ordering::SeqCst);
+
+        backend::spawn(
+            python,
+            root,
+            input,
+            base,
+            self.preset.arg(),
+            self.timestamps,
+            self.join_speaker,
+            self.events.clone(),
+            self.pid.clone(),
+            self.cancelled.clone(),
+        );
+    }
+
+    fn start_single(&mut self) {
         let Some(input) = self.input.clone() else {
             self.status = Status::Error("select an audio file first".to_string());
             return;
@@ -546,6 +728,10 @@ impl App {
         self.progress_shown = 0.0;
         self.run_start = None;
         self.elapsed_final = None;
+        self.batch = false;
+        if let Some(index) = self.current.take() {
+            self.queue[index].status = ItemStatus::Failed("cancelled".to_string());
+        }
     }
 
     fn apply_rename(&mut self) {
@@ -593,21 +779,35 @@ impl App {
                     self.progress = 1.0;
                     self.progress_shown = 1.0;
                     self.elapsed_final = self.run_start.map(|s| s.elapsed().as_secs_f64());
-                    self.status = Status::Done;
-                    self.stats = Some(stats);
                     if let Ok(contents) = std::fs::read_to_string(&txt) {
                         self.transcript = contents;
                     }
                     self.output_txt = Some(PathBuf::from(&txt));
-                    self.name1.clear();
-                    self.name2.clear();
-                    self.rename_open = true;
-                    self.rename_focus = 0;
-                    self.focus_pending = true;
+                    self.stats = Some(stats);
+                    if self.batch {
+                        if let Some(index) = self.current.take() {
+                            self.queue[index].status = ItemStatus::Done(PathBuf::from(&txt));
+                        }
+                        self.run_next();
+                    } else {
+                        self.status = Status::Done;
+                        self.name1.clear();
+                        self.name2.clear();
+                        self.rename_open = true;
+                        self.rename_focus = 0;
+                        self.focus_pending = true;
+                    }
                 }
                 Event::Error { message } => {
                     self.stage = "error".to_string();
-                    self.status = Status::Error(message);
+                    if self.batch {
+                        if let Some(index) = self.current.take() {
+                            self.queue[index].status = ItemStatus::Failed(message);
+                        }
+                        self.run_next();
+                    } else {
+                        self.status = Status::Error(message);
+                    }
                 }
             }
         }
@@ -745,10 +945,15 @@ impl App {
 
         let running = matches!(self.status, Status::Running);
         let has_input = self.input.is_some();
+        let pending = self
+            .queue
+            .iter()
+            .any(|item| matches!(item.status, ItemStatus::Pending));
+        let has_queue = !self.queue.is_empty();
         let can_select = !running;
         let can_output = !running && has_input;
         let can_preset = !running && has_input;
-        let can_start = !running && has_input;
+        let can_start = !running && (has_input || pending);
         let can_cancel = running;
 
         let preset: Element<Message> = if can_preset {
@@ -816,6 +1021,63 @@ impl App {
         ]
         .spacing(16);
 
+        let mut queue_list = column![].spacing(4).width(Length::Fill);
+        for (index, item) in self.queue.iter().enumerate() {
+            let (glyph, color) = match &item.status {
+                ItemStatus::Pending => ("\u{2022}", scheme.ink),
+                ItemStatus::Running => ("\u{25b6}", scheme.blue),
+                ItemStatus::Done(_) => ("\u{2713}", Color::from_rgb(0.3, 0.72, 0.42)),
+                ItemStatus::Failed(_) => ("\u{2717}", scheme.pink),
+            };
+            let name = item
+                .path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| item.path.display().to_string());
+            let detail = match &item.status {
+                ItemStatus::Failed(message) => format!(" \u{2014} {message}"),
+                _ => String::new(),
+            };
+            queue_list = queue_list.push(
+                row![
+                    text(glyph.to_string()).style(move |_theme| text::Style { color: Some(color) }),
+                    text(format!("{name}{detail}")).width(Length::Fill),
+                    button("\u{00d7}")
+                        .on_press_maybe(can_select.then_some(Message::RemoveItem(index)))
+                        .style(pill_button_secondary),
+                ]
+                .spacing(8)
+                .align_y(iced::Alignment::Center),
+            );
+        }
+
+        let mut queue_col = column![
+            row![
+                button("Add Files")
+                    .on_press_maybe(can_select.then_some(Message::AddFiles))
+                    .style(color_button(scheme.blue, scheme.ink)),
+                button("Add Folder")
+                    .on_press_maybe(can_select.then_some(Message::AddFolder))
+                    .style(color_button(scheme.blue, scheme.ink)),
+                button("Clear")
+                    .on_press_maybe((!running && has_queue).then_some(Message::ClearQueue))
+                    .style(color_button(scheme.pink, scheme.ink)),
+            ]
+            .spacing(8)
+            .align_y(iced::Alignment::Center),
+        ]
+        .spacing(6);
+
+        if has_queue {
+            queue_col = queue_col.push(
+                scrollable(queue_list)
+                    .height(Length::Fixed(140.0))
+                    .width(Length::Fill),
+            );
+        }
+
+        controls = controls.push(queue_col);
+
         if self.advanced_open {
             controls = controls.push(
                 column![
@@ -855,7 +1117,7 @@ impl App {
 
         controls = controls.push(
             row![
-                button("Start")
+                button(if pending { "Start Queue" } else { "Start" })
                     .on_press_maybe(can_start.then_some(Message::Start))
                     .style(color_button(scheme.blue, scheme.ink)),
                 button("Summary")
