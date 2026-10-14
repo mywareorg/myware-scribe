@@ -140,39 +140,42 @@ impl fmt::Display for SpeakerOpt {
 /// Playback speed multiplier options.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Speed {
-    X1,
-    X2,
-    X4,
-    X8,
+    Half,
+    One,
+    OneHalf,
+    Two,
 }
 
 impl Speed {
-    const ALL: [Speed; 4] = [Speed::X1, Speed::X2, Speed::X4, Speed::X8];
+    const ALL: [Speed; 4] = [Speed::Half, Speed::One, Speed::OneHalf, Speed::Two];
 
     fn factor(self) -> f32 {
         match self {
-            Speed::X1 => 1.0,
-            Speed::X2 => 2.0,
-            Speed::X4 => 4.0,
-            Speed::X8 => 8.0,
+            Speed::Half => 0.5,
+            Speed::One => 1.0,
+            Speed::OneHalf => 1.5,
+            Speed::Two => 2.0,
         }
     }
 
     fn from_factor(factor: f32) -> Self {
-        match factor as i32 {
-            2 => Speed::X2,
-            4 => Speed::X4,
-            8 => Speed::X8,
-            _ => Speed::X1,
+        if (factor - 0.5).abs() < 0.01 {
+            Speed::Half
+        } else if (factor - 1.5).abs() < 0.01 {
+            Speed::OneHalf
+        } else if (factor - 2.0).abs() < 0.01 {
+            Speed::Two
+        } else {
+            Speed::One
         }
     }
 
     fn label(self) -> &'static str {
         match self {
-            Speed::X1 => "1x",
-            Speed::X2 => "2x",
-            Speed::X4 => "4x",
-            Speed::X8 => "8x",
+            Speed::Half => ".5x",
+            Speed::One => "1x",
+            Speed::OneHalf => "1.5x",
+            Speed::Two => "2x",
         }
     }
 }
@@ -400,6 +403,7 @@ pub struct App {
     search_query: String,
     search_index: usize,
     playback_speed: f32,
+    last_tick: Option<Instant>,
     edit_open: bool,
     edit_index: Option<usize>,
     edit_text: String,
@@ -474,6 +478,7 @@ impl App {
             search_query: String::new(),
             search_index: 0,
             playback_speed: 1.0,
+            last_tick: None,
             edit_open: false,
             edit_index: None,
             edit_text: String::new(),
@@ -622,6 +627,9 @@ impl App {
                 Task::none()
             }
             Message::ToggleAdvanced => {
+                if self.queue.is_empty() {
+                    return Task::none();
+                }
                 self.advanced_open = !self.advanced_open;
                 Task::none()
             }
@@ -692,8 +700,9 @@ impl App {
             Message::Seek(seconds) => {
                 let max = self.timeline_duration.unwrap_or(0.0).max(0.0);
                 self.playhead = seconds.clamp(0.0, max);
+                self.last_tick = Some(Instant::now());
                 if let Some(player) = &self.player {
-                    player.seek(self.playhead);
+                    player.seek(self.playhead, self.playback_speed);
                 }
                 Task::none()
             }
@@ -704,11 +713,18 @@ impl App {
                         if let Some(path) = self.peaks_for.clone() {
                             self.player = Player::new(&path);
                         }
+                        if let Some(player) = &self.player {
+                            player.seek(self.playhead, self.playback_speed);
+                        }
+                    }
+                    if self.player.as_ref().is_some_and(|player| player.finished()) {
+                        self.playhead = 0.0;
                     }
                     if let Some(player) = &self.player {
                         player.set_speed(self.playback_speed);
                         player.toggle();
                     }
+                    self.last_tick = Some(Instant::now());
                 }
                 Task::none()
             }
@@ -805,11 +821,18 @@ impl App {
                         if let Some(path) = self.peaks_for.clone() {
                             self.player = Player::new(&path);
                         }
+                        if let Some(player) = &self.player {
+                            player.seek(self.playhead, self.playback_speed);
+                        }
+                    }
+                    if self.player.as_ref().is_some_and(|player| player.finished()) {
+                        self.playhead = 0.0;
                     }
                     if let Some(player) = &self.player {
                         player.set_speed(self.playback_speed);
                         player.toggle();
                     }
+                    self.last_tick = Some(Instant::now());
                 }
                 Task::none()
             }
@@ -821,8 +844,9 @@ impl App {
                     let max = self.timeline_duration.unwrap_or(0.0).max(0.0);
                     self.playhead = (self.playhead + delta).clamp(0.0, max);
                     let playhead = self.playhead;
+                    self.last_tick = Some(Instant::now());
                     if let Some(player) = &self.player {
-                        player.seek(playhead);
+                        player.seek(playhead, self.playback_speed);
                     }
                 }
                 Task::none()
@@ -969,9 +993,19 @@ impl App {
                 self.progress_shown = self.progress_shown.clamp(0.0, 1.0);
                 if let Some(player) = &self.player {
                     if player.is_playing() {
-                        self.playhead = player.position();
-                    } else if player.finished() {
-                        self.playhead = self.timeline_duration.unwrap_or(self.playhead);
+                        let now = Instant::now();
+                        if let Some(last) = self.last_tick {
+                            let dt = (now - last).as_secs_f32();
+                            let limit = self.timeline_duration.unwrap_or(f32::MAX);
+                            self.playhead =
+                                (self.playhead + dt * self.playback_speed).min(limit);
+                        }
+                        self.last_tick = Some(now);
+                    } else {
+                        self.last_tick = None;
+                        if player.finished() {
+                            self.playhead = self.timeline_duration.unwrap_or(self.playhead);
+                        }
                     }
                 }
                 if self.lock_text {
@@ -1364,15 +1398,9 @@ impl App {
                     format!("Total run time: {}", format_secs(s.run_seconds)),
                     format!("Audio length: {}", format_secs(s.audio_seconds)),
                     format!("Speed: {:.1}\u{00d7} realtime", speed),
-                    format!("Segments: {}", s.lines),
                     format!("Speakers: {speakers}"),
                     format!("Preset: {}", s.preset),
-                    format!("Diarizer: {}", s.diarizer),
-                    format!("Transcriber: {}", s.transcriber),
                 ];
-                if s.cache_hit {
-                    lines.push("Diarization cache: hit".to_string());
-                }
                 if !s.speaker_stats.is_empty() {
                     let mut stats: Vec<(&String, &backend::SpeakerStat)> =
                         s.speaker_stats.iter().collect();
@@ -1516,28 +1544,32 @@ impl App {
         result
     }
 
-    /// Waveform/speaker timeline strip, or `None` before audio is probed.
-    fn timeline_element(&self, scheme: &Scheme) -> Option<Element<'_, Message>> {
-        let duration = self.timeline_duration?;
-        if self.peaks.is_empty() || duration <= 0.0 {
-            return None;
-        }
+    /// Waveform/speaker timeline strip (greyed out until audio is probed).
+    fn timeline_element(&self, scheme: &Scheme) -> Element<'_, Message> {
+        let duration = self.timeline_duration.unwrap_or(0.0);
+        let enabled = duration > 0.0 && !self.peaks.is_empty();
         let program = Timeline {
             peaks: self.peaks.clone(),
-            turns: Arc::new(self.speaker_turns(scheme)),
+            turns: Arc::new(if enabled {
+                self.speaker_turns(scheme)
+            } else {
+                Vec::new()
+            }),
             duration,
             playhead: self.playhead,
             track: scheme.track,
             wave: scheme.blue,
             playhead_color: scheme.ink,
+            enabled,
         };
-        Some(with_tip(
-            canvas(program)
-                .width(Length::Fill)
-                .height(Length::Fixed(TIMELINE_HEIGHT)),
-            "Click or drag to seek",
-            scheme,
-        ))
+        let strip = canvas(program)
+            .width(Length::Fill)
+            .height(Length::Fixed(TIMELINE_HEIGHT));
+        if enabled {
+            with_tip(strip, "Click or drag to seek", scheme)
+        } else {
+            strip.into()
+        }
     }
 
     fn speaker_turns(&self, scheme: &Scheme) -> Vec<TimelineTurn> {
@@ -1568,28 +1600,66 @@ impl App {
         let duration = self.timeline_duration.unwrap_or(0.0).max(0.0);
         let ready = duration > 0.0 && self.peaks_for.is_some();
         let playing = self.player.as_ref().is_some_and(|player| player.is_playing());
-        let play_button = button(
-            canvas(PlayPause {
-                playing,
-                color: scheme.ink,
-            })
-            .width(Length::Fixed(12.0))
-            .height(Length::Fixed(12.0)),
-        )
-        .on_press_maybe(ready.then_some(Message::PlayerToggle))
-        .style(pill_button_secondary);
+        let glyph = if ready { scheme.ink } else { MUTED };
+
+        let play_button: Element<Message> = if ready {
+            button(
+                canvas(PlayPause {
+                    playing,
+                    color: glyph,
+                })
+                .width(Length::Fixed(12.0))
+                .height(Length::Fixed(12.0)),
+            )
+            .on_press(Message::PlayerToggle)
+            .style(pill_button_secondary)
+            .into()
+        } else {
+            button(
+                canvas(PlayPause {
+                    playing: false,
+                    color: glyph,
+                })
+                .width(Length::Fixed(12.0))
+                .height(Length::Fixed(12.0)),
+            )
+            .style(greyed_button)
+            .into()
+        };
+
+        let time_color = if ready { scheme.ink } else { MUTED };
         let time = text(format!(
             "{} / {}",
             format_secs(self.playhead as f64),
             format_secs(duration as f64)
         ))
-        .size(12);
-        let speed = pick_list(
-            Speed::ALL,
-            Some(Speed::from_factor(self.playback_speed)),
-            Message::SpeedChanged,
-        )
-        .style(pill_pick);
+        .size(12)
+        .style(move |_theme| text::Style {
+            color: Some(time_color),
+        });
+
+        let speed: Element<Message> = if ready {
+            pick_list(
+                Speed::ALL,
+                Some(Speed::from_factor(self.playback_speed)),
+                Message::SpeedChanged,
+            )
+            .style(speed_pick)
+            .into()
+        } else {
+            stack![
+                pick_list(Speed::ALL, Some(Speed::One), Message::SpeedChanged).style(greyed_pick),
+                mouse_area(
+                    container(horizontal_space())
+                        .width(Length::Fill)
+                        .height(Length::Fill),
+                )
+                .interaction(mouse::Interaction::Idle)
+                .on_press(Message::Tick),
+            ]
+            .into()
+        };
+
         with_tip(
             row![play_button, time, speed]
                 .spacing(8)
@@ -1635,7 +1705,7 @@ impl App {
             .output_dir
             .as_ref()
             .map(|p| p.display().to_string())
-            .unwrap_or_else(|| "(default: alongside each audio file)".to_string());
+            .unwrap_or_else(|| "(Default: audio source directory)".to_string());
 
         let running = matches!(self.status, Status::Running);
         let pending = self
@@ -1643,6 +1713,7 @@ impl App {
             .iter()
             .any(|item| matches!(item.status, ItemStatus::Pending));
         let has_queue = !self.queue.is_empty();
+        let can_advanced = has_queue;
         let can_add = !running;
         let can_output = !running && has_queue;
         let can_preset = !running && has_queue;
@@ -1656,22 +1727,15 @@ impl App {
         } else {
             // Keep the real pick_list (so iced draws its arrow) but put a
             // click-capturing layer on top so it cannot be opened.
-            let greyed = |theme: &iced::Theme, status: pick_list::Status| {
-                let mut style = pick_list::default(theme, status);
-                let grey = Color::from_rgb(0.55, 0.55, 0.55);
-                style.text_color = grey;
-                style.handle_color = grey;
-                style.background = Color::from_rgb(0.9, 0.9, 0.9).into();
-                style.border.radius = PILL.into();
-                style
-            };
             stack![
-                pick_list(Preset::ALL, Some(self.preset), Message::PresetChanged).style(greyed),
+                pick_list(Preset::ALL, Some(self.preset), Message::PresetChanged)
+                    .style(greyed_pick),
                 mouse_area(
                     container(horizontal_space())
                         .width(Length::Fill)
                         .height(Length::Fill),
                 )
+                .interaction(mouse::Interaction::Idle)
                 .on_press(Message::Tick),
             ]
             .into()
@@ -1683,7 +1747,7 @@ impl App {
                     button("Save Location")
                         .on_press_maybe(can_output.then_some(Message::PickOutput))
                         .style(color_button(scheme.blue, scheme.ink)),
-                    "Choose where transcripts are written (default: alongside each file)",
+                    "Choose where transcripts are written (Default: audio source directory)",
                     &scheme,
                 ),
                 text(output.clone()),
@@ -1702,8 +1766,14 @@ impl App {
                         .spacing(4)
                         .align_y(iced::Alignment::Center),
                     )
-                    .on_press(Message::ToggleAdvanced)
-                    .style(pill_button_secondary),
+                    .on_press_maybe(can_advanced.then_some(Message::ToggleAdvanced))
+                    .style(move |theme: &iced::Theme, status| {
+                        if can_advanced {
+                            pill_button_secondary(theme, status)
+                        } else {
+                            greyed_button(theme, status)
+                        }
+                    }),
                     "Show extra options",
                     &scheme,
                 ),
@@ -1804,7 +1874,7 @@ impl App {
             );
         }
 
-        if self.advanced_open {
+        if self.advanced_open && can_advanced {
             controls = controls.push(
                 column![
                     with_tip(
@@ -1916,15 +1986,6 @@ impl App {
                     &scheme,
                 ),
                 with_tip(
-                    button("Summary")
-                        .on_press_maybe(
-                            (!running && self.stats.is_some()).then_some(Message::OpenSummary)
-                        )
-                        .style(color_button(scheme.pink, scheme.ink)),
-                    "Show the last run summary and rename speakers",
-                    &scheme,
-                ),
-                with_tip(
                     button("Cancel")
                         .on_press_maybe(can_cancel.then_some(Message::Cancel))
                         .style(color_button(scheme.pink, scheme.ink)),
@@ -1936,7 +1997,7 @@ impl App {
             .align_y(iced::Alignment::Center),
         );
 
-        let mut status_row = row![
+        let status_row = row![
             text(self.elapsed().unwrap_or_default()).width(Length::Fixed(70.0)),
             stack![
                 progress_bar(0.0..=1.0, self.progress_shown)
@@ -1956,39 +2017,18 @@ impl App {
         .spacing(8)
         .align_y(iced::Alignment::Center);
 
-        if self.stats.as_ref().is_some_and(|stats| stats.cache_hit) {
-            status_row = status_row.push(with_tip(
-                container(text("cache hit").size(12))
-                    .padding([3, 8])
-                    .style(move |_theme| container::Style {
-                        background: Some(scheme.blue.into()),
-                        text_color: Some(scheme.ink),
-                        border: iced::border::rounded(PILL),
-                        ..container::Style::default()
-                    }),
-                "Diarization was reused from the cache for this run",
-                &scheme,
-            ));
-        }
-
         let mut middle = column![status_row].spacing(8).width(Length::Fill);
-        let timeline = self.timeline_element(&scheme);
-        let mut playback = if timeline.is_some() {
-            row![self.player_element(&scheme), horizontal_space()]
-                .spacing(8)
-                .align_y(iced::Alignment::Center)
-                .width(Length::Fill)
-        } else {
-            row![horizontal_space()]
-                .spacing(8)
-                .align_y(iced::Alignment::Center)
-                .width(Length::Fill)
-        };
-        playback = playback.push(self.search_element(&scheme));
-        if let Some(timeline) = timeline {
-            middle = middle.push(timeline);
-        }
-        middle = middle.push(playback);
+        middle = middle.push(self.timeline_element(&scheme));
+        middle = middle.push(
+            row![
+                self.player_element(&scheme),
+                horizontal_space(),
+                self.search_element(&scheme),
+            ]
+            .spacing(8)
+            .align_y(iced::Alignment::Center)
+            .width(Length::Fill),
+        );
 
         let base = column![
             text("Transiel").size(32),
@@ -2006,6 +2046,16 @@ impl App {
             container(
                 row![
                     with_tip(
+                        button("Summary")
+                            .on_press_maybe(
+                                (!running && self.stats.is_some()).then_some(Message::OpenSummary)
+                            )
+                            .style(color_button(scheme.pink, scheme.ink)),
+                        "Show the last run summary and rename speakers",
+                        &scheme,
+                    ),
+                    horizontal_space(),
+                    with_tip(
                         button("Import Transcription")
                             .on_press_maybe((!running).then_some(Message::PickImport))
                             .style(color_button(scheme.blue, scheme.ink)),
@@ -2021,8 +2071,7 @@ impl App {
                 .spacing(8)
                 .align_y(iced::Alignment::Center),
             )
-            .width(Length::Fill)
-            .align_x(iced::Alignment::End),
+            .width(Length::Fill),
         ]
         .spacing(8)
         .padding(12);
@@ -2122,7 +2171,7 @@ impl App {
         for line in self.stats_lines() {
             col = col.push(text(line));
         }
-        col = col.push(text("Rename speakers").size(20));
+        col = col.push(text("Rename Speakers").size(20));
         col = col.push(
             text_input("SPEAKER 1", &self.name1)
                 .id(name1_id())
@@ -2195,6 +2244,7 @@ struct Timeline {
     track: Color,
     wave: Color,
     playhead_color: Color,
+    enabled: bool,
 }
 
 impl Timeline {
@@ -2217,6 +2267,9 @@ impl canvas::Program<Message> for Timeline {
         cursor: mouse::Cursor,
     ) -> (canvas::event::Status, Option<Message>) {
         use canvas::event::Status;
+        if !self.enabled {
+            return (Status::Ignored, None);
+        }
         match event {
             canvas::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
                 if let Some(position) = cursor.position_in(bounds) {
@@ -2371,10 +2424,6 @@ impl Player {
         self.sink.empty()
     }
 
-    fn position(&self) -> f32 {
-        self.sink.get_pos().as_secs_f32()
-    }
-
     fn toggle(&self) {
         self.rebuild_if_empty();
         if self.sink.empty() {
@@ -2387,9 +2436,13 @@ impl Player {
         }
     }
 
-    fn seek(&self, seconds: f32) {
+    /// Seek to an audio-timeline position. rodio's `try_seek` works in
+    /// real-time units (it multiplies by the speed factor internally), so the
+    /// requested audio position is divided by the current speed.
+    fn seek(&self, seconds: f32, speed: f32) {
         self.rebuild_if_empty();
-        let _ = self.sink.try_seek(Duration::from_secs_f32(seconds.max(0.0)));
+        let real = seconds.max(0.0) / speed.max(0.01);
+        let _ = self.sink.try_seek(Duration::from_secs_f32(real));
     }
 
     fn set_speed(&self, factor: f32) {
@@ -2616,7 +2669,7 @@ fn sms_row(
         .padding(6)
         .style(move |_theme| container::Style {
             background: Some(background.into()),
-            border: iced::border::rounded(8.0),
+            border: iced::border::rounded(PILL),
             ..container::Style::default()
         });
     if left {
@@ -2670,6 +2723,57 @@ fn pill_input(theme: &iced::Theme, status: text_input::Status) -> text_input::St
 
 fn pill_pick(theme: &iced::Theme, status: pick_list::Status) -> pick_list::Style {
     let mut style = pick_list::default(theme, status);
+    style.border.radius = PILL.into();
+    style
+}
+
+/// Borderless pick list whose colours mirror the secondary (Advanced) button.
+fn speed_pick(theme: &iced::Theme, status: pick_list::Status) -> pick_list::Style {
+    let button_status = match status {
+        pick_list::Status::Hovered | pick_list::Status::Opened => button::Status::Hovered,
+        pick_list::Status::Active => button::Status::Active,
+    };
+    let base = button::secondary(theme, button_status);
+    pick_list::Style {
+        text_color: base.text_color,
+        placeholder_color: base.text_color,
+        handle_color: base.text_color,
+        background: base
+            .background
+            .unwrap_or_else(|| Color::TRANSPARENT.into()),
+        border: iced::border::Border {
+            color: Color::TRANSPARENT,
+            width: 0.0,
+            radius: PILL.into(),
+        },
+    }
+}
+
+/// Muted colour used for controls that are visible but unavailable.
+const MUTED: Color = Color {
+    r: 0.6,
+    g: 0.6,
+    b: 0.64,
+    a: 1.0,
+};
+
+fn greyed_pick(theme: &iced::Theme, status: pick_list::Status) -> pick_list::Style {
+    let mut style = pick_list::default(theme, status);
+    style.text_color = MUTED;
+    style.handle_color = MUTED;
+    style.background = Color::from_rgba(0.6, 0.6, 0.64, 0.12).into();
+    style.border = iced::border::Border {
+        color: Color::TRANSPARENT,
+        width: 0.0,
+        radius: PILL.into(),
+    };
+    style
+}
+
+fn greyed_button(theme: &iced::Theme, status: button::Status) -> button::Style {
+    let mut style = button::secondary(theme, status);
+    style.background = Some(Color::from_rgba(0.6, 0.6, 0.64, 0.12).into());
+    style.text_color = MUTED;
     style.border.radius = PILL.into();
     style
 }
