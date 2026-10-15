@@ -38,6 +38,7 @@ load once and are reused across the batch.
 
 - **Python 3.11** (`python3.11`, or `py -3.11` on Windows). The vendored
   DiariZen pins `torch==2.1.1`, which has no Python 3.12 wheels.
+- A **Rust toolchain** (stable) to build the GUI.
 - No system FFmpeg is required (audio is decoded with `soundfile`).
 - GPU is optional and vendor-selectable (see Setup). No GPU is needed.
 
@@ -119,6 +120,12 @@ A Rust/iced desktop front-end wraps the CLI (it spawns
 
 ```bash
 cargo run --release --manifest-path gui/Cargo.toml
+```
+
+Building from source produces the binary at `gui/target/release/transiel-gui`:
+
+```bash
+cargo build --release --manifest-path gui/Cargo.toml
 ```
 
 Features:
