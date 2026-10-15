@@ -63,7 +63,6 @@ pub enum Event {
     #[serde(rename = "done")]
     Done {
         txt: String,
-        json: String,
         stats: Stats,
     },
     #[serde(rename = "log")]
@@ -194,7 +193,7 @@ pub fn output_base(output_dir: Option<&Path>, input: &Path) -> PathBuf {
         .map(|p| p.to_path_buf())
         .or_else(|| input.parent().map(|p| p.to_path_buf()))
         .unwrap_or_else(|| PathBuf::from("."));
-    dir.join(format!("{stem}-transcribed"))
+    dir.join(format!("{stem}-transcript"))
 }
 
 pub fn kill(pid: u32) {

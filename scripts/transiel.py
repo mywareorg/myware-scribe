@@ -178,9 +178,10 @@ def auto_tuning(transcriber, transcribe_device, available_mb, total_mb, physical
     than the memory budget allows (the main OOM risk on big models).
     """
     model_mb = int(transcriber.get("mem_mb") or 512)
-    # Per-worker cost = model + working buffers.
-    per_worker_mb = model_mb + 512
-    headroom_mb = max(4096, int(0.30 * total_mb))
+    # Per-worker cost = model + working buffers (CTranslate2 keeps its own
+    # arenas and thread stacks, so leave generous slack).
+    per_worker_mb = model_mb + 1024
+    headroom_mb = max(4096, int(0.35 * total_mb))
     budget_mb = max(0, available_mb - headroom_mb)
 
     if transcribe_device == "cuda":
@@ -205,6 +206,25 @@ def auto_tuning(transcriber, transcribe_device, available_mb, total_mb, physical
 
 def log(message):
     print(message, file=sys.stderr if PROGRESS_JSON else sys.stdout, flush=True)
+
+
+def rss_mb():
+    try:
+        return int(psutil.Process().memory_info().rss // (1024 * 1024))
+    except Exception:
+        return -1
+
+
+def release_memory():
+    """Drop Python garbage and hand freed arenas back to the OS (glibc)."""
+    gc.collect()
+    if sys.platform.startswith("linux"):
+        try:
+            import ctypes
+
+            ctypes.CDLL("libc.so.6").malloc_trim(0)
+        except Exception:
+            pass
 
 
 def format_timestamp(seconds, use_hours=False):
@@ -306,7 +326,7 @@ def diarize_diarizen(samples, sample_rate, hub, embedding, tuning, num_speakers)
     turns = turns_from_annotation(result)
     # Release the diarization model/buffers before Whisper is loaded.
     del pipeline, result
-    gc.collect()
+    release_memory()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
     return turns
@@ -441,7 +461,7 @@ def diarize_pyannote(samples, sample_rate, segmentation, embedding, tuning, num_
     turns = turns_from_annotation(result)
     # Release the diarization model/buffers before Whisper is loaded.
     del pipeline, result
-    gc.collect()
+    release_memory()
     if device.type == "cuda":
         torch.cuda.empty_cache()
     return turns
@@ -690,7 +710,7 @@ def main():
     parser.add_argument(
         "--output",
         default=None,
-        help="output basename (default: <audio-stem>-transcribed)",
+        help="output basename (default: <audio-stem>-transcript)",
     )
     parser.add_argument(
         "--device",
@@ -759,9 +779,8 @@ def main():
     if not audio_path.is_file():
         sys.exit(f"audio file not found: {audio_path}")
 
-    output_base = Path(args.output) if args.output else REPO_ROOT / f"{audio_path.stem}-transcribed"
+    output_base = Path(args.output) if args.output else REPO_ROOT / f"{audio_path.stem}-transcript"
     out_txt = output_base.with_suffix(".txt")
-    out_json = output_base.with_suffix(".json")
 
     backends = detect_backends()
     diarization_device = resolve_device(args.device)
@@ -787,6 +806,15 @@ def main():
         tuning["transcribe_threads"] = 0
 
     batch_size = tuning.get("batch_size") or auto["batch_size"]
+    # DiariZen pushes a whole segmentation batch (16s windows) through
+    # WavLM-large; the self-attention is quadratic in window length, so a big
+    # batch is a huge peak-memory spike (and the usual OOM-kill on CPU). Keep
+    # it small regardless of how much RAM the machine reports.
+    if resolved["diarizer"]["backend"] == "diarizen":
+        capped = min(batch_size, 8)
+        if capped != batch_size:
+            log(f"Capping DiariZen segmentation batch_size {batch_size} -> {capped}")
+        batch_size = capped
     workers = tuning.get("transcribe_workers") or auto["transcribe_workers"]
     transcribe_threads = tuning.get("transcribe_threads") or max(
         1, PHYSICAL_CORES // max(1, workers)
@@ -805,7 +833,8 @@ def main():
     log(
         f"Auto tuning: batch_size={batch_size}, transcribe_workers={workers}, "
         f"transcribe_threads={transcribe_threads} "
-        f"(physical_cores={PHYSICAL_CORES}, available={vm.available // (1024 * 1024)} MB)"
+        f"(physical_cores={PHYSICAL_CORES}, available={vm.available // (1024 * 1024)} MB, "
+        f"RSS {rss_mb()} MB)"
     )
 
     diarizer_path = (
@@ -888,9 +917,30 @@ def main():
 
     start = time.perf_counter()
     emit_stage("transcription", STAGE_BOUNDS["transcription"][0], "Loading whisper model")
+    # Re-check memory now that diarization has been freed: the count chosen at
+    # startup can be too high if the machine is busier than it was then, and
+    # Whisper loads one model copy per worker.
+    vm_after = psutil.virtual_memory()
+    auto_after = auto_tuning(
+        resolved["transcriber"],
+        transcribe_device,
+        vm_after.available // (1024 * 1024),
+        vm_after.total // (1024 * 1024),
+        PHYSICAL_CORES,
+    )
+    if workers > auto_after["transcribe_workers"]:
+        workers = max(1, auto_after["transcribe_workers"])
+        transcribe_threads = max(1, PHYSICAL_CORES // workers)
+        tuning["transcribe_workers"] = workers
+        tuning["transcribe_threads"] = transcribe_threads
+    log(
+        f"Memory after diarization: {vm_after.available // (1024 * 1024)} MB available, "
+        f"process RSS {rss_mb()} MB; transcribing with {workers} worker(s)"
+    )
     model = load_whisper(
         whisper_dir, transcribe_device, compute_type, transcribe_threads, workers
     )
+    log(f"Whisper loaded ({workers} worker(s)); process RSS {rss_mb()} MB")
     turns = transcribe_turns(
         model, samples, sample_rate, turns, beam_size, workers=workers, mapping=speaker_map
     )
@@ -903,47 +953,6 @@ def main():
     emit_stage("writing", STAGE_BOUNDS["writing"][0], "Writing output")
     txt = "".join(f"{format_line(line, True)}\n" for line in lines)
     out_txt.write_text(txt, encoding="utf-8")
-
-    payload = {
-        "audio": {"path": str(audio_path), "duration": duration},
-        "components": {
-            "preset": resolved["preset"],
-            "diarizer": resolved["diarizer_name"],
-            "embedding": resolved["embedding_name"],
-            "transcriber": resolved["transcriber_name"],
-        },
-        "models": {
-            "whisper": str(whisper_dir.resolve()),
-            "diarization": str(Path(diarizer_path).resolve()),
-        },
-        "run": {
-            "device": args.device,
-            "diarization_device": str(diarization_device),
-            "transcription_device": transcribe_device,
-            "backends": backends,
-            "compute_type": compute_type,
-            "num_speakers": num_speakers,
-            "beam_size": beam_size,
-            "threads": threads,
-            "batch_size": batch_size,
-            "transcribe_workers": workers,
-            "transcribe_threads": transcribe_threads,
-            "physical_cores": PHYSICAL_CORES,
-            "auto_tune": args.auto_tune,
-            "auto": auto,
-            "timestamps": args.timestamps,
-            "join_speaker": args.join_speaker,
-            "tuning": tuning,
-            "merge_gap_s": MERGE_GAP_S,
-            "min_turn_s": MIN_TURN_S,
-            "clip_pad_s": CLIP_PAD_S,
-            "timings": timings,
-        },
-        "speakers": speaker_map,
-        "diarization": turns,
-        "lines": lines,
-    }
-    out_json.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
 
     emit_stage("writing", STAGE_BOUNDS["writing"][1], "Done")
 
@@ -958,7 +967,7 @@ def main():
     for stat in speaker_stats.values():
         stat["seconds"] = round(stat["seconds"], 2)
 
-    emit({"event": "done", "txt": str(out_txt), "json": str(out_json),
+    emit({"event": "done", "txt": str(out_txt),
           "stats": {
               "audio_seconds": round(duration, 2),
               "run_seconds": round(time.perf_counter() - run_start, 2),
@@ -983,7 +992,6 @@ def main():
 
     log("")
     log(f"Wrote {out_txt}")
-    log(f"Wrote {out_json}")
 
 
 if __name__ == "__main__":

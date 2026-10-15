@@ -12,8 +12,8 @@ use iced::widget::{
     rich_text, row, scrollable, stack, text, text_input, toggler, tooltip,
 };
 use iced::{
-    font, mouse, Color, Element, Font, Length, Point, Rectangle, Renderer, Size, Subscription,
-    Task, Theme,
+    font, mouse, Color, Element, Font, Length, Pixels, Point, Rectangle, Renderer, Shadow, Size,
+    Subscription, Task, Theme, Vector,
 };
 use rodio::{Decoder, OutputStream, Sink};
 
@@ -215,15 +215,17 @@ impl fmt::Display for ImportKind {
 pub enum HelpKind {
     About,
     Shortcuts,
+    Console,
 }
 
 impl HelpKind {
-    const ALL: [HelpKind; 2] = [HelpKind::About, HelpKind::Shortcuts];
+    const ALL: [HelpKind; 3] = [HelpKind::About, HelpKind::Shortcuts, HelpKind::Console];
 
     fn label(self) -> &'static str {
         match self {
             HelpKind::About => "About",
             HelpKind::Shortcuts => "Shortcuts",
+            HelpKind::Console => "Console",
         }
     }
 }
@@ -281,9 +283,7 @@ struct Settings {
     num_speakers: Option<i32>,
     cache: Option<bool>,
     confidence: Option<bool>,
-    lock_text: Option<bool>,
     font_scale: Option<f32>,
-    timestamp_gutter: Option<bool>,
     follow_playhead: Option<bool>,
     playback_speed: Option<f32>,
     waveform_zoom: Option<f32>,
@@ -299,6 +299,7 @@ struct Scheme {
     track: Color,
     blue: Color,
     pink: Color,
+    green: Color,
     ink: Color,
     sms0: Color,
     sms1: Color,
@@ -306,6 +307,8 @@ struct Scheme {
     warn_tint_alt: Color,
     search_hl: Color,
     search_active: Color,
+    tip_bg: Color,
+    tip_text: Color,
 }
 
 impl Scheme {
@@ -317,13 +320,16 @@ impl Scheme {
                 track: Color::from_rgb(0.067, 0.067, 0.106),
                 blue: Color::from_rgb(0.537, 0.706, 0.980),
                 pink: Color::from_rgb(0.953, 0.545, 0.659),
+                green: Color::from_rgb(0.35, 0.78, 0.47),
                 ink: Color::from_rgb(0.067, 0.067, 0.106),
                 sms0: Color::from_rgb(0.537, 0.706, 0.980),
-                sms1: Color::from_rgb(0.796, 0.651, 0.969),
+                sms1: Color::from_rgb(0.953, 0.545, 0.659),
                 warn_tint: Color::from_rgba(0.537, 0.749, 1.0, 0.30),
                 warn_tint_alt: Color::from_rgba(0.953, 0.545, 0.659, 0.16),
                 search_hl: Color::from_rgba(1.0, 0.85, 0.35, 0.35),
                 search_active: Color::from_rgba(1.0, 0.72, 0.25, 0.65),
+                tip_bg: Color::from_rgb(0.24, 0.24, 0.32),
+                tip_text: Color::from_rgb(0.93, 0.94, 0.98),
             }
         } else {
             Scheme {
@@ -332,6 +338,7 @@ impl Scheme {
                 track: Color::from_rgb(0.88, 0.88, 0.93),
                 blue: Color::from_rgb(0.357, 0.808, 0.980),
                 pink: Color::from_rgb(0.961, 0.663, 0.722),
+                green: Color::from_rgb(0.30, 0.72, 0.42),
                 ink: Color::from_rgb(0.13, 0.13, 0.17),
                 sms0: Color::from_rgb(0.357, 0.808, 0.980),
                 sms1: Color::from_rgb(0.961, 0.663, 0.722),
@@ -339,6 +346,8 @@ impl Scheme {
                 warn_tint_alt: Color::from_rgba(0.961, 0.663, 0.722, 0.22),
                 search_hl: Color::from_rgba(1.0, 0.85, 0.3, 0.5),
                 search_active: Color::from_rgba(1.0, 0.72, 0.2, 0.8),
+                tip_bg: Color::from_rgb(0.99, 0.99, 1.0),
+                tip_text: Color::from_rgb(0.13, 0.13, 0.17),
             }
         }
     }
@@ -372,20 +381,18 @@ pub enum Message {
     RenameSave,
     RenameCancel,
     RenameMove(bool),
-    RenameSubmit,
+    EnterSubmit,
+    ShiftEnterSubmit,
     RenameSpeaker(String),
     ZoomIn,
     ZoomOut,
     ZoomReset,
-    ToggleGutter,
     ToggleFollowPlayhead,
-    ToggleConsole,
     DismissToast,
     WaveZoom(f32),
     HelpChoice(HelpKind),
     CloseHelp,
     Noop,
-    TranscriptHover(bool),
     OpenSummary,
     TimestampsToggled(bool),
     JoinSpeakerToggled(bool),
@@ -395,7 +402,6 @@ pub enum Message {
     SpeakerCountChanged(SpeakerOpt),
     CacheToggled(bool),
     ConfidenceToggled(bool),
-    LockTextToggled(bool),
     TranscriptScrolled(scrollable::Viewport),
     WindowEvent(iced::window::Event),
     TimelineLoaded(PathBuf, Option<(f64, Vec<f32>)>),
@@ -447,6 +453,7 @@ pub struct App {
     player: Option<Player>,
     output_txt: Option<PathBuf>,
     summary_open: bool,
+    pending_rename: bool,
     rename_open: bool,
     rename_fields: Vec<(String, String)>,
     rename_focus: usize,
@@ -459,13 +466,11 @@ pub struct App {
     num_speakers: Option<i32>,
     cache: bool,
     confidence: bool,
-    lock_text: bool,
-    lock_line: Option<usize>,
     transcript_viewport: f32,
     transcript_content: f32,
-    transcript_hover: bool,
+    transcript_at_bottom: bool,
+    follow_offset: Option<f32>,
     font_scale: f32,
-    timestamp_gutter: bool,
     follow_playhead: bool,
     console_open: bool,
     console_lines: Vec<String>,
@@ -475,6 +480,7 @@ pub struct App {
     search_index: usize,
     playback_speed: f32,
     last_tick: Option<Instant>,
+    pulse: f32,
     window_size: Size,
     window_position: Option<Point>,
     window_dirty: bool,
@@ -523,6 +529,7 @@ impl App {
             player: None,
             output_txt: None,
             summary_open: false,
+            pending_rename: false,
             rename_open: false,
             rename_fields: Vec::new(),
             rename_focus: 0,
@@ -539,14 +546,12 @@ impl App {
             },
             cache: settings.cache.unwrap_or(true),
             confidence: settings.confidence.unwrap_or(true),
-            lock_text: settings.lock_text.unwrap_or(false),
-            lock_line: None,
             transcript_viewport: 0.0,
             transcript_content: 0.0,
-            transcript_hover: false,
+            transcript_at_bottom: true,
+            follow_offset: None,
             font_scale: settings.font_scale.unwrap_or(1.0),
-            timestamp_gutter: settings.timestamp_gutter.unwrap_or(false),
-            follow_playhead: settings.follow_playhead.unwrap_or(false),
+            follow_playhead: settings.follow_playhead.unwrap_or(true),
             console_open: false,
             console_lines: Vec::new(),
             toast: None,
@@ -556,6 +561,7 @@ impl App {
             search_index: 0,
             playback_speed: settings.playback_speed.unwrap_or(1.0),
             last_tick: None,
+            pulse: 0.0,
             window_size: Self::window_size_from(&settings),
             window_position: match (settings.window_x, settings.window_y) {
                 (Some(x), Some(y)) => Some(Point::new(x, y)),
@@ -609,9 +615,7 @@ impl App {
             num_speakers: Some(self.num_speakers.unwrap_or(0)),
             cache: Some(self.cache),
             confidence: Some(self.confidence),
-            lock_text: Some(self.lock_text),
             font_scale: Some(self.font_scale),
-            timestamp_gutter: Some(self.timestamp_gutter),
             follow_playhead: Some(self.follow_playhead),
             playback_speed: Some(self.playback_speed),
             waveform_zoom: Some(self.waveform_zoom),
@@ -645,7 +649,7 @@ impl App {
             (Some(width), Some(height)) if width >= 100.0 && height >= 100.0 => {
                 Size::new(width, height)
             }
-            _ => Size::new(1000.0, 700.0),
+            _ => Size::new(640.0, 1920.0),
         }
     }
 
@@ -679,7 +683,8 @@ impl App {
         match key {
             Key::Named(Named::Tab) => Some(Message::RenameMove(true)),
             Key::Named(Named::Enter) if modifiers.command() => Some(Message::Start),
-            Key::Named(Named::Enter) => Some(Message::RenameSubmit),
+            Key::Named(Named::Enter) if modifiers.shift() => Some(Message::ShiftEnterSubmit),
+            Key::Named(Named::Enter) => Some(Message::EnterSubmit),
             Key::Named(Named::Escape) => Some(Message::Escape),
             Key::Named(Named::Space) => Some(Message::ShortcutPlay),
             Key::Named(Named::ArrowRight) => Some(Message::SeekBy(5.0)),
@@ -743,15 +748,25 @@ impl App {
                 self.save_settings();
                 Task::none()
             }
-            Message::LockTextToggled(value) => {
-                self.lock_text = value;
-                self.lock_line = None;
-                self.save_settings();
-                Task::none()
-            }
             Message::TranscriptScrolled(viewport) => {
                 self.transcript_viewport = viewport.bounds().height;
                 self.transcript_content = viewport.content_bounds().height;
+                let offset = viewport.absolute_offset().y;
+                let viewport_h = viewport.bounds().height;
+                let content_h = viewport.content_bounds().height;
+                self.transcript_at_bottom = offset + viewport_h >= content_h - 8.0;
+                // While playing, follow holds the cursor on screen no matter
+                // what; otherwise scrolling disengages it.
+                let playing = self.player.as_ref().is_some_and(|player| player.is_playing());
+                if self.follow_playhead && !playing && !self.transcript_at_bottom {
+                    if let Some(expected) = self.follow_offset {
+                        if (offset - expected).abs() > 6.0 {
+                            self.follow_playhead = false;
+                            self.follow_offset = None;
+                            self.save_settings();
+                        }
+                    }
+                }
                 Task::none()
             }
             Message::WindowEvent(event) => {
@@ -855,17 +870,36 @@ impl App {
                 if !self.rename_open || self.rename_fields.is_empty() {
                     return Task::none();
                 }
-                let count = self.rename_fields.len();
+                let fields = self.rename_fields.len();
+                let total = fields + 2; // fields, then Save, then Cancel
                 self.rename_focus = if forward {
-                    (self.rename_focus + 1) % count
+                    (self.rename_focus + 1) % total
                 } else {
-                    (self.rename_focus + count - 1) % count
+                    (self.rename_focus + total - 1) % total
                 };
-                text_input::focus(rename_id(self.rename_focus))
+                if self.rename_focus < fields {
+                    text_input::focus(rename_id(self.rename_focus))
+                } else {
+                    Task::none()
+                }
             }
-            Message::RenameSubmit => {
+            Message::EnterSubmit => {
                 if self.rename_open {
                     self.apply_rename();
+                } else {
+                    let count = self.matching_lines().len();
+                    if count > 0 {
+                        self.search_index = (self.search_index + 1) % count;
+                    }
+                }
+                Task::none()
+            }
+            Message::ShiftEnterSubmit => {
+                if !self.rename_open {
+                    let count = self.matching_lines().len();
+                    if count > 0 {
+                        self.search_index = (self.search_index + count - 1) % count;
+                    }
                 }
                 Task::none()
             }
@@ -884,18 +918,10 @@ impl App {
                 self.save_settings();
                 Task::none()
             }
-            Message::ToggleGutter => {
-                self.timestamp_gutter = !self.timestamp_gutter;
-                self.save_settings();
-                Task::none()
-            }
             Message::ToggleFollowPlayhead => {
                 self.follow_playhead = !self.follow_playhead;
+                self.follow_offset = None;
                 self.save_settings();
-                Task::none()
-            }
-            Message::ToggleConsole => {
-                self.console_open = !self.console_open;
                 Task::none()
             }
             Message::DismissToast => {
@@ -908,8 +934,12 @@ impl App {
                 Task::none()
             }
             Message::HelpChoice(kind) => {
-                self.help_open = Some(kind);
-                self.toast = None;
+                if matches!(kind, HelpKind::Console) {
+                    self.console_open = !self.console_open;
+                } else {
+                    self.help_open = Some(kind);
+                    self.toast = None;
+                }
                 Task::none()
             }
             Message::CloseHelp => {
@@ -917,15 +947,17 @@ impl App {
                 Task::none()
             }
             Message::Noop => Task::none(),
-            Message::TranscriptHover(value) => {
-                self.transcript_hover = value;
-                Task::none()
-            }
             Message::Escape => {
                 if self.batch_warning {
                     self.batch_warning = false;
                 } else if self.rename_open {
                     self.rename_open = false;
+                } else if self.summary_open {
+                    self.summary_open = false;
+                    if self.pending_rename {
+                        self.pending_rename = false;
+                        return self.open_rename();
+                    }
                 } else if !self.search_query.is_empty() {
                     self.search_query.clear();
                     self.search_index = 0;
@@ -985,6 +1017,8 @@ impl App {
                 if let Some(text) = text {
                     self.transcript = text;
                     self.lines = parse_lines(&self.transcript);
+                    self.follow_offset = None;
+                    self.transcript_at_bottom = true;
                     self.sms_mode = true;
                 }
                 Task::none()
@@ -1044,12 +1078,17 @@ impl App {
             Message::OpenSummary => {
                 if self.stats.is_some() {
                     self.summary_open = true;
+                    self.pending_rename = false;
                     self.toast = None;
                 }
                 Task::none()
             }
             Message::CloseSummary => {
                 self.summary_open = false;
+                if self.pending_rename {
+                    self.pending_rename = false;
+                    return self.open_rename();
+                }
                 Task::none()
             }
             Message::OpenRename => self.open_rename(),
@@ -1141,6 +1180,7 @@ impl App {
             }
             Message::Tick => {
                 let mut tasks = vec![self.drain_events()];
+                self.pulse = (self.pulse + 0.10) % std::f32::consts::TAU;
                 // Ease the displayed bar toward the latest reported progress.
                 self.progress_shown += (self.progress - self.progress_shown) * 0.25;
                 self.progress_shown = self.progress_shown.clamp(0.0, 1.0);
@@ -1161,30 +1201,38 @@ impl App {
                         }
                     }
                 }
-                if self.lock_text {
-                    let index = self.line_for_playhead(self.playhead);
-                    if index != self.lock_line {
-                        self.lock_line = index;
-                        if let Some(line) = index {
-                            let total = self.lines.len().max(1) as f32;
-                            let content = self.transcript_content;
-                            let viewport = self.transcript_viewport;
+                let total = self.lines.len().max(1) as f32;
+                let content = self.transcript_content;
+                let viewport = self.transcript_viewport;
+                if self.follow_playhead {
+                    if let Some(active) = self.active_line_index() {
+                        if let Some(rank) =
+                            self.display_order().iter().position(|index| *index == active)
+                        {
+                            // Hard-lock the highlighted line to the vertical centre
+                            // (only when geometry is known, so it never jumps to top).
                             if content > 0.0 && viewport > 0.0 {
                                 let line_height = content / total;
-                                let y = (line as f32 * line_height - 0.30 * viewport)
+                                let y = (rank as f32 * line_height - viewport / 2.0)
                                     .clamp(0.0, (content - viewport).max(0.0));
+                                self.follow_offset = Some(y);
                                 tasks.push(scrollable::scroll_to(
                                     transcript_id(),
                                     scrollable::AbsoluteOffset { x: 0.0, y },
                                 ));
-                            } else {
-                                let y = (line as f32 / total).clamp(0.0, 1.0);
-                                tasks.push(scrollable::snap_to(
-                                    transcript_id(),
-                                    scrollable::RelativeOffset { x: 0.0, y },
-                                ));
                             }
                         }
+                    }
+                } else {
+                    self.follow_offset = None;
+                    // Keep the view pinned to the bottom as text is added, as
+                    // long as the user hasn't scrolled away from the bottom.
+                    if self.transcript_at_bottom && content > 0.0 && viewport > 0.0 {
+                        let y = (content - viewport).max(0.0);
+                        tasks.push(scrollable::scroll_to(
+                            transcript_id(),
+                            scrollable::AbsoluteOffset { x: 0.0, y },
+                        ));
                     }
                 }
                 if self.window_dirty
@@ -1316,7 +1364,9 @@ impl App {
             self.stage = "done".to_string();
             self.progress = 1.0;
             self.progress_shown = 1.0;
-            self.toast = Some(("Queue complete".to_string(), Instant::now()));
+            self.toast = None;
+            self.summary_open = true;
+            self.pending_rename = true;
             return;
         };
 
@@ -1348,6 +1398,8 @@ impl App {
 
         self.transcript.clear();
         self.lines.clear();
+        self.follow_offset = None;
+        self.transcript_at_bottom = true;
         self.speakers.clear();
         self.turns.clear();
         self.meta_duration = None;
@@ -1405,6 +1457,11 @@ impl App {
             if let Some((_, new)) = mapping.iter().find(|(old, _)| *old == line.speaker) {
                 line.raw = line.raw.replacen(&line.speaker, new, 1);
                 line.speaker = new.clone();
+            }
+        }
+        for turn in &mut self.turns {
+            if let Some((_, new)) = mapping.iter().find(|(old, _)| *old == turn.speaker) {
+                turn.speaker = new.clone();
             }
         }
         self.refresh_transcript();
@@ -1496,13 +1553,17 @@ impl App {
                         if self.queue.len() == 1 {
                             self.batch = false;
                             self.status = Status::Done;
-                            self.toast = Some(("Queue complete".to_string(), Instant::now()));
+                            self.toast = None;
+                            self.summary_open = true;
+                            self.pending_rename = true;
                         } else {
                             self.run_next();
                         }
                     } else {
                         self.status = Status::Done;
-                        self.toast = Some(("Queue complete".to_string(), Instant::now()));
+                        self.toast = None;
+                        self.summary_open = true;
+                        self.pending_rename = true;
                     }
                 }
                 Event::Error { message } => {
@@ -1584,21 +1645,6 @@ impl App {
         None
     }
 
-    /// Rough remaining-time estimate for the running item, from its progress.
-    fn item_eta(&self, progress: f32) -> Option<String> {
-        let start = self.run_start?;
-        if progress <= 0.03 {
-            return None;
-        }
-        let elapsed = start.elapsed().as_secs_f64();
-        let eta = elapsed * (1.0 - progress as f64) / progress as f64;
-        if eta < 1.0 {
-            None
-        } else {
-            Some(format_secs(eta))
-        }
-    }
-
     /// Collapsible console showing backend log output.
     fn console_panel(&self, scheme: &Scheme) -> Element<'static, Message> {
         let background = scheme.track;
@@ -1613,6 +1659,7 @@ impl App {
             .style(move |_theme| container::Style {
                 background: Some(background.into()),
                 border: iced::border::rounded(8.0),
+                shadow: soft_shadow(),
                 ..container::Style::default()
             })
             .into()
@@ -1632,6 +1679,28 @@ impl App {
             .collect()
     }
 
+    /// Distinct speakers in transcript order (matches the SMS bubble ordering).
+    fn speaker_order(&self) -> Vec<String> {
+        let mut order: Vec<String> = Vec::new();
+        for line in &self.lines {
+            if !line.speaker.is_empty() && !order.contains(&line.speaker) {
+                order.push(line.speaker.clone());
+            }
+        }
+        order
+    }
+
+    /// Line indices sorted by start time (untimed lines last), stable.
+    fn display_order(&self) -> Vec<usize> {
+        let mut indices: Vec<usize> = (0..self.lines.len()).collect();
+        indices.sort_by(|a, b| {
+            let ta = self.lines[*a].start.unwrap_or(f32::INFINITY);
+            let tb = self.lines[*b].start.unwrap_or(f32::INFINITY);
+            ta.partial_cmp(&tb).unwrap_or(std::cmp::Ordering::Equal)
+        });
+        indices
+    }
+
     /// Transcript view: per-line (confidence/search tinted) or SMS bubbles.
     fn transcript_element(&self) -> Element<'_, Message> {
         let scheme = Scheme::for_theme(self.dark_mode);
@@ -1645,11 +1714,16 @@ impl App {
         let size = 16.0 * self.font_scale;
         let mut col = column![].spacing(2).padding(8).width(Length::Fill);
         let mut sides: Vec<String> = Vec::new();
-        for (idx, line) in self.lines.iter().enumerate() {
+        let speaker_order = self.speaker_order();
+        let display: Vec<usize> = self.display_order();
+        let playhead_line = self.active_line_index();
+        for idx in display {
+            let line = &self.lines[idx];
             if line.raw.trim().is_empty() {
                 continue;
             }
             let matched = !query.is_empty() && matches.contains(&idx);
+            let active = playhead_line == Some(idx);
             if self.sms_mode {
                 let label = line.speaker.clone();
                 let index = match sides.iter().position(|s| s == &label) {
@@ -1679,16 +1753,23 @@ impl App {
                     &query,
                     scheme.search_hl,
                     size,
+                    active,
                 ));
             } else {
+                let speaker_bg = speaker_order
+                    .iter()
+                    .position(|name| *name == line.speaker)
+                    .map(|index| speaker_palette(index, &scheme));
                 let tint = if matched {
                     Some(if Some(idx) == active_line {
                         scheme.search_active
                     } else {
                         scheme.search_hl
                     })
+                } else if self.confidence && line.low_confidence() {
+                    Some(scheme.warn_tint)
                 } else {
-                    (self.confidence && line.low_confidence()).then_some(scheme.warn_tint)
+                    speaker_bg
                 };
                 col = col.push(line_element(
                     line,
@@ -1697,48 +1778,30 @@ impl App {
                     scheme.search_hl,
                     &scheme,
                     size,
-                    self.timestamp_gutter,
+                    active,
                 ));
             }
         }
 
-        let list = scrollable(col)
-            .id(transcript_id())
-            .on_scroll(Message::TranscriptScrolled)
-            .height(Length::Fill)
-            .width(Length::Fill)
-            .style(scrollbar_style);
-
-        let content = mouse_area(list)
-            .on_enter(Message::TranscriptHover(true))
-            .on_exit(Message::TranscriptHover(false));
-
-        if self.transcript_hover && !self.lines.is_empty() {
-            stack![
-                content,
-                container(self.transcript_controls(&scheme))
-                    .width(Length::Fill)
-                    .height(Length::Fill)
-                    .align_x(iced::Alignment::End)
-                    .align_y(iced::Alignment::End)
-                    .padding(10),
-            ]
-            .into()
-        } else {
-            content.into()
-        }
+        stack![
+            scrollable(col)
+                .id(transcript_id())
+                .on_scroll(Message::TranscriptScrolled)
+                .height(Length::Fill)
+                .width(Length::Fill)
+                .style(scrollbar_style),
+            container(self.view_controls(&scheme))
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .align_x(iced::Alignment::End)
+                .align_y(iced::Alignment::End)
+                .padding(10),
+        ]
+        .into()
     }
 
-    /// Overlay controls shown while hovering the transcript.
-    fn transcript_controls(&self, scheme: &Scheme) -> Element<'_, Message> {
-        let gutter: Element<Message> = if self.timestamp_gutter {
-            row![icon(ICON_CHECK, 12.0), text("Time")]
-                .spacing(4)
-                .align_y(iced::Alignment::Center)
-                .into()
-        } else {
-            text("Time").into()
-        };
+    /// Zoom / Follow / SMS controls overlaid on the transcript (bottom-right).
+    fn view_controls(&self, scheme: &Scheme) -> Element<'_, Message> {
         let follow: Element<Message> = if self.follow_playhead {
             row![icon(ICON_CHECK, 12.0), text("Follow")]
                 .spacing(4)
@@ -1747,33 +1810,44 @@ impl App {
         } else {
             text("Follow").into()
         };
+        let sms: Element<Message> = if self.sms_mode {
+            row![icon(ICON_CHECK, 12.0), text("SMS")]
+                .spacing(4)
+                .align_y(iced::Alignment::Center)
+                .into()
+        } else {
+            text("SMS").into()
+        };
+        let sms_on = self.sms_mode;
         row![
             self.tip(
-                button(icon(ICON_ZOOM_IN, 14.0))
+                action(icon(ICON_ZOOM_IN, 14.0))
                     .on_press(Message::ZoomIn)
-                    .style(pill_button_secondary),
+                    .style(pill_button_secondary)
+                    .width(Length::Fixed(44.0)),
                 "Zoom text in",
                 scheme,
             ),
             self.tip(
-                button(icon(ICON_ZOOM_OUT, 14.0))
+                action(icon(ICON_ZOOM_OUT, 14.0))
                     .on_press(Message::ZoomOut)
-                    .style(pill_button_secondary),
+                    .style(pill_button_secondary)
+                    .width(Length::Fixed(44.0)),
                 "Zoom text out",
                 scheme,
             ),
             self.tip(
-                button(gutter)
-                    .on_press(Message::ToggleGutter)
-                    .style(pill_button_secondary),
-                "Show an absolute timestamp gutter",
-                scheme,
-            ),
-            self.tip(
-                button(follow)
+                action(follow)
                     .on_press(Message::ToggleFollowPlayhead)
                     .style(pill_button_secondary),
                 "Keep the transcript centered on the playhead",
+                scheme,
+            ),
+            self.tip(
+                action(sms)
+                    .on_press(Message::SmsToggled(!sms_on))
+                    .style(pill_button_secondary),
+                "Show the transcript as chat bubbles",
                 scheme,
             ),
         ]
@@ -1784,15 +1858,28 @@ impl App {
 
     /// Index of the last line whose start time is at or before `t`.
     fn line_for_playhead(&self, t: f32) -> Option<usize> {
-        let mut result = None;
+        let mut best: Option<(usize, f32)> = None;
         for (index, line) in self.lines.iter().enumerate() {
-            match line.start {
-                Some(start) if start <= t => result = Some(index),
-                Some(_) => break,
-                None => {}
+            if let Some(start) = line.start {
+                if start <= t && best.map_or(true, |(_, best_start)| start >= best_start) {
+                    best = Some((index, start));
+                }
             }
         }
-        result
+        best.map(|(index, _)| index)
+    }
+
+    /// The line to highlight / keep in view: the most recently added line while
+    /// transcribing, otherwise the line matching the playhead.
+    fn active_line_index(&self) -> Option<usize> {
+        if self.lines.is_empty() {
+            return None;
+        }
+        if matches!(self.status, Status::Running) || self.timeline_duration.is_none() {
+            self.display_order().last().copied()
+        } else {
+            self.line_for_playhead(self.playhead)
+        }
     }
 
     /// Waveform/speaker timeline strip (greyed out until audio is probed).
@@ -1829,15 +1916,11 @@ impl App {
 
     /// Colour swatches + names for the speakers on the timeline.
     fn timeline_legend(&self, scheme: &Scheme) -> Element<'_, Message> {
-        let mut order: Vec<&str> = Vec::new();
-        for turn in &self.turns {
-            if !order.iter().any(|name| *name == turn.speaker.as_str()) {
-                order.push(turn.speaker.as_str());
-            }
-        }
+        let order = self.speaker_order();
         let mut row = row![].spacing(12).align_y(iced::Alignment::Center);
         for (index, name) in order.iter().enumerate() {
             let color = speaker_palette(index, scheme);
+            let label = name.clone();
             row = row.push(
                 row![
                     container(horizontal_space())
@@ -1848,7 +1931,7 @@ impl App {
                             border: iced::border::rounded(3.0),
                             ..container::Style::default()
                         }),
-                    text((*name).to_string()).size(12),
+                    text(label).size(12),
                 ]
                 .spacing(4)
                 .align_y(iced::Alignment::Center),
@@ -1858,18 +1941,13 @@ impl App {
     }
 
     fn speaker_turns(&self, scheme: &Scheme) -> Vec<TimelineTurn> {
-        let mut order: Vec<&str> = Vec::new();
-        for turn in &self.turns {
-            if !order.iter().any(|name| *name == turn.speaker.as_str()) {
-                order.push(turn.speaker.as_str());
-            }
-        }
+        let order = self.speaker_order();
         self.turns
             .iter()
             .map(|turn| {
                 let index = order
                     .iter()
-                    .position(|name| *name == turn.speaker.as_str())
+                    .position(|name| *name == turn.speaker)
                     .unwrap_or(0);
                 TimelineTurn {
                     start: turn.start,
@@ -1883,19 +1961,22 @@ impl App {
     /// Playback controls: play/pause, time, and a speed selector.
     fn player_element(&self, scheme: &Scheme) -> Element<'_, Message> {
         let duration = self.timeline_duration.unwrap_or(0.0).max(0.0);
-        let ready = duration > 0.0 && self.peaks_for.is_some();
+        let running = matches!(self.status, Status::Running);
+        let ready = duration > 0.0 && self.peaks_for.is_some() && !running;
         let playing = self.player.as_ref().is_some_and(|player| player.is_playing());
         let glyph = if ready { scheme.ink } else { MUTED };
 
         let play_icon = if playing { ICON_PAUSE } else { ICON_PLAY };
         let play_button: Element<Message> = if ready {
-            button(icon_colored(play_icon, 14.0, glyph))
+            action(icon_colored(play_icon, 14.0, glyph))
                 .on_press(Message::PlayerToggle)
                 .style(pill_button_secondary)
+                .width(Length::Fixed(44.0))
                 .into()
         } else {
-            button(icon_colored(ICON_PLAY, 14.0, glyph))
+            action(icon_colored(ICON_PLAY, 14.0, glyph))
                 .style(greyed_button)
+                .width(Length::Fixed(44.0))
                 .into()
         };
 
@@ -1917,10 +1998,13 @@ impl App {
                 Message::SpeedChanged,
             )
             .style(speed_pick)
+            .handle(caret_handle(false))
             .into()
         } else {
             stack![
-                pick_list(Speed::ALL, Some(Speed::One), Message::SpeedChanged).style(greyed_pick),
+                pick_list(Speed::ALL, Some(Speed::One), Message::SpeedChanged)
+                    .style(greyed_pick)
+                    .handle(caret_handle(false)),
                 mouse_area(
                     container(horizontal_space())
                         .width(Length::Fill)
@@ -1951,14 +2035,16 @@ impl App {
         let query_input = text_input("Find", &self.search_query)
             .id(find_id())
             .on_input(Message::SearchChanged)
-            .width(Length::Fixed(220.0))
+            .width(Length::Fixed(120.0))
             .style(pill_input);
-        let prev = button("Prev")
+        let prev = action(icon(ICON_ARROW_UP, 14.0))
             .on_press(Message::FindPrev)
-            .style(pill_button_secondary);
-        let next = button("Next")
+            .style(pill_button_secondary)
+            .width(Length::Fixed(44.0));
+        let next = action(icon(ICON_ARROW_DOWN, 14.0))
             .on_press(Message::FindNext)
-            .style(pill_button_secondary);
+            .style(pill_button_secondary)
+            .width(Length::Fixed(44.0));
         row![query_input, text(status).size(12), prev, next]
             .spacing(8)
             .align_y(iced::Alignment::Center)
@@ -1972,9 +2058,9 @@ impl App {
         label: &'static str,
         scheme: &Scheme,
     ) -> Element<'a, Message> {
-        let background = scheme.dialog_bg;
-        let text_color = scheme.ink;
-        let border_color = scheme.track;
+        let background = scheme.tip_bg;
+        let text_color = scheme.tip_text;
+        let border_color = scheme.tip_text;
         tooltip(
             content,
             container(text(label).size(12))
@@ -1987,6 +2073,7 @@ impl App {
                         width: 1.0,
                         radius: 6.0.into(),
                     },
+                    shadow: soft_shadow(),
                     ..container::Style::default()
                 }),
             tooltip::Position::Top,
@@ -2036,45 +2123,43 @@ impl App {
             .into()
         };
 
-        let mut controls = column![
+        let mut options_col = column![action(
             row![
-                button("Save Location")
-                    .on_press_maybe(can_output.then_some(Message::PickOutput))
-                    .style(color_button(scheme.blue, scheme.ink)),
-                text(output.clone()),
-            ]
-            .spacing(8)
-            .align_y(iced::Alignment::Center),
-            row![
-                text("Preset:"),
-                preset,
-                button(
-                    row![
-                        text("Advanced"),
-                        icon(ICON_CARET_DOWN, 12.0),
-                    ]
-                    .spacing(4)
-                    .align_y(iced::Alignment::Center),
-                )
-                .on_press_maybe(can_advanced.then_some(Message::ToggleAdvanced))
-                .style(move |theme: &iced::Theme, status| {
-                    if can_advanced {
-                        pill_button_secondary(theme, status)
+                text("Options"),
+                icon(
+                    if self.advanced_open {
+                        ICON_CARET_UP
                     } else {
-                        greyed_button(theme, status)
-                    }
-                }),
+                        ICON_CARET_DOWN
+                    },
+                    12.0,
+                ),
             ]
-            .spacing(8)
+            .spacing(4)
             .align_y(iced::Alignment::Center),
-        ]
-        .spacing(16);
+        )
+        .on_press_maybe(can_advanced.then_some(Message::ToggleAdvanced))
+        .style(move |theme: &iced::Theme, status| {
+            if can_advanced {
+                pill_button_secondary(theme, status)
+            } else {
+                greyed_button(theme, status)
+            }
+        })]
+        .spacing(8);
 
         let mut queue_list = column![].spacing(4).width(Length::Fill);
         for (index, item) in self.queue.iter().enumerate() {
             let glyph: Element<Message> = match &item.status {
                 ItemStatus::Pending => icon_colored(ICON_CIRCLE_FILL, 9.0, scheme.ink),
-                ItemStatus::Running => icon_colored(ICON_ARROW_RIGHT, 14.0, scheme.blue),
+                ItemStatus::Running => icon_colored(
+                    ICON_ARROW_RIGHT,
+                    14.0,
+                    Color {
+                        a: 0.55 + 0.45 * (0.5 + 0.5 * self.pulse.sin()),
+                        ..scheme.blue
+                    },
+                ),
                 ItemStatus::Done(_) => {
                     icon_colored(ICON_CHECK, 14.0, Color::from_rgb(0.3, 0.72, 0.42))
                 }
@@ -2116,9 +2201,6 @@ impl App {
                     item_row = item_row.push(
                         text(format!("{:.0}%", self.progress * 100.0)).size(12),
                     );
-                    if let Some(eta) = self.item_eta(self.progress) {
-                        item_row = item_row.push(text(format!("\u{223c}{eta}")).size(12));
-                    }
                 }
                 ItemStatus::Done(_) => {
                     item_row = item_row.push(text("100%").size(12));
@@ -2127,9 +2209,10 @@ impl App {
             }
 
             item_row = item_row.push(self.tip(
-                button(icon(ICON_X, 13.0))
+                action(icon(ICON_X, 13.0))
                     .on_press_maybe(can_add.then_some(Message::RemoveItem(index)))
-                    .style(pill_button_secondary),
+                    .style(pill_button_secondary)
+                    .width(Length::Fixed(40.0)),
                 "Remove from queue",
                 &scheme,
             ));
@@ -2138,13 +2221,13 @@ impl App {
 
         let mut queue_col = column![
             row![
-                button("Add File(s)")
+                action("Add File(s)")
                     .on_press_maybe(can_add.then_some(Message::AddFiles))
                     .style(color_button(scheme.blue, scheme.ink)),
-                button("Add Folder")
+                action("Add Folder")
                     .on_press_maybe(can_add.then_some(Message::AddFolder))
                     .style(color_button(scheme.blue, scheme.ink)),
-                button("Clear")
+                action("Clear")
                     .on_press_maybe((!running && has_queue).then_some(Message::ClearQueue))
                     .style(color_button(scheme.pink, scheme.ink)),
             ]
@@ -2165,7 +2248,7 @@ impl App {
         }
 
         if self.advanced_open && can_advanced {
-            controls = controls.push(
+            options_col = options_col.push(
                 column![
                     self.tip(
                         row![
@@ -2213,28 +2296,6 @@ impl App {
                     ),
                     self.tip(
                         row![
-                            text("Lock Text to Playback"),
-                            horizontal_space(),
-                            toggler(self.lock_text).on_toggle(Message::LockTextToggled),
-                        ]
-                        .spacing(8)
-                        .align_y(iced::Alignment::Center),
-                        "Scroll the transcript to follow the playhead",
-                        &scheme,
-                    ),
-                    self.tip(
-                        row![
-                            text("SMS Mode"),
-                            horizontal_space(),
-                            toggler(self.sms_mode).on_toggle(Message::SmsToggled),
-                        ]
-                        .spacing(8)
-                        .align_y(iced::Alignment::Center),
-                        "Show the transcript as chat bubbles",
-                        &scheme,
-                    ),
-                    self.tip(
-                        row![
                             text("Speakers"),
                             horizontal_space(),
                             pick_list(
@@ -2261,17 +2322,35 @@ impl App {
                         &scheme,
                     ),
                 ]
-                .spacing(8)
-                .padding([0, 2]),
+                .spacing(8),
             );
         }
 
+        let mut controls = column![
+            row![
+                action("Save Location")
+                    .on_press_maybe(can_output.then_some(Message::PickOutput))
+                    .style(color_button(scheme.blue, scheme.ink)),
+                text(output.clone()),
+            ]
+            .spacing(8)
+            .align_y(iced::Alignment::Center),
+            row![
+                text("Preset:"),
+                preset,
+                options_col,
+            ]
+            .spacing(8)
+            .align_y(iced::Alignment::Start),
+        ]
+        .spacing(16);
+
         controls = controls.push(
             row![
-                button(if pending { "Start Queue" } else { "Start" })
+                action("Start")
                     .on_press_maybe(can_start.then_some(Message::Start))
-                    .style(color_button(scheme.blue, scheme.ink)),
-                button("Cancel")
+                    .style(color_button(scheme.green, scheme.ink)),
+                action("Cancel")
                     .on_press_maybe(can_cancel.then_some(Message::Cancel))
                     .style(color_button(scheme.pink, scheme.ink)),
             ]
@@ -2300,9 +2379,14 @@ impl App {
                         bar: scheme.blue.into(),
                         border: iced::border::rounded(14.0),
                     }),
-                container(text(format!("{} — {}", self.stage, self.status_text())))
-                    .center_x(Length::Fill)
-                    .center_y(Length::Fill),
+                container(
+                    text(format!("{} — {}", self.stage, self.status_text()))
+                        .style(move |_theme| text::Style {
+                            color: Some(scheme.ink),
+                        }),
+                )
+                .center_x(Length::Fill)
+                .center_y(Length::Fill),
             ]
             .width(Length::Fill),
         ]
@@ -2311,16 +2395,38 @@ impl App {
 
         let mut middle = column![status_row].spacing(8).width(Length::Fill);
         middle = middle.push(self.timeline_element(&scheme));
+        let import: Element<Message> = if running {
+            stack![
+                pick_list(ImportKind::ALL, None::<ImportKind>, Message::ImportChoice)
+                    .placeholder("Import\u{2026}")
+                    .style(greyed_pick)
+                    .handle(caret_handle(false)),
+                mouse_area(
+                    container(horizontal_space())
+                        .width(Length::Fill)
+                        .height(Length::Fill),
+                )
+                .interaction(mouse::Interaction::Idle)
+                .on_press(Message::Noop),
+            ]
+            .into()
+        } else {
+            pick_list(ImportKind::ALL, None::<ImportKind>, Message::ImportChoice)
+                .placeholder("Import\u{2026}")
+                .style(ink_pick(scheme.ink))
+                .handle(caret_handle(false))
+                .into()
+        };
         middle = middle.push(
             row![
                 self.player_element(&scheme),
-                button("Summary")
+                action("Summary")
                     .on_press_maybe(
                         (!running && self.stats.is_some()).then_some(Message::OpenSummary)
                     )
                     .style(color_button(scheme.pink, scheme.ink)),
                 self.tip(
-                    button("Rename Speakers")
+                    action("Rename Speakers")
                         .on_press_maybe(
                             (!running && !self.lines.is_empty()).then_some(Message::OpenRename)
                         )
@@ -2329,9 +2435,7 @@ impl App {
                     &scheme,
                 ),
                 horizontal_space(),
-                pick_list(ImportKind::ALL, None::<ImportKind>, Message::ImportChoice)
-                    .placeholder("Import\u{2026}")
-                    .style(pill_pick),
+                import,
             ]
             .spacing(8)
             .align_y(iced::Alignment::Center)
@@ -2349,42 +2453,33 @@ impl App {
                 .style(move |_theme| container::Style {
                     background: Some(scheme.panel_bg.into()),
                     border: iced::border::rounded(16.0),
+                    shadow: soft_shadow(),
                     ..container::Style::default()
                 }),
         ]
         .spacing(8)
         .padding(12);
 
-        if self.console_open {
-            base = base.push(self.console_panel(&scheme));
-        }
-
-        let console_label: Element<Message> = if self.console_open {
-            row![icon(ICON_CHECK, 12.0), text("Console")]
-                .spacing(4)
-                .align_y(iced::Alignment::Center)
-                .into()
-        } else {
-            text("Console").into()
-        };
         base = base.push(
             container(
                 row![
                     self.search_element(&scheme),
                     horizontal_space(),
-                    button(console_label)
-                        .on_press(Message::ToggleConsole)
-                        .style(pill_button_secondary),
                     pick_list(HelpKind::ALL, None::<HelpKind>, Message::HelpChoice)
                         .placeholder("Help\u{2026}")
-                        .style(pill_pick),
-                    button("Close").on_press(Message::Close).style(pill_button_secondary),
+                        .style(ink_pick(scheme.ink))
+                        .handle(caret_handle(true)),
+                    action("Close").on_press(Message::Close).style(pill_button_secondary),
                 ]
                 .spacing(8)
                 .align_y(iced::Alignment::Center),
             )
             .width(Length::Fill),
         );
+
+        if self.console_open {
+            base = base.push(self.console_panel(&scheme));
+        }
 
         if let Some((message, _)) = &self.toast {
             let toast = mouse_area(
@@ -2394,6 +2489,7 @@ impl App {
                         background: Some(scheme.blue.into()),
                         text_color: Some(scheme.ink),
                         border: iced::border::rounded(PILL),
+                        shadow: soft_shadow(),
                         ..container::Style::default()
                     }),
             )
@@ -2411,13 +2507,16 @@ impl App {
             let dialog = container(
                 column![
                     text("Warning").size(20),
-                    text("Speakers can not be renamed in batch mode."),
+                    text(
+                        "Speakers can not be renamed in batch mode unless the \
+                         transcription files are reimported.",
+                    ),
                     container(
                         row![
-                            button("Cancel")
+                            action("Cancel")
                                 .on_press(Message::BatchCancel)
                                 .style(color_button(scheme.pink, scheme.ink)),
-                            button("Continue")
+                            action("Continue")
                                 .on_press(Message::BatchContinue)
                                 .style(color_button(scheme.blue, scheme.ink)),
                         ]
@@ -2433,6 +2532,7 @@ impl App {
             .style(move |_theme| container::Style {
                 background: Some(scheme.dialog_bg.into()),
                 border: iced::border::rounded(16.0),
+                shadow: dialog_shadow(),
                 ..container::Style::default()
             });
 
@@ -2446,7 +2546,7 @@ impl App {
             }
             col = col.push(
                 container(
-                    row![button("Close")
+                    row![action("Close")
                         .on_press(Message::CloseSummary)
                         .style(color_button(scheme.blue, scheme.ink))]
                     .spacing(8),
@@ -2459,6 +2559,7 @@ impl App {
                 .style(move |_theme| container::Style {
                     background: Some(scheme.dialog_bg.into()),
                     border: iced::border::rounded(16.0),
+                    shadow: dialog_shadow(),
                     ..container::Style::default()
                 });
             return modal_overlay(base, dialog);
@@ -2481,6 +2582,7 @@ impl App {
                     "Left / Right     Seek \u{00b1}5s".to_string(),
                     "Esc              Dismiss".to_string(),
                 ],
+                HelpKind::Console => Vec::new(),
             };
             let mut col = column![text(kind.label()).size(20)].spacing(8);
             for line in body {
@@ -2488,7 +2590,7 @@ impl App {
             }
             col = col.push(
                 container(
-                    row![button("Close")
+                    row![action("Close")
                         .on_press(Message::CloseHelp)
                         .style(color_button(scheme.blue, scheme.ink))]
                     .spacing(8),
@@ -2501,6 +2603,7 @@ impl App {
                 .style(move |_theme| container::Style {
                     background: Some(scheme.dialog_bg.into()),
                     border: iced::border::rounded(16.0),
+                    shadow: dialog_shadow(),
                     ..container::Style::default()
                 });
             return modal_overlay(base, dialog);
@@ -2531,10 +2634,10 @@ impl App {
         col = col.push(
             container(
                 row![
-                    button("Save")
+                    action("Save")
                         .on_press(Message::RenameSave)
                         .style(color_button(scheme.blue, scheme.ink)),
-                    button("Cancel")
+                    action("Cancel")
                         .on_press(Message::RenameCancel)
                         .style(color_button(scheme.pink, scheme.ink)),
                 ]
@@ -2548,6 +2651,7 @@ impl App {
             .style(move |_theme| container::Style {
                 background: Some(scheme.dialog_bg.into()),
                 border: iced::border::rounded(16.0),
+                shadow: dialog_shadow(),
                 ..container::Style::default()
             });
 
@@ -2844,14 +2948,47 @@ fn icon_colored(code: char, size: f32, color: Color) -> Element<'static, Message
         .into()
 }
 
+/// A dynamic pick-list handle: caret points down when closed (or up when
+/// `invert` is set), flipping when the menu opens.
+fn caret_handle(invert: bool) -> pick_list::Handle<Font> {
+    let icon = |code: char| pick_list::Icon {
+        font: Font::with_name("bootstrap-icons"),
+        code_point: code,
+        size: Some(Pixels(12.0)),
+        line_height: iced::advanced::text::LineHeight::default(),
+        shaping: iced::advanced::text::Shaping::Basic,
+    };
+    let (closed, open) = if invert {
+        (icon(ICON_CARET_UP), icon(ICON_CARET_DOWN))
+    } else {
+        (icon(ICON_CARET_DOWN), icon(ICON_CARET_UP))
+    };
+    pick_list::Handle::Dynamic { closed, open }
+}
+
+/// Pick-list style whose text/placeholder/handle use `ink` (button text colour).
+fn ink_pick(ink: Color) -> impl Fn(&iced::Theme, pick_list::Status) -> pick_list::Style {
+    move |theme, status| {
+        let mut style = pick_list::default(theme, status);
+        style.text_color = ink;
+        style.placeholder_color = ink;
+        style.handle_color = ink;
+        style.border.radius = PILL.into();
+        style
+    }
+}
+
 // Bootstrap Icons codepoints (see assets/bootstrap-icons.json).
 const ICON_PLAY: char = '\u{f4f4}';
 const ICON_PAUSE: char = '\u{f4c3}';
 const ICON_ARROW_RIGHT: char = '\u{f138}';
+const ICON_ARROW_UP: char = '\u{f148}';
+const ICON_ARROW_DOWN: char = '\u{f128}';
 const ICON_CIRCLE_FILL: char = '\u{f287}';
 const ICON_CHECK: char = '\u{f633}';
 const ICON_X: char = '\u{f659}';
 const ICON_CARET_DOWN: char = '\u{f229}';
+const ICON_CARET_UP: char = '\u{f235}';
 const ICON_ZOOM_IN: char = '\u{f62c}';
 const ICON_ZOOM_OUT: char = '\u{f62d}';
 
@@ -2932,6 +3069,19 @@ fn format_secs(secs: f64) -> String {
     }
 }
 
+/// Bracketed absolute timestamp matching the backend output, e.g. "[03:07]".
+fn format_timestamp(secs: f64) -> String {
+    let total = secs.max(0.0) as u64;
+    let hours = total / 3600;
+    let minutes = (total % 3600) / 60;
+    let seconds = total % 60;
+    if hours > 0 {
+        format!("[{hours:02}:{minutes:02}:{seconds:02}]")
+    } else {
+        format!("[{minutes:02}:{seconds:02}]")
+    }
+}
+
 fn find_id() -> text_input::Id {
     text_input::Id::new("find-query")
 }
@@ -2967,15 +3117,25 @@ fn sms_row(
     query: &str,
     highlight: Color,
     size: f32,
+    active: bool,
 ) -> Element<'static, Message> {
     let background = tint.unwrap_or(color);
+    let border = if active {
+        iced::border::Border {
+            color: ink,
+            width: 2.0,
+            radius: 8.0.into(),
+        }
+    } else {
+        iced::border::rounded(8.0)
+    };
     let bubble = container(rich_text(styled_spans(content, query, Some(ink), highlight, size)))
         .width(Length::Fill)
         .align_x(iced::Alignment::Start)
         .padding(6)
         .style(move |_theme| container::Style {
             background: Some(background.into()),
-            border: iced::border::rounded(8.0),
+            border,
             ..container::Style::default()
         });
     if left {
@@ -2995,13 +3155,12 @@ fn line_element(
     highlight: Color,
     scheme: &Scheme,
     size: f32,
-    show_gutter: bool,
+    active: bool,
 ) -> Element<'static, Message> {
     let bold = Font {
         weight: font::Weight::Bold,
         ..Font::default()
     };
-    let muted = MUTED;
     let ink = scheme.ink;
 
     let speaker = line.speaker.clone();
@@ -3010,40 +3169,33 @@ fn line_element(
     } else {
         line.raw.find(&speaker).unwrap_or(0)
     };
-    let prefix = line.raw[..pos].trim().to_string();
     let rest = if speaker.is_empty() {
         line.raw.clone()
     } else {
-        line.raw[pos + speaker.len()..].to_string()
+        let after = &line.raw[pos + speaker.len()..];
+        after.strip_prefix(": ").unwrap_or(after).to_string()
     };
+    let stamp = line
+        .start
+        .map(|s| format_timestamp(s as f64))
+        .unwrap_or_default();
 
     let mut content = row![]
         .spacing(6)
         .align_y(iced::Alignment::Start)
         .width(Length::Fill);
 
-    if show_gutter {
-        let time = line
-            .start
-            .map(|s| format_secs(s as f64))
-            .unwrap_or_default();
+    if !stamp.is_empty() {
         content = content.push(
-            text(time)
+            text(stamp)
                 .size(size * 0.82)
-                .width(Length::Fixed(58.0))
-                .style(move |_theme| text::Style { color: Some(muted) }),
-        );
-    } else if !prefix.is_empty() {
-        content = content.push(
-            text(prefix)
-                .size(size * 0.82)
-                .style(move |_theme| text::Style { color: Some(muted) }),
+                .style(move |_theme| text::Style { color: Some(ink) }),
         );
     }
 
     if !speaker.is_empty() {
         content = content.push(
-            button(text(speaker.clone()).size(size).font(bold))
+            action(text(speaker.clone()).size(size).font(bold))
                 .on_press(Message::RenameSpeaker(speaker.clone()))
                 .style(move |_theme, _status| button::Style {
                     background: None,
@@ -3056,12 +3208,21 @@ fn line_element(
 
     content = content.push(rich_text(styled_spans(&rest, query, None, highlight, size)));
 
+    let border = if active {
+        iced::border::Border {
+            color: ink,
+            width: 2.0,
+            radius: 4.0.into(),
+        }
+    } else {
+        iced::border::rounded(4.0)
+    };
     container(content)
         .width(Length::Fill)
         .padding([2, 4])
         .style(move |_theme| container::Style {
             background: tint.map(Into::into),
-            border: iced::border::rounded(4.0),
+            border,
             ..container::Style::default()
         })
         .into()
@@ -3077,9 +3238,36 @@ fn sms_color(index: usize, scheme: &Scheme) -> Color {
 
 const PILL: f32 = 1000.0;
 
+/// Width shared by the action buttons so they line up.
+const BTN_W: f32 = 150.0;
+
+/// A button with the shared fixed width.
+fn action<'a>(content: impl Into<Element<'a, Message>>) -> iced::widget::Button<'a, Message> {
+    button(content).width(Length::Fixed(BTN_W))
+}
+
+/// A subtle drop shadow that gives surfaces a soft, raised look.
+fn soft_shadow() -> Shadow {
+    Shadow {
+        color: Color::from_rgba(0.0, 0.0, 0.0, 0.20),
+        offset: Vector::new(0.0, 2.0),
+        blur_radius: 8.0,
+    }
+}
+
+/// A larger shadow for floating dialogs.
+fn dialog_shadow() -> Shadow {
+    Shadow {
+        color: Color::from_rgba(0.0, 0.0, 0.0, 0.35),
+        offset: Vector::new(0.0, 6.0),
+        blur_radius: 24.0,
+    }
+}
+
 fn pill_button_secondary(theme: &iced::Theme, status: button::Status) -> button::Style {
     let mut style = button::secondary(theme, status);
     style.border.radius = PILL.into();
+    style.shadow = soft_shadow();
     style
 }
 
@@ -3157,6 +3345,7 @@ fn color_button(bg: Color, ink: Color) -> impl Fn(&iced::Theme, button::Status) 
             background: Some(bg.into()),
             text_color: text,
             border: iced::border::rounded(PILL),
+            shadow: soft_shadow(),
             ..button::Style::default()
         }
     }

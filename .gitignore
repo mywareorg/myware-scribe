@@ -1,7 +1,7 @@
 models/
 .venv/
 __pycache__/
-*-transcribed.txt
-*-transcribed.json
+*-transcript.txt
+*-transcript.json
 gui/target/
 .cache/
