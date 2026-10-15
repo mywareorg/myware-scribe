@@ -555,7 +555,7 @@ impl App {
             follow_offset: None,
             drag_hover: false,
             font_scale: settings.font_scale.unwrap_or(1.0),
-            follow_playhead: settings.follow_playhead.unwrap_or(true),
+            follow_playhead: true,
             console_open: false,
             console_lines: Vec::new(),
             toast: None,
@@ -812,8 +812,12 @@ impl App {
             Message::TimelineLoaded(path, result) => {
                 if self.peaks_for.as_deref() == Some(path.as_path()) {
                     if let Some((duration, peaks)) = result {
-                        self.timeline_duration = Some(duration as f32);
-                        self.peaks = Arc::new(peaks);
+                        if duration > 0.0 {
+                            self.timeline_duration = Some(duration as f32);
+                        }
+                        if !peaks.is_empty() {
+                            self.peaks = Arc::new(peaks);
+                        }
                     }
                 }
                 Task::none()
@@ -1912,20 +1916,6 @@ impl App {
         let sms_on = self.sms_mode;
         row![
             self.tip(
-                action(icon(ICON_ZOOM_IN, 14.0))
-                    .on_press(Message::ZoomIn)
-                    .style(pill_button_secondary),
-                "Zoom text in",
-                scheme,
-            ),
-            self.tip(
-                action(icon(ICON_ZOOM_OUT, 14.0))
-                    .on_press(Message::ZoomOut)
-                    .style(pill_button_secondary),
-                "Zoom text out",
-                scheme,
-            ),
-            self.tip(
                 action(follow)
                     .on_press(Message::ToggleFollowPlayhead)
                     .style(pill_button_secondary),
@@ -1937,6 +1927,29 @@ impl App {
                     .on_press(Message::SmsToggled(!sms_on))
                     .style(pill_button_secondary),
                 "Show the transcript as chat bubbles",
+                scheme,
+            ),
+        ]
+        .spacing(6)
+        .align_y(iced::Alignment::Center)
+        .into()
+    }
+
+    /// Zoom in / out buttons (bottom-left).
+    fn zoom_controls(&self, scheme: &Scheme) -> Element<'_, Message> {
+        row![
+            self.tip(
+                action(icon(ICON_ZOOM_IN, 14.0))
+                    .on_press(Message::ZoomIn)
+                    .style(pill_button_secondary),
+                "Zoom text in",
+                scheme,
+            ),
+            self.tip(
+                action(icon(ICON_ZOOM_OUT, 14.0))
+                    .on_press(Message::ZoomOut)
+                    .style(pill_button_secondary),
+                "Zoom text out",
                 scheme,
             ),
         ]
@@ -2324,7 +2337,7 @@ impl App {
         let drop_text = if self.drag_hover {
             "Release to add files"
         } else {
-            "Drag & drop audio/video files here"
+            "Or drag & drop audio/video files here"
         };
         queue_col = queue_col.push(
             container(
@@ -2453,7 +2466,7 @@ impl App {
                 options_col,
             ]
             .spacing(8)
-            .align_y(iced::Alignment::Start),
+            .align_y(iced::Alignment::Center),
         ]
         .spacing(16);
 
@@ -2575,6 +2588,7 @@ impl App {
         base = base.push(
             container(
                 row![
+                    self.zoom_controls(&scheme),
                     self.search_element(&scheme),
                     horizontal_space(),
                     action("Copy")

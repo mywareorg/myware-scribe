@@ -110,14 +110,27 @@ pub fn probe_audio(path: &Path, buckets: usize) -> Option<(f64, Vec<f32>)> {
     if !python.is_file() {
         return None;
     }
-    let script = "import sys, numpy as np, soundfile as sf\n\
-d, sr = sf.read(sys.argv[1], dtype='float32', always_2d=True)\n\
-m = d.mean(axis=1)\n\
-n = int(sys.argv[2])\n\
-edges = np.linspace(0, len(m), n + 1).astype(int)\n\
-rms = [float(np.sqrt(np.mean(np.square(m[edges[i]:max(edges[i]+1, edges[i+1])])))) for i in range(n)]\n\
-print(len(m) / sr)\n\
-print(','.join(str(x) for x in rms))";
+    let script = r#"import sys, numpy as np, soundfile as sf
+path = sys.argv[1]
+n = int(sys.argv[2])
+info = sf.info(path)
+sr = info.samplerate
+frames = info.frames
+sumsq = np.zeros(n, dtype='float64')
+counts = np.zeros(n, dtype='int64')
+pos = 0
+for block in sf.blocks(path, blocksize=65536, dtype='float32', always_2d=True):
+    m = block.mean(axis=1).astype('float64')
+    k = len(m)
+    if k:
+        idx = (np.arange(pos, pos + k) * n) // max(1, frames)
+        sumsq += np.bincount(idx, weights=m * m, minlength=n)
+        counts += np.bincount(idx, minlength=n)
+        pos += k
+rms = [float(np.sqrt(sumsq[i] / counts[i])) if counts[i] else 0.0 for i in range(n)]
+print(frames / sr if sr else 0.0)
+print(','.join(str(x) for x in rms))
+"#;
     let mut command = Command::new(&python);
     command
         .args(["-c", script])
