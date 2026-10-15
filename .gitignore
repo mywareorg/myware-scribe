@@ -3,5 +3,6 @@ models/
 __pycache__/
 *-transcript.txt
 *-transcript.json
+*-transcribed.txt
 gui/target/
 .cache/
