@@ -184,9 +184,17 @@ pub fn repo_root() -> Option<PathBuf> {
 
 pub fn venv_python(root: &Path) -> PathBuf {
     if cfg!(windows) {
-        root.join(".venv").join("Scripts").join("python.exe")
+        let venv = root.join(".venv").join("Scripts").join("python.exe");
+        if venv.is_file() {
+            return venv;
+        }
+        root.join("runtime").join("python.exe")
     } else {
-        root.join(".venv").join("bin").join("python")
+        let venv = root.join(".venv").join("bin").join("python");
+        if venv.is_file() {
+            return venv;
+        }
+        root.join("runtime").join("bin").join("python3")
     }
 }
 

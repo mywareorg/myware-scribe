@@ -1433,7 +1433,7 @@ impl App {
         };
         let python = backend::venv_python(&root);
         if !python.is_file() {
-            self.fail_pending("python not found; run scripts/bootstrap.py");
+            self.fail_pending("python not found; run scripts/bootstrap.py or ensure runtime/ is present");
             return;
         }
 

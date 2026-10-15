@@ -9,10 +9,20 @@ Run ``python scripts/components.py --list`` to see the available components.
 """
 
 import argparse
+import os
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-MODELS_DIR = REPO_ROOT / "models"
+
+
+def _models_dir():
+    override = os.environ.get("TRANSIEL_MODELS_DIR")
+    if override:
+        return Path(override).expanduser()
+    return REPO_ROOT / "models"
+
+
+MODELS_DIR = _models_dir()
 
 # Each descriptor:
 #   backend/loader : how to build/load it

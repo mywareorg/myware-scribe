@@ -16,7 +16,7 @@ except ImportError:
 import components
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-MODELS_DIR = REPO_ROOT / "models"
+MODELS_DIR = components.MODELS_DIR
 
 # repo_id -> (local dir name, required files, gated)
 ASSETS = {

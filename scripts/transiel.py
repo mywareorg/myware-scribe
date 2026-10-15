@@ -109,7 +109,18 @@ def start_creep(stage, label, stop):
     return thread
 
 
-CACHE_DIR = REPO_ROOT / ".cache" / "diarization"
+def _cache_dir():
+    override = os.environ.get("TRANSIEL_CACHE_DIR")
+    if override:
+        return Path(override).expanduser()
+    if os.name == "nt":
+        base = os.environ.get("LOCALAPPDATA")
+        if base:
+            return Path(base) / "transiel" / "cache" / "diarization"
+    return REPO_ROOT / ".cache" / "diarization"
+
+
+CACHE_DIR = _cache_dir()
 
 
 def cache_key(audio_path, diarizer_name, num_speakers):
