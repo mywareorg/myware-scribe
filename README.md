@@ -15,14 +15,16 @@ with:
 - **Embeddings:** WeSpeaker ResNet34 (`wespeaker-resnet34`).
 - **Transcribers:** faster-whisper models (`whisper-turbo`, `whisper-base-en`).
 
-The pipeline diarizes the audio (forced to exactly two speakers), cleans up the
-speaker turns, then transcribes each speaker turn independently. Because the
-speaker label comes from the diarization turn, transcription timing never
-influences speaker assignment. It writes two outputs:
+The pipeline diarizes the audio, cleans up the speaker turns, then transcribes
+each speaker turn independently. Because the speaker label comes from the
+diarization turn, transcription timing never influences speaker assignment. The
+number of speakers is fixed with `--num-speakers N` (default 2) or detected with
+`--auto-speakers`. It writes one output per file:
 
-- `<audio-stem>-transcribed.txt` — human readable `[hh:mm:ss] SPEAKER N: text`
-- `<audio-stem>-transcribed.json` — the same lines plus diarization turns,
-  components, model paths, timings and run parameters for debugging.
+- `<audio-stem>-transcript.txt` — human readable `[hh:mm:ss] SPEAKER N: text`
+
+Multiple files can be passed at once; they share a single process, so the models
+load once and are reused across the batch.
 
 ## What is in the repository
 
@@ -82,6 +84,7 @@ All other models are public.
 .venv/bin/python scripts/transiel.py path/to/audio.mp3     # any audio file
 .venv/bin/python scripts/transiel.py --speed audio.mp3     # --balanced / --accuracy too
 .venv/bin/python scripts/transiel.py --preset speed audio.mp3
+.venv/bin/python scripts/transiel.py --output-dir out/ a.mp3 b.mp3 c.mp3  # batch
 .venv/bin/python scripts/transiel.py --diarizer diarizen-base --transcriber whisper-base-en audio.mp3
 ```
 
@@ -100,9 +103,11 @@ is not replicated beyond the free memory. Force it for any preset with `--auto-t
 
 Override any slot with `--diarizer`, `--embedding`, `--transcriber`. Raw path
 overrides: `--whisper-model`, `--diarizen-hub`, `--diarizen-embedding`. Other
-options: `--output`, `--device`, `--compute-type`, `--auto-tune`. The number of
-speakers can be fixed with `--num-speakers` or auto-detected with
-`--auto-speakers`.
+options: `--output` (single file), `--output-dir` (per-file names in a directory),
+`--device`, `--compute-type`, `--auto-tune`. The number of speakers can be fixed
+with `--num-speakers N` (default 2) or auto-detected with `--auto-speakers`.
+Diarization results are cached (`.cache/diarization/`) and reused on re-runs of
+the same audio; disable with `--no-cache`.
 
 On CPU, diarization dominates the runtime. Long files are slow because each
 speaker turn is transcribed separately.
@@ -118,23 +123,26 @@ cargo run --release --manifest-path gui/Cargo.toml
 
 Features:
 
-- **Queue**: add files (multi-select) or a folder, per-file durations, per-item
-  progress + ETA; the main bar shows overall queue progress. A completion toast
-  appears when the queue finishes.
+- **Queue**: add files (multi-select) or a folder, or drag-and-drop onto the
+  window; per-file durations and status. The whole queue runs in a **single
+  backend process**, so the models load once and are reused. A completion
+  notification and Summary dialog appear when it finishes.
 - **Controls**: preset picker (Speed/Balanced/Accuracy), Speakers count (1–5,
-  default 2), Save Location, Start/Cancel; Advanced panel with Confidence tint,
-  Dark theme, Diarization cache, Join Speakers, Lock Text to Playback, SMS Mode,
-  Speakers, Timestamps. All settings persist across sessions.
-- **Transcript**: per-line view with confidence tinting, live streaming during a
-  run, Find (with match highlight), click a speaker name to rename it
-  everywhere, hover overlay for font zoom / timestamp gutter / merge / split,
-  and an optional timestamp gutter. SMS "chat bubble" mode available.
-- **Timeline & player**: waveform + speaker-band strip with a draggable
-  playhead, scroll-to-zoom, and a speaker legend; play/pause, time, and speed
-  (`.5x/1x/1.5x/2x`) with speed-synced playhead.
+  default 2), Save Location, Transcribe/Cancel, and an **Options** panel
+  (Confidence tint, Dark theme, Diarization cache, Join Speakers, SMS Mode,
+  Speakers, Timestamps). All settings persist across sessions.
+- **Transcript**: per-line view with confidence tinting and speaker colours, live
+  streaming during a run, Find (match highlight + prev/next), and an always-on
+  overlay at the bottom-right with **zoom / Follow / SMS**. Clicking any line
+  moves the playhead there and enables Follow. Includes **Copy / Save / Reveal**
+  and SMS "chat bubble" mode. After a run a **Summary** dialog appears, then a
+  **Rename Speakers** dialog.
+- **Timeline & player**: green waveform with a speaker-coloured band and legend,
+  scroll-to-zoom, and a black playhead (click/drag to seek); play/pause, time,
+  and speed (`.5x/1x/1.5x/2x`) with a speed-synced playhead.
 - **Import…** dropdown to load a transcript (`.txt`/`.json`) or an audio file
-  (playback only); **Help…** dropdown (About / keyboard shortcuts).
-- **Console**: toggle a panel showing backend log output.
+  (playback only); **Help…** dropdown (About / keyboard shortcuts / console);
+  a toggleable **Console** panel showing backend log output.
 
 The CLI must be set up first (`scripts/bootstrap.py` +
 `scripts/model-download.py`); the GUI locates the repo via `TRANSIEL_ROOT` or by

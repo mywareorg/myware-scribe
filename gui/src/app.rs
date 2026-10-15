@@ -2744,7 +2744,7 @@ impl App {
         if let Some(kind) = self.help_open {
             let body: Vec<String> = match kind {
                 HelpKind::About => vec![
-                    "transiel".to_string(),
+                    format!("transiel {}", env!("CARGO_PKG_VERSION")),
                     "Local speaker diarization + transcription.".to_string(),
                     "Diarization: DiariZen / pyannote.  Transcription: faster-whisper.".to_string(),
                     "Runs fully offline once models are downloaded.".to_string(),
