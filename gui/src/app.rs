@@ -651,11 +651,13 @@ impl App {
     }
 
     fn window_size_from(settings: &Settings) -> Size {
+        // Cap the height so the window never opens taller than common screens.
+        const MAX_HEIGHT: f32 = 1000.0;
         match (settings.window_width, settings.window_height) {
             (Some(width), Some(height)) if width >= 100.0 && height >= 100.0 => {
-                Size::new(width, height)
+                Size::new(width, height.min(MAX_HEIGHT))
             }
-            _ => Size::new(640.0, 1920.0),
+            _ => Size::new(640.0, 900.0),
         }
     }
 
