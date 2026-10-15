@@ -14,8 +14,6 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 MODELS_DIR = REPO_ROOT / "models"
 
-NUM_SPEAKERS = 2
-
 # Each descriptor:
 #   backend/loader : how to build/load it
 #   model          : Hugging Face repo id

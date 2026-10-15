@@ -27,21 +27,12 @@ pub struct Stats {
     pub run_seconds: f64,
     pub speakers: usize,
     pub num_speakers: Option<i32>,
-    pub cache_hit: bool,
-    pub turns: usize,
-    pub lines: usize,
     pub preset: String,
-    pub diarizer: String,
-    pub embedding: String,
-    pub transcriber: String,
-    pub device: String,
-    pub transcription_device: String,
     pub speaker_stats: HashMap<String, SpeakerStat>,
 }
 
 #[derive(Debug, serde::Deserialize)]
 #[serde(tag = "event")]
-#[allow(dead_code)]
 pub enum Event {
     #[serde(rename = "stage")]
     Stage { stage: String, label: String, progress: f32 },
@@ -49,13 +40,11 @@ pub enum Event {
     Meta { audio: String, duration: f32 },
     #[serde(rename = "turns")]
     Turns {
-        speakers: HashMap<String, String>,
         turns: Vec<Turn>,
     },
     #[serde(rename = "line")]
     Line {
         start: f32,
-        end: f32,
         speaker: String,
         text: String,
         confidence: f32,

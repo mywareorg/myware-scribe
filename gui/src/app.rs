@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -284,7 +284,6 @@ struct Settings {
     cache: Option<bool>,
     confidence: Option<bool>,
     font_scale: Option<f32>,
-    follow_playhead: Option<bool>,
     playback_speed: Option<f32>,
     waveform_zoom: Option<f32>,
     window_width: Option<f32>,
@@ -399,7 +398,7 @@ pub enum Message {
     OpenSummary,
     TimestampsToggled(bool),
     JoinSpeakerToggled(bool),
-    ToggleAdvanced,
+    ToggleOptions,
     SmsToggled(bool),
     DarkToggled(bool),
     SpeakerCountChanged(SpeakerOpt),
@@ -449,9 +448,7 @@ pub struct App {
     status: Status,
     transcript: String,
     lines: Vec<DocLine>,
-    speakers: HashMap<String, String>,
     turns: Vec<backend::Turn>,
-    meta_duration: Option<f32>,
     peaks: Arc<Vec<f32>>,
     peaks_for: Option<PathBuf>,
     playhead: f32,
@@ -466,7 +463,7 @@ pub struct App {
     stats: Option<backend::Stats>,
     timestamps: bool,
     join_speaker: bool,
-    advanced_open: bool,
+    options_open: bool,
     sms_mode: bool,
     dark_mode: bool,
     num_speakers: Option<i32>,
@@ -526,9 +523,7 @@ impl App {
             status: Status::Idle,
             transcript: String::new(),
             lines: Vec::new(),
-            speakers: HashMap::new(),
             turns: Vec::new(),
-            meta_duration: None,
             peaks: Arc::new(Vec::new()),
             peaks_for: None,
             playhead: 0.0,
@@ -543,7 +538,7 @@ impl App {
             stats: None,
             timestamps: settings.timestamps.unwrap_or(true),
             join_speaker: settings.join_speaker.unwrap_or(false),
-            advanced_open: false,
+            options_open: false,
             sms_mode: settings.sms_mode.unwrap_or(false),
             dark_mode: settings.dark_mode.unwrap_or(false),
             num_speakers: match settings.num_speakers {
@@ -624,7 +619,6 @@ impl App {
             cache: Some(self.cache),
             confidence: Some(self.confidence),
             font_scale: Some(self.font_scale),
-            follow_playhead: Some(self.follow_playhead),
             playback_speed: Some(self.playback_speed),
             waveform_zoom: Some(self.waveform_zoom),
             window_width: Some(self.window_size.width),
@@ -725,11 +719,11 @@ impl App {
                 self.save_settings();
                 Task::none()
             }
-            Message::ToggleAdvanced => {
+            Message::ToggleOptions => {
                 if self.queue.is_empty() {
                     return Task::none();
                 }
-                self.advanced_open = !self.advanced_open;
+                self.options_open = !self.options_open;
                 Task::none()
             }
             Message::SmsToggled(value) => {
@@ -1266,26 +1260,16 @@ impl App {
                         }
                     }
                 }
-                let total = self.lines.len().max(1) as f32;
                 let content = self.transcript_content;
                 let viewport = self.transcript_viewport;
                 if self.follow_playhead {
                     if let Some(active) = self.active_line_index() {
-                        if let Some(rank) =
-                            self.display_order().iter().position(|index| *index == active)
-                        {
-                            // Hard-lock the highlighted line to the vertical centre
-                            // (only when geometry is known, so it never jumps to top).
-                            if content > 0.0 && viewport > 0.0 {
-                                let line_height = content / total;
-                                let y = ((rank as f32 + 0.5) * line_height - viewport / 2.0)
-                                    .clamp(0.0, (content - viewport).max(0.0));
-                                self.follow_offset = Some(y);
-                                tasks.push(scrollable::scroll_to(
-                                    transcript_id(),
-                                    scrollable::AbsoluteOffset { x: 0.0, y },
-                                ));
-                            }
+                        if let Some(y) = self.follow_target(active) {
+                            self.follow_offset = Some(y);
+                            tasks.push(scrollable::scroll_to(
+                                transcript_id(),
+                                scrollable::AbsoluteOffset { x: 0.0, y },
+                            ));
                         }
                     }
                 } else {
@@ -1487,9 +1471,7 @@ impl App {
         self.lines.clear();
         self.follow_offset = None;
         self.transcript_at_bottom = true;
-        self.speakers.clear();
         self.turns.clear();
-        self.meta_duration = None;
         self.peaks = Arc::new(Vec::new());
         self.peaks_for = None;
         self.playhead = 0.0;
@@ -1583,7 +1565,6 @@ impl App {
                     }
                 }
                 Event::Meta { audio, duration } => {
-                    self.meta_duration = Some(duration);
                     let path = PathBuf::from(audio);
                     if self.peaks_for.as_deref() != Some(path.as_path()) {
                         self.peaks_for = Some(path.clone());
@@ -1598,8 +1579,7 @@ impl App {
                         ));
                     }
                 }
-                Event::Turns { speakers, turns } => {
-                    self.speakers = speakers;
+                Event::Turns { turns } => {
                     self.turns = turns;
                 }
                 Event::Line {
@@ -1607,7 +1587,6 @@ impl App {
                     speaker,
                     text,
                     confidence,
-                    ..
                 } => {
                     let raw = if self.timestamps {
                         format!("[{}] {speaker}: {text}", format_secs(start as f64))
@@ -1797,23 +1776,30 @@ impl App {
     }
 
     /// Scroll the transcript so the given line (by index) is roughly centred.
-    fn scroll_to_line(&self, line: usize) -> Task<Message> {
+    /// Pixel scroll offset that centres the given line in the transcript.
+    fn follow_target(&self, line: usize) -> Option<f32> {
         let total = self.lines.len().max(1) as f32;
         let content = self.transcript_content;
         let viewport = self.transcript_viewport;
         if content <= 0.0 || viewport <= 0.0 {
-            return Task::none();
+            return None;
         }
-        let Some(rank) = self.display_order().iter().position(|index| *index == line) else {
-            return Task::none();
-        };
+        let rank = self.display_order().iter().position(|index| *index == line)?;
         let line_height = content / total;
-        let y = ((rank as f32 + 0.5) * line_height - viewport / 2.0)
-            .clamp(0.0, (content - viewport).max(0.0));
-        scrollable::scroll_to(
-            transcript_id(),
-            scrollable::AbsoluteOffset { x: 0.0, y },
+        Some(
+            ((rank as f32 + 0.5) * line_height - viewport / 2.0)
+                .clamp(0.0, (content - viewport).max(0.0)),
         )
+    }
+
+    fn scroll_to_line(&self, line: usize) -> Task<Message> {
+        match self.follow_target(line) {
+            Some(y) => scrollable::scroll_to(
+                transcript_id(),
+                scrollable::AbsoluteOffset { x: 0.0, y },
+            ),
+            None => Task::none(),
+        }
     }
 
     /// Transcript view: per-line (confidence/search tinted) or SMS bubbles.
@@ -2211,7 +2197,7 @@ impl App {
             .iter()
             .any(|item| matches!(item.status, ItemStatus::Pending));
         let has_queue = !self.queue.is_empty();
-        let can_advanced = has_queue;
+        let can_options = has_queue;
         let can_add = !running;
         let can_output = !running && has_queue;
         let can_preset = !running && has_queue;
@@ -2243,7 +2229,7 @@ impl App {
             row![
                 text("Options"),
                 icon(
-                    if self.advanced_open {
+                    if self.options_open {
                         ICON_CARET_UP
                     } else {
                         ICON_CARET_DOWN
@@ -2254,9 +2240,9 @@ impl App {
             .spacing(4)
             .align_y(iced::Alignment::Center),
         )
-        .on_press_maybe(can_advanced.then_some(Message::ToggleAdvanced))
+        .on_press_maybe(can_options.then_some(Message::ToggleOptions))
         .style(move |theme: &iced::Theme, status| {
-            if can_advanced {
+            if can_options {
                 pill_button_secondary(theme, status)
             } else {
                 greyed_button(theme, status)
@@ -2395,7 +2381,7 @@ impl App {
             );
         }
 
-        if self.advanced_open && can_advanced {
+        if self.options_open && can_options {
             options_col = options_col.push(
                 column![
                     self.tip(
