@@ -298,6 +298,7 @@ struct Scheme {
     panel_bg: Color,
     dialog_bg: Color,
     track: Color,
+    timeline_bg: Color,
     blue: Color,
     pink: Color,
     green: Color,
@@ -319,6 +320,7 @@ impl Scheme {
                 panel_bg: Color::from_rgb(0.094, 0.094, 0.145),
                 dialog_bg: Color::from_rgb(0.118, 0.118, 0.180),
                 track: Color::from_rgb(0.067, 0.067, 0.106),
+                timeline_bg: Color::from_rgb(0.22, 0.22, 0.26),
                 blue: Color::from_rgb(0.537, 0.706, 0.980),
                 pink: Color::from_rgb(0.953, 0.545, 0.659),
                 green: Color::from_rgb(0.35, 0.78, 0.47),
@@ -337,6 +339,7 @@ impl Scheme {
                 panel_bg: Color::from_rgb(0.96, 0.97, 0.995),
                 dialog_bg: Color::from_rgb(0.99, 0.99, 1.0),
                 track: Color::from_rgb(0.88, 0.88, 0.93),
+                timeline_bg: Color::from_rgb(0.88, 0.88, 0.93),
                 blue: Color::from_rgb(0.357, 0.808, 0.980),
                 pink: Color::from_rgb(0.961, 0.663, 0.722),
                 green: Color::from_rgb(0.30, 0.72, 0.42),
@@ -383,7 +386,7 @@ pub enum Message {
     RenameMove(bool),
     EnterSubmit,
     ShiftEnterSubmit,
-    RenameSpeaker(String),
+    SelectLine(usize),
     ZoomIn,
     ZoomOut,
     ZoomReset,
@@ -419,6 +422,7 @@ pub enum Message {
     ImportLoaded(Option<String>),
     ImportChoice(ImportKind),
     CopyTranscript,
+    SaveTranscript,
     RevealOutput,
     AudioPicked(Option<PathBuf>),
     OpenRename,
@@ -763,10 +767,9 @@ impl App {
                 let viewport_h = viewport.bounds().height;
                 let content_h = viewport.content_bounds().height;
                 self.transcript_at_bottom = offset + viewport_h >= content_h - 8.0;
-                // While playing, follow holds the cursor on screen no matter
-                // what; otherwise scrolling disengages it.
-                let playing = self.player.as_ref().is_some_and(|player| player.is_playing());
-                if self.follow_playhead && !playing && !self.transcript_at_bottom {
+                // Any scroll that doesn't match the offset follow just set
+                // means the user scrolled: disengage follow.
+                if self.follow_playhead {
                     if let Some(expected) = self.follow_offset {
                         if (offset - expected).abs() > 6.0 {
                             self.follow_playhead = false;
@@ -882,13 +885,20 @@ impl App {
                 }
                 Task::none()
             }
-            Message::RenameSpeaker(name) => {
-                let focus = self.open_rename();
-                if let Some(index) = self.rename_fields.iter().position(|(old, _)| *old == name) {
-                    self.rename_focus = index;
-                    return text_input::focus(rename_id(index));
+            Message::SelectLine(index) => {
+                if let Some(line) = self.lines.get(index) {
+                    if let Some(start) = line.start {
+                        let max = self.timeline_duration.unwrap_or(start);
+                        self.playhead = start.clamp(0.0, max);
+                        self.follow_playhead = true;
+                        self.follow_offset = None;
+                        self.save_settings();
+                        if let Some(player) = &self.player {
+                            player.seek(self.playhead, self.playback_speed);
+                        }
+                    }
                 }
-                focus
+                Task::none()
             }
             Message::RenameName(index, value) => {
                 if let Some(field) = self.rename_fields.get_mut(index) {
@@ -1136,6 +1146,16 @@ impl App {
                 self.reveal_output();
                 Task::none()
             }
+            Message::SaveTranscript => {
+                if let Some(path) = &self.output_txt {
+                    if std::fs::write(path, &self.transcript).is_ok() {
+                        self.toast = Some((format!("Saved {}", path.display()), Instant::now()));
+                    }
+                } else {
+                    self.toast = Some(("No output file yet".to_string(), Instant::now()));
+                }
+                Task::none()
+            }
             Message::ImportChoice(kind) => match kind {
                 ImportKind::Transcription => Task::perform(
                     async {
@@ -1258,7 +1278,7 @@ impl App {
                             // (only when geometry is known, so it never jumps to top).
                             if content > 0.0 && viewport > 0.0 {
                                 let line_height = content / total;
-                                let y = (rank as f32 * line_height - viewport / 2.0)
+                                let y = ((rank as f32 + 0.5) * line_height - viewport / 2.0)
                                     .clamp(0.0, (content - viewport).max(0.0));
                                 self.follow_offset = Some(y);
                                 tasks.push(scrollable::scroll_to(
@@ -1788,7 +1808,7 @@ impl App {
             return Task::none();
         };
         let line_height = content / total;
-        let y = (rank as f32 * line_height - viewport / 2.0)
+        let y = ((rank as f32 + 0.5) * line_height - viewport / 2.0)
             .clamp(0.0, (content - viewport).max(0.0));
         scrollable::scroll_to(
             transcript_id(),
@@ -1808,7 +1828,6 @@ impl App {
         let active_line = matches.get(self.search_index).copied();
         let size = 16.0 * self.font_scale;
         let mut col = column![].spacing(2).padding(8).width(Length::Fill);
-        let mut sides: Vec<String> = Vec::new();
         let speaker_order = self.speaker_order();
         let display: Vec<usize> = self.display_order();
         let playhead_line = self.active_line_index();
@@ -1820,14 +1839,10 @@ impl App {
             let matched = !query.is_empty() && matches.contains(&idx);
             let active = playhead_line == Some(idx);
             if self.sms_mode {
-                let label = line.speaker.clone();
-                let index = match sides.iter().position(|s| s == &label) {
-                    Some(i) => i,
-                    None => {
-                        sides.push(label.clone());
-                        sides.len() - 1
-                    }
-                };
+                let index = speaker_order
+                    .iter()
+                    .position(|name| *name == line.speaker)
+                    .unwrap_or(0);
                 let left = index % 2 == 0;
                 let tint = if matched {
                     Some(if Some(idx) == active_line {
@@ -1839,17 +1854,28 @@ impl App {
                     (self.confidence && line.low_confidence())
                         .then_some(if left { scheme.warn_tint } else { scheme.warn_tint_alt })
                 };
-                col = col.push(sms_row(
-                    line.raw.trim(),
-                    left,
-                    sms_color(index, &scheme),
-                    scheme.ink,
-                    tint,
-                    &query,
-                    scheme.search_hl,
-                    size,
-                    active,
-                ));
+                col = col.push(
+                    stack![
+                        sms_row(
+                            line.raw.trim(),
+                            left,
+                            speaker_palette(index, &scheme),
+                            scheme.ink,
+                            tint,
+                            &query,
+                            scheme.search_hl,
+                            size,
+                            active,
+                        ),
+                        mouse_area(
+                            container(horizontal_space())
+                                .width(Length::Fill)
+                                .height(Length::Fill),
+                        )
+                        .interaction(mouse::Interaction::Pointer)
+                        .on_press(Message::SelectLine(idx)),
+                    ],
+                );
             } else {
                 let speaker_bg = speaker_order
                     .iter()
@@ -1868,6 +1894,7 @@ impl App {
                 };
                 col = col.push(line_element(
                     line,
+                    idx,
                     tint,
                     &query,
                     scheme.search_hl,
@@ -1888,14 +1915,14 @@ impl App {
             container(self.view_controls(&scheme))
                 .width(Length::Fill)
                 .height(Length::Fill)
-                .align_x(iced::Alignment::End)
+                .align_x(iced::Alignment::Start)
                 .align_y(iced::Alignment::End)
                 .padding(10),
         ]
         .into()
     }
 
-    /// Zoom / Follow / SMS controls overlaid on the transcript (bottom-right).
+    /// Zoom / Follow / SMS controls overlaid on the transcript (bottom-left).
     fn view_controls(&self, scheme: &Scheme) -> Element<'_, Message> {
         let follow: Element<Message> = if self.follow_playhead {
             row![icon(ICON_CHECK, 12.0), text("Follow")]
@@ -1916,29 +1943,6 @@ impl App {
         let sms_on = self.sms_mode;
         row![
             self.tip(
-                action(follow)
-                    .on_press(Message::ToggleFollowPlayhead)
-                    .style(pill_button_secondary),
-                "Keep the transcript centered on the playhead",
-                scheme,
-            ),
-            self.tip(
-                action(sms)
-                    .on_press(Message::SmsToggled(!sms_on))
-                    .style(pill_button_secondary),
-                "Show the transcript as chat bubbles",
-                scheme,
-            ),
-        ]
-        .spacing(6)
-        .align_y(iced::Alignment::Center)
-        .into()
-    }
-
-    /// Zoom in / out buttons (bottom-left).
-    fn zoom_controls(&self, scheme: &Scheme) -> Element<'_, Message> {
-        row![
-            self.tip(
                 action(icon(ICON_ZOOM_IN, 14.0))
                     .on_press(Message::ZoomIn)
                     .style(pill_button_secondary),
@@ -1950,6 +1954,20 @@ impl App {
                     .on_press(Message::ZoomOut)
                     .style(pill_button_secondary),
                 "Zoom text out",
+                scheme,
+            ),
+            self.tip(
+                action(follow)
+                    .on_press(Message::ToggleFollowPlayhead)
+                    .style(pill_button_secondary),
+                "Keep the transcript centered on the playhead",
+                scheme,
+            ),
+            self.tip(
+                action(sms)
+                    .on_press(Message::SmsToggled(!sms_on))
+                    .style(pill_button_secondary),
+                "Show the transcript as chat bubbles",
                 scheme,
             ),
         ]
@@ -1997,8 +2015,8 @@ impl App {
             }),
             duration,
             playhead: self.playhead,
-            track: scheme.track,
-            wave: scheme.blue,
+            track: scheme.timeline_bg,
+            wave: scheme.green,
             playhead_color: scheme.ink,
             enabled,
             zoom: self.waveform_zoom,
@@ -2334,6 +2352,11 @@ impl App {
         .spacing(6);
 
         let drop_color = if self.drag_hover { scheme.blue } else { scheme.track };
+        let drop_ink = if self.dark_mode {
+            Color::from_rgb(0.90, 0.90, 0.95)
+        } else {
+            scheme.ink
+        };
         let drop_text = if self.drag_hover {
             "Release to add files"
         } else {
@@ -2344,7 +2367,7 @@ impl App {
                 text(drop_text)
                     .size(12)
                     .style(move |_theme| text::Style {
-                        color: Some(scheme.ink),
+                        color: Some(drop_ink),
                     }),
             )
             .width(Length::Fill)
@@ -2461,12 +2484,14 @@ impl App {
             .spacing(8)
             .align_y(iced::Alignment::Center),
             row![
-                text("Preset:"),
+                container(text("Preset:"))
+                    .height(Length::Fixed(30.0))
+                    .align_y(iced::Alignment::Center),
                 preset,
                 options_col,
             ]
             .spacing(8)
-            .align_y(iced::Alignment::Center),
+            .align_y(iced::Alignment::Start),
         ]
         .spacing(16);
 
@@ -2588,12 +2613,17 @@ impl App {
         base = base.push(
             container(
                 row![
-                    self.zoom_controls(&scheme),
                     self.search_element(&scheme),
                     horizontal_space(),
                     action("Copy")
                         .on_press_maybe(
                             (!self.transcript.is_empty()).then_some(Message::CopyTranscript)
+                        )
+                        .style(pill_button_secondary),
+                    action("Save")
+                        .on_press_maybe(
+                            (self.output_txt.is_some() && !self.transcript.is_empty())
+                                .then_some(Message::SaveTranscript)
                         )
                         .style(pill_button_secondary),
                     action("Reveal")
@@ -3290,6 +3320,7 @@ fn sms_row(
 #[allow(clippy::too_many_arguments)]
 fn line_element(
     line: &DocLine,
+    idx: usize,
     tint: Option<Color>,
     query: &str,
     highlight: Color,
@@ -3334,19 +3365,11 @@ fn line_element(
     }
 
     if !speaker.is_empty() {
-        content = content.push(
-            action(text(speaker.clone()).size(size).font(bold))
-                .on_press(Message::RenameSpeaker(speaker.clone()))
-                .style(move |_theme, _status| button::Style {
-                    background: None,
-                    text_color: ink,
-                    border: iced::border::Border::default(),
-                    ..button::Style::default()
-                }),
-        );
+        content = content.push(text(speaker).size(size).font(bold).color(ink));
     }
 
-    content = content.push(rich_text(styled_spans(&rest, query, None, highlight, size)));
+    content = content.push(rich_text(styled_spans(&rest, query, Some(ink), highlight, size)));
+    content = content.push(horizontal_space());
 
     let border = if active {
         iced::border::Border {
@@ -3357,23 +3380,24 @@ fn line_element(
     } else {
         iced::border::rounded(4.0)
     };
-    container(content)
-        .width(Length::Fill)
-        .padding([2, 4])
-        .style(move |_theme| container::Style {
-            background: tint.map(Into::into),
-            border,
-            ..container::Style::default()
-        })
-        .into()
-}
-
-fn sms_color(index: usize, scheme: &Scheme) -> Color {
-    if index % 2 == 0 {
-        scheme.sms0
-    } else {
-        scheme.sms1
-    }
+    stack![
+        container(content)
+            .width(Length::Fill)
+            .padding([2, 4])
+            .style(move |_theme| container::Style {
+                background: tint.map(Into::into),
+                border,
+                ..container::Style::default()
+            }),
+        mouse_area(
+            container(horizontal_space())
+                .width(Length::Fill)
+                .height(Length::Fill),
+        )
+        .interaction(mouse::Interaction::Pointer)
+        .on_press(Message::SelectLine(idx)),
+    ]
+    .into()
 }
 
 const PILL: f32 = 1000.0;
