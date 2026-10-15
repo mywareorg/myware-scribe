@@ -663,6 +663,15 @@ def join_speaker_lines(lines):
     return merged
 
 
+def output_base_for(audio_path, args, multiple):
+    """Output basename (without extension) for one audio file."""
+    if not multiple and args.output:
+        return Path(args.output)
+    if args.output_dir:
+        return Path(args.output_dir) / f"{audio_path.stem}-transcript"
+    return audio_path.parent / f"{audio_path.stem}-transcript"
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog="transiel",
@@ -673,9 +682,9 @@ def main():
     )
     parser.add_argument(
         "audio",
-        nargs="?",
-        default=str(DEFAULT_AUDIO),
-        help="audio file to process (default: audio/sample-long.mp3)",
+        nargs="*",
+        default=[str(DEFAULT_AUDIO)],
+        help="audio file(s) to process (default: audio/sample-long.mp3)",
     )
     preset_group = parser.add_mutually_exclusive_group()
     preset_group.add_argument(
@@ -726,7 +735,12 @@ def main():
     parser.add_argument(
         "--output",
         default=None,
-        help="output basename (default: <audio-stem>-transcript)",
+        help="output basename (single file; default: <audio-stem>-transcript)",
+    )
+    parser.add_argument(
+        "--output-dir",
+        default=None,
+        help="directory for per-file <audio-stem>-transcript.txt (default: repo/audio dir)",
     )
     parser.add_argument(
         "--device",
@@ -791,12 +805,9 @@ def main():
     except KeyError as exc:
         sys.exit(str(exc))
 
-    audio_path = Path(args.audio).resolve()
-    if not audio_path.is_file():
-        sys.exit(f"audio file not found: {audio_path}")
-
-    output_base = Path(args.output) if args.output else REPO_ROOT / f"{audio_path.stem}-transcript"
-    out_txt = output_base.with_suffix(".txt")
+    audio_args = args.audio if args.audio else [str(DEFAULT_AUDIO)]
+    audio_paths = [Path(a) for a in audio_args]
+    multiple = len(audio_paths) > 1
 
     backends = detect_backends()
     diarization_device = resolve_device(args.device)
@@ -870,6 +881,8 @@ def main():
     )
     whisper_dir = Path(args.whisper_model) if args.whisper_model else components.model_path(resolved["transcriber"])
 
+    num_speakers = None if args.auto_speakers else args.num_speakers
+
     log(f"Preset: {resolved['preset']}")
     log(f"  diarizer:   {resolved['diarizer_name']} ({resolved['diarizer']['backend']})")
     log(f"  embedding:  {resolved['embedding_name']}")
@@ -877,145 +890,160 @@ def main():
     log(f"  backends:   {', '.join(backends)}")
     log(f"  diarization device:  {diarization_device}")
     log(f"  transcription device: {transcribe_device} ({compute_type})")
-    log(f"Audio: {audio_path}")
+    log(f"Files: {len(audio_paths)}")
 
-    timings = {}
-    run_start = time.perf_counter()
-    num_speakers = None if args.auto_speakers else args.num_speakers
+    # Loaded once on first use and reused for every file in the batch.
+    model = None
+    total_files = len(audio_paths)
 
-    emit_stage("loading", 0.0, "Loading models")
-
-    start = time.perf_counter()
-    samples, sample_rate = load_audio(audio_path)
-    duration = len(samples) / sample_rate
-    timings["load_audio_s"] = round(time.perf_counter() - start, 3)
-    log(f"Duration: {format_timestamp(duration)}")
-    emit({"event": "meta", "audio": str(audio_path), "duration": round(duration, 3)})
-
-    start = time.perf_counter()
-    emit_stage("diarization", STAGE_BOUNDS["diarization"][0], "Diarizing")
-    cache_hit = False
-    key = cache_key(audio_path, resolved["diarizer_name"], num_speakers)
-    cached = cache_read(key) if args.cache else None
-    if cached is not None:
-        raw_turns = cached
-        cache_hit = True
-        log("Using cached diarization.")
-    else:
-        creep_stop = threading.Event()
-        creep = None
-        if resolved["diarizer"]["backend"] == "diarizen":
-            creep = start_creep("diarization", "Diarizing", creep_stop)
-        rss_stop, rss_thread = start_rss_log()
+    for index, raw_audio_path in enumerate(audio_paths):
+        audio_path = raw_audio_path.resolve()
+        if not audio_path.is_file():
+            emit({"event": "error", "message": f"audio file not found: {audio_path}"})
+            continue
+        out_txt = output_base_for(audio_path, args, multiple).with_suffix(".txt")
+        emit({"event": "file", "audio": str(audio_path), "index": index, "total": total_files})
         try:
-            raw_turns = run_diarization(
-                samples,
-                sample_rate,
-                resolved["diarizer"],
-                diarizer_path,
-                embedding,
-                tuning,
-                num_speakers,
-                diarization_device,
+            timings = {}
+            run_start = time.perf_counter()
+
+            emit_stage("loading", 0.0, "Loading models")
+            start = time.perf_counter()
+            samples, sample_rate = load_audio(audio_path)
+            duration = len(samples) / sample_rate
+            timings["load_audio_s"] = round(time.perf_counter() - start, 3)
+            log(f"Duration: {format_timestamp(duration)}")
+            emit({"event": "meta", "audio": str(audio_path), "duration": round(duration, 3)})
+
+            start = time.perf_counter()
+            emit_stage("diarization", STAGE_BOUNDS["diarization"][0], "Diarizing")
+            cache_hit = False
+            key = cache_key(audio_path, resolved["diarizer_name"], num_speakers)
+            cached = cache_read(key) if args.cache else None
+            if cached is not None:
+                raw_turns = cached
+                cache_hit = True
+                log("Using cached diarization.")
+            else:
+                creep_stop = threading.Event()
+                creep = None
+                if resolved["diarizer"]["backend"] == "diarizen":
+                    creep = start_creep("diarization", "Diarizing", creep_stop)
+                rss_stop, rss_thread = start_rss_log()
+                try:
+                    raw_turns = run_diarization(
+                        samples,
+                        sample_rate,
+                        resolved["diarizer"],
+                        diarizer_path,
+                        embedding,
+                        tuning,
+                        num_speakers,
+                        diarization_device,
+                    )
+                finally:
+                    rss_stop.set()
+                    rss_thread.join(timeout=1.0)
+                    creep_stop.set()
+                    if creep is not None:
+                        creep.join(timeout=1.0)
+                if args.cache:
+                    cache_write(key, raw_turns)
+            turns = clean_turns(raw_turns)
+            timings["diarization_s"] = round(time.perf_counter() - start, 3)
+            speaker_map = build_speaker_map(turns)
+            emit({"event": "turns", "speakers": speaker_map, "turns": [
+                {"start": t["start"], "end": t["end"], "speaker": speaker_map.get(t["label"], t["label"])}
+                for t in turns
+            ]})
+            emit_stage("diarization", STAGE_BOUNDS["diarization"][1], "Diarized")
+            log(
+                f"Detected {len(speaker_map)} speaker(s), "
+                f"{len(turns)} turn(s) ({len(raw_turns)} raw)"
             )
+
+            start = time.perf_counter()
+            emit_stage("transcription", STAGE_BOUNDS["transcription"][0], "Loading whisper model")
+            if model is None:
+                # Re-check memory now that diarization has been freed: the count
+                # chosen at startup can be too high if the machine is busier than
+                # it was then, and Whisper loads one model copy per worker.
+                vm_after = psutil.virtual_memory()
+                auto_after = auto_tuning(
+                    resolved["transcriber"],
+                    transcribe_device,
+                    vm_after.available // (1024 * 1024),
+                    vm_after.total // (1024 * 1024),
+                    PHYSICAL_CORES,
+                )
+                if workers > auto_after["transcribe_workers"]:
+                    workers = max(1, auto_after["transcribe_workers"])
+                    transcribe_threads = max(1, PHYSICAL_CORES // workers)
+                    tuning["transcribe_workers"] = workers
+                    tuning["transcribe_threads"] = transcribe_threads
+                log(
+                    f"Memory after diarization: {vm_after.available // (1024 * 1024)} MB available, "
+                    f"process RSS {rss_mb()} MB; transcribing with {workers} worker(s)"
+                )
+                model = load_whisper(
+                    whisper_dir, transcribe_device, compute_type, transcribe_threads, workers
+                )
+                log(f"Whisper loaded ({workers} worker(s)); process RSS {rss_mb()} MB")
+            turns = transcribe_turns(
+                model, samples, sample_rate, turns, beam_size, workers=workers, mapping=speaker_map
+            )
+            timings["transcription_s"] = round(time.perf_counter() - start, 3)
+
+            lines = build_lines(turns, speaker_map, use_hours=duration >= 3600)
+            if args.join_speaker:
+                lines = join_speaker_lines(lines)
+
+            emit_stage("writing", STAGE_BOUNDS["writing"][0], "Writing output")
+            txt = "".join(f"{format_line(line, True)}\n" for line in lines)
+            out_txt.write_text(txt, encoding="utf-8")
+            emit_stage("writing", STAGE_BOUNDS["writing"][1], "Done")
+
+            speaker_stats = {}
+            for line in lines:
+                stat = speaker_stats.setdefault(
+                    line["speaker"], {"seconds": 0.0, "segments": 0, "words": 0}
+                )
+                stat["seconds"] += max(0.0, line["end"] - line["start"])
+                stat["segments"] += 1
+                stat["words"] += len(line["text"].split())
+            for stat in speaker_stats.values():
+                stat["seconds"] = round(stat["seconds"], 2)
+
+            emit({"event": "done", "txt": str(out_txt), "audio": str(audio_path),
+                  "stats": {
+                      "audio_seconds": round(duration, 2),
+                      "run_seconds": round(time.perf_counter() - run_start, 2),
+                      "speakers": len(speaker_map),
+                      "num_speakers": num_speakers,
+                      "cache_hit": cache_hit,
+                      "turns": len(turns),
+                      "lines": len(lines),
+                      "preset": resolved["preset"],
+                      "diarizer": resolved["diarizer_name"],
+                      "embedding": resolved["embedding_name"],
+                      "transcriber": resolved["transcriber_name"],
+                      "device": str(diarization_device),
+                      "transcription_device": transcribe_device,
+                      "speaker_stats": speaker_stats,
+                      "timings": timings,
+                  }})
+
+            log("")
+            for line in lines:
+                log(format_line(line, args.timestamps))
+            log("")
+            log(f"Wrote {out_txt}")
+        except Exception as exc:  # noqa: BLE001
+            emit({"event": "error", "message": f"{audio_path.name}: {exc}"})
         finally:
-            rss_stop.set()
-            rss_thread.join(timeout=1.0)
-            creep_stop.set()
-            if creep is not None:
-                creep.join(timeout=1.0)
-        if args.cache:
-            cache_write(key, raw_turns)
-    turns = clean_turns(raw_turns)
-    timings["diarization_s"] = round(time.perf_counter() - start, 3)
-    speaker_map = build_speaker_map(turns)
-    emit({"event": "turns", "speakers": speaker_map, "turns": [
-        {"start": t["start"], "end": t["end"], "speaker": speaker_map.get(t["label"], t["label"])}
-        for t in turns
-    ]})
-    emit_stage("diarization", STAGE_BOUNDS["diarization"][1], "Diarized")
-    log(
-        f"Detected {len(speaker_map)} speaker(s), "
-        f"{len(turns)} turn(s) ({len(raw_turns)} raw)"
-    )
+            release_memory()
 
-    start = time.perf_counter()
-    emit_stage("transcription", STAGE_BOUNDS["transcription"][0], "Loading whisper model")
-    # Re-check memory now that diarization has been freed: the count chosen at
-    # startup can be too high if the machine is busier than it was then, and
-    # Whisper loads one model copy per worker.
-    vm_after = psutil.virtual_memory()
-    auto_after = auto_tuning(
-        resolved["transcriber"],
-        transcribe_device,
-        vm_after.available // (1024 * 1024),
-        vm_after.total // (1024 * 1024),
-        PHYSICAL_CORES,
-    )
-    if workers > auto_after["transcribe_workers"]:
-        workers = max(1, auto_after["transcribe_workers"])
-        transcribe_threads = max(1, PHYSICAL_CORES // workers)
-        tuning["transcribe_workers"] = workers
-        tuning["transcribe_threads"] = transcribe_threads
-    log(
-        f"Memory after diarization: {vm_after.available // (1024 * 1024)} MB available, "
-        f"process RSS {rss_mb()} MB; transcribing with {workers} worker(s)"
-    )
-    model = load_whisper(
-        whisper_dir, transcribe_device, compute_type, transcribe_threads, workers
-    )
-    log(f"Whisper loaded ({workers} worker(s)); process RSS {rss_mb()} MB")
-    turns = transcribe_turns(
-        model, samples, sample_rate, turns, beam_size, workers=workers, mapping=speaker_map
-    )
-    timings["transcription_s"] = round(time.perf_counter() - start, 3)
-
-    lines = build_lines(turns, speaker_map, use_hours=duration >= 3600)
-    if args.join_speaker:
-        lines = join_speaker_lines(lines)
-
-    emit_stage("writing", STAGE_BOUNDS["writing"][0], "Writing output")
-    txt = "".join(f"{format_line(line, True)}\n" for line in lines)
-    out_txt.write_text(txt, encoding="utf-8")
-
-    emit_stage("writing", STAGE_BOUNDS["writing"][1], "Done")
-
-    speaker_stats = {}
-    for line in lines:
-        stat = speaker_stats.setdefault(
-            line["speaker"], {"seconds": 0.0, "segments": 0, "words": 0}
-        )
-        stat["seconds"] += max(0.0, line["end"] - line["start"])
-        stat["segments"] += 1
-        stat["words"] += len(line["text"].split())
-    for stat in speaker_stats.values():
-        stat["seconds"] = round(stat["seconds"], 2)
-
-    emit({"event": "done", "txt": str(out_txt),
-          "stats": {
-              "audio_seconds": round(duration, 2),
-              "run_seconds": round(time.perf_counter() - run_start, 2),
-              "speakers": len(speaker_map),
-              "num_speakers": num_speakers,
-              "cache_hit": cache_hit,
-              "turns": len(turns),
-              "lines": len(lines),
-              "preset": resolved["preset"],
-              "diarizer": resolved["diarizer_name"],
-              "embedding": resolved["embedding_name"],
-              "transcriber": resolved["transcriber_name"],
-              "device": str(diarization_device),
-              "transcription_device": transcribe_device,
-              "speaker_stats": speaker_stats,
-              "timings": timings,
-          }})
-
-    log("")
-    for line in lines:
-        log(format_line(line, args.timestamps))
-
-    log("")
-    log(f"Wrote {out_txt}")
+    emit({"event": "all_done"})
 
 
 if __name__ == "__main__":

@@ -36,6 +36,8 @@ pub struct Stats {
 pub enum Event {
     #[serde(rename = "stage")]
     Stage { stage: String, label: String, progress: f32 },
+    #[serde(rename = "file")]
+    File { audio: String },
     #[serde(rename = "meta")]
     Meta { audio: String, duration: f32 },
     #[serde(rename = "turns")]
@@ -58,6 +60,8 @@ pub enum Event {
     Log { message: String },
     #[serde(rename = "error")]
     Error { message: String },
+    #[serde(rename = "all_done")]
+    AllDone,
 }
 
 /// Load a transcript from a .txt or .json file as "[time] speaker: text" lines.
@@ -186,18 +190,6 @@ pub fn venv_python(root: &Path) -> PathBuf {
     }
 }
 
-pub fn output_base(output_dir: Option<&Path>, input: &Path) -> PathBuf {
-    let stem = input
-        .file_stem()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "audio".to_string());
-    let dir = output_dir
-        .map(|p| p.to_path_buf())
-        .or_else(|| input.parent().map(|p| p.to_path_buf()))
-        .unwrap_or_else(|| PathBuf::from("."));
-    dir.join(format!("{stem}-transcript"))
-}
-
 pub fn kill(pid: u32) {
     #[cfg(windows)]
     {
@@ -215,8 +207,8 @@ pub fn kill(pid: u32) {
 pub fn spawn(
     python: PathBuf,
     root: PathBuf,
-    input: PathBuf,
-    base: PathBuf,
+    inputs: Vec<PathBuf>,
+    output_dir: Option<PathBuf>,
     preset: &'static str,
     timestamps: bool,
     join_speaker: bool,
@@ -229,17 +221,20 @@ pub fn spawn(
     let script = root.join("scripts").join("transiel.py");
     std::thread::spawn(move || {
         let mut command = Command::new(&python);
+        command.arg(&script);
+        for input in &inputs {
+            command.arg(input);
+        }
         command
-            .arg(&script)
-            .arg(&input)
             .arg("--preset")
             .arg(preset)
-            .arg("--output")
-            .arg(&base)
             .arg("--progress-json")
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
+        if let Some(dir) = &output_dir {
+            command.arg("--output-dir").arg(dir);
+        }
         if !timestamps {
             command.arg("--no-timestamps");
         }
@@ -292,7 +287,7 @@ pub fn spawn(
             });
         }
 
-        let mut saw_done = false;
+        let mut saw_all_done = false;
         if let Some(stdout) = stdout {
             use std::io::BufRead;
             let reader = std::io::BufReader::new(stdout);
@@ -303,8 +298,8 @@ pub fn spawn(
                     continue;
                 }
                 if let Ok(event) = serde_json::from_str::<Event>(line) {
-                    if matches!(event, Event::Done { .. }) {
-                        saw_done = true;
+                    if matches!(event, Event::AllDone) {
+                        saw_all_done = true;
                     }
                     push(&events, event);
                 } else {
@@ -316,7 +311,7 @@ pub fn spawn(
         let status = child.wait();
         pid.store(0, Ordering::SeqCst);
 
-        if !saw_done && !cancelled.load(Ordering::SeqCst) {
+        if !saw_all_done && !cancelled.load(Ordering::SeqCst) {
             let message = match status {
                 Ok(s) if s.success() => "process exited unexpectedly".to_string(),
                 Ok(s) => format!("process exited with {s}"),

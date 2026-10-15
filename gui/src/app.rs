@@ -1411,62 +1411,38 @@ impl App {
         }
     }
 
+    /// Spawn a single pipeline process for all pending queue items, so the
+    /// models load once and are reused across the whole batch.
     fn begin_batch(&mut self) {
-        self.batch = true;
-        self.transcript.clear();
-        self.output_txt = None;
-        self.stats = None;
-        self.rename_open = false;
-        self.cancelled.store(false, Ordering::SeqCst);
-        self.run_next();
-    }
-
-    /// Run the next pending queue item, or finish the batch when none remain.
-    fn run_next(&mut self) {
-        let Some(index) = self
+        let inputs: Vec<PathBuf> = self
             .queue
             .iter()
-            .position(|item| matches!(item.status, ItemStatus::Pending))
-        else {
-            self.batch = false;
-            self.current = None;
-            self.status = Status::Done;
-            self.stage = "done".to_string();
-            self.progress = 1.0;
-            self.progress_shown = 1.0;
-            self.toast = None;
-            self.summary_open = true;
-            self.pending_rename = true;
-            notify("transiel", "Transcription complete");
+            .filter(|item| matches!(item.status, ItemStatus::Pending))
+            .map(|item| item.path.clone())
+            .collect();
+        if inputs.is_empty() {
+            self.status = Status::Error("add at least one file".to_string());
             return;
-        };
-
-        let input = self.queue[index].path.clone();
+        }
 
         let Some(root) = backend::repo_root() else {
-            self.queue[index].status =
-                ItemStatus::Failed("cannot locate repo root".to_string());
-            return self.run_next();
+            self.fail_pending("cannot locate repo root");
+            return;
         };
         let python = backend::venv_python(&root);
         if !python.is_file() {
-            self.queue[index].status =
-                ItemStatus::Failed("python not found; run scripts/bootstrap.py".to_string());
-            return self.run_next();
+            self.fail_pending("python not found; run scripts/bootstrap.py");
+            return;
         }
 
-        let base = backend::output_base(self.output_dir.as_deref(), &input);
-
-        self.queue[index].status = ItemStatus::Running;
-        self.current = Some(index);
+        self.batch = true;
+        self.current = None;
         self.status = Status::Running;
         self.stage = "starting".to_string();
         self.progress = 0.0;
         self.progress_shown = 0.0;
         self.run_start = Some(Instant::now());
         self.elapsed_final = None;
-        self.cancelled.store(false, Ordering::SeqCst);
-
         self.transcript.clear();
         self.lines.clear();
         self.follow_offset = None;
@@ -1479,12 +1455,14 @@ impl App {
         self.player = None;
         self.output_txt = None;
         self.stats = None;
+        self.rename_open = false;
+        self.cancelled.store(false, Ordering::SeqCst);
 
         backend::spawn(
             python,
             root,
-            input,
-            base,
+            inputs,
+            self.output_dir.clone(),
             self.preset.arg(),
             self.timestamps,
             self.join_speaker,
@@ -1494,6 +1472,28 @@ impl App {
             self.pid.clone(),
             self.cancelled.clone(),
         );
+    }
+
+    fn fail_pending(&mut self, message: &str) {
+        for item in self.queue.iter_mut() {
+            if matches!(item.status, ItemStatus::Pending) {
+                item.status = ItemStatus::Failed(message.to_string());
+            }
+        }
+    }
+
+    /// Match a backend-reported audio path to a queue item.
+    fn find_queue_index(&self, path: &Path) -> Option<usize> {
+        self.queue.iter().position(|item| {
+            item.path == path
+                || item
+                    .path
+                    .canonicalize()
+                    .ok()
+                    .zip(path.canonicalize().ok())
+                    .is_some_and(|(a, b)| a == b)
+                || item.path.file_name() == path.file_name()
+        })
     }
 
     fn cancel(&mut self) {
@@ -1564,6 +1564,30 @@ impl App {
                         ));
                     }
                 }
+                Event::File { audio } => {
+                    let path = PathBuf::from(audio);
+                    self.current = self.find_queue_index(&path);
+                    if let Some(index) = self.current {
+                        self.queue[index].status = ItemStatus::Running;
+                    }
+                    self.status = Status::Running;
+                    self.stage = "loading".to_string();
+                    self.progress = 0.0;
+                    self.progress_shown = 0.0;
+                    self.run_start = Some(Instant::now());
+                    self.elapsed_final = None;
+                    self.transcript.clear();
+                    self.lines.clear();
+                    self.follow_offset = None;
+                    self.transcript_at_bottom = true;
+                    self.turns.clear();
+                    self.peaks = Arc::new(Vec::new());
+                    self.peaks_for = None;
+                    self.playhead = 0.0;
+                    self.timeline_duration = None;
+                    self.player = None;
+                    self.output_txt = None;
+                }
                 Event::Meta { audio, duration } => {
                     let path = PathBuf::from(audio);
                     if self.peaks_for.as_deref() != Some(path.as_path()) {
@@ -1609,7 +1633,6 @@ impl App {
                     self.stage = "done".to_string();
                     self.progress = 1.0;
                     self.progress_shown = 1.0;
-                    self.elapsed_final = self.run_start.map(|s| s.elapsed().as_secs_f64());
                     if let Ok(contents) = std::fs::read_to_string(&txt) {
                         self.transcript = contents;
                     }
@@ -1618,38 +1641,39 @@ impl App {
                     }
                     self.output_txt = Some(PathBuf::from(&txt));
                     self.stats = Some(stats);
-                    if self.batch {
-                        if let Some(index) = self.current.take() {
-                            self.queue[index].status = ItemStatus::Done(PathBuf::from(&txt));
-                        }
-                        if self.queue.len() == 1 {
-                            self.batch = false;
-                            self.status = Status::Done;
-                            self.toast = None;
-                            self.summary_open = true;
-                            self.pending_rename = true;
-                            notify("transiel", "Transcription complete");
-                        } else {
-                            self.run_next();
-                        }
-                    } else {
-                        self.status = Status::Done;
-                        self.toast = None;
-                        self.summary_open = true;
-                        self.pending_rename = true;
-                        notify("transiel", "Transcription complete");
+                    if let Some(index) = self.current.take() {
+                        self.queue[index].status = ItemStatus::Done(PathBuf::from(&txt));
                     }
                 }
                 Event::Error { message } => {
                     self.stage = "error".to_string();
-                    if self.batch {
-                        if let Some(index) = self.current.take() {
-                            self.queue[index].status = ItemStatus::Failed(message);
-                        }
-                        self.run_next();
-                    } else {
-                        self.status = Status::Error(message);
+                    if let Some(index) = self.current.take() {
+                        self.queue[index].status = ItemStatus::Failed(message.clone());
                     }
+                    if self.batch {
+                        // A process-level failure (the pipeline died without
+                        // signalling completion) leaves the rest unprocessed.
+                        for item in self.queue.iter_mut() {
+                            if matches!(item.status, ItemStatus::Pending | ItemStatus::Running) {
+                                item.status = ItemStatus::Failed(message.clone());
+                            }
+                        }
+                        self.batch = false;
+                    }
+                    self.status = Status::Error(message);
+                }
+                Event::AllDone => {
+                    self.batch = false;
+                    self.current = None;
+                    self.status = Status::Done;
+                    self.stage = "done".to_string();
+                    self.progress = 1.0;
+                    self.progress_shown = 1.0;
+                    self.elapsed_final = self.run_start.map(|s| s.elapsed().as_secs_f64());
+                    self.toast = None;
+                    self.summary_open = true;
+                    self.pending_rename = true;
+                    notify("transiel", "Transcription complete");
                 }
             }
         }
@@ -1901,14 +1925,14 @@ impl App {
             container(self.view_controls(&scheme))
                 .width(Length::Fill)
                 .height(Length::Fill)
-                .align_x(iced::Alignment::Start)
+                .align_x(iced::Alignment::End)
                 .align_y(iced::Alignment::End)
                 .padding(10),
         ]
         .into()
     }
 
-    /// Zoom / Follow / SMS controls overlaid on the transcript (bottom-left).
+    /// Zoom / Follow / SMS controls overlaid on the transcript (bottom-right).
     fn view_controls(&self, scheme: &Scheme) -> Element<'_, Message> {
         let follow: Element<Message> = if self.follow_playhead {
             row![icon(ICON_CHECK, 12.0), text("Follow")]
@@ -2483,7 +2507,7 @@ impl App {
 
         controls = controls.push(
             row![
-                action("Start")
+                action("Transcribe")
                     .on_press_maybe(can_start.then_some(Message::Start))
                     .style(color_button(scheme.green, scheme.ink)),
                 action("Cancel")
@@ -2560,13 +2584,13 @@ impl App {
                     .on_press_maybe(
                         (!running && self.stats.is_some()).then_some(Message::OpenSummary)
                     )
-                    .style(color_button(scheme.pink, scheme.ink)),
+                    .style(pill_button_secondary),
                 self.tip(
                     action("Rename Speakers")
                         .on_press_maybe(
                             (!running && !self.lines.is_empty()).then_some(Message::OpenRename)
                         )
-                        .style(color_button(scheme.blue, scheme.ink)),
+                        .style(pill_button_secondary),
                     "Rename speakers across the transcript",
                     &scheme,
                 ),
@@ -2728,7 +2752,7 @@ impl App {
                 HelpKind::Shortcuts => vec![
                     "Ctrl+O           Add files".to_string(),
                     "Ctrl+F           Find".to_string(),
-                    "Ctrl+Enter       Start queue".to_string(),
+                    "Ctrl+Enter       Transcribe".to_string(),
                     "Ctrl + / - / 0   Transcript font zoom".to_string(),
                     "Space            Play / pause".to_string(),
                     "Left / Right     Seek \u{00b1}5s".to_string(),
