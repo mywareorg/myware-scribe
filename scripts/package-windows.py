@@ -40,6 +40,7 @@ EXE = REPO_ROOT / "gui" / "target" / "release" / "transiel-gui.exe"
 DIST = REPO_ROOT / "dist"
 BUNDLE = DIST / "transiel"
 ZIP_PATH = DIST / "transiel-windows-x64.zip"
+BUILD_LOG_DIR = DIST / "build-log"
 
 EMBEDDABLE_URL = "https://www.python.org/ftp/python/3.11.9/python-3.11.9-embed-amd64.zip"
 GET_PIP_URL = "https://bootstrap.pypa.io/get-pip.py"
@@ -136,6 +137,9 @@ def build_runtime(runtime_dir, python_zip, build_cache):
     get_pip = download(GET_PIP_URL, build_cache / "get-pip.py")
     run([python, str(get_pip)])
 
+    log("Installing build backends (isolation is unavailable under ._pth)")
+    run_pip(python, ["setuptools<82", "wheel", "flit_core<4"], "build-backends")
+
     torch_reqs, other_reqs = split_requirements()
     log("Installing torch (CPU wheels)")
     run([python, "-m", "pip", "install", *torch_reqs, "--index-url", TORCH_CPU_INDEX])
@@ -143,11 +147,12 @@ def build_runtime(runtime_dir, python_zip, build_cache):
     run([python, "-m", "pip", "install", *other_reqs])
 
     log("Installing DiariZen (non-editable)")
-    pip_install(python, [str(CLONE)])
+    pip_install_source(python, [str(CLONE)], "diarizen")
     log("Installing bundled pyannote.audio fork (non-editable)")
-    pip_install(
+    pip_install_source(
         python,
         [str(CLONE / "pyannote-audio"), "-c", str(CLONE / "constraints.txt")],
+        "pyannote-audio",
     )
 
 
@@ -174,13 +179,30 @@ def split_requirements():
     return torch_reqs, other_reqs
 
 
-def pip_install(python, args):
-    """Install a local source tree, retrying without build isolation on failure."""
-    try:
-        run([python, "-m", "pip", "install", *args])
-    except subprocess.CalledProcessError:
-        log("retrying with --no-build-isolation")
-        run([python, "-m", "pip", "install", "--no-build-isolation", *args])
+def run_pip(python, args, label):
+    """Run pip, capturing output to dist/build-log and echoing it on failure."""
+    BUILD_LOG_DIR.mkdir(parents=True, exist_ok=True)
+    log_path = BUILD_LOG_DIR / f"{label}.log"
+    cmd = [str(python), "-m", "pip", "install", *[str(a) for a in args]]
+    log("+ " + " ".join(cmd))
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    log_path.write_text((result.stdout or "") + (result.stderr or ""), encoding="utf-8")
+    if result.returncode != 0:
+        sys.stderr.write(result.stdout or "")
+        sys.stderr.write(result.stderr or "")
+        fail(f"pip install failed (exit {result.returncode}); see {log_path}")
+    return result
+
+
+def pip_install_source(python, args, label):
+    """Install a vendored source tree into the runtime.
+
+    Build isolation cannot work from the embeddable runtime: its ``._pth`` file
+    puts Python in isolated mode, which ignores the PYTHONPATH that pip's isolated
+    build environment relies on. The build backends are preinstalled instead and
+    isolation is disabled here.
+    """
+    run_pip(python, ["--no-build-isolation", *args], label)
 
 
 def assemble(files=True, models=True):
