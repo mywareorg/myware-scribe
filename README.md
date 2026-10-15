@@ -108,7 +108,9 @@ options: `--output` (single file), `--output-dir` (per-file names in a directory
 `--device`, `--compute-type`, `--auto-tune`. The number of speakers can be fixed
 with `--num-speakers N` (default 2) or auto-detected with `--auto-speakers`.
 Diarization results are cached (`.cache/diarization/`) and reused on re-runs of
-the same audio; disable with `--no-cache`.
+the same audio; disable with `--no-cache`. On Windows the cache lives under
+`%LOCALAPPDATA%\transiel\cache\`. Override the locations with the
+`TRANSIEL_CACHE_DIR` and `TRANSIEL_MODELS_DIR` environment variables.
 
 On CPU, diarization dominates the runtime. Long files are slow because each
 speaker turn is transcribed separately.
@@ -181,7 +183,9 @@ Features:
 
 The CLI must be set up first (`scripts/bootstrap.py` +
 `scripts/model-download.py`); the GUI locates the repo via `TRANSIEL_ROOT` or by
-searching upward for `scripts/transiel.py`.
+searching upward for `scripts/transiel.py`. It runs the pipeline with `.venv`
+when present, otherwise the bundled `runtime/` interpreter (packaged Windows
+builds).
 
 ## Licenses
 
