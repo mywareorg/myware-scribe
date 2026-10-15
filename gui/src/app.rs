@@ -832,16 +832,18 @@ impl App {
                 Task::none()
             }
             Message::FindNext => {
-                let count = self.matching_lines().len();
-                if count > 0 {
-                    self.search_index = (self.search_index + 1) % count;
+                let matches = self.matching_lines();
+                if !matches.is_empty() {
+                    self.search_index = (self.search_index + 1) % matches.len();
+                    return self.scroll_to_line(matches[self.search_index]);
                 }
                 Task::none()
             }
             Message::FindPrev => {
-                let count = self.matching_lines().len();
-                if count > 0 {
-                    self.search_index = (self.search_index + count - 1) % count;
+                let matches = self.matching_lines();
+                if !matches.is_empty() {
+                    self.search_index = (self.search_index + matches.len() - 1) % matches.len();
+                    return self.scroll_to_line(matches[self.search_index]);
                 }
                 Task::none()
             }
@@ -886,19 +888,22 @@ impl App {
             Message::EnterSubmit => {
                 if self.rename_open {
                     self.apply_rename();
+                    Task::none()
                 } else {
-                    let count = self.matching_lines().len();
-                    if count > 0 {
-                        self.search_index = (self.search_index + 1) % count;
+                    let matches = self.matching_lines();
+                    if !matches.is_empty() {
+                        self.search_index = (self.search_index + 1) % matches.len();
+                        return self.scroll_to_line(matches[self.search_index]);
                     }
+                    Task::none()
                 }
-                Task::none()
             }
             Message::ShiftEnterSubmit => {
                 if !self.rename_open {
-                    let count = self.matching_lines().len();
-                    if count > 0 {
-                        self.search_index = (self.search_index + count - 1) % count;
+                    let matches = self.matching_lines();
+                    if !matches.is_empty() {
+                        self.search_index = (self.search_index + matches.len() - 1) % matches.len();
+                        return self.scroll_to_line(matches[self.search_index]);
                     }
                 }
                 Task::none()
@@ -1701,6 +1706,26 @@ impl App {
         indices
     }
 
+    /// Scroll the transcript so the given line (by index) is roughly centred.
+    fn scroll_to_line(&self, line: usize) -> Task<Message> {
+        let total = self.lines.len().max(1) as f32;
+        let content = self.transcript_content;
+        let viewport = self.transcript_viewport;
+        if content <= 0.0 || viewport <= 0.0 {
+            return Task::none();
+        }
+        let Some(rank) = self.display_order().iter().position(|index| *index == line) else {
+            return Task::none();
+        };
+        let line_height = content / total;
+        let y = (rank as f32 * line_height - viewport / 2.0)
+            .clamp(0.0, (content - viewport).max(0.0));
+        scrollable::scroll_to(
+            transcript_id(),
+            scrollable::AbsoluteOffset { x: 0.0, y },
+        )
+    }
+
     /// Transcript view: per-line (confidence/search tinted) or SMS bubbles.
     fn transcript_element(&self) -> Element<'_, Message> {
         let scheme = Scheme::for_theme(self.dark_mode);
@@ -1823,16 +1848,14 @@ impl App {
             self.tip(
                 action(icon(ICON_ZOOM_IN, 14.0))
                     .on_press(Message::ZoomIn)
-                    .style(pill_button_secondary)
-                    .width(Length::Fixed(44.0)),
+                    .style(pill_button_secondary),
                 "Zoom text in",
                 scheme,
             ),
             self.tip(
                 action(icon(ICON_ZOOM_OUT, 14.0))
                     .on_press(Message::ZoomOut)
-                    .style(pill_button_secondary)
-                    .width(Length::Fixed(44.0)),
+                    .style(pill_button_secondary),
                 "Zoom text out",
                 scheme,
             ),
@@ -1971,12 +1994,10 @@ impl App {
             action(icon_colored(play_icon, 14.0, glyph))
                 .on_press(Message::PlayerToggle)
                 .style(pill_button_secondary)
-                .width(Length::Fixed(44.0))
                 .into()
         } else {
             action(icon_colored(ICON_PLAY, 14.0, glyph))
                 .style(greyed_button)
-                .width(Length::Fixed(44.0))
                 .into()
         };
 
@@ -2039,12 +2060,10 @@ impl App {
             .style(pill_input);
         let prev = action(icon(ICON_ARROW_UP, 14.0))
             .on_press(Message::FindPrev)
-            .style(pill_button_secondary)
-            .width(Length::Fixed(44.0));
+            .style(pill_button_secondary);
         let next = action(icon(ICON_ARROW_DOWN, 14.0))
             .on_press(Message::FindNext)
-            .style(pill_button_secondary)
-            .width(Length::Fixed(44.0));
+            .style(pill_button_secondary);
         row![query_input, text(status).size(12), prev, next]
             .spacing(8)
             .align_y(iced::Alignment::Center)
@@ -2211,8 +2230,7 @@ impl App {
             item_row = item_row.push(self.tip(
                 action(icon(ICON_X, 13.0))
                     .on_press_maybe(can_add.then_some(Message::RemoveItem(index)))
-                    .style(pill_button_secondary)
-                    .width(Length::Fixed(40.0)),
+                    .style(pill_button_secondary),
                 "Remove from queue",
                 &scheme,
             ));
@@ -3238,12 +3256,9 @@ fn sms_color(index: usize, scheme: &Scheme) -> Color {
 
 const PILL: f32 = 1000.0;
 
-/// Width shared by the action buttons so they line up.
-const BTN_W: f32 = 150.0;
-
-/// A button with the shared fixed width.
+/// A button (content-sized / minimum width).
 fn action<'a>(content: impl Into<Element<'a, Message>>) -> iced::widget::Button<'a, Message> {
-    button(content).width(Length::Fixed(BTN_W))
+    button(content)
 }
 
 /// A subtle drop shadow that gives surfaces a soft, raised look.
