@@ -113,6 +113,34 @@ the same audio; disable with `--no-cache`.
 On CPU, diarization dominates the runtime. Long files are slow because each
 speaker turn is transcribed separately.
 
+## Windows distribution (no Python required)
+
+For machines that should not install Python, `scripts/package-windows.py` builds a
+self-contained release (Windows build machine only):
+
+```powershell
+cargo build --release --manifest-path gui/Cargo.toml
+.venv\Scripts\python.exe scripts\model-download.py   # populate models/ first
+.venv\Scripts\python.exe scripts\package-windows.py
+```
+
+This produces `dist\transiel-windows-x64.zip` containing the GUI exe, `scripts/`,
+an embedded Python runtime (`runtime/`) with all dependencies, and the models.
+The target machine needs nothing else: extract the zip and run `deploy.bat`, which
+
+- copies the program to `%LOCALAPPDATA%\Programs\transiel`,
+- places `models/` beside it (skipped when already present and complete),
+- adds the install directory to the **user** `PATH`, and
+- is a no-op when the same version is already deployed (use `deploy.bat /force` to
+  overwrite).
+
+Then open a new terminal and run `transiel-gui`. Windows SmartScreen may warn on
+first launch of the unsigned exe — choose **More info → Run anyway**. Remove the
+install with `undeploy.bat` (add `/keepmodels` to retain `models/`).
+
+The packaged app writes its diarization cache to
+`%LOCALAPPDATA%\transiel\cache\` and its settings to `%APPDATA%\transiel\`.
+
 ## GUI
 
 A Rust/iced desktop front-end wraps the CLI (it spawns
