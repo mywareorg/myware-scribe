@@ -227,6 +227,22 @@ def release_memory():
             pass
 
 
+def start_rss_log(interval=2.0):
+    """Start a daemon thread that logs process RSS periodically.
+
+    Returns a stop-event; set it and join the returned thread to stop.
+    """
+    stop = threading.Event()
+
+    def loop():
+        while not stop.wait(interval):
+            log(f"  diarization RSS: {rss_mb()} MB")
+
+    thread = threading.Thread(target=loop, daemon=True)
+    thread.start()
+    return stop, thread
+
+
 def format_timestamp(seconds, use_hours=False):
     total = int(seconds)
     hours, rem = divmod(total, 3600)
@@ -807,11 +823,12 @@ def main():
 
     batch_size = tuning.get("batch_size") or auto["batch_size"]
     # DiariZen pushes a whole segmentation batch (16s windows) through
-    # WavLM-large; the self-attention is quadratic in window length, so a big
-    # batch is a huge peak-memory spike (and the usual OOM-kill on CPU). Keep
-    # it small regardless of how much RAM the machine reports.
+    # WavLM-large; a single 16s window already needs ~0.5 GB of conv-frontend
+    # activations, so keep the batch tiny (1-2) to bound peak memory. This is
+    # the usual OOM-kill on CPU.
     if resolved["diarizer"]["backend"] == "diarizen":
-        capped = min(batch_size, 8)
+        target = 1 if vm.available // (1024 * 1024) < 8192 else 2
+        capped = min(batch_size, target)
         if capped != batch_size:
             log(f"Capping DiariZen segmentation batch_size {batch_size} -> {capped}")
         batch_size = capped
@@ -824,6 +841,10 @@ def main():
     tuning["transcribe_threads"] = transcribe_threads
 
     threads = tuning.get("threads") or PHYSICAL_CORES
+    if resolved["diarizer"]["backend"] == "diarizen":
+        # Fewer torch threads = smaller per-thread arenas/stacks during the
+        # WavLM-large diarization, which is the memory-pressure stage.
+        threads = min(threads, 4)
     torch.set_num_threads(threads)
     try:
         torch.set_num_interop_threads(1)
@@ -885,6 +906,7 @@ def main():
         creep = None
         if resolved["diarizer"]["backend"] == "diarizen":
             creep = start_creep("diarization", "Diarizing", creep_stop)
+        rss_stop, rss_thread = start_rss_log()
         try:
             raw_turns = run_diarization(
                 samples,
@@ -897,6 +919,8 @@ def main():
                 diarization_device,
             )
         finally:
+            rss_stop.set()
+            rss_thread.join(timeout=1.0)
             creep_stop.set()
             if creep is not None:
                 creep.join(timeout=1.0)

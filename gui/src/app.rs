@@ -291,6 +291,7 @@ struct Settings {
     window_height: Option<f32>,
     window_x: Option<f32>,
     window_y: Option<f32>,
+    output_dir: Option<String>,
 }
 
 struct Scheme {
@@ -376,7 +377,6 @@ pub enum Message {
     Start,
     Cancel,
     Tick,
-    Close,
     RenameName(usize, String),
     RenameSave,
     RenameCancel,
@@ -418,6 +418,8 @@ pub enum Message {
     ImportPicked(Option<PathBuf>),
     ImportLoaded(Option<String>),
     ImportChoice(ImportKind),
+    CopyTranscript,
+    RevealOutput,
     AudioPicked(Option<PathBuf>),
     OpenRename,
     CloseSummary,
@@ -470,6 +472,7 @@ pub struct App {
     transcript_content: f32,
     transcript_at_bottom: bool,
     follow_offset: Option<f32>,
+    drag_hover: bool,
     font_scale: f32,
     follow_playhead: bool,
     console_open: bool,
@@ -505,7 +508,7 @@ impl App {
     pub fn new() -> Self {
         let settings = Self::load_settings();
         Self {
-            output_dir: None,
+            output_dir: settings.output_dir.as_ref().map(PathBuf::from),
             preset: settings
                 .preset
                 .as_deref()
@@ -550,6 +553,7 @@ impl App {
             transcript_content: 0.0,
             transcript_at_bottom: true,
             follow_offset: None,
+            drag_hover: false,
             font_scale: settings.font_scale.unwrap_or(1.0),
             follow_playhead: settings.follow_playhead.unwrap_or(true),
             console_open: false,
@@ -623,6 +627,10 @@ impl App {
             window_height: Some(self.window_size.height),
             window_x: self.window_position.map(|point| point.x),
             window_y: self.window_position.map(|point| point.y),
+            output_dir: self
+                .output_dir
+                .as_ref()
+                .map(|path| path.display().to_string()),
         };
         if let Ok(text) = serde_json::to_string_pretty(&settings) {
             let _ = std::fs::write(path, text);
@@ -780,6 +788,22 @@ impl App {
                         self.window_position = Some(point);
                         self.window_dirty = true;
                         self.last_window_change = Some(Instant::now());
+                    }
+                    iced::window::Event::FileHovered(_) => {
+                        self.drag_hover = true;
+                    }
+                    iced::window::Event::FilesHoveredLeft => {
+                        self.drag_hover = false;
+                    }
+                    iced::window::Event::FileDropped(path) => {
+                        self.drag_hover = false;
+                        let paths = if path.is_dir() {
+                            audio_files_in(&path)
+                        } else {
+                            vec![path]
+                        };
+                        let added = self.add_paths(paths);
+                        return Self::probe_items(added);
                     }
                     _ => {}
                 }
@@ -1097,6 +1121,17 @@ impl App {
                 Task::none()
             }
             Message::OpenRename => self.open_rename(),
+            Message::CopyTranscript => {
+                if self.transcript.is_empty() {
+                    return Task::none();
+                }
+                self.toast = Some(("Copied transcript".to_string(), Instant::now()));
+                iced::clipboard::write(self.transcript.clone())
+            }
+            Message::RevealOutput => {
+                self.reveal_output();
+                Task::none()
+            }
             Message::ImportChoice(kind) => match kind {
                 ImportKind::Transcription => Task::perform(
                     async {
@@ -1146,6 +1181,7 @@ impl App {
             Message::OutputPicked(dir) => {
                 if let Some(dir) = dir {
                     self.output_dir = Some(dir);
+                    self.save_settings();
                 }
                 Task::none()
             }
@@ -1257,7 +1293,6 @@ impl App {
                 }
                 Task::batch(tasks)
             }
-            Message::Close => iced::exit(),
             Message::RenameSave => {
                 self.apply_rename();
                 Task::none()
@@ -1305,6 +1340,28 @@ impl App {
         }
         if let Some(path) = &self.output_txt {
             let _ = std::fs::write(path, &self.transcript);
+        }
+    }
+
+    fn reveal_output(&self) {
+        let dir = self
+            .output_txt
+            .as_ref()
+            .and_then(|path| path.parent())
+            .map(|path| path.to_path_buf())
+            .or_else(|| self.output_dir.clone());
+        let Some(dir) = dir else { return };
+        #[cfg(target_os = "linux")]
+        {
+            let _ = std::process::Command::new("xdg-open").arg(&dir).spawn();
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let _ = std::process::Command::new("open").arg(&dir).spawn();
+        }
+        #[cfg(target_os = "windows")]
+        {
+            let _ = std::process::Command::new("explorer").arg(&dir).spawn();
         }
     }
 
@@ -1372,6 +1429,7 @@ impl App {
             self.toast = None;
             self.summary_open = true;
             self.pending_rename = true;
+            notify("transiel", "Transcription complete");
             return;
         };
 
@@ -1493,6 +1551,12 @@ impl App {
                         let excess = self.console_lines.len() - 500;
                         self.console_lines.drain(0..excess);
                     }
+                    if self.console_open {
+                        tasks.push(scrollable::snap_to(
+                            console_id(),
+                            scrollable::RelativeOffset { x: 0.0, y: 1.0 },
+                        ));
+                    }
                 }
                 Event::Meta { audio, duration } => {
                     self.meta_duration = Some(duration);
@@ -1561,6 +1625,7 @@ impl App {
                             self.toast = None;
                             self.summary_open = true;
                             self.pending_rename = true;
+                            notify("transiel", "Transcription complete");
                         } else {
                             self.run_next();
                         }
@@ -1569,6 +1634,7 @@ impl App {
                         self.toast = None;
                         self.summary_open = true;
                         self.pending_rename = true;
+                        notify("transiel", "Transcription complete");
                     }
                 }
                 Event::Error { message } => {
@@ -1657,7 +1723,7 @@ impl App {
         for line in &self.console_lines {
             col = col.push(text(line.clone()).size(12));
         }
-        container(scrollable(col).height(Length::Fill).width(Length::Fill))
+        container(scrollable(col).id(console_id()).height(Length::Fill).width(Length::Fill))
             .width(Length::Fill)
             .height(Length::Fixed(150.0))
             .padding(8)
@@ -2254,6 +2320,34 @@ impl App {
         ]
         .spacing(6);
 
+        let drop_color = if self.drag_hover { scheme.blue } else { scheme.track };
+        let drop_text = if self.drag_hover {
+            "Release to add files"
+        } else {
+            "Drag & drop audio/video files here"
+        };
+        queue_col = queue_col.push(
+            container(
+                text(drop_text)
+                    .size(12)
+                    .style(move |_theme| text::Style {
+                        color: Some(scheme.ink),
+                    }),
+            )
+            .width(Length::Fill)
+            .padding([8, 12])
+            .center_x(Length::Fill)
+            .style(move |_theme| container::Style {
+                background: Some(Color { a: 0.30, ..drop_color }.into()),
+                border: iced::border::Border {
+                    color: drop_color,
+                    width: 1.0,
+                    radius: 8.0.into(),
+                },
+                ..container::Style::default()
+            }),
+        );
+
         if has_queue {
             let line_height = 30.0;
             let height = self.queue.len() as f32 * line_height * 1.2;
@@ -2483,11 +2577,21 @@ impl App {
                 row![
                     self.search_element(&scheme),
                     horizontal_space(),
+                    action("Copy")
+                        .on_press_maybe(
+                            (!self.transcript.is_empty()).then_some(Message::CopyTranscript)
+                        )
+                        .style(pill_button_secondary),
+                    action("Reveal")
+                        .on_press_maybe(
+                            (self.output_txt.is_some() || self.output_dir.is_some())
+                                .then_some(Message::RevealOutput)
+                        )
+                        .style(pill_button_secondary),
                     pick_list(HelpKind::ALL, None::<HelpKind>, Message::HelpChoice)
                         .placeholder("Help\u{2026}")
                         .style(ink_pick(scheme.ink))
                         .handle(caret_handle(true)),
-                    action("Close").on_press(Message::Close).style(pill_button_secondary),
                 ]
                 .spacing(8)
                 .align_y(iced::Alignment::Center),
@@ -3108,6 +3212,10 @@ fn transcript_id() -> scrollable::Id {
     scrollable::Id::new("transcript")
 }
 
+fn console_id() -> scrollable::Id {
+    scrollable::Id::new("console")
+}
+
 fn rename_id(index: usize) -> text_input::Id {
     text_input::Id::new(format!("rename-{index}"))
 }
@@ -3259,6 +3367,18 @@ const PILL: f32 = 1000.0;
 /// A button (content-sized / minimum width).
 fn action<'a>(content: impl Into<Element<'a, Message>>) -> iced::widget::Button<'a, Message> {
     button(content)
+}
+
+/// Fire a best-effort desktop notification (non-blocking).
+fn notify(title: &str, body: &str) {
+    let title = title.to_string();
+    let body = body.to_string();
+    std::thread::spawn(move || {
+        let _ = notify_rust::Notification::new()
+            .summary(&title)
+            .body(&body)
+            .show();
+    });
 }
 
 /// A subtle drop shadow that gives surfaces a soft, raised look.
