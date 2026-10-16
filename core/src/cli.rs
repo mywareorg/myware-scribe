@@ -33,8 +33,9 @@ pub fn run(args: &[String]) -> i32 {
                 }
             }
             "--speed" => preset = "speed".to_string(),
-            "--balanced" => preset = "balanced".to_string(),
-            "--accuracy" => preset = "balanced".to_string(),
+            "--accuracy" => preset = "accuracy".to_string(),
+            // Legacy alias.
+            "--balanced" => preset = "accuracy".to_string(),
             "--num-speakers" => {
                 i += 1;
                 num_speakers = args.get(i).and_then(|v| v.parse().ok());
@@ -57,8 +58,12 @@ pub fn run(args: &[String]) -> i32 {
         i += 1;
     }
 
+    if preset == "balanced" {
+        preset = "accuracy".to_string();
+    }
+
     if inputs.is_empty() {
-        eprintln!("usage: transiel --cli <audio>... [--preset speed|balanced] [--progress-json]");
+        eprintln!("usage: transiel --cli <audio>... [--preset speed|accuracy] [--progress-json]");
         return 2;
     }
 

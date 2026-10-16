@@ -240,17 +240,15 @@ impl fmt::Display for HelpKind {
 pub enum Preset {
     #[default]
     Speed,
-    Balanced,
     Accuracy,
 }
 
 impl Preset {
-    pub const ALL: [Preset; 3] = [Preset::Speed, Preset::Balanced, Preset::Accuracy];
+    pub const ALL: [Preset; 2] = [Preset::Speed, Preset::Accuracy];
 
     fn label(self) -> &'static str {
         match self {
             Preset::Speed => "Speed",
-            Preset::Balanced => "Balanced",
             Preset::Accuracy => "Accuracy",
         }
     }
@@ -258,7 +256,6 @@ impl Preset {
     fn arg(self) -> &'static str {
         match self {
             Preset::Speed => "speed",
-            Preset::Balanced => "balanced",
             Preset::Accuracy => "accuracy",
         }
     }
@@ -266,8 +263,8 @@ impl Preset {
     fn from_arg(value: &str) -> Option<Preset> {
         match value {
             "speed" => Some(Preset::Speed),
-            "balanced" => Some(Preset::Balanced),
-            "accuracy" => Some(Preset::Accuracy),
+            // Legacy saved setting: the old "balanced" now maps to accuracy.
+            "balanced" | "accuracy" => Some(Preset::Accuracy),
             _ => None,
         }
     }

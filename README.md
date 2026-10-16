@@ -55,21 +55,23 @@ Overrides: `TRANSIEL_MODELS_DIR` (root), `TRANSIEL_SEGMENTATION_MODEL`,
 Check what is present:
 
 ```bash
-transiel --cli models [--preset speed|balanced]
+transiel --cli models [--preset speed|accuracy]
 ```
 
 ## CLI
 
 ```bash
 transiel --cli audio.mp3                         # default preset (speed)
-transiel --cli audio.mp3 --preset balanced
+transiel --cli audio.mp3 --preset accuracy
 transiel --cli a.mp3 b.mp3 --output-dir out/     # batch
 transiel --cli audio.mp3 --join-speaker --no-timestamps
 transiel --cli audio.mp3 --progress-json         # line-delimited JSON events
 transiel --cli probe audio.mp3 120               # duration + RMS waveform
 ```
 
-Options: `--preset speed|balanced`, `--num-speakers N`, `--auto-speakers`,
+Presets: `speed` (whisper `base.en`) and `accuracy` (whisper `large-v3-turbo`).
+
+Options: `--preset speed|accuracy`, `--num-speakers N`, `--auto-speakers`,
 `--output-dir`, `--no-timestamps`, `--join-speaker`, `--no-cache`,
 `--progress-json`.
 
