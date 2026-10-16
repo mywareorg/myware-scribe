@@ -1,11 +1,19 @@
 //! Headless CLI (`transiel --cli ...`).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
+use crate::audio;
 use crate::event::Event;
+use crate::models;
 use crate::pipeline::{self, PipelineOptions};
 
 pub fn run(args: &[String]) -> i32 {
+    match args.first().map(String::as_str) {
+        Some("models") => return run_models(&args[1..]),
+        Some("probe") => return run_probe(&args[1..]),
+        _ => {}
+    }
+
     let mut inputs: Vec<PathBuf> = Vec::new();
     let mut preset = String::from("speed");
     let mut num_speakers: Option<i32> = Some(2);
@@ -93,4 +101,66 @@ pub fn run(args: &[String]) -> i32 {
         }
     });
     code
+}
+
+/// `transiel --cli models [--preset speed|balanced]`: report model presence.
+fn run_models(args: &[String]) -> i32 {
+    let mut preset = String::from("speed");
+    let mut index = 0;
+    while index < args.len() {
+        if args[index] == "--preset" {
+            index += 1;
+            if let Some(value) = args.get(index) {
+                preset = value.clone();
+            }
+        }
+        index += 1;
+    }
+    let mut missing = 0;
+    for (label, path) in models::expected(&preset) {
+        let present = path.is_file();
+        if !present {
+            missing += 1;
+        }
+        println!(
+            "[{}] {label:12} {}",
+            if present { "ok" } else { "missing" },
+            path.display()
+        );
+    }
+    if missing > 0 {
+        println!("\n{missing} model file(s) missing under {}", models::models_dir().display());
+        1
+    } else {
+        0
+    }
+}
+
+/// `transiel --cli probe <audio> <buckets>`: duration + RMS waveform.
+fn run_probe(args: &[String]) -> i32 {
+    let path = match args.first() {
+        Some(path) => Path::new(path),
+        None => {
+            eprintln!("usage: transiel --cli probe <audio> <buckets>");
+            return 2;
+        }
+    };
+    let buckets = args.get(1).and_then(|v| v.parse().ok()).unwrap_or(120);
+    match audio::probe(path, buckets) {
+        Ok((duration, rms)) => {
+            println!("{duration}");
+            println!(
+                "{}",
+                rms.iter()
+                    .map(|v| v.to_string())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            );
+            0
+        }
+        Err(message) => {
+            eprintln!("error: {message}");
+            1
+        }
+    }
 }

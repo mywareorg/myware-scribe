@@ -45,10 +45,33 @@ pub fn whisper_model(preset: &str) -> PathBuf {
     models_dir().join(name)
 }
 
+/// Identifier for the diarization model pair (used as the cache salt).
+pub fn diarizer_id() -> String {
+    let seg = segmentation_model();
+    let emb = embedding_model();
+    let name = |p: &std::path::Path| {
+        p.file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("model")
+            .to_string()
+    };
+    format!("{}-{}", name(&seg), name(&emb))
+}
+
+/// The models a preset needs, as (label, path).
+pub fn expected(preset: &str) -> Vec<(&'static str, PathBuf)> {
+    vec![
+        ("segmentation", segmentation_model()),
+        ("embedding", embedding_model()),
+        ("whisper", whisper_model(preset)),
+    ]
+}
+
 /// Missing required model files for a preset (empty when everything is present).
 pub fn missing(preset: &str) -> Vec<PathBuf> {
-    [segmentation_model(), embedding_model(), whisper_model(preset)]
+    expected(preset)
         .into_iter()
+        .map(|(_, path)| path)
         .filter(|path| !path.is_file())
         .collect()
 }

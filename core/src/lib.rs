@@ -2,6 +2,7 @@
 
 pub mod asr;
 pub mod audio;
+pub mod cache;
 pub mod cli;
 pub mod diarize;
 pub mod event;

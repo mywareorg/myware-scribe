@@ -8,6 +8,7 @@ use std::time::Instant;
 
 use crate::asr::Transcriber;
 use crate::audio;
+use crate::cache;
 use crate::diarize::{self, CLUSTER_THRESHOLD};
 use crate::event::{Event, SpeakerStat, Stats, Turn};
 use crate::models;
@@ -110,6 +111,7 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
     let segmentation = models::segmentation_model();
     let embedding = models::embedding_model();
     let whisper = models::whisper_model(&opts.preset);
+    let diarizer = models::diarizer_id();
 
     let transcriber = match Transcriber::load(&whisper) {
         Ok(transcriber) => Some(transcriber),
@@ -150,17 +152,37 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
             label: "Diarizing".to_string(),
             progress: 0.0,
         });
-        let raw = match diarize::diarize(
-            &samples,
-            &segmentation,
-            &embedding,
-            opts.num_speakers,
-            CLUSTER_THRESHOLD,
-        ) {
-            Ok(turns) => turns,
-            Err(message) => {
-                emit(Event::Error { message });
-                continue;
+        let cache_key = if opts.cache {
+            cache::key(input, &diarizer, opts.num_speakers)
+        } else {
+            None
+        };
+        let raw = match cache_key.as_deref().and_then(cache::read) {
+            Some(turns) => {
+                emit(Event::Log {
+                    message: "Using cached diarization.".to_string(),
+                });
+                turns
+            }
+            None => {
+                match diarize::diarize(
+                    &samples,
+                    &segmentation,
+                    &embedding,
+                    opts.num_speakers,
+                    CLUSTER_THRESHOLD,
+                ) {
+                    Ok(turns) => {
+                        if let Some(key) = &cache_key {
+                            cache::write(key, &turns);
+                        }
+                        turns
+                    }
+                    Err(message) => {
+                        emit(Event::Error { message });
+                        continue;
+                    }
+                }
             }
         };
         let cleaned = clean_turns(raw);
