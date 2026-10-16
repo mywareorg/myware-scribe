@@ -1431,12 +1431,6 @@ impl App {
             self.fail_pending("cannot locate repo root");
             return;
         };
-        let python = backend::venv_python(&root);
-        if !python.is_file() {
-            self.fail_pending("python not found; run scripts/bootstrap.py or ensure runtime/ is present");
-            return;
-        }
-
         self.batch = true;
         self.current = None;
         self.status = Status::Running;
@@ -1461,7 +1455,6 @@ impl App {
         self.cancelled.store(false, Ordering::SeqCst);
 
         backend::spawn(
-            python,
             root,
             inputs,
             self.output_dir.clone(),
@@ -1881,8 +1874,8 @@ impl App {
                         ),
                         mouse_area(
                             container(horizontal_space())
-                                .width(Length::Fill)
-                                .height(Length::Fill),
+                            .width(Length::Fill)
+                            .height(Length::Fill),
                         )
                         .interaction(mouse::Interaction::Pointer)
                         .on_press(Message::SelectLine(idx)),
@@ -1919,19 +1912,19 @@ impl App {
 
         stack![
             scrollable(col)
-                .id(transcript_id())
-                .on_scroll(Message::TranscriptScrolled)
-                .height(Length::Fill)
-                .width(Length::Fill)
-                .style(scrollbar_style),
+            .id(transcript_id())
+            .on_scroll(Message::TranscriptScrolled)
+            .height(Length::Fill)
+            .width(Length::Fill)
+            .style(scrollbar_style),
             container(self.view_controls(&scheme))
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .align_x(iced::Alignment::End)
-                .align_y(iced::Alignment::End)
-                .padding(10),
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .align_x(iced::Alignment::End)
+            .align_y(iced::Alignment::End)
+            .padding(10),
         ]
-        .into()
+            .into()
     }
 
     /// Zoom / Follow / SMS controls overlaid on the transcript (bottom-right).
@@ -1956,36 +1949,36 @@ impl App {
         row![
             self.tip(
                 action(icon(ICON_ZOOM_IN, 14.0))
-                    .on_press(Message::ZoomIn)
-                    .style(pill_button_secondary),
+                .on_press(Message::ZoomIn)
+                .style(pill_button_secondary),
                 "Zoom text in",
                 scheme,
             ),
             self.tip(
                 action(icon(ICON_ZOOM_OUT, 14.0))
-                    .on_press(Message::ZoomOut)
-                    .style(pill_button_secondary),
+                .on_press(Message::ZoomOut)
+                .style(pill_button_secondary),
                 "Zoom text out",
                 scheme,
             ),
             self.tip(
                 action(follow)
-                    .on_press(Message::ToggleFollowPlayhead)
-                    .style(pill_button_secondary),
+                .on_press(Message::ToggleFollowPlayhead)
+                .style(pill_button_secondary),
                 "Keep the transcript centered on the playhead",
                 scheme,
             ),
             self.tip(
                 action(sms)
-                    .on_press(Message::SmsToggled(!sms_on))
-                    .style(pill_button_secondary),
+                .on_press(Message::SmsToggled(!sms_on))
+                .style(pill_button_secondary),
                 "Show the transcript as chat bubbles",
                 scheme,
             ),
         ]
-        .spacing(6)
-        .align_y(iced::Alignment::Center)
-        .into()
+            .spacing(6)
+            .align_y(iced::Alignment::Center)
+            .into()
     }
 
     /// Index of the last line whose start time is at or before `t`.
@@ -2056,17 +2049,17 @@ impl App {
             row = row.push(
                 row![
                     container(horizontal_space())
-                        .width(Length::Fixed(12.0))
-                        .height(Length::Fixed(12.0))
-                        .style(move |_theme| container::Style {
-                            background: Some(color.into()),
-                            border: iced::border::rounded(3.0),
-                            ..container::Style::default()
-                        }),
+                    .width(Length::Fixed(12.0))
+                    .height(Length::Fixed(12.0))
+                    .style(move |_theme| container::Style {
+                        background: Some(color.into()),
+                        border: iced::border::rounded(3.0),
+                        ..container::Style::default()
+                    }),
                     text(label).size(12),
                 ]
-                .spacing(4)
-                .align_y(iced::Alignment::Center),
+                    .spacing(4)
+                    .align_y(iced::Alignment::Center),
             );
         }
         row.into()
@@ -2116,10 +2109,10 @@ impl App {
             format_secs(self.playhead as f64),
             format_secs(duration as f64)
         ))
-        .size(12)
-        .style(move |_theme| text::Style {
-            color: Some(time_color),
-        });
+            .size(12)
+            .style(move |_theme| text::Style {
+                color: Some(time_color),
+            });
 
         let speed: Element<Message> = if ready {
             pick_list(
@@ -2127,23 +2120,23 @@ impl App {
                 Some(Speed::from_factor(self.playback_speed)),
                 Message::SpeedChanged,
             )
-            .style(speed_pick)
-            .handle(caret_handle(false))
-            .into()
+                .style(speed_pick)
+                .handle(caret_handle(false))
+                .into()
         } else {
             stack![
                 pick_list(Speed::ALL, Some(Speed::One), Message::SpeedChanged)
-                    .style(greyed_pick)
-                    .handle(caret_handle(false)),
+                .style(greyed_pick)
+                .handle(caret_handle(false)),
                 mouse_area(
                     container(horizontal_space())
-                        .width(Length::Fill)
-                        .height(Length::Fill),
+                    .width(Length::Fill)
+                    .height(Length::Fill),
                 )
                 .interaction(mouse::Interaction::Idle)
                 .on_press(Message::Tick),
             ]
-            .into()
+                .into()
         };
 
         row![play_button, time, speed]
@@ -2206,7 +2199,7 @@ impl App {
                 }),
             tooltip::Position::Top,
         )
-        .into()
+            .into()
     }
 
     pub fn view(&self) -> Element<'_, Message> {
@@ -2239,16 +2232,16 @@ impl App {
             // click-capturing layer on top so it cannot be opened.
             stack![
                 pick_list(Preset::ALL, Some(self.preset), Message::PresetChanged)
-                    .style(greyed_pick),
+                .style(greyed_pick),
                 mouse_area(
                     container(horizontal_space())
-                        .width(Length::Fill)
-                        .height(Length::Fill),
+                    .width(Length::Fill)
+                    .height(Length::Fill),
                 )
                 .interaction(mouse::Interaction::Idle)
                 .on_press(Message::Tick),
             ]
-            .into()
+                .into()
         };
 
         let mut options_col = column![action(
@@ -2266,15 +2259,15 @@ impl App {
             .spacing(4)
             .align_y(iced::Alignment::Center),
         )
-        .on_press_maybe(can_options.then_some(Message::ToggleOptions))
-        .style(move |theme: &iced::Theme, status| {
-            if can_options {
-                pill_button_secondary(theme, status)
-            } else {
-                greyed_button(theme, status)
-            }
-        })]
-        .spacing(8);
+            .on_press_maybe(can_options.then_some(Message::ToggleOptions))
+            .style(move |theme: &iced::Theme, status| {
+                if can_options {
+                    pill_button_secondary(theme, status)
+                } else {
+                    greyed_button(theme, status)
+                }
+            })]
+            .spacing(8);
 
         let mut queue_list = column![].spacing(4).width(Length::Fill);
         for (index, item) in self.queue.iter().enumerate() {
@@ -2311,8 +2304,8 @@ impl App {
                 text(duration),
                 text(format!("{name}{detail}")).width(Length::Fill),
             ]
-            .spacing(8)
-            .align_y(iced::Alignment::Center);
+                .spacing(8)
+                .align_y(iced::Alignment::Center);
 
             match &item.status {
                 ItemStatus::Running => {
@@ -2349,19 +2342,19 @@ impl App {
         let mut queue_col = column![
             row![
                 action("Add File(s)")
-                    .on_press_maybe(can_add.then_some(Message::AddFiles))
-                    .style(color_button(scheme.blue, scheme.ink)),
+                .on_press_maybe(can_add.then_some(Message::AddFiles))
+                .style(color_button(scheme.blue, scheme.ink)),
                 action("Add Folder")
-                    .on_press_maybe(can_add.then_some(Message::AddFolder))
-                    .style(color_button(scheme.blue, scheme.ink)),
+                .on_press_maybe(can_add.then_some(Message::AddFolder))
+                .style(color_button(scheme.blue, scheme.ink)),
                 action("Clear")
-                    .on_press_maybe((!running && has_queue).then_some(Message::ClearQueue))
-                    .style(color_button(scheme.pink, scheme.ink)),
+                .on_press_maybe((!running && has_queue).then_some(Message::ClearQueue))
+                .style(color_button(scheme.pink, scheme.ink)),
             ]
             .spacing(8)
             .align_y(iced::Alignment::Center),
         ]
-        .spacing(6);
+            .spacing(6);
 
         let drop_color = if self.drag_hover { scheme.blue } else { scheme.track };
         let drop_ink = if self.dark_mode {
@@ -2382,18 +2375,18 @@ impl App {
                         color: Some(drop_ink),
                     }),
             )
-            .width(Length::Fill)
-            .padding([8, 12])
-            .center_x(Length::Fill)
-            .style(move |_theme| container::Style {
-                background: Some(Color { a: 0.30, ..drop_color }.into()),
-                border: iced::border::Border {
-                    color: drop_color,
-                    width: 1.0,
-                    radius: 8.0.into(),
-                },
-                ..container::Style::default()
-            }),
+                .width(Length::Fill)
+                .padding([8, 12])
+                .center_x(Length::Fill)
+                .style(move |_theme| container::Style {
+                    background: Some(Color { a: 0.30, ..drop_color }.into()),
+                    border: iced::border::Border {
+                        color: drop_color,
+                        width: 1.0,
+                        radius: 8.0.into(),
+                    },
+                    ..container::Style::default()
+                }),
         );
 
         if has_queue {
@@ -2482,42 +2475,42 @@ impl App {
                         &scheme,
                     ),
                 ]
-                .spacing(8),
+                    .spacing(8),
             );
         }
 
         let mut controls = column![
             row![
                 action("Save Location")
-                    .on_press_maybe(can_output.then_some(Message::PickOutput))
-                    .style(color_button(scheme.blue, scheme.ink)),
+                .on_press_maybe(can_output.then_some(Message::PickOutput))
+                .style(color_button(scheme.blue, scheme.ink)),
                 text(output.clone()),
             ]
             .spacing(8)
             .align_y(iced::Alignment::Center),
             row![
                 container(text("Preset:"))
-                    .height(Length::Fixed(30.0))
-                    .align_y(iced::Alignment::Center),
+                .height(Length::Fixed(30.0))
+                .align_y(iced::Alignment::Center),
                 preset,
                 options_col,
             ]
             .spacing(8)
             .align_y(iced::Alignment::Start),
         ]
-        .spacing(16);
+            .spacing(16);
 
         controls = controls.push(
             row![
                 action("Transcribe")
-                    .on_press_maybe(can_start.then_some(Message::Start))
-                    .style(color_button(scheme.green, scheme.ink)),
+                .on_press_maybe(can_start.then_some(Message::Start))
+                .style(color_button(scheme.green, scheme.ink)),
                 action("Cancel")
-                    .on_press_maybe(can_cancel.then_some(Message::Cancel))
-                    .style(color_button(scheme.pink, scheme.ink)),
+                .on_press_maybe(can_cancel.then_some(Message::Cancel))
+                .style(color_button(scheme.pink, scheme.ink)),
             ]
-            .spacing(8)
-            .align_y(iced::Alignment::Center),
+                .spacing(8)
+                .align_y(iced::Alignment::Center),
         );
 
         let total_items = self.queue.len().max(1) as f32;
@@ -2534,44 +2527,44 @@ impl App {
             text(self.elapsed().unwrap_or_default()).width(Length::Fixed(70.0)),
             stack![
                 progress_bar(0.0..=1.0, global_progress)
-                    .width(Length::Fill)
-                    .height(Length::Fixed(28.0))
-                    .style(move |_theme| progress_bar::Style {
-                        background: scheme.track.into(),
-                        bar: scheme.blue.into(),
-                        border: iced::border::rounded(14.0),
-                    }),
+                .width(Length::Fill)
+                .height(Length::Fixed(28.0))
+                .style(move |_theme| progress_bar::Style {
+                    background: scheme.track.into(),
+                    bar: scheme.blue.into(),
+                    border: iced::border::rounded(14.0),
+                }),
                 container(
                     text(format!("{} — {}", self.stage, self.status_text()))
-                        .style(move |_theme| text::Style {
-                            color: Some(scheme.ink),
-                        }),
+                    .style(move |_theme| text::Style {
+                        color: Some(scheme.ink),
+                    }),
                 )
                 .center_x(Length::Fill)
                 .center_y(Length::Fill),
             ]
             .width(Length::Fill),
         ]
-        .spacing(8)
-        .align_y(iced::Alignment::Center);
+            .spacing(8)
+            .align_y(iced::Alignment::Center);
 
         let mut middle = column![status_row].spacing(8).width(Length::Fill);
         middle = middle.push(self.timeline_element(&scheme));
         let import: Element<Message> = if running {
             stack![
                 pick_list(ImportKind::ALL, None::<ImportKind>, Message::ImportChoice)
-                    .placeholder("Import\u{2026}")
-                    .style(greyed_pick)
-                    .handle(caret_handle(false)),
+                .placeholder("Import\u{2026}")
+                .style(greyed_pick)
+                .handle(caret_handle(false)),
                 mouse_area(
                     container(horizontal_space())
-                        .width(Length::Fill)
-                        .height(Length::Fill),
+                    .width(Length::Fill)
+                    .height(Length::Fill),
                 )
                 .interaction(mouse::Interaction::Idle)
                 .on_press(Message::Noop),
             ]
-            .into()
+                .into()
         } else {
             pick_list(ImportKind::ALL, None::<ImportKind>, Message::ImportChoice)
                 .placeholder("Import\u{2026}")
@@ -2583,25 +2576,25 @@ impl App {
             row![
                 self.player_element(&scheme),
                 action("Summary")
-                    .on_press_maybe(
-                        (!running && self.stats.is_some()).then_some(Message::OpenSummary)
-                    )
-                    .style(pill_button_secondary),
+                .on_press_maybe(
+                    (!running && self.stats.is_some()).then_some(Message::OpenSummary)
+                )
+                .style(pill_button_secondary),
                 self.tip(
                     action("Rename Speakers")
-                        .on_press_maybe(
-                            (!running && !self.lines.is_empty()).then_some(Message::OpenRename)
-                        )
-                        .style(pill_button_secondary),
+                    .on_press_maybe(
+                        (!running && !self.lines.is_empty()).then_some(Message::OpenRename)
+                    )
+                    .style(pill_button_secondary),
                     "Rename speakers across the transcript",
                     &scheme,
                 ),
                 horizontal_space(),
                 import,
             ]
-            .spacing(8)
-            .align_y(iced::Alignment::Center)
-            .width(Length::Fill),
+                .spacing(8)
+                .align_y(iced::Alignment::Center)
+                .width(Length::Fill),
         );
 
         let mut base = column![
@@ -2610,17 +2603,17 @@ impl App {
             controls,
             middle,
             container(self.transcript_element())
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .style(move |_theme| container::Style {
-                    background: Some(scheme.panel_bg.into()),
-                    border: iced::border::rounded(16.0),
-                    shadow: soft_shadow(),
-                    ..container::Style::default()
-                }),
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .style(move |_theme| container::Style {
+                background: Some(scheme.panel_bg.into()),
+                border: iced::border::rounded(16.0),
+                shadow: soft_shadow(),
+                ..container::Style::default()
+            }),
         ]
-        .spacing(8)
-        .padding(12);
+            .spacing(8)
+            .padding(12);
 
         base = base.push(
             container(
@@ -2628,31 +2621,31 @@ impl App {
                     self.search_element(&scheme),
                     horizontal_space(),
                     action("Copy")
-                        .on_press_maybe(
-                            (!self.transcript.is_empty()).then_some(Message::CopyTranscript)
-                        )
-                        .style(pill_button_secondary),
+                    .on_press_maybe(
+                        (!self.transcript.is_empty()).then_some(Message::CopyTranscript)
+                    )
+                    .style(pill_button_secondary),
                     action("Save")
-                        .on_press_maybe(
-                            (self.output_txt.is_some() && !self.transcript.is_empty())
-                                .then_some(Message::SaveTranscript)
-                        )
-                        .style(pill_button_secondary),
+                    .on_press_maybe(
+                        (self.output_txt.is_some() && !self.transcript.is_empty())
+                        .then_some(Message::SaveTranscript)
+                    )
+                    .style(pill_button_secondary),
                     action("Reveal")
-                        .on_press_maybe(
-                            (self.output_txt.is_some() || self.output_dir.is_some())
-                                .then_some(Message::RevealOutput)
-                        )
-                        .style(pill_button_secondary),
+                    .on_press_maybe(
+                        (self.output_txt.is_some() || self.output_dir.is_some())
+                        .then_some(Message::RevealOutput)
+                    )
+                    .style(pill_button_secondary),
                     pick_list(HelpKind::ALL, None::<HelpKind>, Message::HelpChoice)
-                        .placeholder("Help\u{2026}")
-                        .style(ink_pick(scheme.ink))
-                        .handle(caret_handle(true)),
+                    .placeholder("Help\u{2026}")
+                    .style(ink_pick(scheme.ink))
+                    .handle(caret_handle(true)),
                 ]
-                .spacing(8)
-                .align_y(iced::Alignment::Center),
+                    .spacing(8)
+                    .align_y(iced::Alignment::Center),
             )
-            .width(Length::Fill),
+                .width(Length::Fill),
         );
 
         if self.console_open {
@@ -2671,7 +2664,7 @@ impl App {
                         ..container::Style::default()
                     }),
             )
-            .on_press(Message::DismissToast);
+                .on_press(Message::DismissToast);
             let overlay = container(toast)
                 .width(Length::Fill)
                 .height(Length::Fill)
@@ -2692,27 +2685,27 @@ impl App {
                     container(
                         row![
                             action("Cancel")
-                                .on_press(Message::BatchCancel)
-                                .style(color_button(scheme.pink, scheme.ink)),
+                            .on_press(Message::BatchCancel)
+                            .style(color_button(scheme.pink, scheme.ink)),
                             action("Continue")
-                                .on_press(Message::BatchContinue)
-                                .style(color_button(scheme.blue, scheme.ink)),
+                            .on_press(Message::BatchContinue)
+                            .style(color_button(scheme.blue, scheme.ink)),
                         ]
                         .spacing(8),
                     )
                     .width(Length::Fill)
                     .align_x(iced::Alignment::End),
                 ]
-                .spacing(12)
-                .width(Length::Fixed(380.0)),
+                    .spacing(12)
+                    .width(Length::Fixed(380.0)),
             )
-            .padding(16)
-            .style(move |_theme| container::Style {
-                background: Some(scheme.dialog_bg.into()),
-                border: iced::border::rounded(16.0),
-                shadow: dialog_shadow(),
-                ..container::Style::default()
-            });
+                .padding(16)
+                .style(move |_theme| container::Style {
+                    background: Some(scheme.dialog_bg.into()),
+                    border: iced::border::rounded(16.0),
+                    shadow: dialog_shadow(),
+                    ..container::Style::default()
+                });
 
             return modal_overlay(base, dialog);
         }
@@ -2727,10 +2720,10 @@ impl App {
                     row![action("Close")
                         .on_press(Message::CloseSummary)
                         .style(color_button(scheme.blue, scheme.ink))]
-                    .spacing(8),
+                        .spacing(8),
                 )
-                .width(Length::Fill)
-                .align_x(iced::Alignment::End),
+                    .width(Length::Fill)
+                    .align_x(iced::Alignment::End),
             );
             let dialog = container(col.width(Length::Fixed(380.0)))
                 .padding(16)
@@ -2771,10 +2764,10 @@ impl App {
                     row![action("Close")
                         .on_press(Message::CloseHelp)
                         .style(color_button(scheme.blue, scheme.ink))]
-                    .spacing(8),
+                        .spacing(8),
                 )
-                .width(Length::Fill)
-                .align_x(iced::Alignment::End),
+                    .width(Length::Fill)
+                    .align_x(iced::Alignment::End),
             );
             let dialog = container(col.width(Length::Fixed(460.0)))
                 .padding(16)
@@ -2800,29 +2793,29 @@ impl App {
                 row![
                     text(original.clone()).width(Length::Fixed(120.0)),
                     text_input(original.as_str(), value)
-                        .id(rename_id(index))
-                        .on_input(move |text| Message::RenameName(index, text))
-                        .width(Length::Fill)
-                        .style(pill_input),
+                    .id(rename_id(index))
+                    .on_input(move |text| Message::RenameName(index, text))
+                    .width(Length::Fill)
+                    .style(pill_input),
                 ]
-                .spacing(8)
-                .align_y(iced::Alignment::Center),
+                    .spacing(8)
+                    .align_y(iced::Alignment::Center),
             );
         }
         col = col.push(
             container(
                 row![
                     action("Save")
-                        .on_press(Message::RenameSave)
-                        .style(color_button(scheme.blue, scheme.ink)),
+                    .on_press(Message::RenameSave)
+                    .style(color_button(scheme.blue, scheme.ink)),
                     action("Cancel")
-                        .on_press(Message::RenameCancel)
-                        .style(color_button(scheme.pink, scheme.ink)),
+                    .on_press(Message::RenameCancel)
+                    .style(color_button(scheme.pink, scheme.ink)),
                 ]
-                .spacing(8),
+                    .spacing(8),
             )
-            .width(Length::Fill)
-            .align_x(iced::Alignment::End),
+                .width(Length::Fill)
+                .align_x(iced::Alignment::End),
         );
         let dialog = container(col.width(Length::Fixed(380.0)))
             .padding(16)
@@ -3187,7 +3180,7 @@ fn modal_overlay<'a>(
                 ..container::Style::default()
             }),
     )
-    .on_press(Message::Noop);
+        .on_press(Message::Noop);
     let centered = container(dialog)
         .center(Length::Fill)
         .width(Length::Fill)
@@ -3394,22 +3387,22 @@ fn line_element(
     };
     stack![
         container(content)
-            .width(Length::Fill)
-            .padding([2, 4])
-            .style(move |_theme| container::Style {
-                background: tint.map(Into::into),
-                border,
-                ..container::Style::default()
-            }),
+        .width(Length::Fill)
+        .padding([2, 4])
+        .style(move |_theme| container::Style {
+            background: tint.map(Into::into),
+            border,
+            ..container::Style::default()
+        }),
         mouse_area(
             container(horizontal_space())
-                .width(Length::Fill)
-                .height(Length::Fill),
+            .width(Length::Fill)
+            .height(Length::Fill),
         )
         .interaction(mouse::Interaction::Pointer)
         .on_press(Message::SelectLine(idx)),
     ]
-    .into()
+        .into()
 }
 
 const PILL: f32 = 1000.0;

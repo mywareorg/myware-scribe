@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+transiel-core = { path = "../core" }
 iced = { version = "0.13", features = ["tokio", "advanced", "canvas"] }
 rfd = "0.15"
 serde = { version = "1", features = ["derive"] }

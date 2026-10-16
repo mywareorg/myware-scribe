@@ -1,68 +1,12 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
-#[derive(Debug, Clone, Default, serde::Deserialize)]
-#[serde(default)]
-pub struct Turn {
-    pub start: f32,
-    pub end: f32,
-    pub speaker: String,
-}
+use transiel_core::pipeline::{self, PipelineOptions};
 
-#[derive(Debug, Clone, Default, serde::Deserialize)]
-#[serde(default)]
-pub struct SpeakerStat {
-    pub seconds: f32,
-    pub segments: usize,
-    pub words: usize,
-}
-
-#[derive(Debug, Clone, Default, serde::Deserialize)]
-#[serde(default)]
-pub struct Stats {
-    pub audio_seconds: f64,
-    pub run_seconds: f64,
-    pub speakers: usize,
-    pub num_speakers: Option<i32>,
-    pub preset: String,
-    pub speaker_stats: HashMap<String, SpeakerStat>,
-}
-
-#[derive(Debug, serde::Deserialize)]
-#[serde(tag = "event")]
-pub enum Event {
-    #[serde(rename = "stage")]
-    Stage { stage: String, label: String, progress: f32 },
-    #[serde(rename = "file")]
-    File { audio: String },
-    #[serde(rename = "meta")]
-    Meta { audio: String, duration: f32 },
-    #[serde(rename = "turns")]
-    Turns {
-        turns: Vec<Turn>,
-    },
-    #[serde(rename = "line")]
-    Line {
-        start: f32,
-        speaker: String,
-        text: String,
-        confidence: f32,
-    },
-    #[serde(rename = "done")]
-    Done {
-        txt: String,
-        stats: Stats,
-    },
-    #[serde(rename = "log")]
-    Log { message: String },
-    #[serde(rename = "error")]
-    Error { message: String },
-    #[serde(rename = "all_done")]
-    AllDone,
-}
+pub use transiel_core::event::{Event, SpeakerStat, Stats, Turn};
 
 /// Load a transcript from a .txt or .json file as "[time] speaker: text" lines.
 pub fn read_transcript(path: &Path) -> Option<String> {
@@ -91,62 +35,14 @@ pub fn read_transcript(path: &Path) -> Option<String> {
     Some(out)
 }
 
-/// Probe the duration (seconds) of an audio file using the venv's soundfile.
-pub fn probe_duration(path: &Path) -> Option<f64> {
-    probe_audio(path, 1).map(|(duration, _)| duration)
+/// Probe duration (seconds) and a downsampled waveform (RMS peaks).
+pub fn probe_audio(path: &Path, buckets: usize) -> Option<(f64, Vec<f32>)> {
+    transiel_core::audio::probe(path, buckets).ok()
 }
 
-/// Probe duration (seconds) and a downsampled waveform (RMS peaks) for an audio file.
-pub fn probe_audio(path: &Path, buckets: usize) -> Option<(f64, Vec<f32>)> {
-    let root = repo_root()?;
-    let python = venv_python(&root);
-    if !python.is_file() {
-        return None;
-    }
-    let script = r#"import sys, numpy as np, soundfile as sf
-path = sys.argv[1]
-n = int(sys.argv[2])
-info = sf.info(path)
-sr = info.samplerate
-frames = info.frames
-sumsq = np.zeros(n, dtype='float64')
-counts = np.zeros(n, dtype='int64')
-pos = 0
-for block in sf.blocks(path, blocksize=65536, dtype='float32', always_2d=True):
-    m = block.mean(axis=1).astype('float64')
-    k = len(m)
-    if k:
-        idx = (np.arange(pos, pos + k) * n) // max(1, frames)
-        sumsq += np.bincount(idx, weights=m * m, minlength=n)
-        counts += np.bincount(idx, minlength=n)
-        pos += k
-rms = [float(np.sqrt(sumsq[i] / counts[i])) if counts[i] else 0.0 for i in range(n)]
-print(frames / sr if sr else 0.0)
-print(','.join(str(x) for x in rms))
-"#;
-    let mut command = Command::new(&python);
-    command
-        .args(["-c", script])
-        .arg(path)
-        .arg(buckets.to_string());
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        command.creation_flags(0x0800_0000);
-    }
-    let output = command.output().ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let text = String::from_utf8_lossy(&output.stdout);
-    let mut lines = text.lines();
-    let duration: f64 = lines.next()?.trim().parse().ok()?;
-    let peaks: Vec<f32> = lines
-        .next()?
-        .split(',')
-        .filter_map(|value| value.trim().parse().ok())
-        .collect();
-    Some((duration, peaks))
+/// Probe the duration (seconds) of an audio file.
+pub fn probe_duration(path: &Path) -> Option<f64> {
+    transiel_core::audio::duration(path).ok()
 }
 
 /// Locate the repository root (directory containing scripts/transiel.py).
@@ -182,22 +78,6 @@ pub fn repo_root() -> Option<PathBuf> {
     None
 }
 
-pub fn venv_python(root: &Path) -> PathBuf {
-    if cfg!(windows) {
-        let venv = root.join(".venv").join("Scripts").join("python.exe");
-        if venv.is_file() {
-            return venv;
-        }
-        root.join("runtime").join("python.exe")
-    } else {
-        let venv = root.join(".venv").join("bin").join("python");
-        if venv.is_file() {
-            return venv;
-        }
-        root.join("runtime").join("bin").join("python3")
-    }
-}
-
 pub fn kill(pid: u32) {
     #[cfg(windows)]
     {
@@ -211,10 +91,10 @@ pub fn kill(pid: u32) {
     }
 }
 
-/// Spawn the Python pipeline and stream its JSON progress events.
+/// Run the pipeline in-process, streaming events into the shared queue.
+#[allow(clippy::too_many_arguments)]
 pub fn spawn(
-    python: PathBuf,
-    root: PathBuf,
+    _root: PathBuf,
     inputs: Vec<PathBuf>,
     output_dir: Option<PathBuf>,
     preset: &'static str,
@@ -226,107 +106,23 @@ pub fn spawn(
     pid: Arc<AtomicU32>,
     cancelled: Arc<AtomicBool>,
 ) {
-    let script = root.join("scripts").join("transiel.py");
     std::thread::spawn(move || {
-        let mut command = Command::new(&python);
-        command.arg(&script);
-        for input in &inputs {
-            command.arg(input);
-        }
-        command
-            .arg("--preset")
-            .arg(preset)
-            .arg("--progress-json")
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-
-        if let Some(dir) = &output_dir {
-            command.arg("--output-dir").arg(dir);
-        }
-        if !timestamps {
-            command.arg("--no-timestamps");
-        }
-        if join_speaker {
-            command.arg("--join-speaker");
-        }
-        match num_speakers {
-            Some(count) => {
-                command.arg("--num-speakers").arg(count.to_string());
-            }
-            None => {
-                command.arg("--auto-speakers");
-            }
-        }
-        if !cache {
-            command.arg("--no-cache");
-        }
-
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
-        }
-
-        let mut child = match command.spawn() {
-            Ok(child) => child,
-            Err(error) => {
-                push(&events, Event::Error { message: format!("failed to start python: {error}") });
+        let options = PipelineOptions {
+            inputs,
+            output_dir,
+            preset: preset.to_string(),
+            num_speakers,
+            timestamps,
+            join_speaker,
+            cache,
+        };
+        pipeline::run(&options, &mut |event| {
+            if cancelled.load(Ordering::SeqCst) {
                 return;
             }
-        };
-
-        pid.store(child.id(), Ordering::SeqCst);
-
-        let stdout = child.stdout.take();
-        let stderr = child.stderr.take();
-
-        if let Some(stderr) = stderr {
-            let events = events.clone();
-            std::thread::spawn(move || {
-                use std::io::BufRead;
-                let reader = std::io::BufReader::new(stderr);
-                for line in reader.lines() {
-                    let Ok(line) = line else { break };
-                    let line = line.trim();
-                    if !line.is_empty() {
-                        push(&events, Event::Log { message: line.to_string() });
-                    }
-                }
-            });
-        }
-
-        let mut saw_all_done = false;
-        if let Some(stdout) = stdout {
-            use std::io::BufRead;
-            let reader = std::io::BufReader::new(stdout);
-            for line in reader.lines() {
-                let Ok(line) = line else { break };
-                let line = line.trim();
-                if line.is_empty() {
-                    continue;
-                }
-                if let Ok(event) = serde_json::from_str::<Event>(line) {
-                    if matches!(event, Event::AllDone) {
-                        saw_all_done = true;
-                    }
-                    push(&events, event);
-                } else {
-                    push(&events, Event::Log { message: line.to_string() });
-                }
-            }
-        }
-
-        let status = child.wait();
+            push(&events, event);
+        });
         pid.store(0, Ordering::SeqCst);
-
-        if !saw_all_done && !cancelled.load(Ordering::SeqCst) {
-            let message = match status {
-                Ok(s) if s.success() => "process exited unexpectedly".to_string(),
-                Ok(s) => format!("process exited with {s}"),
-                Err(e) => format!("process error: {e}"),
-            };
-            push(&events, Event::Error { message });
-        }
     });
 }
 
