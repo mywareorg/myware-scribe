@@ -5,10 +5,10 @@ executable provides both the desktop GUI (iced) and a command-line mode
 (`--cli`). No Python, no runtime network access.
 
 - **Diarization** — [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx):
-  `pyannote/segmentation-3.0` ONNX + a `wespeaker` speaker-embedding ONNX, with
-  agglomerative clustering.
+`pyannote/segmentation-3.0` ONNX + a `wespeaker` speaker-embedding ONNX, with
+agglomerative clustering.
 - **Transcription** — [whisper.cpp](https://github.com/ggerganov/whisper.cpp)
-  (GGML models) via `whisper-rs`.
+(GGML models) via `whisper-rs`.
 - **Audio** — `symphonia` decode + `rubato` resample to 16 kHz mono.
 
 The pipeline diarizes the audio, cleans up the speaker turns, then transcribes
@@ -20,7 +20,7 @@ speakers is fixed with `--num-speakers N` (default 2) or auto-detected with
 ## Workspace
 
 - `core/` — `transiel-core` library: audio, diarization, ASR, model/cache paths,
-  pipeline, CLI.
+pipeline, CLI.
 - `gui/` — `transiel-gui` binary: the iced GUI and the `--cli` entry point.
 
 ## Build
@@ -34,9 +34,9 @@ cargo build --release            # target/release/transiel-gui
 ```
 
 - On Linux x86_64 the non-PIC relocation flag needed for the static sherpa
-  libraries is already set in `.cargo/config.toml`.
+libraries is already set in `.cargo/config.toml`.
 - On Windows set `SHERPA_STATIC_CRT=1` (and `+crt-static`) for a fully static
-  build, then rename the binary to `transiel.exe` for deployment.
+build, then rename the binary to `transiel.exe` for deployment.
 
 ## Models
 

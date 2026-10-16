@@ -134,7 +134,10 @@ fn run_models(args: &[String]) -> i32 {
         );
     }
     if missing > 0 {
-        println!("\n{missing} model file(s) missing under {}", models::models_dir().display());
+        println!(
+            "\n{missing} model file(s) missing under {}",
+            models::models_dir().display()
+        );
         1
     } else {
         0
