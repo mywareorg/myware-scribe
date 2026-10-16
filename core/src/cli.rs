@@ -62,6 +62,7 @@ pub fn run(args: &[String]) -> i32 {
         timestamps,
         join_speaker,
         cache,
+        cancel: None,
     };
 
     let mut code = 0;

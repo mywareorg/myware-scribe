@@ -1427,10 +1427,6 @@ impl App {
             return;
         }
 
-        let Some(root) = backend::repo_root() else {
-            self.fail_pending("cannot locate repo root");
-            return;
-        };
         self.batch = true;
         self.current = None;
         self.status = Status::Running;
@@ -1455,7 +1451,6 @@ impl App {
         self.cancelled.store(false, Ordering::SeqCst);
 
         backend::spawn(
-            root,
             inputs,
             self.output_dir.clone(),
             self.preset.arg(),
@@ -1467,14 +1462,6 @@ impl App {
             self.pid.clone(),
             self.cancelled.clone(),
         );
-    }
-
-    fn fail_pending(&mut self, message: &str) {
-        for item in self.queue.iter_mut() {
-            if matches!(item.status, ItemStatus::Pending) {
-                item.status = ItemStatus::Failed(message.to_string());
-            }
-        }
     }
 
     /// Match a backend-reported audio path to a queue item.

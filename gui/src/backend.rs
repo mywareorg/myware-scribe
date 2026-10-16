@@ -45,39 +45,6 @@ pub fn probe_duration(path: &Path) -> Option<f64> {
     transiel_core::audio::duration(path).ok()
 }
 
-/// Locate the repository root (directory containing scripts/transiel.py).
-pub fn repo_root() -> Option<PathBuf> {
-    if let Ok(root) = std::env::var("TRANSIEL_ROOT") {
-        let path = PathBuf::from(root);
-        if path.join("scripts").join("transiel.py").is_file() {
-            return Some(path);
-        }
-    }
-
-    let mut starts = Vec::new();
-    if let Ok(cwd) = std::env::current_dir() {
-        starts.push(cwd);
-    }
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            starts.push(dir.to_path_buf());
-        }
-    }
-
-    for start in starts {
-        let mut dir = start;
-        loop {
-            if dir.join("scripts").join("transiel.py").is_file() {
-                return Some(dir);
-            }
-            if !dir.pop() {
-                break;
-            }
-        }
-    }
-    None
-}
-
 pub fn kill(pid: u32) {
     #[cfg(windows)]
     {
@@ -94,7 +61,6 @@ pub fn kill(pid: u32) {
 /// Run the pipeline in-process, streaming events into the shared queue.
 #[allow(clippy::too_many_arguments)]
 pub fn spawn(
-    _root: PathBuf,
     inputs: Vec<PathBuf>,
     output_dir: Option<PathBuf>,
     preset: &'static str,
@@ -115,6 +81,7 @@ pub fn spawn(
             timestamps,
             join_speaker,
             cache,
+            cancel: Some(cancelled.clone()),
         };
         pipeline::run(&options, &mut |event| {
             if cancelled.load(Ordering::SeqCst) {

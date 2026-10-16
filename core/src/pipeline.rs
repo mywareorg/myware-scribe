@@ -2,6 +2,8 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Instant;
 
 use crate::asr::Transcriber;
@@ -23,6 +25,7 @@ pub struct PipelineOptions {
     pub timestamps: bool,
     pub join_speaker: bool,
     pub cache: bool,
+    pub cancel: Option<Arc<AtomicBool>>,
 }
 
 #[derive(Debug, Clone)]
@@ -102,6 +105,7 @@ fn output_path(input: &Path, output_dir: &Option<PathBuf>) -> PathBuf {
 pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
     let start = Instant::now();
     let total = opts.inputs.len().max(1);
+    let is_cancelled = || opts.cancel.as_ref().is_some_and(|c| c.load(Ordering::SeqCst));
 
     let segmentation = models::segmentation_model();
     let embedding = models::embedding_model();
@@ -116,6 +120,9 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
     };
 
     for (index, input) in opts.inputs.iter().enumerate() {
+        if is_cancelled() {
+            break;
+        }
         emit(Event::File {
             audio: input.display().to_string(),
         });
@@ -182,6 +189,9 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
         if let Some(transcriber) = &transcriber {
             let count = turns.len();
             for (turn_index, turn) in turns.iter().enumerate() {
+                if is_cancelled() {
+                    break;
+                }
                 let clip_start = (turn.start - CLIP_PAD_S).max(0.0);
                 let clip_end = (turn.end + CLIP_PAD_S).min(duration as f32);
                 let from = (clip_start * rate as f32) as usize;
