@@ -1,11 +1,10 @@
 //! The diarize + transcribe pipeline.
-//!
-//! P2 wires diarization; ASR (P3) fills in transcription.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
+use crate::asr::Transcriber;
 use crate::audio;
 use crate::diarize::{self, CLUSTER_THRESHOLD};
 use crate::event::{Event, SpeakerStat, Stats, Turn};
@@ -13,6 +12,7 @@ use crate::models;
 
 const MERGE_GAP_S: f32 = 1.0;
 const MIN_TURN_S: f32 = 0.4;
+const CLIP_PAD_S: f32 = 0.1;
 
 #[derive(Debug, Clone)]
 pub struct PipelineOptions {
@@ -23,6 +23,14 @@ pub struct PipelineOptions {
     pub timestamps: bool,
     pub join_speaker: bool,
     pub cache: bool,
+}
+
+#[derive(Debug, Clone)]
+struct Line {
+    start: f32,
+    speaker: String,
+    text: String,
+    confidence: f32,
 }
 
 /// Merge near-adjacent same-speaker turns and drop ultra-short fragments.
@@ -53,6 +61,43 @@ fn build_speaker_map(turns: &[Turn]) -> HashMap<String, String> {
     map
 }
 
+fn format_timestamp(seconds: f32, use_hours: bool) -> String {
+    let total = seconds.max(0.0) as u32;
+    let hours = total / 3600;
+    let minutes = (total % 3600) / 60;
+    let secs = total % 60;
+    if use_hours || hours > 0 {
+        format!("{hours:02}:{minutes:02}:{secs:02}")
+    } else {
+        format!("{minutes:02}:{secs:02}")
+    }
+}
+
+fn join_speaker_lines(lines: Vec<Line>) -> Vec<Line> {
+    let mut merged: Vec<Line> = Vec::new();
+    for line in lines {
+        match merged.last_mut() {
+            Some(last) if last.speaker == line.speaker => {
+                last.text = format!("{} {}", last.text, line.text).trim().to_string();
+            }
+            _ => merged.push(line),
+        }
+    }
+    merged
+}
+
+fn output_path(input: &Path, output_dir: &Option<PathBuf>) -> PathBuf {
+    let stem = input
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("transcript");
+    let name = format!("{stem}-transcript.txt");
+    match output_dir {
+        Some(dir) => dir.join(name),
+        None => input.with_file_name(name),
+    }
+}
+
 /// Run the pipeline over all inputs, emitting progress events.
 pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
     let start = Instant::now();
@@ -60,6 +105,15 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
 
     let segmentation = models::segmentation_model();
     let embedding = models::embedding_model();
+    let whisper = models::whisper_model(&opts.preset);
+
+    let transcriber = match Transcriber::load(&whisper) {
+        Ok(transcriber) => Some(transcriber),
+        Err(message) => {
+            emit(Event::Error { message });
+            None
+        }
+    };
 
     for (index, input) in opts.inputs.iter().enumerate() {
         emit(Event::File {
@@ -119,22 +173,108 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
             turns: turns.clone(),
         });
 
-        // TODO(P3): per-turn ASR.
+        emit(Event::Stage {
+            stage: "transcription".to_string(),
+            label: "Transcribing".to_string(),
+            progress: 0.0,
+        });
+        let mut lines: Vec<Line> = Vec::new();
+        if let Some(transcriber) = &transcriber {
+            let count = turns.len();
+            for (turn_index, turn) in turns.iter().enumerate() {
+                let clip_start = (turn.start - CLIP_PAD_S).max(0.0);
+                let clip_end = (turn.end + CLIP_PAD_S).min(duration as f32);
+                let from = (clip_start * rate as f32) as usize;
+                let to = ((clip_end * rate as f32) as usize).min(samples.len());
+                if to > from && (to - from) >= (0.15 * rate as f32) as usize {
+                    match transcriber.transcribe(&samples[from..to]) {
+                        Ok(segments) => {
+                            for segment in segments {
+                                let line = Line {
+                                    start: clip_start + segment.start,
+                                    speaker: turn.speaker.clone(),
+                                    text: segment.text,
+                                    confidence: segment.confidence,
+                                };
+                                emit(Event::Line {
+                                    start: line.start,
+                                    speaker: line.speaker.clone(),
+                                    text: line.text.clone(),
+                                    confidence: line.confidence,
+                                });
+                                lines.push(line);
+                            }
+                        }
+                        Err(message) => emit(Event::Log { message }),
+                    }
+                }
+                if count > 0 {
+                    emit(Event::Stage {
+                        stage: "transcription".to_string(),
+                        label: "Transcribing".to_string(),
+                        progress: (turn_index + 1) as f32 / count as f32,
+                    });
+                }
+            }
+        }
+
+        lines.sort_by(|a, b| {
+            a.start
+                .partial_cmp(&b.start)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        let use_hours = duration >= 3600.0;
+        let ordered = if opts.join_speaker {
+            join_speaker_lines(lines)
+        } else {
+            lines
+        };
+        let txt = ordered
+            .iter()
+            .map(|line| {
+                if opts.timestamps {
+                    format!(
+                        "[{}] {}: {}",
+                        format_timestamp(line.start, use_hours),
+                        line.speaker,
+                        line.text
+                    )
+                } else {
+                    format!("{}: {}", line.speaker, line.text)
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let path = output_path(input, &opts.output_dir);
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Err(error) = std::fs::write(&path, format!("{txt}\n")) {
+            emit(Event::Log {
+                message: format!("could not write {}: {error}", path.display()),
+            });
+        }
+
+        let mut speaker_stats: HashMap<String, SpeakerStat> = HashMap::new();
+        for line in &ordered {
+            let entry = speaker_stats.entry(line.speaker.clone()).or_default();
+            entry.segments += 1;
+            entry.words += line.text.split_whitespace().count();
+        }
+        for turn in &turns {
+            let entry = speaker_stats.entry(turn.speaker.clone()).or_default();
+            entry.seconds += (turn.end - turn.start).max(0.0);
+        }
+
         emit(Event::Stage {
             stage: "done".to_string(),
             label: "Done".to_string(),
             progress: (index + 1) as f32 / total as f32,
         });
-
-        let mut speaker_stats: HashMap<String, SpeakerStat> = HashMap::new();
-        for turn in &turns {
-            let entry = speaker_stats.entry(turn.speaker.clone()).or_default();
-            entry.seconds += (turn.end - turn.start).max(0.0);
-            entry.segments += 1;
-        }
-
         emit(Event::Done {
-            txt: String::new(),
+            txt: path.display().to_string(),
             stats: Stats {
                 audio_seconds: duration,
                 run_seconds: start.elapsed().as_secs_f64(),

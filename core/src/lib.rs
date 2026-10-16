@@ -1,5 +1,6 @@
 //! transiel-core: audio, diarization, ASR and the pipeline (no GUI).
 
+pub mod asr;
 pub mod audio;
 pub mod cli;
 pub mod diarize;
