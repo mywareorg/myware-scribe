@@ -1,0 +1,4 @@
+# sherpa-onnx static libraries are non-PIC, so the whole binary must be built
+# non-PIE on Linux x86_64.
+[target.x86_64-unknown-linux-gnu]
+rustflags = ["-C", "relocation-model=dynamic-no-pic"]

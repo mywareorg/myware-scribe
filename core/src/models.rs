@@ -22,12 +22,18 @@ pub fn models_dir() -> PathBuf {
 }
 
 pub fn segmentation_model() -> PathBuf {
+    if let Ok(path) = std::env::var("TRANSIEL_SEGMENTATION_MODEL") {
+        return PathBuf::from(path);
+    }
     models_dir()
         .join("sherpa-onnx-pyannote-segmentation-3-0")
         .join("model.onnx")
 }
 
 pub fn embedding_model() -> PathBuf {
+    if let Ok(path) = std::env::var("TRANSIEL_EMBEDDING_MODEL") {
+        return PathBuf::from(path);
+    }
     models_dir().join("wespeaker_en_voxceleb_resnet34_LM.onnx")
 }
 
