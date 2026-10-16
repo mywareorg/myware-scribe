@@ -1,10 +1,6 @@
-models/
-.venv/
-__pycache__/
-*-transcript.txt
-*-transcript.json
-*-transcribed.txt
 target/
-gui/target/
 .cache/
 dist/
+models/
+.venv/
+*-transcript.txt
