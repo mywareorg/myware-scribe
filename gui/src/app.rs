@@ -2444,18 +2444,24 @@ impl App {
         }
 
         if self.options_open && can_options {
+            let speakers_control: Element<Message> = if running {
+                text(SpeakerOpt::from_value(self.num_speakers).to_string()).into()
+            } else {
+                pick_list(
+                    SpeakerOpt::ALL,
+                    Some(SpeakerOpt::from_value(self.num_speakers)),
+                    Message::SpeakerCountChanged,
+                )
+                .style(pill_pick)
+                .into()
+            };
             options_col = options_col.push(
                 column![
                     self.tip(
                         row![
                             text("Speakers"),
                             horizontal_space(),
-                            pick_list(
-                                SpeakerOpt::ALL,
-                                Some(SpeakerOpt::from_value(self.num_speakers)),
-                                Message::SpeakerCountChanged,
-                            )
-                            .style(pill_pick),
+                            speakers_control,
                         ]
                         .spacing(8)
                         .align_y(iced::Alignment::Center),
@@ -2466,7 +2472,8 @@ impl App {
                         row![
                             text("Timestamps"),
                             horizontal_space(),
-                            toggler(self.timestamps).on_toggle(Message::TimestampsToggled),
+                            toggler(self.timestamps)
+                                .on_toggle_maybe((!running).then_some(Message::TimestampsToggled)),
                         ]
                         .spacing(8)
                         .align_y(iced::Alignment::Center),
@@ -2477,7 +2484,8 @@ impl App {
                         row![
                             text("Join Speakers"),
                             horizontal_space(),
-                            toggler(self.join_speaker).on_toggle(Message::JoinSpeakerToggled),
+                            toggler(self.join_speaker)
+                                .on_toggle_maybe((!running).then_some(Message::JoinSpeakerToggled)),
                         ]
                         .spacing(8)
                         .align_y(iced::Alignment::Center),
@@ -2488,7 +2496,8 @@ impl App {
                         row![
                             text("Confidence"),
                             horizontal_space(),
-                            toggler(self.confidence).on_toggle(Message::ConfidenceToggled),
+                            toggler(self.confidence)
+                                .on_toggle_maybe((!running).then_some(Message::ConfidenceToggled)),
                         ]
                         .spacing(8)
                         .align_y(iced::Alignment::Center),
@@ -2499,7 +2508,8 @@ impl App {
                         row![
                             text("Diarization cache"),
                             horizontal_space(),
-                            toggler(self.cache).on_toggle(Message::CacheToggled),
+                            toggler(self.cache)
+                                .on_toggle_maybe((!running).then_some(Message::CacheToggled)),
                         ]
                         .spacing(8)
                         .align_y(iced::Alignment::Center),
@@ -2510,7 +2520,8 @@ impl App {
                         row![
                             text("Dark theme"),
                             horizontal_space(),
-                            toggler(self.dark_mode).on_toggle(Message::DarkToggled),
+                            toggler(self.dark_mode)
+                                .on_toggle_maybe((!running).then_some(Message::DarkToggled)),
                         ]
                         .spacing(8)
                         .align_y(iced::Alignment::Center),
