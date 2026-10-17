@@ -299,6 +299,7 @@ struct Scheme {
     pink: Color,
     green: Color,
     ink: Color,
+    text: Color,
     sms0: Color,
     sms1: Color,
     warn_tint: Color,
@@ -321,6 +322,7 @@ impl Scheme {
                 pink: Color::from_rgb(0.961, 0.663, 0.722),
                 green: Color::from_rgb(0.30, 0.72, 0.42),
                 ink: Color::from_rgb(0.067, 0.067, 0.106),
+                text: Color::from_rgb(0.93, 0.94, 0.98),
                 sms0: Color::from_rgb(0.357, 0.808, 0.980),
                 sms1: Color::from_rgb(0.961, 0.663, 0.722),
                 warn_tint: Color::from_rgba(0.537, 0.749, 1.0, 0.30),
@@ -340,6 +342,7 @@ impl Scheme {
                 pink: Color::from_rgb(0.961, 0.663, 0.722),
                 green: Color::from_rgb(0.30, 0.72, 0.42),
                 ink: Color::from_rgb(0.13, 0.13, 0.17),
+                text: Color::from_rgb(0.13, 0.13, 0.17),
                 sms0: Color::from_rgb(0.357, 0.808, 0.980),
                 sms1: Color::from_rgb(0.961, 0.663, 0.722),
                 warn_tint: Color::from_rgba(0.529, 0.867, 1.0, 0.35),
@@ -2564,7 +2567,7 @@ impl App {
             ((done_items + current_fraction) / total_items).clamp(0.0, 1.0);
 
         let clock = row![
-            icon_colored(ICON_CLOCK, 14.0, scheme.ink),
+            icon_colored(ICON_CLOCK, 14.0, scheme.text),
             text(self.elapsed().unwrap_or_default()).width(Length::Fixed(60.0)),
         ]
             .spacing(4)
@@ -2582,8 +2585,8 @@ impl App {
                     border: iced::border::rounded(14.0),
                 }),
                 container(text(format!("{} — {}", self.stage, self.status_text())))
-                    .center_x(Length::Fill)
-                    .center_y(Length::Fill),
+                .center_x(Length::Fill)
+                .center_y(Length::Fill),
             ]
             .width(Length::Fill),
         ]
