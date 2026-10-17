@@ -643,8 +643,18 @@ impl App {
             size: Self::window_size_from(&settings),
             position,
             min_size: Some(Size::new(640.0, 480.0)),
+            icon: Self::window_icon(),
             ..iced::window::Settings::default()
         }
+    }
+
+    /// Title-bar / taskbar icon decoded from the bundled PNG.
+    fn window_icon() -> Option<iced::window::Icon> {
+        let image = image::load_from_memory(include_bytes!("../assets/icon.png"))
+            .ok()?
+            .into_rgba8();
+        let (width, height) = image.dimensions();
+        iced::window::icon::from_rgba(image.into_raw(), width, height).ok()
     }
 
     fn window_size_from(settings: &Settings) -> Size {
