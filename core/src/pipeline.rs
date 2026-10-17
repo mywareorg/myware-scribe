@@ -104,7 +104,6 @@ fn output_path(input: &Path, output_dir: &Option<PathBuf>) -> PathBuf {
 
 /// Run the pipeline over all inputs, emitting progress events.
 pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
-    let start = Instant::now();
     let total = opts.inputs.len().max(1);
     let is_cancelled = || opts.cancel.as_ref().is_some_and(|c| c.load(Ordering::SeqCst));
 
@@ -125,6 +124,7 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
         if is_cancelled() {
             break;
         }
+        let file_start = Instant::now();
         emit(Event::File {
             audio: input.display().to_string(),
         });
@@ -309,7 +309,7 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
             txt: path.display().to_string(),
             stats: Stats {
                 audio_seconds: duration,
-                run_seconds: start.elapsed().as_secs_f64(),
+                run_seconds: file_start.elapsed().as_secs_f64(),
                 speakers: map.len(),
                 num_speakers: opts.num_speakers,
                 preset: opts.preset.clone(),

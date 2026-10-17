@@ -457,7 +457,7 @@ pub struct App {
     rename_open: bool,
     rename_fields: Vec<(String, String)>,
     rename_focus: usize,
-    stats: Option<backend::Stats>,
+    batch_runs: Vec<(String, backend::Stats)>,
     timestamps: bool,
     join_speaker: bool,
     options_open: bool,
@@ -532,7 +532,7 @@ impl App {
             rename_open: false,
             rename_fields: Vec::new(),
             rename_focus: 0,
-            stats: None,
+            batch_runs: Vec::new(),
             timestamps: settings.timestamps.unwrap_or(true),
             join_speaker: settings.join_speaker.unwrap_or(false),
             options_open: false,
@@ -1122,10 +1122,14 @@ impl App {
                 Task::none()
             }
             Message::OpenSummary => {
-                if self.stats.is_some() {
+                if !self.batch_runs.is_empty() {
                     self.summary_open = true;
                     self.pending_rename = false;
                     self.toast = None;
+                    return scrollable::snap_to(
+                        summary_id(),
+                        scrollable::RelativeOffset { x: 0.0, y: 0.0 },
+                    );
                 }
                 Task::none()
             }
@@ -1453,7 +1457,7 @@ impl App {
         self.timeline_duration = None;
         self.player = None;
         self.output_txt = None;
-        self.stats = None;
+        self.batch_runs.clear();
         self.rename_open = false;
         self.cancelled.store(false, Ordering::SeqCst);
 
@@ -1629,7 +1633,20 @@ impl App {
                         self.lines = parse_lines(&self.transcript);
                     }
                     self.output_txt = Some(PathBuf::from(&txt));
-                    self.stats = Some(stats);
+                    let name = self
+                        .current
+                        .and_then(|index| self.queue.get(index))
+                        .and_then(|item| item.path.file_name())
+                        .and_then(|n| n.to_str())
+                        .map(|n| n.to_string())
+                        .unwrap_or_else(|| {
+                            PathBuf::from(&txt)
+                                .file_stem()
+                                .and_then(|s| s.to_str())
+                                .unwrap_or("file")
+                                .to_string()
+                        });
+                    self.batch_runs.push((name, stats));
                     if let Some(index) = self.current.take() {
                         self.queue[index].status = ItemStatus::Done(PathBuf::from(&txt));
                     }
@@ -1654,15 +1671,24 @@ impl App {
                 Event::AllDone => {
                     self.batch = false;
                     self.current = None;
-                    self.status = Status::Done;
                     self.stage = "done".to_string();
                     self.progress = 1.0;
                     self.progress_shown = 1.0;
                     self.elapsed_final = self.run_start.map(|s| s.elapsed().as_secs_f64());
                     self.toast = None;
-                    self.summary_open = true;
-                    self.pending_rename = true;
-                    notify("transiel", "Transcription complete");
+                    // Summary covers every successful run; rename only a single file.
+                    self.summary_open = !self.batch_runs.is_empty();
+                    self.pending_rename = self.batch_runs.len() == 1;
+                    if self.batch_runs.is_empty() {
+                        // Nothing succeeded, so keep any error status.
+                    } else {
+                        self.status = Status::Done;
+                        tasks.push(scrollable::snap_to(
+                            summary_id(),
+                            scrollable::RelativeOffset { x: 0.0, y: 0.0 },
+                        ));
+                        notify("transiel", "Transcription complete");
+                    }
                 }
             }
         }
@@ -1670,46 +1696,57 @@ impl App {
     }
 
     fn stats_lines(&self) -> Vec<String> {
-        match &self.stats {
-            Some(s) => {
-                let speed = if s.run_seconds > 0.0 {
-                    s.audio_seconds / s.run_seconds
-                } else {
-                    0.0
-                };
-                let speakers = match s.num_speakers {
-                    Some(count) => count.to_string(),
-                    None => format!("{} (auto)", s.speakers),
-                };
-                let mut lines = vec![
-                    format!("Total run time: {}", format_secs(s.run_seconds)),
-                    format!("Audio length: {}", format_secs(s.audio_seconds)),
-                    format!("Speed: {:.1}\u{00d7} realtime", speed),
-                    format!("Speakers: {speakers}"),
-                    format!("Preset: {}", s.preset),
-                ];
-                if !s.speaker_stats.is_empty() {
-                    let mut stats: Vec<(&String, &backend::SpeakerStat)> =
-                        s.speaker_stats.iter().collect();
-                    stats.sort_by(|a, b| {
-                        b.1.seconds
-                            .partial_cmp(&a.1.seconds)
-                            .unwrap_or(std::cmp::Ordering::Equal)
-                    });
-                    lines.push("Per speaker:".to_string());
-                    for (name, stat) in stats {
-                        lines.push(format!(
-                            "  {name}: {}, {} segments, {} words",
-                            format_secs(stat.seconds as f64),
-                            stat.segments,
-                            stat.words
-                        ));
-                    }
-                }
-                lines
-            }
-            None => vec!["No completed run yet.".to_string()],
+        if self.batch_runs.is_empty() {
+            return vec!["No completed run yet.".to_string()];
         }
+        let mut lines: Vec<String> = Vec::new();
+        for (name, stats) in &self.batch_runs {
+            if !lines.is_empty() {
+                lines.push(String::new());
+            }
+            lines.push(name.clone());
+            lines.extend(Self::single_stats_lines(stats));
+        }
+        lines
+    }
+
+    /// The summary block for one completed run.
+    fn single_stats_lines(s: &backend::Stats) -> Vec<String> {
+        let speed = if s.run_seconds > 0.0 {
+            s.audio_seconds / s.run_seconds
+        } else {
+            0.0
+        };
+        let speakers = match s.num_speakers {
+            Some(count) => count.to_string(),
+            None => format!("{} (auto)", s.speakers),
+        };
+        let mut lines = vec![
+            format!("Total run time: {}", format_secs(s.run_seconds)),
+            format!("Audio length: {}", format_secs(s.audio_seconds)),
+            format!("Speed: {:.1}\u{00d7} realtime", speed),
+            format!("Speakers: {speakers}"),
+            format!("Preset: {}", s.preset),
+        ];
+        if !s.speaker_stats.is_empty() {
+            let mut stats: Vec<(&String, &backend::SpeakerStat)> =
+                s.speaker_stats.iter().collect();
+            stats.sort_by(|a, b| {
+                b.1.seconds
+                    .partial_cmp(&a.1.seconds)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            lines.push("Per speaker:".to_string());
+            for (name, stat) in stats {
+                lines.push(format!(
+                    "  {name}: {}, {} segments, {} words",
+                    format_secs(stat.seconds as f64),
+                    stat.segments,
+                    stat.words
+                ));
+            }
+        }
+        lines
     }
 
     fn status_text(&self) -> String {
@@ -2571,7 +2608,7 @@ impl App {
                 self.player_element(&scheme),
                 action("Summary")
                 .on_press_maybe(
-                    (!running && self.stats.is_some()).then_some(Message::OpenSummary)
+                    (!running && !self.batch_runs.is_empty()).then_some(Message::OpenSummary)
                 )
                 .style(pill_button_secondary),
                 self.tip(
@@ -2705,11 +2742,24 @@ impl App {
         }
 
         if self.summary_open {
-            let mut col = column![text("Summary").size(20)].spacing(8);
-            for line in self.stats_lines() {
-                col = col.push(text(line));
+            let lines = self.stats_lines();
+            let mut body = column![text("Summary").size(20)].spacing(8);
+            for line in &lines {
+                body = body.push(text(line.clone()));
             }
-            col = col.push(
+
+            // Cap the scrollable height so long queues stay usable.
+            let cap = (self.window_size.height * 0.8).max(300.0);
+            let estimated = (lines.len() as f32 + 1.0) * 22.0 + 24.0;
+            let height = estimated.min(cap);
+
+            let scroll = scrollable(body)
+                .id(summary_id())
+                .width(Length::Fill)
+                .height(Length::Fixed(height));
+
+            let col = column![
+                container(scroll).width(Length::Fill),
                 container(
                     row![action("Close")
                         .on_press(Message::CloseSummary)
@@ -2718,7 +2768,9 @@ impl App {
                 )
                     .width(Length::Fill)
                     .align_x(iced::Alignment::End),
-            );
+            ]
+            .spacing(8);
+
             let dialog = container(col.width(Length::Fixed(380.0)))
                 .padding(16)
                 .style(move |_theme| container::Style {
@@ -3258,6 +3310,10 @@ fn transcript_id() -> scrollable::Id {
 
 fn console_id() -> scrollable::Id {
     scrollable::Id::new("console")
+}
+
+fn summary_id() -> scrollable::Id {
+    scrollable::Id::new("summary")
 }
 
 fn rename_id(index: usize) -> text_input::Id {
