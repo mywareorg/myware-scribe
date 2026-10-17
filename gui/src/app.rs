@@ -278,7 +278,6 @@ struct Settings {
     sms_mode: Option<bool>,
     dark_mode: Option<bool>,
     num_speakers: Option<i32>,
-    cache: Option<bool>,
     confidence: Option<bool>,
     font_scale: Option<f32>,
     playback_speed: Option<f32>,
@@ -294,6 +293,7 @@ struct Scheme {
     panel_bg: Color,
     dialog_bg: Color,
     track: Color,
+    bar_track: Color,
     timeline_bg: Color,
     blue: Color,
     pink: Color,
@@ -317,6 +317,7 @@ impl Scheme {
                 panel_bg: Color::from_rgb(0.094, 0.094, 0.145),
                 dialog_bg: Color::from_rgb(0.118, 0.118, 0.180),
                 track: Color::from_rgb(0.067, 0.067, 0.106),
+                bar_track: Color::from_rgba(0.357, 0.808, 0.980, 0.24),
                 timeline_bg: Color::from_rgb(0.22, 0.22, 0.26),
                 blue: Color::from_rgb(0.357, 0.808, 0.980),
                 pink: Color::from_rgb(0.961, 0.663, 0.722),
@@ -337,6 +338,7 @@ impl Scheme {
                 panel_bg: Color::from_rgb(0.96, 0.97, 0.995),
                 dialog_bg: Color::from_rgb(0.99, 0.99, 1.0),
                 track: Color::from_rgb(0.88, 0.88, 0.93),
+                bar_track: Color::from_rgb(0.88, 0.88, 0.93),
                 timeline_bg: Color::from_rgb(0.88, 0.88, 0.93),
                 blue: Color::from_rgb(0.357, 0.808, 0.980),
                 pink: Color::from_rgb(0.961, 0.663, 0.722),
@@ -402,7 +404,6 @@ pub enum Message {
     SmsToggled(bool),
     DarkToggled(bool),
     SpeakerCountChanged(SpeakerOpt),
-    CacheToggled(bool),
     ConfidenceToggled(bool),
     TranscriptScrolled(scrollable::Viewport),
     WindowEvent(iced::window::Event),
@@ -467,7 +468,6 @@ pub struct App {
     sms_mode: bool,
     dark_mode: bool,
     num_speakers: Option<i32>,
-    cache: bool,
     confidence: bool,
     transcript_viewport: f32,
     transcript_content: f32,
@@ -546,7 +546,6 @@ impl App {
                 Some(0) => None,
                 Some(count) => Some(count),
             },
-            cache: settings.cache.unwrap_or(true),
             confidence: settings.confidence.unwrap_or(true),
             transcript_viewport: 0.0,
             transcript_content: 0.0,
@@ -616,7 +615,6 @@ impl App {
             sms_mode: Some(self.sms_mode),
             dark_mode: Some(self.dark_mode),
             num_speakers: Some(self.num_speakers.unwrap_or(0)),
-            cache: Some(self.cache),
             confidence: Some(self.confidence),
             font_scale: Some(self.font_scale),
             playback_speed: Some(self.playback_speed),
@@ -762,11 +760,6 @@ impl App {
                     return Task::none();
                 }
                 self.num_speakers = Some(option.value());
-                self.save_settings();
-                Task::none()
-            }
-            Message::CacheToggled(value) => {
-                self.cache = value;
                 self.save_settings();
                 Task::none()
             }
@@ -1480,7 +1473,7 @@ impl App {
             self.timestamps,
             self.join_speaker,
             self.num_speakers,
-            self.cache,
+            true, // diarization cache is always on
             self.events.clone(),
             self.pid.clone(),
             self.cancelled.clone(),
@@ -2357,7 +2350,7 @@ impl App {
                             .width(Length::Fixed(90.0))
                             .height(Length::Fixed(10.0))
                             .style(move |_theme| progress_bar::Style {
-                                background: scheme.track.into(),
+                                background: scheme.bar_track.into(),
                                 bar: scheme.blue.into(),
                                 border: iced::border::rounded(5.0),
                             }),
@@ -2506,18 +2499,6 @@ impl App {
                     ),
                     self.tip(
                         row![
-                            text("Diarization cache"),
-                            horizontal_space(),
-                            toggler(self.cache)
-                            .on_toggle_maybe((!running).then_some(Message::CacheToggled)),
-                        ]
-                        .spacing(8)
-                        .align_y(iced::Alignment::Center),
-                        "Reuse diarization results for unchanged audio",
-                        &scheme,
-                    ),
-                    self.tip(
-                        row![
                             text("Dark theme"),
                             horizontal_space(),
                             toggler(self.dark_mode)
@@ -2591,7 +2572,7 @@ impl App {
                 .width(Length::Fill)
                 .height(Length::Fixed(28.0))
                 .style(move |_theme| progress_bar::Style {
-                    background: scheme.track.into(),
+                    background: scheme.bar_track.into(),
                     bar: scheme.blue.into(),
                     border: iced::border::rounded(14.0),
                 }),
