@@ -317,12 +317,12 @@ impl Scheme {
                 dialog_bg: Color::from_rgb(0.118, 0.118, 0.180),
                 track: Color::from_rgb(0.067, 0.067, 0.106),
                 timeline_bg: Color::from_rgb(0.22, 0.22, 0.26),
-                blue: Color::from_rgb(0.537, 0.706, 0.980),
-                pink: Color::from_rgb(0.953, 0.545, 0.659),
-                green: Color::from_rgb(0.35, 0.78, 0.47),
+                blue: Color::from_rgb(0.357, 0.808, 0.980),
+                pink: Color::from_rgb(0.961, 0.663, 0.722),
+                green: Color::from_rgb(0.30, 0.72, 0.42),
                 ink: Color::from_rgb(0.067, 0.067, 0.106),
-                sms0: Color::from_rgb(0.537, 0.706, 0.980),
-                sms1: Color::from_rgb(0.953, 0.545, 0.659),
+                sms0: Color::from_rgb(0.357, 0.808, 0.980),
+                sms1: Color::from_rgb(0.961, 0.663, 0.722),
                 warn_tint: Color::from_rgba(0.537, 0.749, 1.0, 0.30),
                 warn_tint_alt: Color::from_rgba(0.953, 0.545, 0.659, 0.16),
                 search_hl: Color::from_rgba(1.0, 0.85, 0.35, 0.35),
@@ -670,7 +670,16 @@ impl App {
 
     pub fn theme(&self) -> iced::Theme {
         if self.dark_mode {
-            iced::Theme::CatppuccinMocha
+            iced::Theme::custom(
+                "Transgender Dark".to_string(),
+                iced::theme::Palette {
+                    background: Color::from_rgb(0.094, 0.094, 0.145),
+                    text: Color::from_rgb(0.93, 0.94, 0.98),
+                    primary: Color::from_rgb(0.357, 0.808, 0.980),
+                    success: Color::from_rgb(0.357, 0.808, 0.980),
+                    danger: Color::from_rgb(0.961, 0.663, 0.722),
+                },
+            )
         } else {
             iced::Theme::custom(
                 "Transgender".to_string(),
@@ -2453,7 +2462,7 @@ impl App {
                         ]
                         .spacing(8)
                         .align_y(iced::Alignment::Center),
-                        "Use the dark (Catppuccin Mocha) theme",
+                        "Use the dark theme",
                         &scheme,
                     ),
                     self.tip(
@@ -2554,8 +2563,15 @@ impl App {
         let global_progress =
             ((done_items + current_fraction) / total_items).clamp(0.0, 1.0);
 
+        let clock = row![
+            icon_colored(ICON_CLOCK, 14.0, scheme.ink),
+            text(self.elapsed().unwrap_or_default()).width(Length::Fixed(60.0)),
+        ]
+        .spacing(4)
+        .align_y(iced::Alignment::Center);
+
         let status_row = row![
-            text(self.elapsed().unwrap_or_default()).width(Length::Fixed(70.0)),
+            clock,
             stack![
                 progress_bar(0.0..=1.0, global_progress)
                 .width(Length::Fill)
@@ -2576,7 +2592,7 @@ impl App {
             ]
             .width(Length::Fill),
         ]
-            .spacing(8)
+            .spacing(2)
             .align_y(iced::Alignment::Center);
 
         let mut middle = column![status_row].spacing(8).width(Length::Fill);
@@ -2764,12 +2780,12 @@ impl App {
                     row![action("Close")
                         .on_press(Message::CloseSummary)
                         .style(color_button(scheme.blue, scheme.ink))]
-                        .spacing(8),
+                    .spacing(8),
                 )
-                    .width(Length::Fill)
-                    .align_x(iced::Alignment::End),
+                .width(Length::Fill)
+                .align_x(iced::Alignment::End),
             ]
-            .spacing(8);
+                .spacing(8);
 
             let dialog = container(col.width(Length::Fixed(380.0)))
                 .padding(16)
@@ -3209,6 +3225,7 @@ const ICON_CARET_DOWN: char = '\u{f229}';
 const ICON_CARET_UP: char = '\u{f235}';
 const ICON_ZOOM_IN: char = '\u{f62c}';
 const ICON_ZOOM_OUT: char = '\u{f62d}';
+const ICON_CLOCK: char = '\u{f293}';
 
 /// Layer `dialog` over `base` behind a dimming backdrop that swallows clicks,
 /// so a visible modal blocks everything outside it.
