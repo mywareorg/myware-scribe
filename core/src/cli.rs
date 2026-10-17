@@ -150,9 +150,9 @@ fn run_probe(args: &[String]) -> i32 {
             println!(
                 "{}",
                 rms.iter()
-                    .map(|v| v.to_string())
-                    .collect::<Vec<_>>()
-                    .join(",")
+                .map(|v| v.to_string())
+                .collect::<Vec<_>>()
+                .join(",")
             );
             0
         }
