@@ -2789,6 +2789,7 @@ impl App {
                     text_input(original.as_str(), value)
                     .id(rename_id(index))
                     .on_input(move |text| Message::RenameName(index, text))
+                    .on_submit(Message::RenameSave)
                     .width(Length::Fill)
                     .style(pill_input),
                 ]
