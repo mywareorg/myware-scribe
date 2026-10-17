@@ -2581,14 +2581,9 @@ impl App {
                     bar: scheme.blue.into(),
                     border: iced::border::rounded(14.0),
                 }),
-                container(
-                    text(format!("{} — {}", self.stage, self.status_text()))
-                    .style(move |_theme| text::Style {
-                        color: Some(scheme.ink),
-                    }),
-                )
-                .center_x(Length::Fill)
-                .center_y(Length::Fill),
+                container(text(format!("{} — {}", self.stage, self.status_text())))
+                    .center_x(Length::Fill)
+                    .center_y(Length::Fill),
             ]
             .width(Length::Fill),
         ]
