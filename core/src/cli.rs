@@ -4,7 +4,6 @@ use std::path::{Path, PathBuf};
 
 use crate::audio;
 use crate::event::Event;
-use crate::models;
 use crate::pipeline::{self, PipelineOptions};
 
 pub fn run(args: &[String]) -> i32 {
@@ -108,39 +107,30 @@ pub fn run(args: &[String]) -> i32 {
     code
 }
 
-/// `transiel --cli models [--preset speed|balanced]`: report model presence.
+/// `transiel --cli models [download] [--force] [--verify]`
+///
+/// Without `download` this reports which models are present.
 fn run_models(args: &[String]) -> i32 {
-    let mut preset = String::from("speed");
-    let mut index = 0;
-    while index < args.len() {
-        if args[index] == "--preset" {
-            index += 1;
-            if let Some(value) = args.get(index) {
-                preset = value.clone();
+    let mut download = false;
+    let mut force = false;
+    let mut verify = false;
+
+    for arg in args {
+        match arg.as_str() {
+            "download" => download = true,
+            "--force" => force = true,
+            "--verify" => verify = true,
+            other => {
+                eprintln!("unknown option: {other}");
+                return 2;
             }
         }
-        index += 1;
     }
-    let mut missing = 0;
-    for (label, path) in models::expected(&preset) {
-        let present = path.is_file();
-        if !present {
-            missing += 1;
-        }
-        println!(
-            "[{}] {label:12} {}",
-            if present { "ok" } else { "missing" },
-            path.display()
-        );
-    }
-    if missing > 0 {
-        println!(
-            "\n{missing} model file(s) missing under {}",
-            models::models_dir().display()
-        );
-        1
+
+    if download {
+        crate::download::download(force, verify)
     } else {
-        0
+        crate::download::verify_all()
     }
 }
 

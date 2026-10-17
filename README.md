@@ -40,22 +40,28 @@ build, then rename the binary to `transiel.exe` for deployment.
 
 ## Models
 
-Models are non-gated and downloaded by the deploy script into
-`%LOCALAPPDATA%\transiel\models` (Windows) or `~/.cache/transiel/models`
-(Linux/macOS). The app never downloads at runtime.
+Models are non-gated and installed into `%LOCALAPPDATA%\transiel\models`
+(Windows) or `~/.cache/transiel/models` (Linux/macOS). Downloading is the only
+time the app needs the network; the pipeline itself is fully offline.
+
+Download everything at once (also what `deploy.bat` runs on Windows):
+
+```bash
+transiel --cli models download --verify
+```
 
 - `ggml-large-v3-turbo-q5_0.bin` (accuracy), `ggml-base.en-q5_1.bin` (speed)
 - `sherpa-onnx-pyannote-segmentation-3-0/model.onnx`
 - `wespeaker_en_voxceleb_resnet34_LM.onnx`
 
 Overrides: `TRANSIEL_MODELS_DIR` (root), `TRANSIEL_SEGMENTATION_MODEL`,
-`TRANSIEL_EMBEDDING_MODEL`. Diarization is cached under `TRANSIEL_CACHE_DIR`
-(or the platform cache dir) and reused on re-runs.
+`TRANSIEL_EMBEDDING_MODEL`, `TRANSIEL_WHISPER_MODEL`. Diarization is cached
+under `TRANSIEL_CACHE_DIR` (or the platform cache dir) and reused on re-runs.
 
-Check what is present:
+Report what is present (exit non-zero if anything is missing):
 
 ```bash
-transiel --cli models [--preset speed|accuracy]
+transiel --cli models
 ```
 
 ## CLI

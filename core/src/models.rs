@@ -60,21 +60,3 @@ pub fn diarizer_id() -> String {
     };
     format!("{}-{}", name(&seg), name(&emb))
 }
-
-/// The models a preset needs, as (label, path).
-pub fn expected(preset: &str) -> Vec<(&'static str, PathBuf)> {
-    vec![
-        ("segmentation", segmentation_model()),
-        ("embedding", embedding_model()),
-        ("whisper", whisper_model(preset)),
-    ]
-}
-
-/// Missing required model files for a preset (empty when everything is present).
-pub fn missing(preset: &str) -> Vec<PathBuf> {
-    expected(preset)
-        .into_iter()
-        .map(|(_, path)| path)
-        .filter(|path| !path.is_file())
-        .collect()
-}
