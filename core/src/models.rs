@@ -38,8 +38,11 @@ pub fn embedding_model() -> PathBuf {
 }
 
 pub fn whisper_model(preset: &str) -> PathBuf {
+    if let Ok(path) = std::env::var("TRANSIEL_WHISPER_MODEL") {
+        return PathBuf::from(path);
+    }
     let name = match preset {
-        "speed" => "ggml-base.en.bin",
+        "speed" => "ggml-base.en-q5_1.bin",
         _ => "ggml-large-v3-turbo-q5_0.bin",
     };
     models_dir().join(name)

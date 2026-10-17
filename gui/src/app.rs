@@ -2452,8 +2452,8 @@ impl App {
                     Some(SpeakerOpt::from_value(self.num_speakers)),
                     Message::SpeakerCountChanged,
                 )
-                .style(pill_pick)
-                .into()
+                    .style(pill_pick)
+                    .into()
             };
             options_col = options_col.push(
                 column![
@@ -2473,7 +2473,7 @@ impl App {
                             text("Timestamps"),
                             horizontal_space(),
                             toggler(self.timestamps)
-                                .on_toggle_maybe((!running).then_some(Message::TimestampsToggled)),
+                            .on_toggle_maybe((!running).then_some(Message::TimestampsToggled)),
                         ]
                         .spacing(8)
                         .align_y(iced::Alignment::Center),
@@ -2485,7 +2485,7 @@ impl App {
                             text("Join Speakers"),
                             horizontal_space(),
                             toggler(self.join_speaker)
-                                .on_toggle_maybe((!running).then_some(Message::JoinSpeakerToggled)),
+                            .on_toggle_maybe((!running).then_some(Message::JoinSpeakerToggled)),
                         ]
                         .spacing(8)
                         .align_y(iced::Alignment::Center),
@@ -2497,7 +2497,7 @@ impl App {
                             text("Confidence"),
                             horizontal_space(),
                             toggler(self.confidence)
-                                .on_toggle_maybe((!running).then_some(Message::ConfidenceToggled)),
+                            .on_toggle_maybe((!running).then_some(Message::ConfidenceToggled)),
                         ]
                         .spacing(8)
                         .align_y(iced::Alignment::Center),
@@ -2509,7 +2509,7 @@ impl App {
                             text("Diarization cache"),
                             horizontal_space(),
                             toggler(self.cache)
-                                .on_toggle_maybe((!running).then_some(Message::CacheToggled)),
+                            .on_toggle_maybe((!running).then_some(Message::CacheToggled)),
                         ]
                         .spacing(8)
                         .align_y(iced::Alignment::Center),
@@ -2521,7 +2521,7 @@ impl App {
                             text("Dark theme"),
                             horizontal_space(),
                             toggler(self.dark_mode)
-                                .on_toggle_maybe((!running).then_some(Message::DarkToggled)),
+                            .on_toggle_maybe((!running).then_some(Message::DarkToggled)),
                         ]
                         .spacing(8)
                         .align_y(iced::Alignment::Center),

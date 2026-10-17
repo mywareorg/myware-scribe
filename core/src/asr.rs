@@ -35,8 +35,20 @@ impl Transcriber {
         Ok(Self { ctx, threads })
     }
 
-    /// Transcribe 16 kHz mono samples, returning one entry per Whisper segment.
+    /// Transcribe 16 kHz mono samples using the default thread count.
     pub fn transcribe(&self, samples: &[f32]) -> Result<Vec<Segment>, String> {
+        self.transcribe_with_threads(samples, self.threads)
+    }
+
+    /// Transcribe 16 kHz mono samples, returning one entry per Whisper segment.
+    ///
+    /// Each call creates its own decode state, so one `Transcriber` (and model)
+    /// can be shared across threads.
+    pub fn transcribe_with_threads(
+        &self,
+        samples: &[f32],
+        threads: i32,
+    ) -> Result<Vec<Segment>, String> {
         let mut state = self
             .ctx
             .create_state()
@@ -50,7 +62,7 @@ impl Transcriber {
         params.set_print_progress(false);
         params.set_print_realtime(false);
         params.set_print_timestamps(false);
-        params.set_n_threads(self.threads);
+        params.set_n_threads(threads);
 
         state
             .full(params, samples)

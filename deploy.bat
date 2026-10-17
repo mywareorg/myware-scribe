@@ -30,7 +30,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command "$dir='%INSTALL_DIR%'; $p
 
 echo Downloading models to "%MODELS%"
 if not exist "%MODELS%" mkdir "%MODELS%" >nul
-call :get "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin" "%MODELS%\ggml-base.en.bin"
+call :get "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en-q5_1.bin" "%MODELS%\ggml-base.en-q5_1.bin"
 call :get "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo-q5_0.bin" "%MODELS%\ggml-large-v3-turbo-q5_0.bin"
 call :get "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/wespeaker_en_voxceleb_resnet34_LM.onnx" "%MODELS%\wespeaker_en_voxceleb_resnet34_LM.onnx"
 if not exist "%MODELS%\sherpa-onnx-pyannote-segmentation-3-0\model.onnx" (

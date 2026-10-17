@@ -12,6 +12,7 @@ use crate::cache;
 use crate::diarize::{self, CLUSTER_THRESHOLD};
 use crate::event::{Event, SpeakerStat, Stats, Turn};
 use crate::models;
+use rayon::prelude::*;
 
 const MERGE_GAP_S: f32 = 1.0;
 const MIN_TURN_S: f32 = 0.4;
@@ -102,6 +103,27 @@ fn output_path(input: &Path, output_dir: &Option<PathBuf>) -> PathBuf {
     }
 }
 
+type ClipResult = (usize, f32, Result<Vec<crate::asr::Segment>, String>);
+
+/// Transcribe the turn clips in parallel (order preserved by index).
+fn transcribe_clips(
+    transcriber: &Transcriber,
+    samples: &[f32],
+    clips: &[(usize, f32, usize, usize)],
+    threads: i32,
+) -> Vec<ClipResult> {
+    clips
+        .par_iter()
+        .map(|&(turn_index, clip_start, from, to)| {
+            (
+                turn_index,
+                clip_start,
+                transcriber.transcribe_with_threads(&samples[from..to], threads),
+            )
+        })
+        .collect()
+}
+
 /// Run the pipeline over all inputs, emitting progress events.
 pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
     let total = opts.inputs.len().max(1);
@@ -119,6 +141,22 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
             None
         }
     };
+
+    // Parallel ASR: a small pool of workers sharing one model (each call creates
+    // its own decode state). Per-call threads split the physical cores.
+    let physical = num_cpus::get_physical().max(1);
+    let env_int = |name: &str| std::env::var(name).ok().and_then(|v| v.parse::<usize>().ok());
+    let workers = env_int("TRANSIEL_ASR_WORKERS")
+        .unwrap_or(physical.min(4))
+        .max(1);
+    let per_call_threads = env_int("TRANSIEL_ASR_THREADS")
+        .map(|v| v as i32)
+        .unwrap_or((physical / workers).max(1) as i32)
+        .max(1);
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(workers)
+        .build()
+        .ok();
 
     for (index, input) in opts.inputs.iter().enumerate() {
         if is_cancelled() {
@@ -209,45 +247,59 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
         });
         let mut lines: Vec<Line> = Vec::new();
         if let Some(transcriber) = &transcriber {
-            let count = turns.len();
-            for (turn_index, turn) in turns.iter().enumerate() {
+            // (turn_index, clip_start, from, to) for each transcribable turn.
+            let clips: Vec<(usize, f32, usize, usize)> = turns
+                .iter()
+                .enumerate()
+                .filter_map(|(turn_index, turn)| {
+                    let clip_start = (turn.start - CLIP_PAD_S).max(0.0);
+                    let clip_end = (turn.end + CLIP_PAD_S).min(duration as f32);
+                    let from = (clip_start * rate as f32) as usize;
+                    let to = ((clip_end * rate as f32) as usize).min(samples.len());
+                    (to > from && (to - from) >= (0.15 * rate as f32) as usize)
+                        .then_some((turn_index, clip_start, from, to))
+                })
+                .collect();
+
+            let results = match &pool {
+                Some(pool) => pool.install(|| {
+                    transcribe_clips(transcriber, &samples, &clips, per_call_threads)
+                }),
+                None => transcribe_clips(transcriber, &samples, &clips, per_call_threads),
+            };
+
+            // par_iter().collect() preserves order, so results are in turn order.
+            for (turn_index, clip_start, result) in results {
                 if is_cancelled() {
                     break;
                 }
-                let clip_start = (turn.start - CLIP_PAD_S).max(0.0);
-                let clip_end = (turn.end + CLIP_PAD_S).min(duration as f32);
-                let from = (clip_start * rate as f32) as usize;
-                let to = ((clip_end * rate as f32) as usize).min(samples.len());
-                if to > from && (to - from) >= (0.15 * rate as f32) as usize {
-                    match transcriber.transcribe(&samples[from..to]) {
-                        Ok(segments) => {
-                            for segment in segments {
-                                let line = Line {
-                                    start: clip_start + segment.start,
-                                    speaker: turn.speaker.clone(),
-                                    text: segment.text,
-                                    confidence: segment.confidence,
-                                };
-                                emit(Event::Line {
-                                    start: line.start,
-                                    speaker: line.speaker.clone(),
-                                    text: line.text.clone(),
-                                    confidence: line.confidence,
-                                });
-                                lines.push(line);
-                            }
+                let speaker = turns[turn_index].speaker.clone();
+                match result {
+                    Ok(segments) => {
+                        for segment in segments {
+                            let line = Line {
+                                start: clip_start + segment.start,
+                                speaker: speaker.clone(),
+                                text: segment.text,
+                                confidence: segment.confidence,
+                            };
+                            emit(Event::Line {
+                                start: line.start,
+                                speaker: line.speaker.clone(),
+                                text: line.text.clone(),
+                                confidence: line.confidence,
+                            });
+                            lines.push(line);
                         }
-                        Err(message) => emit(Event::Log { message }),
                     }
-                }
-                if count > 0 {
-                    emit(Event::Stage {
-                        stage: "transcription".to_string(),
-                        label: "Transcribing".to_string(),
-                        progress: (turn_index + 1) as f32 / count as f32,
-                    });
+                    Err(message) => emit(Event::Log { message }),
                 }
             }
+            emit(Event::Stage {
+                stage: "transcription".to_string(),
+                label: "Transcribing".to_string(),
+                progress: 1.0,
+            });
         }
 
         lines.sort_by(|a, b| {

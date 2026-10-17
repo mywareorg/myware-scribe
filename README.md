@@ -44,7 +44,7 @@ Models are non-gated and downloaded by the deploy script into
 `%LOCALAPPDATA%\transiel\models` (Windows) or `~/.cache/transiel/models`
 (Linux/macOS). The app never downloads at runtime.
 
-- `ggml-large-v3-turbo-q5_0.bin` (default), `ggml-base.en.bin` (fast)
+- `ggml-large-v3-turbo-q5_0.bin` (accuracy), `ggml-base.en-q5_1.bin` (speed)
 - `sherpa-onnx-pyannote-segmentation-3-0/model.onnx`
 - `wespeaker_en_voxceleb_resnet34_LM.onnx`
 
