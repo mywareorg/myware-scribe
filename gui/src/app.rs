@@ -2445,50 +2445,6 @@ impl App {
                 column![
                     self.tip(
                         row![
-                            text("Confidence"),
-                            horizontal_space(),
-                            toggler(self.confidence).on_toggle(Message::ConfidenceToggled),
-                        ]
-                        .spacing(8)
-                        .align_y(iced::Alignment::Center),
-                        "Tint lines the model transcribed with low confidence",
-                        &scheme,
-                    ),
-                    self.tip(
-                        row![
-                            text("Dark theme"),
-                            horizontal_space(),
-                            toggler(self.dark_mode).on_toggle(Message::DarkToggled),
-                        ]
-                        .spacing(8)
-                        .align_y(iced::Alignment::Center),
-                        "Use the dark theme",
-                        &scheme,
-                    ),
-                    self.tip(
-                        row![
-                            text("Diarization cache"),
-                            horizontal_space(),
-                            toggler(self.cache).on_toggle(Message::CacheToggled),
-                        ]
-                        .spacing(8)
-                        .align_y(iced::Alignment::Center),
-                        "Reuse diarization results for unchanged audio",
-                        &scheme,
-                    ),
-                    self.tip(
-                        row![
-                            text("Join Speakers"),
-                            horizontal_space(),
-                            toggler(self.join_speaker).on_toggle(Message::JoinSpeakerToggled),
-                        ]
-                        .spacing(8)
-                        .align_y(iced::Alignment::Center),
-                        "Merge consecutive lines from the same speaker",
-                        &scheme,
-                    ),
-                    self.tip(
-                        row![
                             text("Speakers"),
                             horizontal_space(),
                             pick_list(
@@ -2512,6 +2468,50 @@ impl App {
                         .spacing(8)
                         .align_y(iced::Alignment::Center),
                         "Prefix each line with its start time",
+                        &scheme,
+                    ),
+                    self.tip(
+                        row![
+                            text("Join Speakers"),
+                            horizontal_space(),
+                            toggler(self.join_speaker).on_toggle(Message::JoinSpeakerToggled),
+                        ]
+                        .spacing(8)
+                        .align_y(iced::Alignment::Center),
+                        "Merge consecutive lines from the same speaker",
+                        &scheme,
+                    ),
+                    self.tip(
+                        row![
+                            text("Confidence"),
+                            horizontal_space(),
+                            toggler(self.confidence).on_toggle(Message::ConfidenceToggled),
+                        ]
+                        .spacing(8)
+                        .align_y(iced::Alignment::Center),
+                        "Tint lines the model transcribed with low confidence",
+                        &scheme,
+                    ),
+                    self.tip(
+                        row![
+                            text("Diarization cache"),
+                            horizontal_space(),
+                            toggler(self.cache).on_toggle(Message::CacheToggled),
+                        ]
+                        .spacing(8)
+                        .align_y(iced::Alignment::Center),
+                        "Reuse diarization results for unchanged audio",
+                        &scheme,
+                    ),
+                    self.tip(
+                        row![
+                            text("Dark theme"),
+                            horizontal_space(),
+                            toggler(self.dark_mode).on_toggle(Message::DarkToggled),
+                        ]
+                        .spacing(8)
+                        .align_y(iced::Alignment::Center),
+                        "Use the dark theme",
                         &scheme,
                     ),
                 ]
@@ -2567,8 +2567,8 @@ impl App {
             icon_colored(ICON_CLOCK, 14.0, scheme.ink),
             text(self.elapsed().unwrap_or_default()).width(Length::Fixed(60.0)),
         ]
-        .spacing(4)
-        .align_y(iced::Alignment::Center);
+            .spacing(4)
+            .align_y(iced::Alignment::Center);
 
         let status_row = row![
             clock,
