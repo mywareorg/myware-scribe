@@ -787,7 +787,7 @@ impl App {
                 self.transcript_at_bottom = offset + viewport_h >= content_h - 8.0;
                 // Any scroll that doesn't match the offset follow just set
                 // means the user scrolled: disengage follow.
-                if self.follow_playhead {
+                if self.follow_playhead && !matches!(self.status, Status::Running) {
                     if let Some(expected) = self.follow_offset {
                         if (offset - expected).abs() > 6.0 {
                             self.follow_playhead = false;
@@ -964,7 +964,12 @@ impl App {
                 Task::none()
             }
             Message::ToggleFollowPlayhead => {
-                self.follow_playhead = !self.follow_playhead;
+                // Follow is forced on while a transcription is running.
+                if matches!(self.status, Status::Running) {
+                    self.follow_playhead = true;
+                } else {
+                    self.follow_playhead = !self.follow_playhead;
+                }
                 self.follow_offset = None;
                 self.save_settings();
                 Task::none()
@@ -1533,6 +1538,7 @@ impl App {
         self.transcript_dirty = false;
         self.follow_offset = None;
         self.transcript_at_bottom = true;
+        self.follow_playhead = true;
         self.turns.clear();
         self.peaks = Arc::new(Vec::new());
         self.peaks_for = None;
