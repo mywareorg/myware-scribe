@@ -2710,8 +2710,8 @@ impl App {
                 column![
                     text("Warning").size(20),
                     text(
-                        "Speakers can not be renamed in batch mode unless the \
-                         transcription files are reimported.",
+                        "Only the speakers of the final file can be renamed \
+                         without reimporting.",
                     ),
                     container(
                         row![
