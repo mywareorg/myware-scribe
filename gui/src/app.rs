@@ -2632,7 +2632,8 @@ impl App {
                     &self.stage,
                     self.progress,
                     has_queue,
-                    1 + self.activity_frame % 3,
+                    // Advance the decoded ellipses once every 0.5s (ticks are 100ms).
+                    1 + (self.activity_frame / 5) % 3,
                 )))
                 .center_x(Length::Fill)
                 .center_y(Length::Fill),
