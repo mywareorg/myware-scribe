@@ -2,9 +2,9 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::asr::Transcriber;
 use crate::audio;
@@ -17,6 +17,11 @@ use rayon::prelude::*;
 const MERGE_GAP_S: f32 = 1.0;
 const MIN_TURN_S: f32 = 0.4;
 const CLIP_PAD_S: f32 = 0.1;
+
+// Per-file progress ranges: decode, diarization, transcription (incl. writing).
+const DIAR_START: f32 = 0.05;
+const DIAR_END: f32 = 0.55;
+const TRANS_START: f32 = 0.55;
 
 #[derive(Debug, Clone)]
 pub struct PipelineOptions {
@@ -134,6 +139,12 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
     let whisper = models::whisper_model(&opts.preset);
     let diarizer = models::diarizer_id();
 
+    emit(Event::Stage {
+        stage: "loading".to_string(),
+        label: "Loading models".to_string(),
+        progress: 0.0,
+    });
+
     let transcriber = match Transcriber::load(&whisper) {
         Ok(transcriber) => Some(transcriber),
         Err(message) => {
@@ -167,9 +178,9 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
             audio: input.display().to_string(),
         });
         emit(Event::Stage {
-            stage: "loading".to_string(),
-            label: "Loading".to_string(),
-            progress: index as f32 / total as f32,
+            stage: "decoding".to_string(),
+            label: "Decoding".to_string(),
+            progress: 0.0,
         });
 
         let (samples, rate) = match audio::decode(input) {
@@ -180,16 +191,12 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
             }
         };
         let duration = samples.len() as f64 / rate as f64;
+        let samples = Arc::new(samples);
         emit(Event::Meta {
             audio: input.display().to_string(),
             duration: duration as f32,
         });
 
-        emit(Event::Stage {
-            stage: "diarization".to_string(),
-            label: "Diarizing".to_string(),
-            progress: 0.0,
-        });
         let cache_key = if opts.cache {
             cache::key(input, &diarizer, opts.num_speakers)
         } else {
@@ -200,24 +207,70 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
                 emit(Event::Log {
                     message: "Using cached diarization.".to_string(),
                 });
+                emit(Event::Stage {
+                    stage: "diarization".to_string(),
+                    label: "Running Diarization".to_string(),
+                    progress: DIAR_END,
+                });
                 turns
             }
             None => {
-                match diarize::diarize(
-                    &samples,
-                    &segmentation,
-                    &embedding,
-                    opts.num_speakers,
-                    CLUSTER_THRESHOLD,
-                ) {
-                    Ok(turns) => {
+                let progress = Arc::new(AtomicU32::new(0));
+                let progress_for_thread = progress.clone();
+                let segmentation = segmentation.clone();
+                let embedding = embedding.clone();
+                let audio = samples.clone();
+                let num_speakers = opts.num_speakers;
+                let handle = std::thread::spawn(move || {
+                    diarize::diarize_with_progress(
+                        audio.as_slice(),
+                        &segmentation,
+                        &embedding,
+                        num_speakers,
+                        CLUSTER_THRESHOLD,
+                        progress_for_thread,
+                    )
+                });
+
+                emit(Event::Stage {
+                    stage: "diarization".to_string(),
+                    label: "Running Diarization".to_string(),
+                    progress: DIAR_START,
+                });
+                while !handle.is_finished() {
+                    if is_cancelled() {
+                        break;
+                    }
+                    let fraction = progress.load(Ordering::Relaxed) as f32 / 1_000_000.0;
+                    emit(Event::Stage {
+                        stage: "diarization".to_string(),
+                        label: "Running Diarization".to_string(),
+                        progress: DIAR_START + (DIAR_END - DIAR_START) * fraction,
+                    });
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+
+                let joined = handle.join();
+                emit(Event::Stage {
+                    stage: "diarization".to_string(),
+                    label: "Running Diarization".to_string(),
+                    progress: DIAR_END,
+                });
+                match joined {
+                    Ok(Ok(turns)) => {
                         if let Some(key) = &cache_key {
                             cache::write(key, &turns);
                         }
                         turns
                     }
-                    Err(message) => {
+                    Ok(Err(message)) => {
                         emit(Event::Error { message });
+                        continue;
+                    }
+                    Err(_) => {
+                        emit(Event::Error {
+                            message: "diarization thread panicked".to_string(),
+                        });
                         continue;
                     }
                 }
@@ -240,11 +293,6 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
             turns: turns.clone(),
         });
 
-        emit(Event::Stage {
-            stage: "transcription".to_string(),
-            label: "Transcribing".to_string(),
-            progress: 0.0,
-        });
         let mut lines: Vec<Line> = Vec::new();
         if let Some(transcriber) = &transcriber {
             // (turn_index, clip_start, from, to) for each transcribable turn.
@@ -261,45 +309,80 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
                 })
                 .collect();
 
-            let results = match &pool {
-                Some(pool) => pool.install(|| {
-                    transcribe_clips(transcriber, &samples, &clips, per_call_threads)
-                }),
-                None => transcribe_clips(transcriber, &samples, &clips, per_call_threads),
-            };
+            let total_turns = clips.len();
+            let total_seconds: f64 = clips
+                .iter()
+                .map(|(_, _, from, to)| (to - from) as f64 / rate as f64)
+                .sum();
+            let batch_size = (workers * 2).max(1);
+            let mut done_seconds = 0.0f64;
+            let mut done_turns = 0usize;
 
-            // par_iter().collect() preserves order, so results are in turn order.
-            for (turn_index, clip_start, result) in results {
+            emit(Event::Stage {
+                stage: "transcription".to_string(),
+                label: format!("Transcribing 0/{total_turns}"),
+                progress: TRANS_START,
+            });
+
+            for batch in clips.chunks(batch_size) {
                 if is_cancelled() {
                     break;
                 }
-                let speaker = turns[turn_index].speaker.clone();
-                match result {
-                    Ok(segments) => {
-                        for segment in segments {
-                            let line = Line {
-                                start: clip_start + segment.start,
-                                speaker: speaker.clone(),
-                                text: segment.text,
-                                confidence: segment.confidence,
-                            };
-                            emit(Event::Line {
-                                start: line.start,
-                                speaker: line.speaker.clone(),
-                                text: line.text.clone(),
-                                confidence: line.confidence,
-                            });
-                            lines.push(line);
+                let results = match &pool {
+                    Some(pool) => pool.install(|| {
+                        transcribe_clips(
+                            transcriber,
+                            samples.as_slice(),
+                            batch,
+                            per_call_threads,
+                        )
+                    }),
+                    None => transcribe_clips(
+                        transcriber,
+                        samples.as_slice(),
+                        batch,
+                        per_call_threads,
+                    ),
+                };
+
+                // par_iter().collect() preserves order, so results match the batch.
+                for (clip, (turn_index, clip_start, result)) in batch.iter().zip(results) {
+                    done_seconds += (clip.3 - clip.2) as f64 / rate as f64;
+                    done_turns += 1;
+                    let speaker = turns[turn_index].speaker.clone();
+                    match result {
+                        Ok(segments) => {
+                            for segment in segments {
+                                let line = Line {
+                                    start: clip_start + segment.start,
+                                    speaker: speaker.clone(),
+                                    text: segment.text,
+                                    confidence: segment.confidence,
+                                };
+                                emit(Event::Line {
+                                    start: line.start,
+                                    speaker: line.speaker.clone(),
+                                    text: line.text.clone(),
+                                    confidence: line.confidence,
+                                });
+                                lines.push(line);
+                            }
                         }
+                        Err(message) => emit(Event::Log { message }),
                     }
-                    Err(message) => emit(Event::Log { message }),
                 }
+
+                let fraction = if total_seconds > 0.0 {
+                    (done_seconds / total_seconds).clamp(0.0, 1.0)
+                } else {
+                    1.0
+                };
+                emit(Event::Stage {
+                    stage: "transcription".to_string(),
+                    label: format!("Transcribing {done_turns}/{total_turns}"),
+                    progress: TRANS_START + (1.0 - TRANS_START) * fraction as f32,
+                });
             }
-            emit(Event::Stage {
-                stage: "transcription".to_string(),
-                label: "Transcribing".to_string(),
-                progress: 1.0,
-            });
         }
 
         lines.sort_by(|a, b| {

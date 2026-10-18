@@ -2515,11 +2515,7 @@ impl App {
                     bar: scheme.blue.into(),
                     border: iced::border::rounded(14.0),
                 }),
-                container(text(capitalize_first(&match &self.status {
-                    Status::Idle => "Ready".to_string(),
-                    Status::Error(message) => format!("error: {message}"),
-                    _ => self.stage.clone(),
-                })))
+                container(text(progress_label(&self.status, &self.stage, self.progress)))
                 .center_x(Length::Fill)
                 .center_y(Length::Fill),
             ]
@@ -3236,6 +3232,22 @@ fn speaker_of(raw: &str) -> String {
     match rest.split_once(": ") {
         Some((head, _)) => head.trim().to_string(),
         None => String::new(),
+    }
+}
+
+/// Progress-bar text: phase (with detail) plus overall percentage.
+fn progress_label(status: &Status, stage: &str, progress: f32) -> String {
+    match status {
+        Status::Idle => "Ready".to_string(),
+        Status::Error(message) => format!("Error: {message}"),
+        _ => {
+            let stage = capitalize_first(stage);
+            if stage.eq_ignore_ascii_case("Loading models") {
+                stage
+            } else {
+                format!("{stage} ({:.0}%)", progress.clamp(0.0, 1.0) * 100.0)
+            }
+        }
     }
 }
 
