@@ -81,6 +81,12 @@ impl DocLine {
 /// Lines at or below this average log-probability are flagged as low confidence.
 const CONFIDENCE_MIN: f32 = -0.6;
 
+/// Cadence at which streamed utterances are revealed in the textbox.
+const REVEAL_INTERVAL_S: f32 = 0.15;
+/// Faster cadence used to catch up when the reveal backlog grows.
+const REVEAL_CATCHUP_S: f32 = 0.04;
+const REVEAL_BACKLOG: usize = 8;
+
 /// Speaker-count picker options (a fixed 1..=5).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SpeakerOpt {
@@ -449,6 +455,8 @@ pub struct App {
     status: Status,
     transcript: String,
     lines: Vec<DocLine>,
+    pending_lines: VecDeque<DocLine>,
+    reveal_accum: f32,
     turns: Vec<backend::Turn>,
     peaks: Arc<Vec<f32>>,
     peaks_for: Option<PathBuf>,
@@ -523,6 +531,8 @@ impl App {
             status: Status::Idle,
             transcript: String::new(),
             lines: Vec::new(),
+            pending_lines: VecDeque::new(),
+            reveal_accum: 0.0,
             turns: Vec::new(),
             peaks: Arc::new(Vec::new()),
             peaks_for: None,
@@ -1052,6 +1062,8 @@ impl App {
                 if let Some(text) = text {
                     self.transcript = text;
                     self.lines = parse_lines(&self.transcript);
+                    self.pending_lines.clear();
+                    self.reveal_accum = 0.0;
                     self.transcript_dirty = false;
                     self.follow_offset = None;
                     self.transcript_at_bottom = true;
@@ -1111,6 +1123,8 @@ impl App {
                     self.current = None;
                     self.transcript.clear();
                     self.lines.clear();
+                    self.pending_lines.clear();
+                    self.reveal_accum = 0.0;
                     self.transcript_dirty = false;
                     self.turns.clear();
                     self.peaks = Arc::new(Vec::new());
@@ -1285,6 +1299,28 @@ impl App {
                     }
                     self.transcript = out;
                 }
+
+                // Reveal queued utterances one at a time, like natural speech.
+                self.reveal_accum += 0.1;
+                let mut revealed = 0usize;
+                while !self.pending_lines.is_empty() {
+                    let interval = if self.pending_lines.len() > REVEAL_BACKLOG {
+                        REVEAL_CATCHUP_S
+                    } else {
+                        REVEAL_INTERVAL_S
+                    };
+                    if self.reveal_accum < interval {
+                        break;
+                    }
+                    self.reveal_accum -= interval;
+                    let line = self.pending_lines.pop_front().unwrap();
+                    self.reveal_line(line);
+                    revealed += 1;
+                    if revealed >= 30 {
+                        break;
+                    }
+                }
+
                 self.pulse = (self.pulse + 0.10) % std::f32::consts::TAU;
                 // Ease the displayed bar toward the latest reported progress.
                 self.progress_shown += (self.progress - self.progress_shown) * 0.25;
@@ -1445,6 +1481,17 @@ impl App {
         }))
     }
 
+    /// Move one queued utterance into the visible transcript.
+    fn reveal_line(&mut self, line: DocLine) {
+        if !self.transcript.is_empty() && !self.transcript.ends_with('\n') {
+            self.transcript.push('\n');
+        }
+        self.transcript.push_str(&line.raw);
+        self.transcript.push('\n');
+        self.lines.push(line);
+        self.transcript_dirty = true;
+    }
+
     fn start(&mut self) {
         if self
             .queue
@@ -1481,6 +1528,8 @@ impl App {
         self.elapsed_final = None;
         self.transcript.clear();
         self.lines.clear();
+        self.pending_lines.clear();
+        self.reveal_accum = 0.0;
         self.transcript_dirty = false;
         self.follow_offset = None;
         self.transcript_at_bottom = true;
@@ -1535,6 +1584,8 @@ impl App {
         self.progress_shown = 0.0;
         self.run_start = None;
         self.elapsed_final = None;
+        self.pending_lines.clear();
+        self.reveal_accum = 0.0;
         self.batch = false;
         if let Some(index) = self.current.take() {
             self.queue[index].status = ItemStatus::Failed("cancelled".to_string());
@@ -1605,6 +1656,8 @@ impl App {
                     self.elapsed_final = None;
                     self.transcript.clear();
                     self.lines.clear();
+                    self.pending_lines.clear();
+                    self.reveal_accum = 0.0;
                     self.transcript_dirty = false;
                     self.follow_offset = None;
                     self.transcript_at_bottom = true;
@@ -1645,20 +1698,20 @@ impl App {
                     } else {
                         format!("{speaker}: {text}")
                     };
-                    self.lines.push(DocLine {
-                        raw: raw.clone(),
+                    // Queue it; the textbox reveals lines at a speech-like pace.
+                    self.pending_lines.push_back(DocLine {
+                        raw,
                         speaker,
                         confidence,
                         start: Some(start),
                     });
-                    if !self.transcript.is_empty() && !self.transcript.ends_with('\n') {
-                        self.transcript.push('\n');
-                    }
-                    self.transcript.push_str(&raw);
-                    self.transcript.push('\n');
-                    self.transcript_dirty = true;
                 }
                 Event::Done { txt, stats, .. } => {
+                    // Finish revealing any queued utterances immediately.
+                    while let Some(line) = self.pending_lines.pop_front() {
+                        self.reveal_line(line);
+                    }
+                    self.reveal_accum = 0.0;
                     self.stage = "done".to_string();
                     self.progress = 1.0;
                     self.progress_shown = 1.0;
