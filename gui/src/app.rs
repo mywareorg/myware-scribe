@@ -1106,8 +1106,38 @@ impl App {
             }
             Message::ClearQueue => {
                 if !matches!(self.status, Status::Running) {
+                    // "Clear" is a full reset: queue, transcript and run state.
                     self.queue.clear();
                     self.current = None;
+                    self.transcript.clear();
+                    self.lines.clear();
+                    self.transcript_dirty = false;
+                    self.turns.clear();
+                    self.peaks = Arc::new(Vec::new());
+                    self.peaks_for = None;
+                    self.playhead = 0.0;
+                    self.timeline_duration = None;
+                    self.player = None;
+                    self.output_txt = None;
+                    self.batch_runs.clear();
+                    self.summary_open = false;
+                    self.pending_rename = false;
+                    self.rename_open = false;
+                    self.rename_fields.clear();
+                    self.rename_focus = 0;
+                    self.search_query.clear();
+                    self.search_index = 0;
+                    self.follow_offset = None;
+                    self.transcript_at_bottom = true;
+                    self.console_lines.clear();
+                    self.toast = None;
+                    self.batch_warning = false;
+                    self.run_start = None;
+                    self.elapsed_final = None;
+                    self.progress = 0.0;
+                    self.progress_shown = 0.0;
+                    self.stage = "idle".to_string();
+                    self.status = Status::Idle;
                 }
                 Task::none()
             }
