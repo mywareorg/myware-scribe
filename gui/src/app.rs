@@ -473,7 +473,6 @@ pub struct App {
     transcript_content: f32,
     transcript_at_bottom: bool,
     follow_offset: Option<f32>,
-    drag_hover: bool,
     font_scale: f32,
     follow_playhead: bool,
     console_open: bool,
@@ -551,7 +550,6 @@ impl App {
             transcript_content: 0.0,
             transcript_at_bottom: true,
             follow_offset: None,
-            drag_hover: false,
             font_scale: settings.font_scale.unwrap_or(1.0),
             follow_playhead: true,
             console_open: false,
@@ -799,22 +797,6 @@ impl App {
                         self.window_position = Some(point);
                         self.window_dirty = true;
                         self.last_window_change = Some(Instant::now());
-                    }
-                    iced::window::Event::FileHovered(_) => {
-                        self.drag_hover = true;
-                    }
-                    iced::window::Event::FilesHoveredLeft => {
-                        self.drag_hover = false;
-                    }
-                    iced::window::Event::FileDropped(path) => {
-                        self.drag_hover = false;
-                        let paths = if path.is_dir() {
-                            audio_files_in(&path)
-                        } else {
-                            vec![path]
-                        };
-                        let added = self.add_paths(paths);
-                        return Self::probe_items(added);
                     }
                     _ => {}
                 }
@@ -2391,39 +2373,6 @@ impl App {
             .align_y(iced::Alignment::Center),
         ]
             .spacing(6);
-
-        let drop_color = if self.drag_hover { scheme.blue } else { scheme.track };
-        let drop_ink = if self.dark_mode {
-            Color::from_rgb(0.90, 0.90, 0.95)
-        } else {
-            scheme.ink
-        };
-        let drop_text = if self.drag_hover {
-            "Release to add files"
-        } else {
-            "Or drag & drop audio/video files here"
-        };
-        queue_col = queue_col.push(
-            container(
-                text(drop_text)
-                    .size(12)
-                    .style(move |_theme| text::Style {
-                        color: Some(drop_ink),
-                    }),
-            )
-                .width(Length::Fill)
-                .padding([8, 12])
-                .center_x(Length::Fill)
-                .style(move |_theme| container::Style {
-                    background: Some(Color { a: 0.30, ..drop_color }.into()),
-                    border: iced::border::Border {
-                        color: drop_color,
-                        width: 1.0,
-                        radius: 8.0.into(),
-                    },
-                    ..container::Style::default()
-                }),
-        );
 
         if has_queue {
             let line_height = 30.0;
