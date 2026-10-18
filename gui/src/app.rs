@@ -2565,7 +2565,12 @@ impl App {
                     bar: scheme.blue.into(),
                     border: iced::border::rounded(14.0),
                 }),
-                container(text(progress_label(&self.status, &self.stage, self.progress)))
+                container(text(progress_label(
+                    &self.status,
+                    &self.stage,
+                    self.progress,
+                    has_queue,
+                )))
                 .center_x(Length::Fill)
                 .center_y(Length::Fill),
             ]
@@ -3286,9 +3291,10 @@ fn speaker_of(raw: &str) -> String {
 }
 
 /// Progress-bar text: phase (with detail) plus overall percentage.
-fn progress_label(status: &Status, stage: &str, progress: f32) -> String {
+fn progress_label(status: &Status, stage: &str, progress: f32, has_queue: bool) -> String {
     match status {
-        Status::Idle => "Ready".to_string(),
+        Status::Idle if has_queue => "Ready".to_string(),
+        Status::Idle => "Idle".to_string(),
         Status::Error(message) => format!("Error: {message}"),
         _ => {
             let stage = capitalize_first(stage);
