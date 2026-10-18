@@ -466,6 +466,7 @@ pub struct App {
     output_txt: Option<PathBuf>,
     summary_open: bool,
     pending_rename: bool,
+    completion_pending: bool,
     rename_open: bool,
     rename_fields: Vec<(String, String)>,
     rename_focus: usize,
@@ -505,6 +506,7 @@ pub struct App {
     queue: Vec<QueueItem>,
     batch: bool,
     current: Option<usize>,
+    current_index: Option<usize>,
     batch_warning: bool,
 }
 
@@ -543,6 +545,7 @@ impl App {
             output_txt: None,
             summary_open: false,
             pending_rename: false,
+            completion_pending: false,
             rename_open: false,
             rename_fields: Vec::new(),
             rename_focus: 0,
@@ -589,6 +592,7 @@ impl App {
             queue: Vec::new(),
             batch: false,
             current: None,
+            current_index: None,
             batch_warning: false,
         }
     }
@@ -1071,6 +1075,7 @@ impl App {
                     self.lines = parse_lines(&self.transcript);
                     self.pending_lines.clear();
                     self.reveal_accum = 0.0;
+                    self.completion_pending = false;
                     self.transcript_dirty = false;
                     self.follow_offset = None;
                     self.transcript_at_bottom = true;
@@ -1120,6 +1125,13 @@ impl App {
                             *current -= 1;
                         }
                     }
+                    if let Some(current) = self.current_index.as_mut() {
+                        if *current == index {
+                            self.current_index = None;
+                        } else if *current > index {
+                            *current -= 1;
+                        }
+                    }
                 }
                 Task::none()
             }
@@ -1128,10 +1140,12 @@ impl App {
                     // "Clear" is a full reset: queue, transcript and run state.
                     self.queue.clear();
                     self.current = None;
+                    self.current_index = None;
                     self.transcript.clear();
                     self.lines.clear();
                     self.pending_lines.clear();
                     self.reveal_accum = 0.0;
+                    self.completion_pending = false;
                     self.transcript_dirty = false;
                     self.turns.clear();
                     self.peaks = Arc::new(Vec::new());
@@ -1333,6 +1347,18 @@ impl App {
                 // Ease the displayed bar toward the latest reported progress.
                 self.progress_shown += (self.progress - self.progress_shown) * 0.25;
                 self.progress_shown = self.progress_shown.clamp(0.0, 1.0);
+
+                // Once the bar has eased to 100%, present the completion dialogs.
+                if self.completion_pending && self.progress_shown >= 0.995 {
+                    self.progress_shown = 1.0;
+                    self.completion_pending = false;
+                    if self.present_completion() {
+                        tasks.push(scrollable::snap_to(
+                            summary_id(),
+                            scrollable::RelativeOffset { x: 0.0, y: 0.0 },
+                        ));
+                    }
+                }
                 if let Some(player) = &self.player {
                     if player.is_playing() {
                         let now = Instant::now();
@@ -1489,6 +1515,19 @@ impl App {
         }))
     }
 
+    /// Show the summary (and queue the rename dialog) after the bar reaches 100%.
+    /// Returns true when a summary was opened.
+    fn present_completion(&mut self) -> bool {
+        if self.batch_runs.is_empty() {
+            return false;
+        }
+        self.summary_open = true;
+        self.pending_rename = self.batch_runs.len() == 1;
+        self.toast = None;
+        notify("transiel", "Transcription complete");
+        true
+    }
+
     /// Move one queued utterance into the visible transcript.
     fn reveal_line(&mut self, line: DocLine) {
         if !self.transcript.is_empty() && !self.transcript.ends_with('\n') {
@@ -1528,6 +1567,7 @@ impl App {
 
         self.batch = true;
         self.current = None;
+        self.current_index = None;
         self.status = Status::Running;
         self.stage = "starting".to_string();
         self.progress = 0.0;
@@ -1536,9 +1576,11 @@ impl App {
         self.elapsed_final = None;
         self.transcript.clear();
         self.lines.clear();
-        self.pending_lines.clear();
-        self.reveal_accum = 0.0;
-        self.transcript_dirty = false;
+                    self.pending_lines.clear();
+                    self.reveal_accum = 0.0;
+                    self.completion_pending = false;
+                    self.current_index = None;
+                    self.transcript_dirty = false;
         self.follow_offset = None;
         self.transcript_at_bottom = true;
         self.follow_playhead = true;
@@ -1595,6 +1637,8 @@ impl App {
         self.elapsed_final = None;
         self.pending_lines.clear();
         self.reveal_accum = 0.0;
+        self.completion_pending = false;
+        self.current_index = None;
         self.batch = false;
         if let Some(index) = self.current.take() {
             self.queue[index].status = ItemStatus::Failed("cancelled".to_string());
@@ -1654,6 +1698,7 @@ impl App {
                 Event::File { audio } => {
                     let path = PathBuf::from(audio);
                     self.current = self.find_queue_index(&path);
+                    self.current_index = self.current;
                     if let Some(index) = self.current {
                         self.queue[index].status = ItemStatus::Running;
                     }
@@ -1667,6 +1712,7 @@ impl App {
                     self.lines.clear();
                     self.pending_lines.clear();
                     self.reveal_accum = 0.0;
+                    self.completion_pending = false;
                     self.transcript_dirty = false;
                     self.follow_offset = None;
                     self.transcript_at_bottom = true;
@@ -1722,8 +1768,8 @@ impl App {
                     }
                     self.reveal_accum = 0.0;
                     self.stage = "done".to_string();
+                    // Target 100%; the bar eases there over the next ticks.
                     self.progress = 1.0;
-                    self.progress_shown = 1.0;
                     if let Ok(contents) = std::fs::read_to_string(&txt) {
                         self.transcript = contents;
                     }
@@ -1772,21 +1818,16 @@ impl App {
                     self.current = None;
                     self.stage = "done".to_string();
                     self.progress = 1.0;
-                    self.progress_shown = 1.0;
                     self.elapsed_final = self.run_start.map(|s| s.elapsed().as_secs_f64());
                     self.toast = None;
-                    // Summary covers every successful run; rename only a single file.
-                    self.summary_open = !self.batch_runs.is_empty();
-                    self.pending_rename = self.batch_runs.len() == 1;
-                    if self.batch_runs.is_empty() {
-                        // Nothing succeeded, so keep any error status.
-                    } else {
+                    if !self.batch_runs.is_empty() {
                         self.status = Status::Done;
-                        tasks.push(scrollable::snap_to(
-                            summary_id(),
-                            scrollable::RelativeOffset { x: 0.0, y: 0.0 },
-                        ));
-                        notify("transiel", "Transcription complete");
+                        // Present the summary / rename only once the bar hits 100%.
+                        self.completion_pending = true;
+                    } else {
+                        // Nothing succeeded: no dialogs, just settle at 100%.
+                        self.progress = 1.0;
+                        self.progress_shown = 1.0;
                     }
                 }
             }
@@ -2430,7 +2471,7 @@ impl App {
             match &item.status {
                 ItemStatus::Running => {
                     item_row = item_row.push(
-                        progress_bar(0.0..=1.0, self.progress)
+                        progress_bar(0.0..=1.0, self.progress_shown)
                             .width(Length::Fixed(90.0))
                             .height(Length::Fixed(10.0))
                             .style(move |_theme| progress_bar::Style {
@@ -2605,9 +2646,21 @@ impl App {
             .iter()
             .filter(|item| matches!(item.status, ItemStatus::Done(_) | ItemStatus::Failed(_)))
             .count() as f32;
-        let current_fraction = if running { self.progress_shown } else { 0.0 };
-        let global_progress =
-            ((done_items + current_fraction) / total_items).clamp(0.0, 1.0);
+        // While animating (running or easing to completion) base the bar on the
+        // current file's index so the final file's ease-up reaches 100% instead
+        // of snapping when its queue item is marked done.
+        let animating = running || self.completion_pending;
+        let base = if animating {
+            self.current_index.unwrap_or(0) as f32
+        } else {
+            done_items
+        };
+        let current_fraction = if animating {
+            self.progress_shown
+        } else {
+            0.0
+        };
+        let global_progress = ((base + current_fraction) / total_items).clamp(0.0, 1.0);
 
         let clock = row![
             icon_colored(ICON_CLOCK, 14.0, scheme.text),
@@ -2619,11 +2672,11 @@ impl App {
         let label = progress_label(
             &self.status,
             &self.stage,
-            self.progress,
-            has_queue,
-            // Advance the ellipses once every 0.5s (ticks are 100ms).
-            1 + (self.activity_frame / 5) % 5,
-        );
+                    self.progress_shown,
+                    has_queue,
+                    // Advance the ellipses once every 0.5s (ticks are 100ms).
+                    1 + (self.activity_frame / 5) % 5,
+                );
         // Keep "Decoding" centered and stationary while its dots animate: the
         // word sits in a fixed, centered box with a fixed dots area beside it.
         let label_el: Element<Message> = if self.stage.eq_ignore_ascii_case("Decoding") {
@@ -2632,10 +2685,10 @@ impl App {
                 horizontal_space().width(Length::Fixed(50.0)),
                 text("Decoding"),
                 container(text(dots))
-                    .width(Length::Fixed(50.0))
-                    .align_x(iced::Alignment::Start),
+                .width(Length::Fixed(50.0))
+                .align_x(iced::Alignment::Start),
             ]
-            .into()
+                .into()
         } else {
             text(label).into()
         };
