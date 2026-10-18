@@ -2279,21 +2279,21 @@ impl App {
 
         let mut queue_list = column![].spacing(4).width(Length::Fill);
         for (index, item) in self.queue.iter().enumerate() {
-            let glyph: Element<Message> = match &item.status {
-                ItemStatus::Pending => icon_colored(ICON_CIRCLE_FILL, 9.0, scheme.ink),
+            let glyph: Element<Message> = container(match &item.status {
+                ItemStatus::Pending => icon_colored(ICON_CIRCLE_FILL, 12.0, scheme.text),
                 ItemStatus::Running => icon_colored(
                     ICON_ARROW_RIGHT,
-                    14.0,
+                    18.0,
                     Color {
                         a: 0.55 + 0.45 * (0.5 + 0.5 * self.pulse.sin()),
                         ..scheme.blue
                     },
                 ),
-                ItemStatus::Done(_) => {
-                    icon_colored(ICON_CHECK, 14.0, Color::from_rgb(0.3, 0.72, 0.42))
-                }
-                ItemStatus::Failed(_) => icon_colored(ICON_X, 14.0, scheme.pink),
-            };
+                ItemStatus::Done(_) => icon_colored(ICON_CHECK, 18.0, scheme.green),
+                ItemStatus::Failed(_) => icon_colored(ICON_X, 18.0, scheme.pink),
+            })
+            .center_x(Length::Fixed(22.0))
+            .into();
             let name = item
                 .path
                 .file_name()
