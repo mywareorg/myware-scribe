@@ -2757,7 +2757,7 @@ impl App {
                                 text(key).width(Length::Fixed(KEY_WIDTH)),
                                 text(description),
                             ]
-                            .spacing(12),
+                                .spacing(12),
                         );
                     }
                 }
