@@ -2616,6 +2616,25 @@ impl App {
             .spacing(4)
             .align_y(iced::Alignment::Center);
 
+        let label = progress_label(
+            &self.status,
+            &self.stage,
+            self.progress,
+            has_queue,
+            // Advance the ellipses once every 0.5s (ticks are 100ms).
+            1 + (self.activity_frame / 5) % 5,
+        );
+        // Keep "Decoding" stationary while its dots animate: fixed-width,
+        // left-aligned box so the word doesn't shift as dots are appended.
+        let label_el: Element<Message> = if self.stage.eq_ignore_ascii_case("Decoding") {
+            container(text(label))
+                .width(Length::Fixed(180.0))
+                .align_x(iced::Alignment::Start)
+                .into()
+        } else {
+            text(label).into()
+        };
+
         let status_row = row![
             clock,
             stack![
@@ -2627,14 +2646,7 @@ impl App {
                     bar: scheme.blue.into(),
                     border: iced::border::rounded(14.0),
                 }),
-                container(text(progress_label(
-                    &self.status,
-                    &self.stage,
-                    self.progress,
-                    has_queue,
-                    // Advance the decoded ellipses once every 0.5s (ticks are 100ms).
-                    1 + (self.activity_frame / 5) % 3,
-                )))
+                container(label_el)
                 .center_x(Length::Fill)
                 .center_y(Length::Fill),
             ]
@@ -3371,7 +3383,7 @@ fn progress_label(
             let lower = label.to_ascii_lowercase();
             // Animate ellipses while decoding (1..=3, cycling).
             if lower == "decoding" {
-                return format!("{label}{}", ".".repeat(dots.clamp(1, 3)));
+                return format!("{label}{}", ".".repeat(dots.clamp(1, 5)));
             }
             // Only transcription contributes to the bar (and its percentage).
             if lower.starts_with("transcribing") || lower == "done" {
