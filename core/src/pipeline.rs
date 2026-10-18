@@ -1,12 +1,12 @@
 //! The diarize + transcribe pipeline.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::asr::Transcriber;
+use crate::asr::{Segment, Transcriber};
 use crate::audio;
 use crate::cache;
 use crate::diarize::{self, CLUSTER_THRESHOLD};
@@ -297,8 +297,8 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
                 progress: TRANS_START,
             });
 
-            // Worker pool + channel: emit each turn's lines as soon as its ASR
-            // finishes. Completion order is arbitrary; the view sorts by start.
+            // Worker pool + channel: turns finish out of order, but lines are
+            // emitted strictly in clip (turn/start) order.
             let (tx, rx) = std::sync::mpsc::channel();
             let next = AtomicUsize::new(0);
             let samples_ref = samples.as_slice();
@@ -324,6 +324,10 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
                 // Drop the spare sender so the channel closes when workers finish.
                 drop(tx);
 
+                let mut pending: BTreeMap<usize, (usize, f32, Result<Vec<Segment>, String>)> =
+                    BTreeMap::new();
+                let mut buffer: Vec<Line> = Vec::new();
+                let mut next_emit = 0usize;
                 let mut remaining = clips.len();
                 while remaining > 0 {
                     if is_cancelled() {
@@ -334,29 +338,50 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
                     };
                     remaining -= 1;
 
+                    // Progress reflects completed work.
                     done_seconds += (clips[index].3 - clips[index].2) as f64 / rate as f64;
                     done_turns += 1;
+                    pending.insert(index, (turn_index, clip_start, result));
 
-                    let speaker = turns[turn_index].speaker.clone();
-                    match result {
-                        Ok(segments) => {
-                            for segment in segments {
-                                let line = Line {
-                                    start: clip_start + segment.start,
-                                    speaker: speaker.clone(),
-                                    text: segment.text,
-                                    confidence: segment.confidence,
-                                };
-                                emit(Event::Line {
-                                    start: line.start,
-                                    speaker: line.speaker.clone(),
-                                    text: line.text.clone(),
-                                    confidence: line.confidence,
-                                });
-                                lines.push(line);
+                    // Process completed clips in clip order. Overlapping turns can
+                    // make a later clip's lines start earlier, so buffer lines and
+                    // emit only up to the next unprocessed clip's start time.
+                    while let Some((turn_index, clip_start, result)) = pending.remove(&next_emit) {
+                        let speaker = turns[turn_index].speaker.clone();
+                        match result {
+                            Ok(segments) => {
+                                for segment in segments {
+                                    buffer.push(Line {
+                                        start: clip_start + segment.start,
+                                        speaker: speaker.clone(),
+                                        text: segment.text,
+                                        confidence: segment.confidence,
+                                    });
+                                }
                             }
+                            Err(message) => emit(Event::Log { message }),
                         }
-                        Err(message) => emit(Event::Log { message }),
+                        next_emit += 1;
+
+                        let watermark = clips
+                            .get(next_emit)
+                            .map(|clip| clip.1)
+                            .unwrap_or(f32::INFINITY);
+                        buffer.sort_by(|a, b| {
+                            a.start
+                                .partial_cmp(&b.start)
+                                .unwrap_or(std::cmp::Ordering::Equal)
+                        });
+                        let split = buffer.partition_point(|line| line.start <= watermark);
+                        for line in buffer.drain(..split) {
+                            emit(Event::Line {
+                                start: line.start,
+                                speaker: line.speaker.clone(),
+                                text: line.text.clone(),
+                                confidence: line.confidence,
+                            });
+                            lines.push(line);
+                        }
                     }
 
                     let fraction = if total_seconds > 0.0 {
@@ -369,6 +394,22 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
                         label: format!("Transcribing {done_turns}/{total_turns}"),
                         progress: TRANS_START + (1.0 - TRANS_START) * fraction as f32,
                     });
+                }
+
+                // Flush anything still buffered (end of file or cancellation).
+                buffer.sort_by(|a, b| {
+                    a.start
+                        .partial_cmp(&b.start)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+                for line in buffer.drain(..) {
+                    emit(Event::Line {
+                        start: line.start,
+                        speaker: line.speaker.clone(),
+                        text: line.text.clone(),
+                        confidence: line.confidence,
+                    });
+                    lines.push(line);
                 }
             });
         }
