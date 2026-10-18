@@ -2624,13 +2624,20 @@ impl App {
             // Advance the ellipses once every 0.5s (ticks are 100ms).
             1 + (self.activity_frame / 5) % 5,
         );
-        // Keep "Decoding" stationary while its dots animate: fixed-width,
-        // left-aligned box so the word doesn't shift as dots are appended.
+        // Keep "Decoding" centered and stationary while its dots animate: the
+        // word sits in a fixed, centered box with a fixed dots area beside it.
         let label_el: Element<Message> = if self.stage.eq_ignore_ascii_case("Decoding") {
-            container(text(label))
-                .width(Length::Fixed(180.0))
-                .align_x(iced::Alignment::Start)
-                .into()
+            let dots = ".".repeat(1 + (self.activity_frame / 5) % 5);
+            row![
+                horizontal_space().width(Length::Fixed(50.0)),
+                container(text("Decoding"))
+                    .width(Length::Fixed(90.0))
+                    .align_x(iced::Alignment::Center),
+                container(text(dots))
+                    .width(Length::Fixed(50.0))
+                    .align_x(iced::Alignment::Start),
+            ]
+            .into()
         } else {
             text(label).into()
         };
