@@ -2738,27 +2738,41 @@ impl App {
         }
 
         if let Some(kind) = self.help_open {
-            let body: Vec<String> = match kind {
-                HelpKind::About => vec![
-                    format!("transiel {}", env!("CARGO_PKG_VERSION")),
-                    "Local speaker diarization + transcription.".to_string(),
-                    "Diarization: DiariZen / pyannote.  Transcription: faster-whisper.".to_string(),
-                    "Runs fully offline once models are downloaded.".to_string(),
-                ],
-                HelpKind::Shortcuts => vec![
-                    "Ctrl+O           Add files".to_string(),
-                    "Ctrl+F           Find".to_string(),
-                    "Ctrl+Enter       Transcribe".to_string(),
-                    "Ctrl + / - / 0   Transcript font zoom".to_string(),
-                    "Space            Play / pause".to_string(),
-                    "Left / Right     Seek \u{00b1}5s".to_string(),
-                    "Esc              Dismiss".to_string(),
-                ],
-                HelpKind::Console => Vec::new(),
-            };
             let mut col = column![text(kind.label()).size(20)].spacing(8);
-            for line in body {
-                col = col.push(text(line));
+            match kind {
+                HelpKind::Shortcuts => {
+                    // Key in a fixed-width column so the descriptions line up.
+                    const KEY_WIDTH: f32 = 150.0;
+                    for (key, description) in [
+                        ("Ctrl+O", "Add files"),
+                        ("Ctrl+F", "Find"),
+                        ("Ctrl+Enter", "Transcribe"),
+                        ("Ctrl + / - / 0", "Transcript font zoom"),
+                        ("Space", "Play / pause"),
+                        ("Left / Right", "Seek \u{00b1}5s"),
+                        ("Esc", "Dismiss"),
+                    ] {
+                        col = col.push(
+                            row![
+                                text(key).width(Length::Fixed(KEY_WIDTH)),
+                                text(description),
+                            ]
+                            .spacing(12),
+                        );
+                    }
+                }
+                HelpKind::About => {
+                    for line in [
+                        format!("transiel {}", env!("CARGO_PKG_VERSION")),
+                        "Local speaker diarization + transcription.".to_string(),
+                        "Diarization: DiariZen / pyannote.  Transcription: faster-whisper."
+                            .to_string(),
+                        "Runs fully offline once models are downloaded.".to_string(),
+                    ] {
+                        col = col.push(text(line));
+                    }
+                }
+                HelpKind::Console => {}
             }
             col = col.push(
                 container(
