@@ -9,7 +9,7 @@ use iced::keyboard::{self, Key, Modifiers};
 use serde::{Deserialize, Serialize};
 use iced::widget::{
     button, canvas, column, container, horizontal_space, mouse_area, pick_list, progress_bar,
-    rich_text, row, scrollable, stack, text, text_input, toggler, tooltip, Column,
+    rich_text, row, scrollable, stack, text, text_input, toggler, tooltip,
 };
 use iced::{
     font, mouse, Color, Element, Font, Length, Pixels, Point, Rectangle, Renderer, Shadow, Size,
@@ -2757,23 +2757,8 @@ impl App {
                 HelpKind::Console => Vec::new(),
             };
             let mut col = column![text(kind.label()).size(20)].spacing(8);
-            if matches!(kind, HelpKind::Shortcuts) {
-                let split = body.len().div_ceil(2);
-                let left: Vec<Element<Message>> =
-                    body[..split].iter().map(|line| text(line.clone()).into()).collect();
-                let right: Vec<Element<Message>> =
-                    body[split..].iter().map(|line| text(line.clone()).into()).collect();
-                col = col.push(
-                    row![
-                        Column::with_children(left).spacing(6),
-                        Column::with_children(right).spacing(6),
-                    ]
-                    .spacing(24),
-                );
-            } else {
-                for line in body {
-                    col = col.push(text(line));
-                }
+            for line in body {
+                col = col.push(text(line));
             }
             col = col.push(
                 container(
@@ -2785,12 +2770,7 @@ impl App {
                     .width(Length::Fill)
                     .align_x(iced::Alignment::End),
             );
-            let width = if matches!(kind, HelpKind::Shortcuts) {
-                700.0
-            } else {
-                460.0
-            };
-            let dialog = container(col.width(Length::Fixed(width)))
+            let dialog = container(col.width(Length::Fixed(460.0)))
                 .padding(16)
                 .style(move |_theme| container::Style {
                     background: Some(scheme.dialog_bg.into()),
