@@ -1736,16 +1736,6 @@ impl App {
         lines
     }
 
-    fn status_text(&self) -> String {
-        match &self.status {
-            Status::Idle => "idle".to_string(),
-            Status::Running => "running".to_string(),
-            Status::Done => "done".to_string(),
-            Status::Cancelled => "cancelled".to_string(),
-            Status::Error(message) => format!("error: {message}"),
-        }
-    }
-
     fn elapsed(&self) -> Option<String> {
         if let Some(secs) = self.elapsed_final {
             return Some(format_secs(secs));
@@ -2525,7 +2515,11 @@ impl App {
                     bar: scheme.blue.into(),
                     border: iced::border::rounded(14.0),
                 }),
-                container(text(format!("{} — {}", self.stage, self.status_text())))
+                container(text(match &self.status {
+                    Status::Idle => "Ready".to_string(),
+                    Status::Error(message) => format!("error: {message}"),
+                    _ => self.stage.clone(),
+                }))
                 .center_x(Length::Fill)
                 .center_y(Length::Fill),
             ]

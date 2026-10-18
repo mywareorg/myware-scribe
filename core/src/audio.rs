@@ -142,6 +142,45 @@ pub fn probe(path: &Path, buckets: usize) -> Result<(f64, Vec<f32>), String> {
     Ok((duration, rms))
 }
 
+/// Fast duration from container metadata only (no packet decoding).
+pub fn duration_fast(path: &Path) -> Option<f64> {
+    let file = std::fs::File::open(path).ok()?;
+    let mss = MediaSourceStream::new(Box::new(file), Default::default());
+
+    let mut hint = Hint::new();
+    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+        hint.with_extension(ext);
+    }
+
+    let probed = symphonia::default::get_probe()
+        .format(&hint, mss, &FormatOptions::default(), &MetadataOptions::default())
+        .ok()?;
+    let track = probed
+        .format
+        .tracks()
+        .iter()
+        .find(|t| t.codec_params.codec != CODEC_TYPE_NULL)?;
+
+    let params = &track.codec_params;
+    let frames = params.n_frames?;
+
+    if let Some(time_base) = params.time_base {
+        let seconds = frames as f64 * time_base.numer as f64 / time_base.denom as f64;
+        if seconds > 0.0 {
+            return Some(seconds);
+        }
+    }
+
+    let rate = params.sample_rate?;
+    if rate == 0 {
+        return None;
+    }
+    Some(frames as f64 / rate as f64)
+}
+
 pub fn duration(path: &Path) -> Result<f64, String> {
+    if let Some(seconds) = duration_fast(path) {
+        return Ok(seconds);
+    }
     probe(path, 1).map(|(d, _)| d)
 }
