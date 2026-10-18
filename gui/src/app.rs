@@ -3356,11 +3356,13 @@ fn progress_label(status: &Status, stage: &str, progress: f32, has_queue: bool) 
         Status::Idle => "Idle".to_string(),
         Status::Error(message) => format!("Error: {message}"),
         _ => {
-            let stage = capitalize_first(stage);
-            if stage.eq_ignore_ascii_case("Loading models") {
-                stage
+            let label = capitalize_first(stage);
+            let lower = label.to_ascii_lowercase();
+            // Only transcription contributes to the bar (and its percentage).
+            if lower.starts_with("transcribing") || lower == "done" {
+                format!("{label} ({:.0}%)", progress.clamp(0.0, 1.0) * 100.0)
             } else {
-                format!("{stage} ({:.0}%)", progress.clamp(0.0, 1.0) * 100.0)
+                label
             }
         }
     }

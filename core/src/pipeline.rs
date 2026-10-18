@@ -17,11 +17,6 @@ const MERGE_GAP_S: f32 = 1.0;
 const MIN_TURN_S: f32 = 0.4;
 const CLIP_PAD_S: f32 = 0.1;
 
-// Per-file progress ranges: decode, diarization, transcription (incl. writing).
-const DIAR_START: f32 = 0.05;
-const DIAR_END: f32 = 0.55;
-const TRANS_START: f32 = 0.55;
-
 #[derive(Debug, Clone)]
 pub struct PipelineOptions {
     pub inputs: Vec<PathBuf>,
@@ -183,8 +178,8 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
                 });
                 emit(Event::Stage {
                     stage: "diarization".to_string(),
-                    label: "Running Diarization".to_string(),
-                    progress: DIAR_END,
+                    label: "Running Diarization 100%".to_string(),
+                    progress: 0.0,
                 });
                 turns
             }
@@ -208,8 +203,8 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
 
                 emit(Event::Stage {
                     stage: "diarization".to_string(),
-                    label: "Running Diarization".to_string(),
-                    progress: DIAR_START,
+                    label: "Running Diarization 0%".to_string(),
+                    progress: 0.0,
                 });
                 while !handle.is_finished() {
                     if is_cancelled() {
@@ -218,8 +213,11 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
                     let fraction = progress.load(Ordering::Relaxed) as f32 / 1_000_000.0;
                     emit(Event::Stage {
                         stage: "diarization".to_string(),
-                        label: "Running Diarization".to_string(),
-                        progress: DIAR_START + (DIAR_END - DIAR_START) * fraction,
+                        label: format!(
+                            "Running Diarization {:.0}%",
+                            (fraction * 100.0).clamp(0.0, 100.0)
+                        ),
+                        progress: 0.0,
                     });
                     std::thread::sleep(Duration::from_millis(100));
                 }
@@ -227,8 +225,8 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
                 let joined = handle.join();
                 emit(Event::Stage {
                     stage: "diarization".to_string(),
-                    label: "Running Diarization".to_string(),
-                    progress: DIAR_END,
+                    label: "Running Diarization 100%".to_string(),
+                    progress: 0.0,
                 });
                 match joined {
                     Ok(Ok(turns)) => {
@@ -294,7 +292,7 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
             emit(Event::Stage {
                 stage: "transcription".to_string(),
                 label: format!("Transcribing 0/{total_turns}"),
-                progress: TRANS_START,
+                progress: 0.0,
             });
 
             // Worker pool + channel: turns finish out of order, but lines are
@@ -392,7 +390,7 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
                     emit(Event::Stage {
                         stage: "transcription".to_string(),
                         label: format!("Transcribing {done_turns}/{total_turns}"),
-                        progress: TRANS_START + (1.0 - TRANS_START) * fraction as f32,
+                        progress: fraction as f32,
                     });
                 }
 
