@@ -16,6 +16,8 @@ use crate::models;
 const MERGE_GAP_S: f32 = 1.0;
 const MIN_TURN_S: f32 = 0.4;
 const CLIP_PAD_S: f32 = 0.1;
+/// Bucket count for the waveform emitted once diarization identifies speakers.
+const TIMELINE_BUCKETS: usize = 2000;
 
 #[derive(Debug, Clone)]
 pub struct PipelineOptions {
@@ -263,6 +265,11 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
             .collect();
         emit(Event::Turns {
             turns: turns.clone(),
+        });
+        // Speakers are now known: surface the waveform without re-decoding.
+        emit(Event::Waveform {
+            audio: input.display().to_string(),
+            peaks: audio::rms_peaks(samples.as_slice(), TIMELINE_BUCKETS),
         });
 
         let mut lines: Vec<Line> = Vec::new();

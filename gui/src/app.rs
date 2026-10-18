@@ -450,6 +450,7 @@ pub struct App {
     stage: String,
     progress: f32,
     progress_shown: f32,
+    overall_shown: f32,
     run_start: Option<Instant>,
     elapsed_final: Option<f64>,
     status: Status,
@@ -529,6 +530,7 @@ impl App {
             stage: "idle".to_string(),
             progress: 0.0,
             progress_shown: 0.0,
+            overall_shown: 0.0,
             run_start: None,
             elapsed_final: None,
             status: Status::Idle,
@@ -1076,6 +1078,8 @@ impl App {
                     self.pending_lines.clear();
                     self.reveal_accum = 0.0;
                     self.completion_pending = false;
+                    self.current_index = None;
+                    self.overall_shown = 0.0;
                     self.transcript_dirty = false;
                     self.follow_offset = None;
                     self.transcript_at_bottom = true;
@@ -1171,6 +1175,7 @@ impl App {
                     self.elapsed_final = None;
                     self.progress = 0.0;
                     self.progress_shown = 0.0;
+                    self.overall_shown = 0.0;
                     self.stage = "idle".to_string();
                     self.status = Status::Idle;
                 }
@@ -1344,13 +1349,32 @@ impl App {
 
                 self.pulse = (self.pulse + 0.10) % std::f32::consts::TAU;
                 self.activity_frame = self.activity_frame.wrapping_add(1);
-                // Ease the displayed bar toward the latest reported progress.
+                // Ease the per-file bar toward the latest reported progress.
                 self.progress_shown += (self.progress - self.progress_shown) * 0.25;
                 self.progress_shown = self.progress_shown.clamp(0.0, 1.0);
 
+                // Ease an overall bar that continues smoothly across queued files.
+                let total_items = self.queue.len().max(1) as f32;
+                let animating =
+                    matches!(self.status, Status::Running) || self.completion_pending;
+                let target_overall = if animating {
+                    (self.current_index.unwrap_or(0) as f32 + self.progress) / total_items
+                } else {
+                    let done = self
+                        .queue
+                        .iter()
+                        .filter(|item| {
+                            matches!(item.status, ItemStatus::Done(_) | ItemStatus::Failed(_))
+                        })
+                        .count() as f32;
+                    done / total_items
+                };
+                self.overall_shown += (target_overall - self.overall_shown) * 0.25;
+                self.overall_shown = self.overall_shown.clamp(0.0, 1.0);
+
                 // Once the bar has eased to 100%, present the completion dialogs.
-                if self.completion_pending && self.progress_shown >= 0.995 {
-                    self.progress_shown = 1.0;
+                if self.completion_pending && self.overall_shown >= 0.995 {
+                    self.overall_shown = 1.0;
                     self.completion_pending = false;
                     if self.present_completion() {
                         tasks.push(scrollable::snap_to(
@@ -1572,15 +1596,16 @@ impl App {
         self.stage = "starting".to_string();
         self.progress = 0.0;
         self.progress_shown = 0.0;
+        self.overall_shown = 0.0;
         self.run_start = Some(Instant::now());
         self.elapsed_final = None;
         self.transcript.clear();
         self.lines.clear();
-                    self.pending_lines.clear();
-                    self.reveal_accum = 0.0;
-                    self.completion_pending = false;
-                    self.current_index = None;
-                    self.transcript_dirty = false;
+        self.pending_lines.clear();
+        self.reveal_accum = 0.0;
+        self.completion_pending = false;
+        self.current_index = None;
+        self.transcript_dirty = false;
         self.follow_offset = None;
         self.transcript_at_bottom = true;
         self.follow_playhead = true;
@@ -1633,6 +1658,7 @@ impl App {
         self.stage = "cancelled".to_string();
         self.progress = 0.0;
         self.progress_shown = 0.0;
+        self.overall_shown = 0.0;
         self.run_start = None;
         self.elapsed_final = None;
         self.pending_lines.clear();
@@ -1725,22 +1751,18 @@ impl App {
                     self.output_txt = None;
                 }
                 Event::Meta { audio, duration } => {
-                    let path = PathBuf::from(audio);
-                    if self.peaks_for.as_deref() != Some(path.as_path()) {
-                        self.peaks_for = Some(path.clone());
-                        self.peaks = Arc::new(Vec::new());
-                        self.playhead = 0.0;
-                        self.timeline_duration = Some(duration);
-                        let probe_path = path.clone();
-                        let message_path = path;
-                        tasks.push(Task::perform(
-                            async move { backend::probe_audio(&probe_path, TIMELINE_BUCKETS) },
-                            move |result| Message::TimelineLoaded(message_path.clone(), result),
-                        ));
-                    }
+                    self.peaks_for = Some(PathBuf::from(audio));
+                    self.peaks = Arc::new(Vec::new());
+                    self.playhead = 0.0;
+                    self.timeline_duration = Some(duration);
                 }
                 Event::Turns { turns } => {
                     self.turns = turns;
+                }
+                Event::Waveform { audio, peaks } => {
+                    // Emitted once diarization has identified the speakers.
+                    self.peaks_for = Some(PathBuf::from(audio));
+                    self.peaks = Arc::new(peaks);
                 }
                 Event::Line {
                     start,
@@ -1828,6 +1850,7 @@ impl App {
                         // Nothing succeeded: no dialogs, just settle at 100%.
                         self.progress = 1.0;
                         self.progress_shown = 1.0;
+                        self.overall_shown = 1.0;
                     }
                 }
             }
@@ -2481,7 +2504,7 @@ impl App {
                             }),
                     );
                     item_row = item_row.push(
-                        text(format!("{:.0}%", self.progress * 100.0)).size(12),
+                        text(format!("{:.0}%", self.progress_shown * 100.0)).size(12),
                     );
                 }
                 ItemStatus::Done(_) => {
@@ -2640,27 +2663,7 @@ impl App {
                 .align_y(iced::Alignment::Center),
         );
 
-        let total_items = self.queue.len().max(1) as f32;
-        let done_items = self
-            .queue
-            .iter()
-            .filter(|item| matches!(item.status, ItemStatus::Done(_) | ItemStatus::Failed(_)))
-            .count() as f32;
-        // While animating (running or easing to completion) base the bar on the
-        // current file's index so the final file's ease-up reaches 100% instead
-        // of snapping when its queue item is marked done.
-        let animating = running || self.completion_pending;
-        let base = if animating {
-            self.current_index.unwrap_or(0) as f32
-        } else {
-            done_items
-        };
-        let current_fraction = if animating {
-            self.progress_shown
-        } else {
-            0.0
-        };
-        let global_progress = ((base + current_fraction) / total_items).clamp(0.0, 1.0);
+        let global_progress = self.overall_shown;
 
         let clock = row![
             icon_colored(ICON_CLOCK, 14.0, scheme.text),
@@ -2672,7 +2675,7 @@ impl App {
         let label = progress_label(
             &self.status,
             &self.stage,
-                    self.progress_shown,
+                    self.overall_shown,
                     has_queue,
                     // Advance the ellipses once every 0.5s (ticks are 100ms).
                     1 + (self.activity_frame / 5) % 5,

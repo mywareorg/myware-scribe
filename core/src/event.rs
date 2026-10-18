@@ -38,6 +38,8 @@ pub enum Event {
     Meta { audio: String, duration: f32 },
     #[serde(rename = "turns")]
     Turns { turns: Vec<Turn> },
+    #[serde(rename = "waveform")]
+    Waveform { audio: String, peaks: Vec<f32> },
     #[serde(rename = "line")]
     Line { start: f32, speaker: String, text: String, confidence: f32 },
     #[serde(rename = "done")]

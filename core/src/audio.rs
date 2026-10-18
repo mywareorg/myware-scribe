@@ -119,10 +119,8 @@ fn resample(input: &[f32], in_rate: u32, out_rate: u32) -> Result<Vec<f32>, Stri
     Ok(output)
 }
 
-/// Duration (seconds) and a downsampled RMS waveform (one value per bucket).
-pub fn probe(path: &Path, buckets: usize) -> Result<(f64, Vec<f32>), String> {
-    let (samples, rate) = decode(path)?;
-    let duration = samples.len() as f64 / rate as f64;
+/// Downsampled RMS waveform (one value per bucket) from mono samples.
+pub fn rms_peaks(samples: &[f32], buckets: usize) -> Vec<f32> {
     let buckets = buckets.max(1);
     let mut rms = vec![0.0f32; buckets];
     if !samples.is_empty() {
@@ -139,7 +137,14 @@ pub fn probe(path: &Path, buckets: usize) -> Result<(f64, Vec<f32>), String> {
             }
         }
     }
-    Ok((duration, rms))
+    rms
+}
+
+/// Duration (seconds) and a downsampled RMS waveform (one value per bucket).
+pub fn probe(path: &Path, buckets: usize) -> Result<(f64, Vec<f32>), String> {
+    let (samples, rate) = decode(path)?;
+    let duration = samples.len() as f64 / rate as f64;
+    Ok((duration, rms_peaks(&samples, buckets)))
 }
 
 /// Fast duration from container metadata only (no packet decoding).
