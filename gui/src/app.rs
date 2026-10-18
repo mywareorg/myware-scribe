@@ -2515,11 +2515,11 @@ impl App {
                     bar: scheme.blue.into(),
                     border: iced::border::rounded(14.0),
                 }),
-                container(text(match &self.status {
+                container(text(capitalize_first(&match &self.status {
                     Status::Idle => "Ready".to_string(),
                     Status::Error(message) => format!("error: {message}"),
                     _ => self.stage.clone(),
-                }))
+                })))
                 .center_x(Length::Fill)
                 .center_y(Length::Fill),
             ]
@@ -3235,6 +3235,13 @@ fn speaker_of(raw: &str) -> String {
     let rest = rest.strip_prefix(' ').unwrap_or(rest);
     match rest.split_once(": ") {
         Some((head, _)) => head.trim().to_string(),
+        None => String::new(),
+    }
+}
+
+fn capitalize_first(text: &str) -> String {
+    match text.chars().next() {
+        Some(first) => first.to_uppercase().collect::<String>() + &text[first.len_utf8()..],
         None => String::new(),
     }
 }
