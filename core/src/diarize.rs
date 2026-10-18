@@ -97,8 +97,9 @@ fn run(
             return Err("failed to initialize offline speaker diarization".to_string());
         }
 
-        let callback: Option<unsafe extern "C" fn(i32, i32, *mut c_void) -> i32> =
-            progress.as_ref().map(|_| diarize_progress);
+        let callback: Option<unsafe extern "C" fn(i32, i32, *mut c_void) -> i32> = progress
+            .as_ref()
+            .map(|_| diarize_progress as unsafe extern "C" fn(i32, i32, *mut c_void) -> i32);
         let arg = match &progress {
             Some(progress) => Arc::as_ptr(progress) as *mut c_void,
             None => std::ptr::null_mut(),
