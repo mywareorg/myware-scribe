@@ -2630,9 +2630,7 @@ impl App {
             let dots = ".".repeat(1 + (self.activity_frame / 5) % 5);
             row![
                 horizontal_space().width(Length::Fixed(50.0)),
-                container(text("Decoding"))
-                    .width(Length::Fixed(90.0))
-                    .align_x(iced::Alignment::Center),
+                text("Decoding"),
                 container(text(dots))
                     .width(Length::Fixed(50.0))
                     .align_x(iced::Alignment::Start),
