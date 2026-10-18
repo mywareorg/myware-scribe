@@ -2675,11 +2675,11 @@ impl App {
         let label = progress_label(
             &self.status,
             &self.stage,
-                    self.overall_shown,
-                    has_queue,
-                    // Advance the ellipses once every 0.5s (ticks are 100ms).
-                    1 + (self.activity_frame / 5) % 5,
-                );
+            self.overall_shown,
+            has_queue,
+            // Advance the ellipses once every 0.5s (ticks are 100ms).
+            1 + (self.activity_frame / 5) % 5,
+        );
         // Keep "Decoding" centered and stationary while its dots animate: the
         // word sits in a fixed, centered box with a fixed dots area beside it.
         let label_el: Element<Message> = if self.stage.eq_ignore_ascii_case("Decoding") {
@@ -2845,7 +2845,7 @@ impl App {
         if self.batch_warning {
             let dialog = container(
                 column![
-                    text("Warning").size(20),
+                    text("Note").size(20),
                     text(
                         "Only the speakers of the final file can be renamed \
                          without reimporting.",
