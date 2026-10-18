@@ -493,6 +493,7 @@ pub struct App {
     playback_speed: f32,
     last_tick: Option<Instant>,
     pulse: f32,
+    activity_frame: usize,
     window_size: Size,
     window_position: Option<Point>,
     window_dirty: bool,
@@ -574,6 +575,7 @@ impl App {
             playback_speed: settings.playback_speed.unwrap_or(1.0),
             last_tick: None,
             pulse: 0.0,
+            activity_frame: 0,
             window_size: Self::window_size_from(&settings),
             window_position: match (settings.window_x, settings.window_y) {
                 (Some(x), Some(y)) => Some(Point::new(x, y)),
@@ -1327,6 +1329,7 @@ impl App {
                 }
 
                 self.pulse = (self.pulse + 0.10) % std::f32::consts::TAU;
+                self.activity_frame = self.activity_frame.wrapping_add(1);
                 // Ease the displayed bar toward the latest reported progress.
                 self.progress_shown += (self.progress - self.progress_shown) * 0.25;
                 self.progress_shown = self.progress_shown.clamp(0.0, 1.0);
@@ -2629,6 +2632,7 @@ impl App {
                     &self.stage,
                     self.progress,
                     has_queue,
+                    1 + self.activity_frame % 3,
                 )))
                 .center_x(Length::Fill)
                 .center_y(Length::Fill),
@@ -3350,7 +3354,13 @@ fn speaker_of(raw: &str) -> String {
 }
 
 /// Progress-bar text: phase (with detail) plus overall percentage.
-fn progress_label(status: &Status, stage: &str, progress: f32, has_queue: bool) -> String {
+fn progress_label(
+    status: &Status,
+    stage: &str,
+    progress: f32,
+    has_queue: bool,
+    dots: usize,
+) -> String {
     match status {
         Status::Idle if has_queue => "Ready".to_string(),
         Status::Idle => "Idle".to_string(),
@@ -3358,6 +3368,10 @@ fn progress_label(status: &Status, stage: &str, progress: f32, has_queue: bool) 
         _ => {
             let label = capitalize_first(stage);
             let lower = label.to_ascii_lowercase();
+            // Animate ellipses while decoding (1..=3, cycling).
+            if lower == "decoding" {
+                return format!("{label}{}", ".".repeat(dots.clamp(1, 3)));
+            }
             // Only transcription contributes to the bar (and its percentage).
             if lower.starts_with("transcribing") || lower == "done" {
                 format!("{label} ({:.0}%)", progress.clamp(0.0, 1.0) * 100.0)
