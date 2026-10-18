@@ -472,6 +472,7 @@ pub struct App {
     transcript_viewport: f32,
     transcript_content: f32,
     transcript_at_bottom: bool,
+    transcript_dirty: bool,
     follow_offset: Option<f32>,
     font_scale: f32,
     follow_playhead: bool,
@@ -549,6 +550,7 @@ impl App {
             transcript_viewport: 0.0,
             transcript_content: 0.0,
             transcript_at_bottom: true,
+            transcript_dirty: false,
             follow_offset: None,
             font_scale: settings.font_scale.unwrap_or(1.0),
             follow_playhead: true,
@@ -1050,6 +1052,7 @@ impl App {
                 if let Some(text) = text {
                     self.transcript = text;
                     self.lines = parse_lines(&self.transcript);
+                    self.transcript_dirty = false;
                     self.follow_offset = None;
                     self.transcript_at_bottom = true;
                     self.sms_mode = true;
@@ -1239,6 +1242,19 @@ impl App {
             }
             Message::Tick => {
                 let mut tasks = vec![self.drain_events()];
+                if self.transcript_dirty {
+                    self.transcript_dirty = false;
+                    let mut out = String::new();
+                    for index in self.display_order() {
+                        let line = &self.lines[index];
+                        if line.raw.is_empty() {
+                            continue;
+                        }
+                        out.push_str(&line.raw);
+                        out.push('\n');
+                    }
+                    self.transcript = out;
+                }
                 self.pulse = (self.pulse + 0.10) % std::f32::consts::TAU;
                 // Ease the displayed bar toward the latest reported progress.
                 self.progress_shown += (self.progress - self.progress_shown) * 0.25;
@@ -1435,6 +1451,7 @@ impl App {
         self.elapsed_final = None;
         self.transcript.clear();
         self.lines.clear();
+        self.transcript_dirty = false;
         self.follow_offset = None;
         self.transcript_at_bottom = true;
         self.turns.clear();
@@ -1558,6 +1575,7 @@ impl App {
                     self.elapsed_final = None;
                     self.transcript.clear();
                     self.lines.clear();
+                    self.transcript_dirty = false;
                     self.follow_offset = None;
                     self.transcript_at_bottom = true;
                     self.turns.clear();
@@ -1608,6 +1626,7 @@ impl App {
                     }
                     self.transcript.push_str(&raw);
                     self.transcript.push('\n');
+                    self.transcript_dirty = true;
                 }
                 Event::Done { txt, stats, .. } => {
                     self.stage = "done".to_string();
@@ -1616,6 +1635,7 @@ impl App {
                     if let Ok(contents) = std::fs::read_to_string(&txt) {
                         self.transcript = contents;
                     }
+                    self.transcript_dirty = false;
                     if self.lines.is_empty() {
                         self.lines = parse_lines(&self.transcript);
                     }
@@ -2292,8 +2312,8 @@ impl App {
                 ItemStatus::Done(_) => icon_colored(ICON_CHECK, 18.0, scheme.green),
                 ItemStatus::Failed(_) => icon_colored(ICON_X, 18.0, scheme.pink),
             })
-            .center_x(Length::Fixed(22.0))
-            .into();
+                .center_x(Length::Fixed(22.0))
+                .into();
             let name = item
                 .path
                 .file_name()

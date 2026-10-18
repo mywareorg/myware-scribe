@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -12,7 +12,6 @@ use crate::cache;
 use crate::diarize::{self, CLUSTER_THRESHOLD};
 use crate::event::{Event, SpeakerStat, Stats, Turn};
 use crate::models;
-use rayon::prelude::*;
 
 const MERGE_GAP_S: f32 = 1.0;
 const MIN_TURN_S: f32 = 0.4;
@@ -108,27 +107,6 @@ fn output_path(input: &Path, output_dir: &Option<PathBuf>) -> PathBuf {
     }
 }
 
-type ClipResult = (usize, f32, Result<Vec<crate::asr::Segment>, String>);
-
-/// Transcribe the turn clips in parallel (order preserved by index).
-fn transcribe_clips(
-    transcriber: &Transcriber,
-    samples: &[f32],
-    clips: &[(usize, f32, usize, usize)],
-    threads: i32,
-) -> Vec<ClipResult> {
-    clips
-        .par_iter()
-        .map(|&(turn_index, clip_start, from, to)| {
-            (
-                turn_index,
-                clip_start,
-                transcriber.transcribe_with_threads(&samples[from..to], threads),
-            )
-        })
-        .collect()
-}
-
 /// Run the pipeline over all inputs, emitting progress events.
 pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
     let total = opts.inputs.len().max(1);
@@ -164,10 +142,6 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
         .map(|v| v as i32)
         .unwrap_or((physical / workers).max(1) as i32)
         .max(1);
-    let pool = rayon::ThreadPoolBuilder::new()
-        .num_threads(workers)
-        .build()
-        .ok();
 
     for (index, input) in opts.inputs.iter().enumerate() {
         if is_cancelled() {
@@ -314,7 +288,6 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
                 .iter()
                 .map(|(_, _, from, to)| (to - from) as f64 / rate as f64)
                 .sum();
-            let batch_size = (workers * 2).max(1);
             let mut done_seconds = 0.0f64;
             let mut done_turns = 0usize;
 
@@ -324,31 +297,46 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
                 progress: TRANS_START,
             });
 
-            for batch in clips.chunks(batch_size) {
-                if is_cancelled() {
-                    break;
-                }
-                let results = match &pool {
-                    Some(pool) => pool.install(|| {
-                        transcribe_clips(
-                            transcriber,
-                            samples.as_slice(),
-                            batch,
-                            per_call_threads,
-                        )
-                    }),
-                    None => transcribe_clips(
-                        transcriber,
-                        samples.as_slice(),
-                        batch,
-                        per_call_threads,
-                    ),
-                };
+            // Worker pool + channel: emit each turn's lines as soon as its ASR
+            // finishes. Completion order is arbitrary; the view sorts by start.
+            let (tx, rx) = std::sync::mpsc::channel();
+            let next = AtomicUsize::new(0);
+            let samples_ref = samples.as_slice();
+            let clips_ref = clips.as_slice();
 
-                // par_iter().collect() preserves order, so results match the batch.
-                for (clip, (turn_index, clip_start, result)) in batch.iter().zip(results) {
-                    done_seconds += (clip.3 - clip.2) as f64 / rate as f64;
+            std::thread::scope(|scope| {
+                for _ in 0..workers {
+                    let tx = tx.clone();
+                    let next = &next;
+                    scope.spawn(move || loop {
+                        let index = next.fetch_add(1, Ordering::Relaxed);
+                        if index >= clips_ref.len() {
+                            break;
+                        }
+                        let (turn_index, clip_start, from, to) = clips_ref[index];
+                        let result = transcriber
+                            .transcribe_with_threads(&samples_ref[from..to], per_call_threads);
+                        if tx.send((index, turn_index, clip_start, result)).is_err() {
+                            break;
+                        }
+                    });
+                }
+                // Drop the spare sender so the channel closes when workers finish.
+                drop(tx);
+
+                let mut remaining = clips.len();
+                while remaining > 0 {
+                    if is_cancelled() {
+                        break;
+                    }
+                    let Ok((index, turn_index, clip_start, result)) = rx.recv() else {
+                        break;
+                    };
+                    remaining -= 1;
+
+                    done_seconds += (clips[index].3 - clips[index].2) as f64 / rate as f64;
                     done_turns += 1;
+
                     let speaker = turns[turn_index].speaker.clone();
                     match result {
                         Ok(segments) => {
@@ -370,19 +358,19 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
                         }
                         Err(message) => emit(Event::Log { message }),
                     }
-                }
 
-                let fraction = if total_seconds > 0.0 {
-                    (done_seconds / total_seconds).clamp(0.0, 1.0)
-                } else {
-                    1.0
-                };
-                emit(Event::Stage {
-                    stage: "transcription".to_string(),
-                    label: format!("Transcribing {done_turns}/{total_turns}"),
-                    progress: TRANS_START + (1.0 - TRANS_START) * fraction as f32,
-                });
-            }
+                    let fraction = if total_seconds > 0.0 {
+                        (done_seconds / total_seconds).clamp(0.0, 1.0)
+                    } else {
+                        1.0
+                    };
+                    emit(Event::Stage {
+                        stage: "transcription".to_string(),
+                        label: format!("Transcribing {done_turns}/{total_turns}"),
+                        progress: TRANS_START + (1.0 - TRANS_START) * fraction as f32,
+                    });
+                }
+            });
         }
 
         lines.sort_by(|a, b| {
