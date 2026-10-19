@@ -30,13 +30,29 @@ MSVC on Windows) — `sherpa-onnx` and `whisper.cpp` are built from source and
 statically linked.
 
 ```bash
-cargo build --release            # target/release/transiel-gui
+cargo build --release            # target/release/transiel
 ```
 
 - On Linux x86_64 the non-PIC relocation flag needed for the static sherpa
   libraries is already set in `.cargo/config.toml`.
-- On Windows set `SHERPA_STATIC_CRT=1` (and `+crt-static`) for a fully static
-  build, then rename the binary to `transiel.exe` for deployment.
+
+### Windows
+
+Run the build script from a normal PowerShell prompt:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\build-windows.ps1
+```
+
+It enters the Visual Studio developer environment, configures the static CRT and
+libclang, runs the tests, builds, checks the executable's dependencies, and
+writes a release folder and zip under `dist\`.
+
+Prerequisites: Visual Studio 2022 Build Tools with the "Desktop development with
+C++" workload, Rust stable MSVC (`rustup default stable-x86_64-pc-windows-msvc`),
+LLVM (`winget install LLVM.LLVM`), and CMake (included with the workload or
+`winget install Kitware.CMake`). Pass `-SkipTests`, `-SkipBindgen`, `-Clean`,
+`-NoZip`, `-Version 0.2.0`, or `-OutDir C:\builds` as needed.
 
 ## Models
 

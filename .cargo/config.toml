@@ -2,3 +2,7 @@
 # non-PIE on Linux x86_64.
 [target.x86_64-unknown-linux-gnu]
 rustflags = ["-C", "relocation-model=dynamic-no-pic"]
+
+# Match the MSVC static CRT used by sherpa-onnx and whisper.cpp.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
