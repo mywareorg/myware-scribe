@@ -1,15 +1,16 @@
 //! Speaker diarization via sherpa-onnx (pyannote segmentation + speaker embedding).
 //!
-//! Uses the raw sherpa-onnx C API directly (rather than `sherpa_rs::diarize`,
-//! which hardcodes `num_threads = 1`) so diarization runs multi-threaded, and
-//! wires the progress callback so the UI can show live progress.
+//! Uses the raw sherpa-onnx C API directly (rather than the high-level
+//! `sherpa-rs` diarize helper, which hardcodes `num_threads = 1`) so
+//! diarization runs multi-threaded, and wires the progress callback so the UI
+//! can show live progress.
 
 use std::ffi::{c_void, CString};
 use std::path::Path;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
-use sherpa_rs::sherpa_rs_sys as ffi;
+use sherpa_rs_sys as ffi;
 
 use crate::event::Turn;
 

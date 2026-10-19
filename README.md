@@ -44,9 +44,13 @@ Run the build script from a normal PowerShell prompt:
 powershell -ExecutionPolicy Bypass -File .\scripts\build-windows.ps1
 ```
 
-It enters the Visual Studio developer environment, configures the static CRT and
-libclang, runs the tests, builds, checks the executable's dependencies, and
-writes a release folder and zip under `dist\`.
+It enters the Visual Studio developer environment, configures the CRT, libclang,
+and Windows system libraries, runs the tests, builds, checks the executable's
+dependencies, and writes a release folder and zip under `dist\`.
+
+The default build uses the dynamic C++ runtime because the prebuilt ONNX Runtime
+static library is built with `/MD`; target machines need the VC++ Redistributable.
+Pass `-StaticCrt` only when every native library is built with `/MT`.
 
 Prerequisites: Visual Studio 2022 Build Tools with the "Desktop development with
 C++" workload, Rust stable MSVC (`rustup default stable-x86_64-pc-windows-msvc`),

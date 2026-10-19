@@ -5,10 +5,11 @@ Build transiel for Windows, stage a release folder, and optionally zip it.
 
 .DESCRIPTION
 Enters the Visual Studio developer environment (so cl.exe, rc.exe, the Windows
-SDK, and CMake are on PATH), configures the static MSVC CRT used by sherpa-onnx
-and whisper.cpp, builds the release binary, verifies that it does not depend on
-the dynamic C++ runtime, stages deploy.bat/undeploy.bat/README/LICENSE plus the
-sample audio, and writes a zip with a SHA-256 checksum.
+SDK, and CMake are on PATH), configures the MSVC CRT (dynamic by default, or
+/MT with -StaticCrt), adds the Windows system libraries the native dependencies
+need, builds the release binary, checks its runtime dependencies, stages
+deploy.bat/undeploy.bat/README/LICENSE plus the sample audio, and writes a zip
+with a SHA-256 checksum.
 
 Requires:
   - Visual Studio 2022 Build Tools with "Desktop development with C++"
@@ -29,6 +30,7 @@ param(
     [string]$TargetDir,
     [switch]$SkipTests,
     [switch]$SkipBindgen,
+    [switch]$StaticCrt,
     [switch]$Clean,
     [switch]$NoZip
 )
@@ -159,20 +161,35 @@ try {
         throw "libclang was not found. Install LLVM (winget install LLVM.LLVM) or pass -SkipBindgen."
     }
 
-    $env:SHERPA_STATIC_CRT = "1"
-    # sherpa-rs builds its wrapper as a cdylib, and that link does not inherit
-    # the Windows system libraries that ONNX Runtime (ETW/registry) and
-    # PortAudio need. Pass them to every link step.
+    # The prebuilt ONNX Runtime static library is built against the dynamic
+    # CRT (/MD). Use the dynamic CRT by default so the native libraries and
+    # Rust agree; otherwise link.exe reports LNK2005/LNK1169 duplicate runtime
+    # symbols. Pass -StaticCrt only when every native library is /MT.
+    $env:SHERPA_STATIC_CRT = if ($StaticCrt) { "1" } else { "0" }
     $rustFlags = @()
-    if ($env:RUSTFLAGS) { $rustFlags += $env:RUSTFLAGS }
-    if (-not ($env:RUSTFLAGS -match "crt-static")) {
-        $rustFlags += "-C target-feature=+crt-static"
-    }
-    foreach ($lib in @("advapi32", "ole32", "oleaut32", "uuid", "winmm")) {
-        $flag = "-C link-arg=$lib.lib"
-        if (-not ($env:RUSTFLAGS -match [regex]::Escape("link-arg=$lib.lib"))) {
-            $rustFlags += $flag
+    if ($env:RUSTFLAGS) {
+        # Preserve extra flags, but drop any existing crt-static selection so
+        # this script fully controls the CRT mode.
+        $tokens = @($env:RUSTFLAGS -split '\s+' | Where-Object { $_ })
+        for ($i = 0; $i -lt $tokens.Count; $i++) {
+            $token = $tokens[$i]
+            if ($token -eq "-C" -and ($i + 1) -lt $tokens.Count -and
+                $tokens[$i + 1] -match 'crt-static') {
+                $i++
+                continue
+            }
+            if ($token -match 'crt-static') { continue }
+            $rustFlags += $token
         }
+    }
+    if ($StaticCrt) {
+        $rustFlags += @("-C", "target-feature=+crt-static")
+    }
+    # sherpa-onnx's static libraries do not carry their Windows system
+    # dependencies, so pass the libraries ONNX Runtime (ETW/registry) and
+    # PortAudio need to the final link.
+    foreach ($lib in @("advapi32", "ole32", "oleaut32", "uuid", "winmm")) {
+        $rustFlags += @("-C", "link-arg=$lib.lib")
     }
     $env:RUSTFLAGS = $rustFlags -join " "
     if ($TargetDir) {
@@ -216,7 +233,11 @@ try {
     if ($dumpbin) {
         $dependencies = & $dumpbin.Source /dependents $binary | Out-String
         if ($dependencies -match "VCRUNTIME140|MSVCP140") {
-            Write-Warn "The executable still depends on the dynamic C++ runtime. Check the CRT settings."
+            if ($StaticCrt) {
+                Write-Warn "The executable still depends on the dynamic C++ runtime despite -StaticCrt."
+            } else {
+                Write-Step "Using the dynamic C++ runtime (VC++ Redistributable required)."
+            }
         }
     }
 

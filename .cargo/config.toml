@@ -3,12 +3,12 @@
 [target.x86_64-unknown-linux-gnu]
 rustflags = ["-C", "relocation-model=dynamic-no-pic"]
 
-# Match the MSVC static CRT used by sherpa-onnx and whisper.cpp, and provide
+# The prebuilt ONNX Runtime static library is built against the dynamic MSVC
+# CRT (/MD). Keep Rust and the native libraries on the same runtime, and pass
 # the Windows system libraries required by ONNX Runtime (ETW/registry) and
-# PortAudio when sherpa-rs is linked as a cdylib.
+# PortAudio, which the static sherpa-onnx libraries do not carry.
 [target.x86_64-pc-windows-msvc]
 rustflags = [
-    "-C", "target-feature=+crt-static",
     "-C", "link-arg=advapi32.lib",
     "-C", "link-arg=ole32.lib",
     "-C", "link-arg=oleaut32.lib",

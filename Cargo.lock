@@ -1218,17 +1218,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "af9673d8203fcb076b19dfd17e38b3d4ae9f44959416ea532ce72415a6020365"
 
 [[package]]
-name = "eyre"
-version = "0.6.14"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c08309dbcc659c5549a24ddb9b27027640641b282ef5768267c7e675558986a3"
-dependencies = [
- "autocfg",
- "indenter",
- "once_cell",
-]
-
-[[package]]
 name = "fastrand"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1982,12 +1971,6 @@ dependencies = [
  "num-traits",
  "png 0.18.1",
 ]
-
-[[package]]
-name = "indenter"
-version = "0.3.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "964de6e86d545b246d84badc0fef527924ace5134f30641c203ef52ba83f58d5"
 
 [[package]]
 name = "indexmap"
@@ -3850,18 +3833,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "sherpa-rs"
-version = "0.6.8"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "81835d89a3fc44482a6829e3e2483ac83f7b4d1623c76f196c77c9ecf5c18203"
-dependencies = [
- "eyre",
- "hound",
- "sherpa-rs-sys",
- "tracing",
-]
-
-[[package]]
 name = "sherpa-rs-sys"
 version = "0.6.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4610,7 +4581,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
- "sherpa-rs",
+ "sherpa-rs-sys",
  "symphonia",
  "ureq",
  "whisper-rs",
