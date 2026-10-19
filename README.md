@@ -26,8 +26,8 @@ speakers is fixed with `--num-speakers N` (default 2) or auto-detected with
 ## Build
 
 Requires a **Rust toolchain**, **CMake**, and a C/C++ compiler (clang on Linux,
-MSVC on Windows) — `sherpa-onnx` and `whisper.cpp` are built from source and
-statically linked.
+MSVC on Windows). `whisper.cpp` is built from source; on Linux `sherpa-onnx` is
+too, while Windows downloads the prebuilt static sherpa-onnx package.
 
 ```bash
 cargo build --release            # target/release/transiel
@@ -44,19 +44,29 @@ Run the build script from a normal PowerShell prompt:
 powershell -ExecutionPolicy Bypass -File .\scripts\build-windows.ps1
 ```
 
-It enters the Visual Studio developer environment, configures the CRT, libclang,
-and Windows system libraries, runs the tests, builds, checks the executable's
-dependencies, and writes a release folder and zip under `dist\`.
+It enters the Visual Studio developer environment, configures libclang and the
+Windows system libraries, runs the release tests, builds, checks the
+executable's dependencies, and writes a release folder and zip under `dist\`.
 
-The default build uses the dynamic C++ runtime because the prebuilt ONNX Runtime
-static library is built with `/MD`; target machines need the VC++ Redistributable.
-Pass `-StaticCrt` only when every native library is built with `/MT`.
+Cargo downloads the prebuilt sherpa-onnx v1.12.9 static package, which is built
+with the static MSVC CRT. Only `whisper.cpp` is compiled locally.
+
+For the edit/run loop, use the fast iteration profile:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\run-windows.ps1
+```
+
+That runs `cargo run --profile release-fast` (no LTO, parallel codegen,
+incremental). The same profile is available as `cargo run-fast` if you are
+already in a Visual Studio developer prompt. Use the full build script for the
+final release.
 
 Prerequisites: Visual Studio 2022 Build Tools with the "Desktop development with
 C++" workload, Rust stable MSVC (`rustup default stable-x86_64-pc-windows-msvc`),
 LLVM (`winget install LLVM.LLVM`), and CMake (included with the workload or
-`winget install Kitware.CMake`). Pass `-SkipTests`, `-SkipBindgen`, `-Clean`,
-`-NoZip`, `-Version 0.2.0`, or `-OutDir C:\builds` as needed.
+`winget install Kitware.CMake`). Pass `-SkipTests`, `-SkipBindgen`, `-Diagnose`,
+`-Clean`, `-NoZip`, `-Version 0.2.0`, or `-OutDir C:\builds` as needed.
 
 ## Models
 

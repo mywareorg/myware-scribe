@@ -1,7 +1,16 @@
 [workspace]
 resolver = "2"
 members = ["core", "gui"]
+default-members = ["gui"]
 
 [profile.release]
 lto = true
 codegen-units = 1
+
+# Iteration profile: no LTO and parallel codegen for fast rebuilds. Use
+# `cargo run --profile release-fast` while developing.
+[profile.release-fast]
+inherits = "release"
+lto = false
+codegen-units = 16
+incremental = true

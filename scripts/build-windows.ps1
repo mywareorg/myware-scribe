@@ -5,11 +5,16 @@ Build transiel for Windows, stage a release folder, and optionally zip it.
 
 .DESCRIPTION
 Enters the Visual Studio developer environment (so cl.exe, rc.exe, the Windows
-SDK, and CMake are on PATH), configures the MSVC CRT (dynamic by default, or
-/MT with -StaticCrt), adds the Windows system libraries the native dependencies
-need, builds the release binary, checks its runtime dependencies, stages
+SDK, and CMake are on PATH), configures the static MSVC CRT used by the
+prebuilt sherpa-onnx/ONNX Runtime libraries, adds the Windows system libraries
+they need, builds the release binary, checks its runtime dependencies, stages
 deploy.bat/undeploy.bat/README/LICENSE plus the sample audio, and writes a zip
 with a SHA-256 checksum.
+
+On Windows, Cargo downloads the prebuilt sherpa-onnx v1.12.9 static package
+instead of compiling sherpa-onnx and ONNX Runtime from source. Only whisper.cpp
+is built locally. Tests run in release mode because the debug profile links
+msvcrtd on Windows.
 
 Requires:
   - Visual Studio 2022 Build Tools with "Desktop development with C++"
@@ -30,7 +35,7 @@ param(
     [string]$TargetDir,
     [switch]$SkipTests,
     [switch]$SkipBindgen,
-    [switch]$StaticCrt,
+    [switch]$Diagnose,
     [switch]$Clean,
     [switch]$NoZip
 )
@@ -38,15 +43,7 @@ param(
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
-function Write-Step {
-    param([string]$Message)
-    Write-Host "==> $Message" -ForegroundColor Cyan
-}
-
-function Write-Warn {
-    param([string]$Message)
-    Write-Warning $Message
-}
+. (Join-Path $PSScriptRoot "windows-env.ps1")
 
 function Invoke-Native {
     param(
@@ -59,67 +56,7 @@ function Invoke-Native {
     }
 }
 
-function Get-VsInstallPath {
-    $base = ${env:ProgramFiles(x86)}
-    if (-not $base) { $base = "C:\Program Files (x86)" }
-    $vswhere = Join-Path $base "Microsoft Visual Studio\Installer\vswhere.exe"
-    if (-not (Test-Path $vswhere)) {
-        throw "vswhere.exe was not found. Install Visual Studio 2022 Build Tools with the 'Desktop development with C++' workload."
-    }
-    $path = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
-    if (-not $path) {
-        throw "No Visual Studio installation with the C++ build tools was found. Add the 'Desktop development with C++' workload."
-    }
-    return $path.Trim()
-}
-
-function Enter-DevEnvironment {
-    $vs = Get-VsInstallPath
-    $cmd = Join-Path $vs "Common7\Tools\VsDevCmd.bat"
-    if (-not (Test-Path $cmd)) {
-        throw "VsDevCmd.bat was not found under $vs"
-    }
-    Write-Step "Entering the Visual Studio developer environment"
-    # Import the environment into this process. Dot-sourcing Launch-VsDevShell
-    # from a function would scope the PATH changes to the function.
-    $commandLine = '""{0}" -arch=x64 -host_arch=x64 >nul && set"' -f $cmd
-    $lines = & cmd.exe /c $commandLine
-    if ($LASTEXITCODE -ne 0) {
-        throw "VsDevCmd.bat failed with exit code $LASTEXITCODE"
-    }
-    foreach ($line in $lines) {
-        if ($line -match '^([^=]+)=(.*)$') {
-            [Environment]::SetEnvironmentVariable($matches[1], $matches[2], 'Process')
-        }
-    }
-}
-
-function Resolve-LibClang {
-    if ($env:LIBCLANG_PATH -and (Test-Path (Join-Path $env:LIBCLANG_PATH "libclang.dll"))) {
-        return $env:LIBCLANG_PATH
-    }
-    $programFiles = ${env:ProgramFiles}
-    if (-not $programFiles) { $programFiles = "C:\Program Files" }
-    $programW6432 = ${env:ProgramW6432}
-    $candidates = @(
-        (Join-Path $programFiles "LLVM\bin"),
-        "C:\Program Files\LLVM\bin"
-    )
-    if ($programW6432) { $candidates += (Join-Path $programW6432 "LLVM\bin") }
-    $found = @($candidates | Where-Object {
-            $_ -and (Test-Path (Join-Path $_ "libclang.dll"))
-        }) | Select-Object -First 1
-    if ($found) { return $found }
-    return $null
-}
-
-function Add-CMakeIfNeeded {
-    if (Get-Command cmake.exe -ErrorAction SilentlyContinue) { return }
-    $candidate = "C:\Program Files\CMake\bin"
-    if (Test-Path (Join-Path $candidate "cmake.exe")) {
-        $env:PATH = "$candidate;$env:PATH"
-    }
-}
+# Environment helpers live in windows-env.ps1.
 
 function Get-CargoMetadata {
     $json = (& cargo metadata --no-deps --format-version 1) -join "`n"
@@ -161,11 +98,10 @@ try {
         throw "libclang was not found. Install LLVM (winget install LLVM.LLVM) or pass -SkipBindgen."
     }
 
-    # The prebuilt ONNX Runtime static library is built against the dynamic
-    # CRT (/MD). Use the dynamic CRT by default so the native libraries and
-    # Rust agree; otherwise link.exe reports LNK2005/LNK1169 duplicate runtime
-    # symbols. Pass -StaticCrt only when every native library is /MT.
-    $env:SHERPA_STATIC_CRT = if ($StaticCrt) { "1" } else { "0" }
+    # The prebuilt sherpa-onnx/ONNX Runtime static libraries are built with
+    # the static MSVC CRT (/MT), so Rust and the source-build fallback must
+    # use it too.
+    $env:SHERPA_STATIC_CRT = "1"
     $rustFlags = @()
     if ($env:RUSTFLAGS) {
         # Preserve extra flags, but drop any existing crt-static selection so
@@ -182,9 +118,7 @@ try {
             $rustFlags += $token
         }
     }
-    if ($StaticCrt) {
-        $rustFlags += @("-C", "target-feature=+crt-static")
-    }
+    $rustFlags += @("-C", "target-feature=+crt-static")
     # sherpa-onnx's static libraries do not carry their Windows system
     # dependencies, so pass the libraries ONNX Runtime (ETW/registry) and
     # PortAudio need to the final link.
@@ -202,12 +136,23 @@ try {
     }
 
     if (-not $SkipTests) {
-        Write-Step "Running tests"
-        Invoke-Native cargo @("test", "--workspace")
+        Write-Step "Running tests (release)"
+        Invoke-Native cargo @("test", "--workspace", "--release")
     }
 
-    Write-Step "Building release binary"
-    Invoke-Native cargo @("build", "--release", "--locked")
+    if ($Diagnose) {
+        Write-Step "Building with verbose output (diagnose)"
+        $log = Join-Path $root "build-windows.log"
+        & cargo build --release --locked -vv 2>&1 | Tee-Object -FilePath $log
+        if ($LASTEXITCODE -ne 0) {
+            Select-String -Path $log -Pattern 'LNK2005|LNK2019|LNK1169|LNK2038|LNK1104' |
+                ForEach-Object { Write-Host $_.Line -ForegroundColor Yellow }
+            throw "cargo build failed; full log at $log"
+        }
+    } else {
+        Write-Step "Building release binary"
+        Invoke-Native cargo @("build", "--release", "--locked")
+    }
 
     $metadata = Get-CargoMetadata
     $package = $metadata.packages | Where-Object { $_.name -eq "transiel-gui" } | Select-Object -First 1
@@ -233,11 +178,7 @@ try {
     if ($dumpbin) {
         $dependencies = & $dumpbin.Source /dependents $binary | Out-String
         if ($dependencies -match "VCRUNTIME140|MSVCP140") {
-            if ($StaticCrt) {
-                Write-Warn "The executable still depends on the dynamic C++ runtime despite -StaticCrt."
-            } else {
-                Write-Step "Using the dynamic C++ runtime (VC++ Redistributable required)."
-            }
+            Write-Warn "The executable depends on the dynamic C++ runtime, but the prebuilt sherpa/ONNX Runtime libraries expect the static CRT."
         }
     }
 

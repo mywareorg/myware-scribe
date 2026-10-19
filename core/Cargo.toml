@@ -9,7 +9,15 @@ serde_json = "1"
 sha2 = "0.10"
 symphonia = { version = "0.5", features = ["all"] }
 rubato = "0.15"
-sherpa-rs-sys = { version = "0.6.8", default-features = false, features = ["static"] }
 whisper-rs = "0.16"
 num_cpus = "1"
 ureq = "2"
+
+# On Windows, use the crate's prebuilt static sherpa-onnx package (v1.12.9).
+# It is built with the static CRT and avoids compiling sherpa-onnx and ONNX
+# Runtime from source. Other platforms build from source.
+[target.'cfg(windows)'.dependencies]
+sherpa-rs-sys = { version = "0.6.8", default-features = false, features = ["static", "download-binaries"] }
+
+[target.'cfg(not(windows))'.dependencies]
+sherpa-rs-sys = { version = "0.6.8", default-features = false, features = ["static"] }
