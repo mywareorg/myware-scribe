@@ -70,7 +70,7 @@ transiel --cli models
 transiel --cli audio.mp3                         # default preset (speed)
 transiel --cli audio.mp3 --preset accuracy
 transiel --cli a.mp3 b.mp3 --output-dir out/     # batch
-transiel --cli audio.mp3 --join-speaker --no-timestamps
+transiel --cli audio.mp3 --no-timestamps
 transiel --cli audio.mp3 --progress-json         # line-delimited JSON events
 transiel --cli probe audio.mp3 120               # duration + RMS waveform
 ```
@@ -78,11 +78,27 @@ transiel --cli probe audio.mp3 120               # duration + RMS waveform
 Presets: `speed` (whisper `base.en`) and `accuracy` (whisper `large-v3-turbo`).
 
 Options: `--preset speed|accuracy`, `--num-speakers N`, `--auto-speakers`,
-`--output-dir`, `--no-timestamps`, `--join-speaker`, `--no-cache`,
+`--output-dir`, `--no-timestamps`, `--no-cache`,
 `--progress-json`.
 
-Output: `<audio-stem>-transcript.txt` (`[hh:mm:ss] SPEAKER N: text`), written
-next to the audio or into `--output-dir`.
+Output: `<audio-stem>-<preset>-transcription.txt` (`[hh:mm:ss] SPEAKER N: text`),
+written next to the audio or into `--output-dir`.
+
+## GUI
+
+Run `transiel` with no arguments. Add files/folders to the queue, choose a
+preset and speaker count, then Transcribe. Files added (or imported) while a run
+is active join the queue and are processed in a follow-up pass automatically.
+
+Completed rows stay in the queue: click one to revisit that file's transcript,
+speaker timeline, waveform and playback. Renaming speakers or saving writes back
+to that file's `.txt`. `Import → Transcription` adds an existing transcript as a
+completed item (a same-stem audio file beside it is attached automatically);
+`Import → Audio` queues a file for transcription.
+
+The queue (statuses, output paths and per-file statistics) is restored on
+restart; timeline and waveform data is re-derived on demand from the
+diarization cache.
 
 ## Deploy (Windows)
 
@@ -94,6 +110,8 @@ new terminal and run `transiel`. `undeploy.bat` removes the install
 
 ## Licenses
 
-- DiariZen model weights (not bundled) are CC BY-NC 4.0 / non-commercial.
+- `pyannote/segmentation-3.0` weights: MIT (via the sherpa-onnx ONNX conversion).
+- `wespeaker` speaker-embedding weights: CC BY 4.0 (attribution required).
+- Whisper GGML models: MIT.
 - The GUI bundles **Bootstrap Icons** (`gui/assets/bootstrap-icons.ttf`), MIT.
 - Other components retain their own licenses (MIT/Apache/etc.).

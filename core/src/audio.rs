@@ -119,6 +119,135 @@ fn resample(input: &[f32], in_rate: u32, out_rate: u32) -> Result<Vec<f32>, Stri
     Ok(output)
 }
 
+/// Downsampled RMS waveform at the file's native sample rate (no resampling).
+///
+/// This is much faster than [`probe`] because it skips the 16 kHz conversion
+/// and never stores the full sample buffer. Used for the UI timeline.
+pub fn waveform(path: &Path, buckets: usize) -> Result<(f64, Vec<f32>), String> {
+    let file = std::fs::File::open(path).map_err(|e| format!("open {}: {e}", path.display()))?;
+    let mss = MediaSourceStream::new(Box::new(file), Default::default());
+
+    let mut hint = Hint::new();
+    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+        hint.with_extension(ext);
+    }
+
+    let probed = symphonia::default::get_probe()
+        .format(
+            &hint,
+            mss,
+            &FormatOptions::default(),
+            &MetadataOptions::default(),
+        )
+        .map_err(|e| format!("probe {}: {e}", path.display()))?;
+    let mut format = probed.format;
+
+    let track = format
+        .tracks()
+        .iter()
+        .find(|t| t.codec_params.codec != CODEC_TYPE_NULL)
+        .ok_or_else(|| "no audio track".to_string())?;
+    let track_id = track.id;
+
+    let mut decoder = symphonia::default::get_codecs()
+        .make(&track.codec_params, &DecoderOptions::default())
+        .map_err(|e| format!("decoder: {e}"))?;
+
+    let mut sample_rate = track.codec_params.sample_rate.unwrap_or(0);
+    let mut total_frames: u64 = 0;
+    let mut chunk_frames: usize = 0;
+    let mut chunk_sq: f64 = 0.0;
+    let mut chunks: Vec<f32> = Vec::new();
+
+    loop {
+        let packet = match format.next_packet() {
+            Ok(packet) => packet,
+            Err(SymphoniaError::IoError(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                break;
+            }
+            Err(SymphoniaError::ResetRequired) => break,
+            Err(e) => return Err(format!("read packet: {e}")),
+        };
+        if packet.track_id() != track_id {
+            continue;
+        }
+        match decoder.decode(&packet) {
+            Ok(buf) => {
+                let spec = *buf.spec();
+                if sample_rate == 0 {
+                    sample_rate = spec.rate;
+                }
+                let frames = buf.frames();
+                let channels = spec.channels.count();
+                let mut sbuf = SampleBuffer::<f32>::new(frames as u64, spec);
+                sbuf.copy_interleaved_ref(buf);
+                let inter = sbuf.samples();
+                // One RMS bucket per ~10 ms of audio.
+                let target = (sample_rate as usize / 100).max(1);
+                for frame in 0..frames {
+                    let value = if channels == 1 {
+                        inter[frame]
+                    } else {
+                        let mut sum = 0.0f32;
+                        for channel in 0..channels {
+                            sum += inter[frame * channels + channel];
+                        }
+                        sum / channels as f32
+                    };
+                    chunk_sq += (value as f64) * (value as f64);
+                    chunk_frames += 1;
+                    total_frames += 1;
+                    if chunk_frames >= target {
+                        chunks.push((chunk_sq / chunk_frames as f64).sqrt() as f32);
+                        chunk_sq = 0.0;
+                        chunk_frames = 0;
+                    }
+                }
+            }
+            Err(SymphoniaError::DecodeError(_)) => continue,
+            Err(e) => return Err(format!("decode: {e}")),
+        }
+    }
+
+    if sample_rate == 0 || total_frames == 0 {
+        return Err("empty audio".to_string());
+    }
+    if chunk_frames > 0 {
+        chunks.push((chunk_sq / chunk_frames as f64).sqrt() as f32);
+    }
+
+    let peaks = bucketize_rms(&chunks, buckets);
+    Ok((total_frames as f64 / sample_rate as f64, peaks))
+}
+
+fn bucketize_rms(chunks: &[f32], buckets: usize) -> Vec<f32> {
+    let buckets = buckets.max(1);
+    let mut out = vec![0.0f32; buckets];
+    if chunks.is_empty() {
+        return out;
+    }
+    if chunks.len() >= buckets {
+        let per = chunks.len() as f64 / buckets as f64;
+        for (i, value) in out.iter_mut().enumerate() {
+            let start = (i as f64 * per) as usize;
+            let end = (((i + 1) as f64 * per) as usize).min(chunks.len());
+            if end > start {
+                let sum: f64 = chunks[start..end]
+                    .iter()
+                    .map(|v| (*v as f64) * (*v as f64))
+                    .sum();
+                *value = (sum / (end - start) as f64).sqrt() as f32;
+            }
+        }
+    } else {
+        for (i, value) in out.iter_mut().enumerate() {
+            let index = (i * chunks.len()) / buckets;
+            *value = chunks[index.min(chunks.len() - 1)];
+        }
+    }
+    out
+}
+
 /// Downsampled RMS waveform (one value per bucket) from mono samples.
 pub fn rms_peaks(samples: &[f32], buckets: usize) -> Vec<f32> {
     let buckets = buckets.max(1);

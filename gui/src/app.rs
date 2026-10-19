@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -9,7 +9,7 @@ use iced::keyboard::{self, Key, Modifiers};
 use serde::{Deserialize, Serialize};
 use iced::widget::{
     button, canvas, column, container, horizontal_space, mouse_area, pick_list, progress_bar,
-    rich_text, row, scrollable, stack, text, text_input, toggler, tooltip,
+    rich_text, row, scrollable, stack, text, text_editor, text_input, tooltip,
 };
 use iced::{
     font, mouse, Color, Element, Font, Length, Pixels, Point, Rectangle, Renderer, Shadow, Size,
@@ -33,15 +33,66 @@ const TIMELINE_BUCKETS: usize = 2000;
 enum ItemStatus {
     Pending,
     Running,
-    Done(PathBuf),
+    Done,
     Failed(String),
 }
 
 #[derive(Debug, Clone)]
 struct QueueItem {
+    /// Identity used to match backend events and to de-duplicate additions:
+    /// the audio path when one is known, otherwise the transcript path.
     path: PathBuf,
+    /// Audio file backing this item (None for transcript-only imports).
+    audio: Option<PathBuf>,
     status: ItemStatus,
     duration: Option<f64>,
+    /// Output transcript (None while pending, or for a missing file).
+    transcript: Option<PathBuf>,
+    /// Run statistics for transcripts produced by the pipeline.
+    stats: Option<backend::Stats>,
+    /// Diarization turns kept for the session; re-derived from the cache after
+    /// a restart.
+    turns: Vec<backend::Turn>,
+    peaks: Arc<Vec<f32>>,
+}
+
+/// Persisted queue entry. Runtime-only data (turns, waveform) is re-derived
+/// on demand and is intentionally not stored.
+#[derive(Serialize, Deserialize)]
+struct QueueState {
+    #[serde(default)]
+    items: Vec<QueueRecord>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct QueueRecord {
+    audio: Option<String>,
+    transcript: Option<String>,
+    duration: Option<f64>,
+    /// "pending" | "running" | "done" | "failed"
+    #[serde(default)]
+    status: String,
+    message: Option<String>,
+    stats: Option<backend::Stats>,
+    /// Downsampled RMS waveform, so completed items render their timeline
+    /// immediately after a restart.
+    #[serde(default)]
+    peaks: Vec<f32>,
+}
+
+/// A completed item's content while it is being viewed.
+struct ItemView {
+    index: usize,
+    /// The file the transcript was loaded from (txt or json).
+    source: PathBuf,
+    transcript: String,
+    lines: Vec<DocLine>,
+    turns: Vec<backend::Turn>,
+    peaks: Arc<Vec<f32>>,
+    duration: Option<f32>,
+    audio: Option<PathBuf>,
+    /// Where edits are written; None means the view is read-only.
+    output: Option<PathBuf>,
 }
 
 fn is_audio(path: &Path) -> bool {
@@ -68,18 +119,15 @@ fn audio_files_in(dir: &Path) -> Vec<PathBuf> {
 struct DocLine {
     raw: String,
     speaker: String,
-    confidence: f32,
     start: Option<f32>,
 }
 
-impl DocLine {
-    fn low_confidence(&self) -> bool {
-        self.confidence < CONFIDENCE_MIN
-    }
+/// Right-click line editor: the line index plus its editable fields.
+struct LineEdit {
+    index: usize,
+    speaker: String,
+    content: text_editor::Content,
 }
-
-/// Lines at or below this average log-probability are flagged as low confidence.
-const CONFIDENCE_MIN: f32 = -0.6;
 
 /// Cadence at which streamed utterances are revealed in the textbox.
 const REVEAL_INTERVAL_S: f32 = 0.15;
@@ -279,15 +327,12 @@ impl Preset {
 #[derive(Default, Serialize, Deserialize)]
 struct Settings {
     preset: Option<String>,
-    timestamps: Option<bool>,
-    join_speaker: Option<bool>,
     sms_mode: Option<bool>,
-    dark_mode: Option<bool>,
     num_speakers: Option<i32>,
-    confidence: Option<bool>,
     font_scale: Option<f32>,
     playback_speed: Option<f32>,
     waveform_zoom: Option<f32>,
+    follow_playhead: Option<bool>,
     window_width: Option<f32>,
     window_height: Option<f32>,
     window_x: Option<f32>,
@@ -309,7 +354,6 @@ struct Scheme {
     sms0: Color,
     sms1: Color,
     warn_tint: Color,
-    warn_tint_alt: Color,
     search_hl: Color,
     search_active: Color,
     tip_bg: Color,
@@ -317,49 +361,25 @@ struct Scheme {
 }
 
 impl Scheme {
-    fn for_theme(dark: bool) -> Scheme {
-        if dark {
-            Scheme {
-                panel_bg: Color::from_rgb(0.094, 0.094, 0.145),
-                dialog_bg: Color::from_rgb(0.118, 0.118, 0.180),
-                track: Color::from_rgb(0.067, 0.067, 0.106),
-                bar_track: Color::from_rgba(0.357, 0.808, 0.980, 0.24),
-                timeline_bg: Color::from_rgb(0.22, 0.22, 0.26),
-                blue: Color::from_rgb(0.357, 0.808, 0.980),
-                pink: Color::from_rgb(0.961, 0.663, 0.722),
-                green: Color::from_rgb(0.30, 0.72, 0.42),
-                ink: Color::from_rgb(0.067, 0.067, 0.106),
-                text: Color::from_rgb(0.93, 0.94, 0.98),
-                sms0: Color::from_rgb(0.357, 0.808, 0.980),
-                sms1: Color::from_rgb(0.961, 0.663, 0.722),
-                warn_tint: Color::from_rgba(0.537, 0.749, 1.0, 0.30),
-                warn_tint_alt: Color::from_rgba(0.953, 0.545, 0.659, 0.16),
-                search_hl: Color::from_rgba(1.0, 0.85, 0.35, 0.35),
-                search_active: Color::from_rgba(1.0, 0.72, 0.25, 0.65),
-                tip_bg: Color::from_rgb(0.24, 0.24, 0.32),
-                tip_text: Color::from_rgb(0.93, 0.94, 0.98),
-            }
-        } else {
-            Scheme {
-                panel_bg: Color::from_rgb(0.96, 0.97, 0.995),
-                dialog_bg: Color::from_rgb(0.99, 0.99, 1.0),
-                track: Color::from_rgb(0.88, 0.88, 0.93),
-                bar_track: Color::from_rgb(0.88, 0.88, 0.93),
-                timeline_bg: Color::from_rgb(0.88, 0.88, 0.93),
-                blue: Color::from_rgb(0.357, 0.808, 0.980),
-                pink: Color::from_rgb(0.961, 0.663, 0.722),
-                green: Color::from_rgb(0.30, 0.72, 0.42),
-                ink: Color::from_rgb(0.13, 0.13, 0.17),
-                text: Color::from_rgb(0.13, 0.13, 0.17),
-                sms0: Color::from_rgb(0.357, 0.808, 0.980),
-                sms1: Color::from_rgb(0.961, 0.663, 0.722),
-                warn_tint: Color::from_rgba(0.529, 0.867, 1.0, 0.35),
-                warn_tint_alt: Color::from_rgba(0.961, 0.663, 0.722, 0.22),
-                search_hl: Color::from_rgba(1.0, 0.85, 0.3, 0.5),
-                search_active: Color::from_rgba(1.0, 0.72, 0.2, 0.8),
-                tip_bg: Color::from_rgb(0.99, 0.99, 1.0),
-                tip_text: Color::from_rgb(0.13, 0.13, 0.17),
-            }
+    fn light() -> Scheme {
+        Scheme {
+            panel_bg: Color::from_rgb(0.96, 0.97, 0.995),
+            dialog_bg: Color::from_rgb(0.99, 0.99, 1.0),
+            track: Color::from_rgb(0.88, 0.88, 0.93),
+            bar_track: Color::from_rgb(0.88, 0.88, 0.93),
+            timeline_bg: Color::from_rgb(0.88, 0.88, 0.93),
+            blue: Color::from_rgb(0.357, 0.808, 0.980),
+            pink: Color::from_rgb(0.961, 0.663, 0.722),
+            green: Color::from_rgb(0.30, 0.72, 0.42),
+            ink: Color::from_rgb(0.13, 0.13, 0.17),
+            text: Color::from_rgb(0.13, 0.13, 0.17),
+            sms0: Color::from_rgb(0.357, 0.808, 0.980),
+            sms1: Color::from_rgb(0.961, 0.663, 0.722),
+            warn_tint: Color::from_rgba(0.529, 0.867, 1.0, 0.35),
+            search_hl: Color::from_rgba(1.0, 0.85, 0.3, 0.5),
+            search_active: Color::from_rgba(1.0, 0.72, 0.2, 0.8),
+            tip_bg: Color::from_rgb(0.99, 0.99, 1.0),
+            tip_text: Color::from_rgb(0.13, 0.13, 0.17),
         }
     }
 }
@@ -377,6 +397,14 @@ enum Status {
     Done,
     Cancelled,
     Error(String),
+}
+
+/// One line in the completion summary: a file name (styled prominently) or
+/// ordinary statistics text.
+#[derive(Debug, Clone)]
+enum SummaryLine {
+    File(String),
+    Body(String),
 }
 
 #[derive(Debug, Clone)]
@@ -404,16 +432,10 @@ pub enum Message {
     CloseHelp,
     Noop,
     OpenSummary,
-    TimestampsToggled(bool),
-    JoinSpeakerToggled(bool),
-    ToggleOptions,
     SmsToggled(bool),
-    DarkToggled(bool),
     SpeakerCountChanged(SpeakerOpt),
-    ConfidenceToggled(bool),
     TranscriptScrolled(scrollable::Viewport),
     WindowEvent(iced::window::Event),
-    TimelineLoaded(PathBuf, Option<(f64, Vec<f32>)>),
     Seek(f32),
     PlayerToggle,
     FocusFind,
@@ -425,13 +447,19 @@ pub enum Message {
     ShortcutPlay,
     SeekBy(f32),
     ImportPicked(Option<PathBuf>),
-    ImportLoaded(Option<String>),
+    ImportLoaded(Option<(PathBuf, String)>),
     ImportChoice(ImportKind),
     CopyTranscript,
     SaveTranscript,
     RevealOutput,
     AudioPicked(Option<PathBuf>),
     OpenRename,
+    EditLine(usize),
+    LineEditSpeaker(String),
+    LineEditAction(text_editor::Action),
+    SaveLineEdit,
+    CancelLineEdit,
+    DeleteLineEdit,
     CloseSummary,
     AddFiles,
     FilesPicked(Option<Vec<PathBuf>>),
@@ -439,9 +467,16 @@ pub enum Message {
     FolderPicked(Option<PathBuf>),
     RemoveItem(usize),
     ClearQueue,
-    BatchContinue,
-    BatchCancel,
     ItemDurationProbed(PathBuf, Option<f64>),
+    ViewItem(usize),
+    ViewDetailsLoaded(
+        usize,
+        PathBuf,
+        Option<Vec<backend::Turn>>,
+        Option<(f64, Vec<f32>)>,
+    ),
+    QueueWaveformLoaded(PathBuf, Option<(f64, Vec<f32>)>),
+    RequeueItem(usize),
 }
 
 pub struct App {
@@ -471,19 +506,19 @@ pub struct App {
     rename_open: bool,
     rename_fields: Vec<(String, String)>,
     rename_focus: usize,
-    batch_runs: Vec<(String, backend::Stats)>,
-    timestamps: bool,
-    join_speaker: bool,
-    options_open: bool,
     sms_mode: bool,
-    dark_mode: bool,
     num_speakers: Option<i32>,
-    confidence: bool,
     transcript_viewport: f32,
     transcript_content: f32,
     transcript_at_bottom: bool,
     transcript_dirty: bool,
     follow_offset: Option<f32>,
+    /// Horizontal target of the last programmatic transcript scroll, used to
+    /// distinguish it from a user scroll.
+    scroll_target: Option<f32>,
+    /// True after the user scroll-seeks the live transcript: the highlight then
+    /// follows the playhead instead of the newest streamed line.
+    scroll_seek: bool,
     font_scale: f32,
     follow_playhead: bool,
     console_open: bool,
@@ -494,7 +529,6 @@ pub struct App {
     search_index: usize,
     playback_speed: f32,
     last_tick: Option<Instant>,
-    pulse: f32,
     activity_frame: usize,
     window_size: Size,
     window_position: Option<Point>,
@@ -508,7 +542,16 @@ pub struct App {
     batch: bool,
     current: Option<usize>,
     current_index: Option<usize>,
-    batch_warning: bool,
+    /// Index of the completed queue item currently shown, if any.
+    selected: Option<usize>,
+    selected_view: Option<ItemView>,
+    /// Error shown in the transcript pane when a completed item cannot load.
+    view_error: Option<String>,
+    /// Right-clicked line currently being edited.
+    line_edit: Option<LineEdit>,
+    /// Background waveform backfill for completed items without cached peaks.
+    backfill_active: bool,
+    waveform_tried: HashSet<PathBuf>,
 }
 
 impl Default for App {
@@ -551,25 +594,21 @@ impl App {
             rename_open: false,
             rename_fields: Vec::new(),
             rename_focus: 0,
-            batch_runs: Vec::new(),
-            timestamps: settings.timestamps.unwrap_or(true),
-            join_speaker: settings.join_speaker.unwrap_or(false),
-            options_open: false,
             sms_mode: settings.sms_mode.unwrap_or(false),
-            dark_mode: settings.dark_mode.unwrap_or(false),
             num_speakers: match settings.num_speakers {
                 None => Some(2),
                 Some(0) => None,
                 Some(count) => Some(count),
             },
-            confidence: settings.confidence.unwrap_or(true),
             transcript_viewport: 0.0,
             transcript_content: 0.0,
             transcript_at_bottom: true,
             transcript_dirty: false,
             follow_offset: None,
+            scroll_target: None,
+            scroll_seek: false,
             font_scale: settings.font_scale.unwrap_or(1.0),
-            follow_playhead: true,
+            follow_playhead: settings.follow_playhead.unwrap_or(true),
             console_open: false,
             console_lines: Vec::new(),
             toast: None,
@@ -579,7 +618,6 @@ impl App {
             search_index: 0,
             playback_speed: settings.playback_speed.unwrap_or(1.0),
             last_tick: None,
-            pulse: 0.0,
             activity_frame: 0,
             window_size: Self::window_size_from(&settings),
             window_position: match (settings.window_x, settings.window_y) {
@@ -591,11 +629,16 @@ impl App {
             events: Arc::new(Mutex::new(VecDeque::new())),
             pid: Arc::new(AtomicU32::new(0)),
             cancelled: Arc::new(AtomicBool::new(false)),
-            queue: Vec::new(),
+            queue: Self::load_queue(),
             batch: false,
             current: None,
             current_index: None,
-            batch_warning: false,
+            selected: None,
+            selected_view: None,
+            view_error: None,
+            line_edit: None,
+            backfill_active: false,
+            waveform_tried: HashSet::new(),
         }
     }
 
@@ -628,15 +671,12 @@ impl App {
         }
         let settings = Settings {
             preset: Some(self.preset.arg().to_string()),
-            timestamps: Some(self.timestamps),
-            join_speaker: Some(self.join_speaker),
             sms_mode: Some(self.sms_mode),
-            dark_mode: Some(self.dark_mode),
             num_speakers: Some(self.num_speakers.unwrap_or(0)),
-            confidence: Some(self.confidence),
             font_scale: Some(self.font_scale),
             playback_speed: Some(self.playback_speed),
             waveform_zoom: Some(self.waveform_zoom),
+            follow_playhead: Some(self.follow_playhead),
             window_width: Some(self.window_size.width),
             window_height: Some(self.window_size.height),
             window_x: self.window_position.map(|point| point.x),
@@ -649,6 +689,375 @@ impl App {
         if let Ok(text) = serde_json::to_string_pretty(&settings) {
             let _ = std::fs::write(path, text);
         }
+    }
+
+    /// Queue state lives beside the settings file.
+    fn queue_path() -> Option<PathBuf> {
+        Self::settings_path().map(|path| path.with_file_name("queue.json"))
+    }
+
+    fn load_queue() -> Vec<QueueItem> {
+        let Some(path) = Self::queue_path() else {
+            return Vec::new();
+        };
+        let Ok(text) = std::fs::read_to_string(path) else {
+            return Vec::new();
+        };
+        let Ok(state) = serde_json::from_str::<QueueState>(&text) else {
+            return Vec::new();
+        };
+        state
+            .items
+            .into_iter()
+            .filter_map(|record| {
+                let audio = record.audio.map(PathBuf::from);
+                let transcript = record.transcript.map(PathBuf::from);
+                let path = audio.clone().or_else(|| transcript.clone())?;
+                let mut status = match record.status.as_str() {
+                    // A run interrupted by a restart is simply pending again.
+                    "running" => ItemStatus::Pending,
+                    "failed" => ItemStatus::Failed(
+                        record.message.unwrap_or_else(|| "failed".to_string()),
+                    ),
+                    "done" => ItemStatus::Done,
+                    _ => ItemStatus::Pending,
+                };
+                if matches!(status, ItemStatus::Pending) && !path.is_file() {
+                    status = ItemStatus::Failed("file not found".to_string());
+                }
+                Some(QueueItem {
+                    path,
+                    audio,
+                    status,
+                    duration: record.duration,
+                    transcript,
+                    stats: record.stats,
+                    turns: Vec::new(),
+                    peaks: Arc::new(record.peaks),
+                })
+            })
+            .collect()
+    }
+
+    fn save_queue(&self) {
+        let Some(path) = Self::queue_path() else {
+            return;
+        };
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let state = QueueState {
+            items: self
+                .queue
+                .iter()
+                .map(|item| QueueRecord {
+                    audio: item.audio.as_ref().map(|path| path.display().to_string()),
+                    transcript: item.transcript.as_ref().map(|path| path.display().to_string()),
+                    duration: item.duration,
+                    status: match &item.status {
+                        ItemStatus::Pending => "pending",
+                        ItemStatus::Running => "running",
+                        ItemStatus::Done => "done",
+                        ItemStatus::Failed(_) => "failed",
+                    }
+                    .to_string(),
+                    message: match &item.status {
+                        ItemStatus::Failed(message) => Some(message.clone()),
+                        _ => None,
+                    },
+                    stats: item.stats.clone(),
+                    peaks: item.peaks.as_ref().clone(),
+                })
+                .collect(),
+        };
+        if let Ok(text) = serde_json::to_string_pretty(&state) {
+            let _ = std::fs::write(path, text);
+        }
+    }
+
+    // ---- displayed view (live run vs. a selected completed item) ----
+
+    fn shown_lines(&self) -> &[DocLine] {
+        match &self.selected_view {
+            Some(view) => &view.lines,
+            None => &self.lines,
+        }
+    }
+
+    fn shown_turns(&self) -> &[backend::Turn] {
+        match &self.selected_view {
+            Some(view) => &view.turns,
+            None => &self.turns,
+        }
+    }
+
+    fn shown_peaks(&self) -> &[f32] {
+        match &self.selected_view {
+            Some(view) => &view.peaks,
+            None => &self.peaks,
+        }
+    }
+
+    fn shown_peaks_arc(&self) -> Arc<Vec<f32>> {
+        match &self.selected_view {
+            Some(view) => view.peaks.clone(),
+            None => self.peaks.clone(),
+        }
+    }
+
+    fn shown_duration(&self) -> Option<f32> {
+        match &self.selected_view {
+            Some(view) => view.duration,
+            None => self.timeline_duration,
+        }
+    }
+
+    fn shown_audio(&self) -> Option<&Path> {
+        match &self.selected_view {
+            Some(view) => view.audio.as_deref(),
+            None => self.peaks_for.as_deref(),
+        }
+    }
+
+    fn shown_output(&self) -> Option<&Path> {
+        match &self.selected_view {
+            Some(view) => view.output.as_deref(),
+            None => self.output_txt.as_deref(),
+        }
+    }
+
+    fn shown_transcript(&self) -> &str {
+        match &self.selected_view {
+            Some(view) => &view.transcript,
+            None => &self.transcript,
+        }
+    }
+
+    /// True when the queue holds at least one completed transcript.
+    fn has_results(&self) -> bool {
+        self.queue
+            .iter()
+            .any(|item| matches!(item.status, ItemStatus::Done) && item.transcript.is_some())
+    }
+
+    /// Audio file name of the item currently being transcribed.
+    fn current_file_name(&self) -> Option<String> {
+        if !matches!(self.status, Status::Running) {
+            return None;
+        }
+        let index = self.current.or(self.current_index)?;
+        let item = self.queue.get(index)?;
+        let path = item.audio.as_deref().unwrap_or(item.path.as_path());
+        let name = path.file_name().and_then(|name| name.to_str())?;
+        // Keep the progress label on one line for very long file names.
+        const MAX: usize = 56;
+        if name.chars().count() <= MAX {
+            Some(name.to_string())
+        } else {
+            let mut short: String = name.chars().take(MAX - 1).collect();
+            short.push('\u{2026}');
+            Some(short)
+        }
+    }
+
+    /// Playback is available for any shown transcript with audio, except the
+    /// live file while it is still being transcribed.
+    fn player_ready(&self) -> bool {
+        self.shown_audio().is_some()
+            && !(self.selected_view.is_none() && matches!(self.status, Status::Running))
+    }
+
+    /// Keep a pinned completed view across a file transition when its audio is
+    /// playing or has just finished.
+    fn keep_pinned_view(&self) -> bool {
+        self.selected_view.is_some()
+            && self
+                .player
+                .as_ref()
+                .is_some_and(|player| player.is_playing() || player.finished())
+    }
+
+    fn completed_count(&self) -> usize {
+        self.queue
+            .iter()
+            .filter(|item| matches!(item.status, ItemStatus::Done))
+            .count()
+    }
+
+    // ---- completed-item selection ----
+
+    /// Open a completed queue item (or return to the live run when the running
+    /// row is clicked).
+    fn view_item(&mut self, index: usize) -> Task<Message> {
+        // Clicking the row that is already on screen (e.g. while its audio is
+        // playing) is not a view change.
+        if self.selected == Some(index) && self.selected_view.is_some() {
+            return Task::none();
+        }
+        self.open_item_view(index, None)
+    }
+
+    fn open_item_view(
+        &mut self,
+        index: usize,
+        preloaded: Option<(String, Option<PathBuf>)>,
+    ) -> Task<Message> {
+        let Some(item) = self.queue.get(index) else {
+            return Task::none();
+        };
+        if matches!(item.status, ItemStatus::Running) {
+            self.return_to_live();
+            return Task::none();
+        }
+        if !matches!(item.status, ItemStatus::Done) {
+            return Task::none();
+        }
+        let Some(source) = item.transcript.clone() else {
+            return Task::none();
+        };
+        let audio = item.audio.clone();
+        let duration = item.duration.map(|seconds| seconds as f32);
+        let turns = item.turns.clone();
+        let peaks = item.peaks.clone();
+
+        self.player = None;
+        self.playhead = 0.0;
+        self.last_tick = None;
+        self.search_query.clear();
+        self.search_index = 0;
+        self.follow_offset = None;
+        self.scroll_seek = false;
+        self.transcript_viewport = 0.0;
+        self.transcript_content = 0.0;
+        self.transcript_at_bottom = true;
+
+        let loaded = match preloaded {
+            Some((text, output)) => Some((text, output)),
+            None => match std::fs::read_to_string(&source) {
+                Ok(text) => {
+                    // JSON imports are displayed read-only; only plain .txt
+                    // transcripts are safe to edit in place.
+                    let editable = source
+                        .extension()
+                        .and_then(|ext| ext.to_str())
+                        .map(|ext| ext.eq_ignore_ascii_case("txt"))
+                        .unwrap_or(false);
+                    Some((text, editable.then(|| source.clone())))
+                }
+                Err(error) => {
+                    self.selected = Some(index);
+                    self.selected_view = Some(ItemView {
+                        index,
+                        source: source.clone(),
+                        transcript: String::new(),
+                        lines: Vec::new(),
+                        turns: Vec::new(),
+                        peaks: Arc::new(Vec::new()),
+                        duration,
+                        audio,
+                        output: None,
+                    });
+                    self.view_error =
+                        Some(format!("Could not read {}: {error}", source.display()));
+                    return scrollable::snap_to(
+                        transcript_id(),
+                        scrollable::RelativeOffset { x: 0.0, y: 0.0 },
+                    );
+                }
+            },
+        };
+        let Some((text, output)) = loaded else {
+            return Task::none();
+        };
+
+        let lines = parse_lines(&text);
+        self.view_error = None;
+        self.selected = Some(index);
+        self.selected_view = Some(ItemView {
+            index,
+            source: source.clone(),
+            transcript: text,
+            lines,
+            turns,
+            peaks,
+            duration,
+            audio: audio.clone(),
+            output,
+        });
+
+        self.scroll_target = Some(0.0);
+        let mut tasks = vec![scrollable::snap_to(
+            transcript_id(),
+            scrollable::RelativeOffset { x: 0.0, y: 0.0 },
+        )];
+
+        // A persisted waveform (and duration) renders immediately; only the
+        // speaker turns still need to be re-derived from the diarization cache.
+        let needs_probe = self
+            .selected_view
+            .as_ref()
+            .is_some_and(|view| view.peaks.is_empty() || view.duration.unwrap_or(0.0) <= 0.0);
+        let needs_turns = self
+            .selected_view
+            .as_ref()
+            .is_some_and(|view| view.turns.is_empty());
+        if let Some(audio) = audio {
+            let num_speakers = self.queue[index]
+                .stats
+                .as_ref()
+                .and_then(|stats| stats.num_speakers);
+            if needs_probe {
+                tasks.push(Task::perform(
+                    async move { backend::load_completed(audio, num_speakers, TIMELINE_BUCKETS) },
+                    move |(turns, probe)| {
+                        Message::ViewDetailsLoaded(index, source.clone(), turns, probe)
+                    },
+                ));
+            } else if needs_turns {
+                tasks.push(Task::perform(
+                    async move { backend::load_turns(&audio, num_speakers) },
+                    move |turns| {
+                        Message::ViewDetailsLoaded(index, source.clone(), turns, None)
+                    },
+                ));
+            }
+        }
+        Task::batch(tasks)
+    }
+
+    /// Drop a pinned completed-item view and show the live run again.
+    fn return_to_live(&mut self) {
+        self.selected = None;
+        self.selected_view = None;
+        self.view_error = None;
+        self.player = None;
+        self.playhead = 0.0;
+        self.last_tick = None;
+        self.follow_offset = None;
+        self.scroll_target = None;
+        self.scroll_seek = false;
+        self.search_index = 0;
+    }
+
+    /// Find an audio file beside the transcript with the same stem.
+    fn matching_audio(transcript: &Path) -> Option<PathBuf> {
+        let parent = transcript.parent()?;
+        let stem = transcript.file_stem()?.to_str()?;
+        let mut candidates: Vec<PathBuf> = std::fs::read_dir(parent)
+            .ok()?
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.is_file()
+                    && is_audio(path)
+                    && path
+                        .file_stem()
+                        .and_then(|name| name.to_str())
+                        .is_some_and(|name| name.eq_ignore_ascii_case(stem))
+            })
+            .collect();
+        candidates.sort();
+        candidates.into_iter().next()
     }
 
     /// Window settings seeded from the persisted size/position.
@@ -688,29 +1097,16 @@ impl App {
     }
 
     pub fn theme(&self) -> iced::Theme {
-        if self.dark_mode {
-            iced::Theme::custom(
-                "Transgender Dark".to_string(),
-                iced::theme::Palette {
-                    background: Color::from_rgb(0.094, 0.094, 0.145),
-                    text: Color::from_rgb(0.93, 0.94, 0.98),
-                    primary: Color::from_rgb(0.357, 0.808, 0.980),
-                    success: Color::from_rgb(0.357, 0.808, 0.980),
-                    danger: Color::from_rgb(0.961, 0.663, 0.722),
-                },
-            )
-        } else {
-            iced::Theme::custom(
-                "Transgender".to_string(),
-                iced::theme::Palette {
-                    background: Color::WHITE,
-                    text: Color::from_rgb(0.13, 0.13, 0.17),
-                    primary: Color::from_rgb(0.357, 0.808, 0.980),
-                    success: Color::from_rgb(0.357, 0.808, 0.980),
-                    danger: Color::from_rgb(0.961, 0.663, 0.722),
-                },
-            )
-        }
+        iced::Theme::custom(
+            "Transgender".to_string(),
+            iced::theme::Palette {
+                background: Color::WHITE,
+                text: Color::from_rgb(0.13, 0.13, 0.17),
+                primary: Color::from_rgb(0.357, 0.808, 0.980),
+                success: Color::from_rgb(0.357, 0.808, 0.980),
+                danger: Color::from_rgb(0.961, 0.663, 0.722),
+            },
+        )
     }
 
     pub fn subscription(&self) -> Subscription<Message> {
@@ -746,30 +1142,8 @@ impl App {
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
         match message {
-            Message::TimestampsToggled(value) => {
-                self.timestamps = value;
-                self.save_settings();
-                Task::none()
-            }
-            Message::JoinSpeakerToggled(value) => {
-                self.join_speaker = value;
-                self.save_settings();
-                Task::none()
-            }
-            Message::ToggleOptions => {
-                if self.queue.is_empty() {
-                    return Task::none();
-                }
-                self.options_open = !self.options_open;
-                Task::none()
-            }
             Message::SmsToggled(value) => {
                 self.sms_mode = value;
-                self.save_settings();
-                Task::none()
-            }
-            Message::DarkToggled(value) => {
-                self.dark_mode = value;
                 self.save_settings();
                 Task::none()
             }
@@ -781,11 +1155,6 @@ impl App {
                 self.save_settings();
                 Task::none()
             }
-            Message::ConfidenceToggled(value) => {
-                self.confidence = value;
-                self.save_settings();
-                Task::none()
-            }
             Message::TranscriptScrolled(viewport) => {
                 self.transcript_viewport = viewport.bounds().height;
                 self.transcript_content = viewport.content_bounds().height;
@@ -793,16 +1162,27 @@ impl App {
                 let viewport_h = viewport.bounds().height;
                 let content_h = viewport.content_bounds().height;
                 self.transcript_at_bottom = offset + viewport_h >= content_h - 8.0;
-                // Any scroll that doesn't match the offset follow just set
-                // means the user scrolled: disengage follow.
-                if self.follow_playhead && !matches!(self.status, Status::Running) {
-                    if let Some(expected) = self.follow_offset {
-                        if (offset - expected).abs() > 6.0 {
-                            self.follow_playhead = false;
-                            self.follow_offset = None;
-                            self.save_settings();
-                        }
-                    }
+
+                let following = self.follow_playhead;
+                let follows = following
+                    && self
+                        .follow_offset
+                        .is_some_and(|expected| (offset - expected).abs() <= 6.0);
+                let programmatic = self
+                    .scroll_target
+                    .take()
+                    .is_some_and(|target| (offset - target).abs() <= 6.0);
+
+                // A scroll that doesn't match follow/programmatic targets is a
+                // user scroll: stop auto-following and move the playhead to the
+                // line now in view.
+                if following && !follows {
+                    self.follow_playhead = false;
+                    self.follow_offset = None;
+                    self.save_settings();
+                }
+                if !follows && !programmatic {
+                    self.seek_from_scroll(offset, viewport_h);
                 }
                 Task::none()
             }
@@ -822,21 +1202,82 @@ impl App {
                 }
                 Task::none()
             }
-            Message::TimelineLoaded(path, result) => {
-                if self.peaks_for.as_deref() == Some(path.as_path()) {
-                    if let Some((duration, peaks)) = result {
-                        if duration > 0.0 {
-                            self.timeline_duration = Some(duration as f32);
+            Message::ViewDetailsLoaded(index, source, turns, probe) => {
+                let mut changed = false;
+                if let Some(view) = self.selected_view.as_mut() {
+                    if view.index == index && view.source == source {
+                        if let Some(turns) = turns {
+                            view.turns = turns;
                         }
-                        if !peaks.is_empty() {
-                            self.peaks = Arc::new(peaks);
+                        if let Some((duration, peaks)) = probe {
+                            if duration > 0.0 {
+                                view.duration = Some(duration as f32);
+                            }
+                            if !peaks.is_empty() {
+                                view.peaks = Arc::new(peaks);
+                            }
+                        }
+                        changed = true;
+                    }
+                }
+                if changed {
+                    if let Some(view) = &self.selected_view {
+                        if let Some(item) = self.queue.get_mut(index) {
+                            item.turns = view.turns.clone();
+                            item.peaks = view.peaks.clone();
+                            item.duration = view.duration.map(|seconds| seconds as f64);
                         }
                     }
+                    self.save_queue();
+                }
+                Task::none()
+            }
+            Message::QueueWaveformLoaded(path, probe) => {
+                self.backfill_active = false;
+                if let Some((duration, peaks)) = probe {
+                    let peaks = Arc::new(peaks);
+                    if let Some(item) = self
+                        .queue
+                        .iter_mut()
+                        .find(|item| item.audio.as_deref() == Some(path.as_path()))
+                    {
+                        item.duration = Some(duration);
+                        item.peaks = peaks.clone();
+                    }
+                    if let Some(view) = self.selected_view.as_mut() {
+                        if view.audio.as_deref() == Some(path.as_path()) {
+                            view.duration = Some(duration as f32);
+                            view.peaks = peaks;
+                        }
+                    }
+                    self.save_queue();
+                }
+                self.backfill_next_waveform()
+            }
+            Message::ViewItem(index) => self.view_item(index),
+            Message::RequeueItem(index) => {
+                if index >= self.queue.len() || self.queue[index].audio.is_none() {
+                    self.toast = Some(("No audio file to transcribe".to_string(), Instant::now()));
+                    return Task::none();
+                }
+                let item = &mut self.queue[index];
+                item.status = ItemStatus::Pending;
+                item.transcript = None;
+                item.stats = None;
+                item.turns.clear();
+                item.peaks = Arc::new(Vec::new());
+                self.selected = None;
+                self.selected_view = None;
+                self.view_error = None;
+                self.save_queue();
+                self.toast = Some(("Queued for transcription".to_string(), Instant::now()));
+                if !matches!(self.status, Status::Running) {
+                    self.begin_batch(false);
                 }
                 Task::none()
             }
             Message::Seek(seconds) => {
-                let max = self.timeline_duration.unwrap_or(0.0).max(0.0);
+                let max = self.shown_duration().unwrap_or(0.0).max(0.0);
                 self.playhead = seconds.clamp(0.0, max);
                 self.last_tick = Some(Instant::now());
                 if let Some(player) = &self.player {
@@ -845,25 +1286,7 @@ impl App {
                 Task::none()
             }
             Message::PlayerToggle => {
-                let ready = self.timeline_duration.unwrap_or(0.0) > 0.0;
-                if ready {
-                    if self.player.is_none() {
-                        if let Some(path) = self.peaks_for.clone() {
-                            self.player = Player::new(&path);
-                        }
-                        if let Some(player) = &self.player {
-                            player.seek(self.playhead, self.playback_speed);
-                        }
-                    }
-                    if self.player.as_ref().is_some_and(|player| player.finished()) {
-                        self.playhead = 0.0;
-                    }
-                    if let Some(player) = &self.player {
-                        player.set_speed(self.playback_speed);
-                        player.toggle();
-                    }
-                    self.last_tick = Some(Instant::now());
-                }
+                self.toggle_playback();
                 Task::none()
             }
             Message::FocusFind => text_input::focus(find_id()),
@@ -896,13 +1319,12 @@ impl App {
                 Task::none()
             }
             Message::SelectLine(index) => {
-                if let Some(line) = self.lines.get(index) {
+                if let Some(line) = self.shown_lines().get(index) {
                     if let Some(start) = line.start {
-                        let max = self.timeline_duration.unwrap_or(start);
+                        let max = self.shown_duration().unwrap_or(start);
                         self.playhead = start.clamp(0.0, max);
-                        self.follow_playhead = true;
                         self.follow_offset = None;
-                        self.save_settings();
+                        self.scroll_seek = true;
                         if let Some(player) = &self.player {
                             player.seek(self.playhead, self.playback_speed);
                         }
@@ -934,7 +1356,11 @@ impl App {
                 }
             }
             Message::EnterSubmit => {
-                if self.rename_open {
+                if self.line_edit.is_some() {
+                    // Enter saves the line editor from any of its fields.
+                    self.apply_line_edit();
+                    Task::none()
+                } else if self.rename_open {
                     self.apply_rename();
                     Task::none()
                 } else {
@@ -947,7 +1373,9 @@ impl App {
                 }
             }
             Message::ShiftEnterSubmit => {
-                if !self.rename_open {
+                if self.line_edit.is_some() {
+                    return Task::none();
+                } else if !self.rename_open {
                     let matches = self.matching_lines();
                     if !matches.is_empty() {
                         self.search_index = (self.search_index + matches.len() - 1) % matches.len();
@@ -972,13 +1400,26 @@ impl App {
                 Task::none()
             }
             Message::ToggleFollowPlayhead => {
-                // Follow is forced on while a transcription is running.
-                if matches!(self.status, Status::Running) {
-                    self.follow_playhead = true;
-                } else {
-                    self.follow_playhead = !self.follow_playhead;
+                let turning_off = self.follow_playhead;
+                self.follow_playhead = !self.follow_playhead;
+                // Turning Follow off while the live transcript is streaming:
+                // keep the playhead on the newest line so the highlight stays
+                // where the text is.
+                if turning_off
+                    && self.selected_view.is_none()
+                    && matches!(self.status, Status::Running)
+                {
+                    if let Some(last) = self.display_order().last().copied() {
+                        if let Some(start) =
+                            self.shown_lines().get(last).and_then(|line| line.start)
+                        {
+                            self.playhead = start;
+                        }
+                    }
                 }
                 self.follow_offset = None;
+                self.scroll_target = None;
+                self.scroll_seek = false;
                 self.save_settings();
                 Task::none()
             }
@@ -1006,8 +1447,8 @@ impl App {
             }
             Message::Noop => Task::none(),
             Message::Escape => {
-                if self.batch_warning {
-                    self.batch_warning = false;
+                if self.line_edit.is_some() {
+                    self.line_edit = None;
                 } else if self.rename_open {
                     self.rename_open = false;
                 } else if self.summary_open {
@@ -1021,40 +1462,24 @@ impl App {
                     self.search_index = 0;
                 } else if matches!(self.status, Status::Running) {
                     self.cancel();
+                } else if self.selected_view.is_some() {
+                    self.return_to_live();
                 }
                 Task::none()
             }
             Message::ShortcutPlay => {
-                if self.rename_open {
+                if self.rename_open || self.line_edit.is_some() {
                     return Task::none();
                 }
-                let ready = self.timeline_duration.unwrap_or(0.0) > 0.0;
-                if ready {
-                    if self.player.is_none() {
-                        if let Some(path) = self.peaks_for.clone() {
-                            self.player = Player::new(&path);
-                        }
-                        if let Some(player) = &self.player {
-                            player.seek(self.playhead, self.playback_speed);
-                        }
-                    }
-                    if self.player.as_ref().is_some_and(|player| player.finished()) {
-                        self.playhead = 0.0;
-                    }
-                    if let Some(player) = &self.player {
-                        player.set_speed(self.playback_speed);
-                        player.toggle();
-                    }
-                    self.last_tick = Some(Instant::now());
-                }
+                self.toggle_playback();
                 Task::none()
             }
             Message::SeekBy(delta) => {
-                if self.rename_open {
+                if self.rename_open || self.line_edit.is_some() {
                     return Task::none();
                 }
-                if self.timeline_duration.is_some() {
-                    let max = self.timeline_duration.unwrap_or(0.0).max(0.0);
+                if self.shown_duration().is_some() {
+                    let max = self.shown_duration().unwrap_or(0.0).max(0.0);
                     self.playhead = (self.playhead + delta).clamp(0.0, max);
                     let playhead = self.playhead;
                     self.last_tick = Some(Instant::now());
@@ -1066,26 +1491,68 @@ impl App {
             }
             Message::ImportPicked(path) => match path {
                 Some(path) => Task::perform(
-                    async move { backend::read_transcript(&path) },
+                    async move { backend::read_transcript(&path).map(|text| (path, text)) },
                     Message::ImportLoaded,
                 ),
                 None => Task::none(),
             },
-            Message::ImportLoaded(text) => {
-                if let Some(text) = text {
-                    self.transcript = text;
-                    self.lines = parse_lines(&self.transcript);
-                    self.pending_lines.clear();
-                    self.reveal_accum = 0.0;
-                    self.completion_pending = false;
-                    self.current_index = None;
-                    self.overall_shown = 0.0;
-                    self.transcript_dirty = false;
-                    self.follow_offset = None;
-                    self.transcript_at_bottom = true;
-                    self.sms_mode = true;
+            Message::ImportLoaded(loaded) => {
+                let Some((transcript, text)) = loaded else {
+                    return Task::none();
+                };
+                let audio = Self::matching_audio(&transcript);
+                // Reuse the entry for the same transcript; attach the audio to a
+                // still-pending entry for the same audio instead of duplicating.
+                let existing = self.queue.iter().position(|item| {
+                    item.transcript.as_deref() == Some(transcript.as_path())
+                        || (audio.is_some()
+                            && item.audio == audio
+                            && matches!(item.status, ItemStatus::Pending))
+                });
+                let index = match existing {
+                    Some(index) => {
+                        let item = &mut self.queue[index];
+                        item.transcript = Some(transcript.clone());
+                        if !matches!(item.status, ItemStatus::Done) {
+                            item.status = ItemStatus::Done;
+                            item.stats = None;
+                            item.turns.clear();
+                            item.peaks = Arc::new(Vec::new());
+                        }
+                        if item.audio.is_none() {
+                            item.audio = audio.clone();
+                        }
+                        index
+                    }
+                    None => {
+                        let path = audio.clone().unwrap_or_else(|| transcript.clone());
+                        self.queue.push(QueueItem {
+                            path,
+                            audio: audio.clone(),
+                            status: ItemStatus::Done,
+                            duration: None,
+                            transcript: Some(transcript.clone()),
+                            stats: None,
+                            turns: Vec::new(),
+                            peaks: Arc::new(Vec::new()),
+                        });
+                        self.queue.len() - 1
+                    }
+                };
+                self.save_queue();
+                // Plain .txt files are editable in place; anything else (legacy
+                // JSON) is shown read-only.
+                let editable = transcript
+                    .extension()
+                    .and_then(|ext| ext.to_str())
+                    .map(|ext| ext.eq_ignore_ascii_case("txt"))
+                    .unwrap_or(false);
+                let output = editable.then(|| transcript.clone());
+                let mut tasks = vec![self.open_item_view(index, Some((text, output)))];
+                if let Some(audio) = audio {
+                    tasks.push(Self::probe_items(vec![audio]));
                 }
-                Task::none()
+                Task::batch(tasks)
             }
             Message::AddFiles => Task::perform(
                 async {
@@ -1114,13 +1581,24 @@ impl App {
                 Task::none()
             }
             Message::ItemDurationProbed(path, seconds) => {
-                if let Some(item) = self.queue.iter_mut().find(|item| item.path == path) {
+                if let Some(item) = self
+                    .queue
+                    .iter_mut()
+                    .find(|item| item.path == path || item.audio.as_deref() == Some(path.as_path()))
+                {
                     item.duration = seconds;
                 }
+                if let Some(view) = self.selected_view.as_mut() {
+                    if view.audio.as_deref() == Some(path.as_path()) {
+                        view.duration = seconds.map(|seconds| seconds as f32);
+                    }
+                }
+                self.save_queue();
                 Task::none()
             }
             Message::RemoveItem(index) => {
                 if !matches!(self.status, Status::Running) && index < self.queue.len() {
+                    let was_viewing = self.selected_view.is_some();
                     self.queue.remove(index);
                     if let Some(current) = self.current.as_mut() {
                         if *current == index {
@@ -1136,6 +1614,28 @@ impl App {
                             *current -= 1;
                         }
                     }
+                    self.selected = self.selected.and_then(|selected| {
+                        match selected.cmp(&index) {
+                            std::cmp::Ordering::Equal => None,
+                            std::cmp::Ordering::Greater => Some(selected - 1),
+                            std::cmp::Ordering::Less => Some(selected),
+                        }
+                    });
+                    if self.selected.is_none() {
+                        self.selected_view = None;
+                        self.view_error = None;
+                        if was_viewing {
+                            // The viewed transcript is gone: stop its audio.
+                            self.player = None;
+                            self.playhead = 0.0;
+                            self.last_tick = None;
+                        }
+                    } else if let Some(view) = self.selected_view.as_mut() {
+                        if view.index > index {
+                            view.index -= 1;
+                        }
+                    }
+                    self.save_queue();
                 }
                 Task::none()
             }
@@ -1157,8 +1657,9 @@ impl App {
                     self.playhead = 0.0;
                     self.timeline_duration = None;
                     self.player = None;
+                    self.scroll_target = None;
+                    self.scroll_seek = false;
                     self.output_txt = None;
-                    self.batch_runs.clear();
                     self.summary_open = false;
                     self.pending_rename = false;
                     self.rename_open = false;
@@ -1170,7 +1671,9 @@ impl App {
                     self.transcript_at_bottom = true;
                     self.console_lines.clear();
                     self.toast = None;
-                    self.batch_warning = false;
+                    self.selected = None;
+                    self.selected_view = None;
+                    self.view_error = None;
                     self.run_start = None;
                     self.elapsed_final = None;
                     self.progress = 0.0;
@@ -1178,11 +1681,12 @@ impl App {
                     self.overall_shown = 0.0;
                     self.stage = "idle".to_string();
                     self.status = Status::Idle;
+                    self.save_queue();
                 }
                 Task::none()
             }
             Message::OpenSummary => {
-                if !self.batch_runs.is_empty() {
+                if self.has_results() {
                     self.summary_open = true;
                     self.pending_rename = false;
                     self.toast = None;
@@ -1202,24 +1706,82 @@ impl App {
                 Task::none()
             }
             Message::OpenRename => self.open_rename(),
+            Message::EditLine(index) => {
+                // Only transcripts we can write back to are editable, and the
+                // live transcript is left alone while it is still being built.
+                if self.shown_output().is_none()
+                    || (self.selected_view.is_none() && matches!(self.status, Status::Running))
+                {
+                    self.toast = Some(("This transcript is read-only".to_string(), Instant::now()));
+                    return Task::none();
+                }
+                let Some(line) = self.shown_lines().get(index) else {
+                    return Task::none();
+                };
+                let speaker = line.speaker.clone();
+                let text = line_text(line);
+                self.line_edit = Some(LineEdit {
+                    index,
+                    speaker,
+                    content: text_editor::Content::with_text(&text),
+                });
+                self.summary_open = false;
+                self.rename_open = false;
+                self.toast = None;
+                Task::none()
+            }
+            Message::LineEditSpeaker(value) => {
+                if let Some(edit) = &mut self.line_edit {
+                    edit.speaker = value;
+                }
+                Task::none()
+            }
+            Message::LineEditAction(action) => {
+                if let Some(edit) = &mut self.line_edit {
+                    edit.content.perform(action);
+                }
+                Task::none()
+            }
+            Message::SaveLineEdit => {
+                self.apply_line_edit();
+                Task::none()
+            }
+            Message::CancelLineEdit => {
+                self.line_edit = None;
+                Task::none()
+            }
+            Message::DeleteLineEdit => {
+                self.delete_edit_line();
+                Task::none()
+            }
             Message::CopyTranscript => {
-                if self.transcript.is_empty() {
+                if self.shown_transcript().is_empty() {
                     return Task::none();
                 }
                 self.toast = Some(("Copied transcript".to_string(), Instant::now()));
-                iced::clipboard::write(self.transcript.clone())
+                iced::clipboard::write(self.shown_transcript().to_string())
             }
             Message::RevealOutput => {
                 self.reveal_output();
                 Task::none()
             }
             Message::SaveTranscript => {
-                if let Some(path) = &self.output_txt {
-                    if std::fs::write(path, &self.transcript).is_ok() {
-                        self.toast = Some((format!("Saved {}", path.display()), Instant::now()));
+                match (self.shown_output(), self.shown_transcript()) {
+                    (Some(path), text) => {
+                        if std::fs::write(path, text).is_ok() {
+                            self.toast =
+                                Some((format!("Saved {}", path.display()), Instant::now()));
+                        }
                     }
-                } else {
-                    self.toast = Some(("No output file yet".to_string(), Instant::now()));
+                    (None, text) if !text.is_empty() => {
+                        self.toast = Some((
+                            "Imported transcript is read-only".to_string(),
+                            Instant::now(),
+                        ));
+                    }
+                    _ => {
+                        self.toast = Some(("No output file yet".to_string(), Instant::now()));
+                    }
                 }
                 Task::none()
             }
@@ -1243,16 +1805,26 @@ impl App {
             },
             Message::AudioPicked(path) => {
                 if let Some(path) = path {
-                    self.player = None;
-                    self.peaks = Arc::new(Vec::new());
-                    self.peaks_for = Some(path.clone());
-                    self.playhead = 0.0;
-                    self.timeline_duration = None;
-                    let probe = path.clone();
-                    return Task::perform(
-                        async move { backend::probe_audio(&probe, TIMELINE_BUCKETS) },
-                        move |result| Message::TimelineLoaded(path.clone(), result),
-                    );
+                    if self
+                        .queue
+                        .iter()
+                        .any(|item| item.audio.as_deref() == Some(path.as_path()))
+                    {
+                        self.toast =
+                            Some(("Already in the queue".to_string(), Instant::now()));
+                        return Task::none();
+                    }
+                    let added = self.add_paths(vec![path]);
+                    if let Some(path) = added.first() {
+                        let name = path
+                            .file_name()
+                            .and_then(|name| name.to_str())
+                            .unwrap_or("file")
+                            .to_string();
+                        self.toast =
+                            Some((format!("Added {name} to the queue"), Instant::now()));
+                        return Self::probe_items(added);
+                    }
                 }
                 Task::none()
             }
@@ -1285,25 +1857,7 @@ impl App {
                 Task::none()
             }
             Message::Start => {
-                let will_batch = self
-                    .queue
-                    .iter()
-                    .any(|item| matches!(item.status, ItemStatus::Pending));
-                if will_batch && self.queue.len() > 1 {
-                    self.batch_warning = true;
-                    self.toast = None;
-                } else {
-                    self.start();
-                }
-                Task::none()
-            }
-            Message::BatchContinue => {
-                self.batch_warning = false;
-                self.begin_batch();
-                Task::none()
-            }
-            Message::BatchCancel => {
-                self.batch_warning = false;
+                self.start();
                 Task::none()
             }
             Message::Cancel => {
@@ -1312,7 +1866,7 @@ impl App {
             }
             Message::Tick => {
                 let mut tasks = vec![self.drain_events()];
-                if self.transcript_dirty {
+                if self.transcript_dirty && self.selected_view.is_none() {
                     self.transcript_dirty = false;
                     let mut out = String::new();
                     for index in self.display_order() {
@@ -1347,7 +1901,6 @@ impl App {
                     }
                 }
 
-                self.pulse = (self.pulse + 0.10) % std::f32::consts::TAU;
                 self.activity_frame = self.activity_frame.wrapping_add(1);
                 // Ease the per-file bar toward the latest reported progress.
                 self.progress_shown += (self.progress - self.progress_shown) * 0.25;
@@ -1364,7 +1917,7 @@ impl App {
                         .queue
                         .iter()
                         .filter(|item| {
-                            matches!(item.status, ItemStatus::Done(_) | ItemStatus::Failed(_))
+                            matches!(item.status, ItemStatus::Done | ItemStatus::Failed(_))
                         })
                         .count() as f32;
                     done / total_items
@@ -1388,7 +1941,7 @@ impl App {
                         let now = Instant::now();
                         if let Some(last) = self.last_tick {
                             let dt = (now - last).as_secs_f32();
-                            let limit = self.timeline_duration.unwrap_or(f32::MAX);
+                            let limit = self.shown_duration().unwrap_or(f32::MAX);
                             self.playhead =
                                 (self.playhead + dt * self.playback_speed).min(limit);
                         }
@@ -1396,16 +1949,20 @@ impl App {
                     } else {
                         self.last_tick = None;
                         if player.finished() {
-                            self.playhead = self.timeline_duration.unwrap_or(self.playhead);
+                            self.playhead = self.shown_duration().unwrap_or(self.playhead);
                         }
                     }
                 }
                 let content = self.transcript_content;
                 let viewport = self.transcript_viewport;
+                // Follow tracks the active line on whichever transcript is
+                // shown (streamed text while live, the audio playhead
+                // otherwise). Manual scrolling disengages it.
                 if self.follow_playhead {
                     if let Some(active) = self.active_line_index() {
                         if let Some(y) = self.follow_target(active) {
                             self.follow_offset = Some(y);
+                            self.scroll_target = Some(y);
                             tasks.push(scrollable::scroll_to(
                                 transcript_id(),
                                 scrollable::AbsoluteOffset { x: 0.0, y },
@@ -1414,10 +1971,15 @@ impl App {
                     }
                 } else {
                     self.follow_offset = None;
-                    // Keep the view pinned to the bottom as text is added, as
-                    // long as the user hasn't scrolled away from the bottom.
-                    if self.transcript_at_bottom && content > 0.0 && viewport > 0.0 {
+                    // Keep the live view pinned to the bottom as text is added,
+                    // as long as the user hasn't scrolled away from the bottom.
+                    if self.selected_view.is_none()
+                        && self.transcript_at_bottom
+                        && content > 0.0
+                        && viewport > 0.0
+                    {
                         let y = (content - viewport).max(0.0);
+                        self.scroll_target = Some(y);
                         tasks.push(scrollable::scroll_to(
                             transcript_id(),
                             scrollable::AbsoluteOffset { x: 0.0, y },
@@ -1439,6 +2001,7 @@ impl App {
                 {
                     self.toast = None;
                 }
+                tasks.push(self.backfill_next_waveform());
                 Task::batch(tasks)
             }
             Message::RenameSave => {
@@ -1457,7 +2020,7 @@ impl App {
     /// field keeps the original name. Focuses the first field.
     fn open_rename(&mut self) -> Task<Message> {
         let mut seen: Vec<String> = Vec::new();
-        for line in &self.lines {
+        for line in self.shown_lines() {
             if !line.speaker.is_empty() && !seen.contains(&line.speaker) {
                 seen.push(line.speaker.clone());
             }
@@ -1493,8 +2056,8 @@ impl App {
 
     fn reveal_output(&self) {
         let dir = self
-            .output_txt
-            .as_ref()
+            .shown_output()
+            .or_else(|| self.shown_audio())
             .and_then(|path| path.parent())
             .map(|path| path.to_path_buf())
             .or_else(|| self.output_dir.clone());
@@ -1516,15 +2079,27 @@ impl App {
     fn add_paths(&mut self, paths: Vec<PathBuf>) -> Vec<PathBuf> {
         let mut added = Vec::new();
         for path in paths {
-            if self.queue.iter().any(|item| item.path == path) {
+            if self
+                .queue
+                .iter()
+                .any(|item| item.path == path || item.audio.as_deref() == Some(path.as_path()))
+            {
                 continue;
             }
             self.queue.push(QueueItem {
                 path: path.clone(),
+                audio: Some(path.clone()),
                 status: ItemStatus::Pending,
                 duration: None,
+                transcript: None,
+                stats: None,
+                turns: Vec::new(),
+                peaks: Arc::new(Vec::new()),
             });
             added.push(path);
+        }
+        if !added.is_empty() {
+            self.save_queue();
         }
         added
     }
@@ -1542,11 +2117,16 @@ impl App {
     /// Show the summary (and queue the rename dialog) after the bar reaches 100%.
     /// Returns true when a summary was opened.
     fn present_completion(&mut self) -> bool {
-        if self.batch_runs.is_empty() {
+        if !self.has_results() {
             return false;
         }
+        let generated = self
+            .queue
+            .iter()
+            .filter(|item| matches!(item.status, ItemStatus::Done) && item.stats.is_some())
+            .count();
         self.summary_open = true;
-        self.pending_rename = self.batch_runs.len() == 1;
+        self.pending_rename = generated == 1 && self.completed_count() == 1;
         self.toast = None;
         notify("transiel", "Transcription complete");
         true
@@ -1563,21 +2143,82 @@ impl App {
         self.transcript_dirty = true;
     }
 
+    /// Probe one completed item's waveform in the background. Results are
+    /// persisted so subsequent clicks show the waveform immediately.
+    fn backfill_next_waveform(&mut self) -> Task<Message> {
+        if self.backfill_active || matches!(self.status, Status::Running) {
+            return Task::none();
+        }
+        let next = self.queue.iter().find_map(|item| {
+            if !matches!(item.status, ItemStatus::Done) || !item.peaks.is_empty() {
+                return None;
+            }
+            let audio = item.audio.as_ref()?;
+            if !audio.is_file() || self.waveform_tried.contains(audio) {
+                return None;
+            }
+            Some(audio.clone())
+        });
+        let Some(path) = next else {
+            return Task::none();
+        };
+        self.waveform_tried.insert(path.clone());
+        self.backfill_active = true;
+        let probe_path = path.clone();
+        let message_path = path;
+        Task::perform(
+            async move { backend::probe_waveform(&probe_path, TIMELINE_BUCKETS) },
+            move |probe| Message::QueueWaveformLoaded(message_path.clone(), probe),
+        )
+    }
+
+    /// Start or pause playback for the transcript currently on screen.
+    fn toggle_playback(&mut self) {
+        if !self.player_ready() {
+            return;
+        }
+        if self.player.is_none() {
+            let Some(path) = self.shown_audio().map(Path::to_path_buf) else {
+                return;
+            };
+            self.player = Player::new(&path);
+            if self.player.is_none() {
+                self.toast =
+                    Some(("Could not open the audio file".to_string(), Instant::now()));
+                return;
+            }
+            if let Some(player) = &self.player {
+                player.seek(self.playhead, self.playback_speed);
+            }
+        }
+        if self.player.as_ref().is_some_and(|player| player.finished()) {
+            self.playhead = 0.0;
+        }
+        if let Some(player) = &self.player {
+            player.set_speed(self.playback_speed);
+            player.toggle();
+        }
+        self.last_tick = Some(Instant::now());
+    }
+
     fn start(&mut self) {
         if self
             .queue
             .iter()
             .any(|item| matches!(item.status, ItemStatus::Pending))
         {
-            self.begin_batch();
+            self.begin_batch(false);
         } else {
             self.status = Status::Error("add at least one file".to_string());
         }
     }
 
     /// Spawn a single pipeline process for all pending queue items, so the
-    /// models load once and are reused across the whole batch.
-    fn begin_batch(&mut self) {
+    /// models load once and are reused across the whole batch. `preserve_view`
+    /// keeps a completed transcript (and its playback) visible across an
+    /// automatic follow-up pass; explicit starts always return to live.
+    fn begin_batch(&mut self, preserve_view: bool) {
+        let preserve = preserve_view && self.keep_pinned_view();
         let inputs: Vec<PathBuf> = self
             .queue
             .iter()
@@ -1607,25 +2248,28 @@ impl App {
         self.current_index = None;
         self.transcript_dirty = false;
         self.follow_offset = None;
+        self.scroll_target = None;
+        self.scroll_seek = false;
         self.transcript_at_bottom = true;
-        self.follow_playhead = true;
         self.turns.clear();
         self.peaks = Arc::new(Vec::new());
         self.peaks_for = None;
-        self.playhead = 0.0;
         self.timeline_duration = None;
-        self.player = None;
         self.output_txt = None;
-        self.batch_runs.clear();
         self.rename_open = false;
+        if !preserve {
+            self.playhead = 0.0;
+            self.player = None;
+            self.selected = None;
+            self.selected_view = None;
+            self.view_error = None;
+        }
         self.cancelled.store(false, Ordering::SeqCst);
 
         backend::spawn(
             inputs,
             self.output_dir.clone(),
             self.preset.arg(),
-            self.timestamps,
-            self.join_speaker,
             self.num_speakers,
             true, // diarization cache is always on
             self.events.clone(),
@@ -1669,6 +2313,24 @@ impl App {
         if let Some(index) = self.current.take() {
             self.queue[index].status = ItemStatus::Failed("cancelled".to_string());
         }
+        self.save_queue();
+    }
+
+    fn rename_lines(lines: &mut [DocLine], mapping: &[(String, String)]) {
+        for line in lines {
+            if let Some((_, new)) = mapping.iter().find(|(old, _)| *old == line.speaker) {
+                line.raw = line.raw.replacen(&line.speaker, new, 1);
+                line.speaker = new.clone();
+            }
+        }
+    }
+
+    fn rename_turns(turns: &mut [backend::Turn], mapping: &[(String, String)]) {
+        for turn in turns {
+            if let Some((_, new)) = mapping.iter().find(|(old, _)| *old == turn.speaker) {
+                turn.speaker = new.clone();
+            }
+        }
     }
 
     fn apply_rename(&mut self) {
@@ -1679,19 +2341,106 @@ impl App {
             .map(|(old, new)| (old.clone(), new.trim().to_string()))
             .collect();
 
-        for line in &mut self.lines {
-            if let Some((_, new)) = mapping.iter().find(|(old, _)| *old == line.speaker) {
-                line.raw = line.raw.replacen(&line.speaker, new, 1);
-                line.speaker = new.clone();
+        if let Some(view) = self.selected_view.as_mut() {
+            Self::rename_lines(&mut view.lines, &mapping);
+            Self::rename_turns(&mut view.turns, &mapping);
+            view.transcript = view
+                .lines
+                .iter()
+                .map(|line| line.raw.as_str())
+                .collect::<Vec<_>>()
+                .join("\n");
+            if !view.transcript.is_empty() {
+                view.transcript.push('\n');
             }
-        }
-        for turn in &mut self.turns {
-            if let Some((_, new)) = mapping.iter().find(|(old, _)| *old == turn.speaker) {
-                turn.speaker = new.clone();
+            if let Some(path) = &view.output {
+                let _ = std::fs::write(path, &view.transcript);
             }
+            let index = view.index;
+            let turns = view.turns.clone();
+            if let Some(item) = self.queue.get_mut(index) {
+                item.turns = turns;
+            }
+        } else {
+            Self::rename_lines(&mut self.lines, &mapping);
+            Self::rename_turns(&mut self.turns, &mapping);
+            self.refresh_transcript();
         }
-        self.refresh_transcript();
         self.rename_open = false;
+    }
+
+    /// Apply the right-click line editor: only that line's speaker and text
+    /// change; the rest of the transcript is untouched.
+    fn apply_line_edit(&mut self) {
+        let Some(edit) = self.line_edit.as_ref() else {
+            return;
+        };
+        let index = edit.index;
+        let speaker = edit.speaker.trim().to_string();
+        // One transcript line must stay one physical line: collapse any
+        // newlines typed into the editor into spaces.
+        let text = edit
+            .content
+            .text()
+            .trim_end()
+            .replace(['\n', '\r'], " ");
+        self.line_edit = None;
+
+        if let Some(view) = self.selected_view.as_mut() {
+            let Some(line) = view.lines.get_mut(index) else {
+                return;
+            };
+            rewrite_line(line, &speaker, &text);
+            view.transcript = view
+                .lines
+                .iter()
+                .map(|line| line.raw.as_str())
+                .collect::<Vec<_>>()
+                .join("\n");
+            if !view.transcript.is_empty() {
+                view.transcript.push('\n');
+            }
+            if let Some(path) = &view.output {
+                let _ = std::fs::write(path, &view.transcript);
+            }
+        } else if let Some(line) = self.lines.get_mut(index) {
+            rewrite_line(line, &speaker, &text);
+            self.refresh_transcript();
+        }
+    }
+
+    /// Delete the line currently open in the right-click editor.
+    fn delete_edit_line(&mut self) {
+        let Some(edit) = self.line_edit.take() else {
+            return;
+        };
+        let index = edit.index;
+        let mut removed = false;
+        if let Some(view) = self.selected_view.as_mut() {
+            if index < view.lines.len() {
+                view.lines.remove(index);
+                view.transcript = view
+                    .lines
+                    .iter()
+                    .map(|line| line.raw.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                if !view.transcript.is_empty() {
+                    view.transcript.push('\n');
+                }
+                if let Some(path) = &view.output {
+                    let _ = std::fs::write(path, &view.transcript);
+                }
+                removed = true;
+            }
+        } else if index < self.lines.len() {
+            self.lines.remove(index);
+            self.refresh_transcript();
+            removed = true;
+        }
+        if removed {
+            self.toast = Some(("Line deleted".to_string(), Instant::now()));
+        }
     }
 
     fn drain_events(&mut self) -> Task<Message> {
@@ -1723,10 +2472,18 @@ impl App {
                 }
                 Event::File { audio } => {
                     let path = PathBuf::from(audio);
+                    // Keep a completed view (and its audio) alive when the user
+                    // is listening to it; otherwise return to the live file.
+                    let keep_view = self.keep_pinned_view();
                     self.current = self.find_queue_index(&path);
                     self.current_index = self.current;
                     if let Some(index) = self.current {
                         self.queue[index].status = ItemStatus::Running;
+                    }
+                    if !keep_view {
+                        self.selected = None;
+                        self.selected_view = None;
+                        self.view_error = None;
                     }
                     self.status = Status::Running;
                     self.stage = "loading".to_string();
@@ -1741,20 +2498,32 @@ impl App {
                     self.completion_pending = false;
                     self.transcript_dirty = false;
                     self.follow_offset = None;
+                    self.scroll_target = None;
+                    self.scroll_seek = false;
                     self.transcript_at_bottom = true;
                     self.turns.clear();
                     self.peaks = Arc::new(Vec::new());
                     self.peaks_for = None;
-                    self.playhead = 0.0;
                     self.timeline_duration = None;
-                    self.player = None;
+                    if !keep_view {
+                        self.playhead = 0.0;
+                        self.player = None;
+                    }
                     self.output_txt = None;
+                    self.save_queue();
                 }
                 Event::Meta { audio, duration } => {
                     self.peaks_for = Some(PathBuf::from(audio));
                     self.peaks = Arc::new(Vec::new());
-                    self.playhead = 0.0;
+                    if self.selected_view.is_none() {
+                        self.playhead = 0.0;
+                    }
                     self.timeline_duration = Some(duration);
+                    if let Some(index) = self.current {
+                        if let Some(item) = self.queue.get_mut(index) {
+                            item.duration = Some(duration as f64);
+                        }
+                    }
                 }
                 Event::Turns { turns } => {
                     self.turns = turns;
@@ -1768,18 +2537,13 @@ impl App {
                     start,
                     speaker,
                     text,
-                    confidence,
+                    confidence: _,
                 } => {
-                    let raw = if self.timestamps {
-                        format!("[{}] {speaker}: {text}", format_secs(start as f64))
-                    } else {
-                        format!("{speaker}: {text}")
-                    };
+                    let raw = format!("[{}] {speaker}: {text}", format_secs(start as f64));
                     // Queue it; the textbox reveals lines at a speech-like pace.
                     self.pending_lines.push_back(DocLine {
                         raw,
                         speaker,
-                        confidence,
                         start: Some(start),
                     });
                 }
@@ -1800,23 +2564,20 @@ impl App {
                         self.lines = parse_lines(&self.transcript);
                     }
                     self.output_txt = Some(PathBuf::from(&txt));
-                    let name = self
-                        .current
-                        .and_then(|index| self.queue.get(index))
-                        .and_then(|item| item.path.file_name())
-                        .and_then(|n| n.to_str())
-                        .map(|n| n.to_string())
-                        .unwrap_or_else(|| {
-                            PathBuf::from(&txt)
-                                .file_stem()
-                                .and_then(|s| s.to_str())
-                                .unwrap_or("file")
-                                .to_string()
-                        });
-                    self.batch_runs.push((name, stats));
+                    let transcript = PathBuf::from(&txt);
+                    let turns = self.turns.clone();
+                    let peaks = self.peaks.clone();
+                    let duration = self.timeline_duration.map(|seconds| seconds as f64);
                     if let Some(index) = self.current.take() {
-                        self.queue[index].status = ItemStatus::Done(PathBuf::from(&txt));
+                        let item = &mut self.queue[index];
+                        item.status = ItemStatus::Done;
+                        item.transcript = Some(transcript);
+                        item.stats = Some(stats);
+                        item.turns = turns;
+                        item.peaks = peaks;
+                        item.duration = duration.or(item.duration);
                     }
+                    self.save_queue();
                 }
                 Event::Error { message } => {
                     self.stage = "error".to_string();
@@ -1834,6 +2595,7 @@ impl App {
                         self.batch = false;
                     }
                     self.status = Status::Error(message);
+                    self.save_queue();
                 }
                 Event::AllDone => {
                     self.batch = false;
@@ -1842,7 +2604,16 @@ impl App {
                     self.progress = 1.0;
                     self.elapsed_final = self.run_start.map(|s| s.elapsed().as_secs_f64());
                     self.toast = None;
-                    if !self.batch_runs.is_empty() {
+                    self.save_queue();
+                    // Files added while a run was active are picked up as a
+                    // follow-up pass without prompting.
+                    if self
+                        .queue
+                        .iter()
+                        .any(|item| matches!(item.status, ItemStatus::Pending))
+                    {
+                        self.begin_batch(true);
+                    } else if self.has_results() {
                         self.status = Status::Done;
                         // Present the summary / rename only once the bar hits 100%.
                         self.completion_pending = true;
@@ -1858,19 +2629,39 @@ impl App {
         Task::batch(tasks)
     }
 
-    fn stats_lines(&self) -> Vec<String> {
-        if self.batch_runs.is_empty() {
-            return vec!["No completed run yet.".to_string()];
-        }
-        let mut lines: Vec<String> = Vec::new();
-        for (name, stats) in &self.batch_runs {
-            if !lines.is_empty() {
-                lines.push(String::new());
+    fn stats_lines(&self) -> Vec<SummaryLine> {
+        let mut lines: Vec<SummaryLine> = Vec::new();
+        for item in &self.queue {
+            if !matches!(item.status, ItemStatus::Done) {
+                continue;
             }
-            lines.push(name.clone());
-            lines.extend(Self::single_stats_lines(stats));
+            let name = item
+                .audio
+                .as_ref()
+                .or(item.transcript.as_ref())
+                .or(Some(&item.path))
+                .and_then(|path| path.file_name())
+                .and_then(|name| name.to_str())
+                .unwrap_or("file")
+                .to_string();
+            if !lines.is_empty() {
+                lines.push(SummaryLine::Body(String::new()));
+            }
+            lines.push(SummaryLine::File(name));
+            match &item.stats {
+                Some(stats) => lines.extend(
+                    Self::single_stats_lines(stats)
+                        .into_iter()
+                        .map(SummaryLine::Body),
+                ),
+                None => lines.push(SummaryLine::Body("Imported transcript".to_string())),
+            }
         }
-        lines
+        if lines.is_empty() {
+            vec![SummaryLine::Body("No completed run yet.".to_string())]
+        } else {
+            lines
+        }
     }
 
     /// The summary block for one completed run.
@@ -1942,13 +2733,13 @@ impl App {
             .into()
     }
 
-    /// Line indices (into `self.lines`) containing the current search query.
+    /// Line indices (into the displayed transcript) containing the query.
     fn matching_lines(&self) -> Vec<usize> {
         let query = self.search_query.trim().to_lowercase();
         if query.is_empty() {
             return Vec::new();
         }
-        self.lines
+        self.shown_lines()
             .iter()
             .enumerate()
             .filter(|(_, line)| line.raw.to_lowercase().contains(&query))
@@ -1959,7 +2750,7 @@ impl App {
     /// Distinct speakers in transcript order (matches the SMS bubble ordering).
     fn speaker_order(&self) -> Vec<String> {
         let mut order: Vec<String> = Vec::new();
-        for line in &self.lines {
+        for line in self.shown_lines() {
             if !line.speaker.is_empty() && !order.contains(&line.speaker) {
                 order.push(line.speaker.clone());
             }
@@ -1969,10 +2760,11 @@ impl App {
 
     /// Line indices sorted by start time (untimed lines last), stable.
     fn display_order(&self) -> Vec<usize> {
-        let mut indices: Vec<usize> = (0..self.lines.len()).collect();
+        let lines = self.shown_lines();
+        let mut indices: Vec<usize> = (0..lines.len()).collect();
         indices.sort_by(|a, b| {
-            let ta = self.lines[*a].start.unwrap_or(f32::INFINITY);
-            let tb = self.lines[*b].start.unwrap_or(f32::INFINITY);
+            let ta = lines[*a].start.unwrap_or(f32::INFINITY);
+            let tb = lines[*b].start.unwrap_or(f32::INFINITY);
             ta.partial_cmp(&tb).unwrap_or(std::cmp::Ordering::Equal)
         });
         indices
@@ -1981,7 +2773,7 @@ impl App {
     /// Scroll the transcript so the given line (by index) is roughly centred.
     /// Pixel scroll offset that centres the given line in the transcript.
     fn follow_target(&self, line: usize) -> Option<f32> {
-        let total = self.lines.len().max(1) as f32;
+        let total = self.shown_lines().len().max(1) as f32;
         let content = self.transcript_content;
         let viewport = self.transcript_viewport;
         if content <= 0.0 || viewport <= 0.0 {
@@ -1995,19 +2787,85 @@ impl App {
         )
     }
 
-    fn scroll_to_line(&self, line: usize) -> Task<Message> {
+    fn scroll_to_line(&mut self, line: usize) -> Task<Message> {
         match self.follow_target(line) {
-            Some(y) => scrollable::scroll_to(
-                transcript_id(),
-                scrollable::AbsoluteOffset { x: 0.0, y },
-            ),
+            Some(y) => {
+                self.scroll_target = Some(y);
+                scrollable::scroll_to(
+                    transcript_id(),
+                    scrollable::AbsoluteOffset { x: 0.0, y },
+                )
+            }
             None => Task::none(),
         }
     }
 
-    /// Transcript view: per-line (confidence/search tinted) or SMS bubbles.
+    /// Move the playhead to the line matching the scroll position after a user
+    /// scroll. Reaches the first line at the top and the last line at the
+    /// bottom instead of always centring.
+    fn seek_from_scroll(&mut self, offset: f32, viewport: f32) {
+        let total = self.shown_lines().len();
+        if total == 0 || viewport <= 0.0 {
+            return;
+        }
+        let content = self.transcript_content;
+        if content <= 0.0 {
+            return;
+        }
+        let max_offset = (content - viewport).max(0.0);
+        let rank = if max_offset > 0.0 {
+            (offset.clamp(0.0, max_offset) / max_offset) * (total - 1) as f32
+        } else {
+            0.0
+        };
+        let order = self.display_order();
+        if order.is_empty() {
+            return;
+        }
+        let rank = rank.floor().clamp(0.0, (order.len() - 1) as f32) as usize;
+        let start = order
+            .iter()
+            .skip(rank)
+            .chain(order[..rank].iter().rev())
+            .find_map(|index| self.shown_lines().get(*index).and_then(|line| line.start));
+        let Some(start) = start else {
+            return;
+        };
+        let max = self.shown_duration().unwrap_or(start);
+        self.playhead = start.clamp(0.0, max);
+        self.scroll_seek = true;
+        self.last_tick = Some(Instant::now());
+        if let Some(player) = &self.player {
+            player.seek(self.playhead, self.playback_speed);
+        }
+    }
+
+    /// Transcript view: per-line (search tinted) or SMS bubbles.
     fn transcript_element(&self) -> Element<'_, Message> {
-        let scheme = Scheme::for_theme(self.dark_mode);
+        let scheme = Scheme::light();
+        if let Some(error) = &self.view_error {
+            let mut col = column![
+                text("Transcript unavailable").size(20),
+                text(error.clone()).size(14),
+            ]
+            .spacing(8)
+            .padding(16);
+            if let Some(index) = self.selected {
+                let has_audio = self
+                    .queue
+                    .get(index)
+                    .and_then(|item| item.audio.as_ref())
+                    .is_some();
+                if has_audio {
+                    col = col.push(
+                        action("Transcribe again")
+                            .on_press(Message::RequeueItem(index))
+                            .style(color_button(scheme.green, scheme.ink)),
+                    );
+                }
+            }
+            return col.into();
+        }
         let query = self.search_query.trim().to_string();
         let matches = if query.is_empty() {
             Vec::new()
@@ -2020,8 +2878,11 @@ impl App {
         let speaker_order = self.speaker_order();
         let display: Vec<usize> = self.display_order();
         let playhead_line = self.active_line_index();
+        let lines = self.shown_lines();
+        // SMS bubbles alternate sides per message, rather than giving each
+        // speaker a fixed column.
         for idx in display {
-            let line = &self.lines[idx];
+            let line = &lines[idx];
             if line.raw.trim().is_empty() {
                 continue;
             }
@@ -2032,7 +2893,8 @@ impl App {
                     .iter()
                     .position(|name| *name == line.speaker)
                     .unwrap_or(0);
-                let left = index % 2 == 0;
+                // Each speaker keeps a fixed side (their own column).
+                let left = index.is_multiple_of(2);
                 let tint = if matched {
                     Some(if Some(idx) == active_line {
                         scheme.search_active
@@ -2040,8 +2902,7 @@ impl App {
                         scheme.search_hl
                     })
                 } else {
-                    (self.confidence && line.low_confidence())
-                        .then_some(if left { scheme.warn_tint } else { scheme.warn_tint_alt })
+                    None
                 };
                 col = col.push(
                     stack![
@@ -2062,7 +2923,8 @@ impl App {
                             .height(Length::Fill),
                         )
                         .interaction(mouse::Interaction::Pointer)
-                        .on_press(Message::SelectLine(idx)),
+                        .on_press(Message::SelectLine(idx))
+                        .on_right_press(Message::EditLine(idx)),
                     ],
                 );
             } else {
@@ -2076,8 +2938,6 @@ impl App {
                     } else {
                         scheme.search_hl
                     })
-                } else if self.confidence && line.low_confidence() {
-                    Some(scheme.warn_tint)
                 } else {
                     speaker_bg
                 };
@@ -2149,7 +3009,7 @@ impl App {
                 action(follow)
                 .on_press(Message::ToggleFollowPlayhead)
                 .style(pill_button_secondary),
-                "Keep the transcript centered on the playhead",
+                "Keep the active line in view",
                 scheme,
             ),
             self.tip(
@@ -2168,7 +3028,7 @@ impl App {
     /// Index of the last line whose start time is at or before `t`.
     fn line_for_playhead(&self, t: f32) -> Option<usize> {
         let mut best: Option<(usize, f32)> = None;
-        for (index, line) in self.lines.iter().enumerate() {
+        for (index, line) in self.shown_lines().iter().enumerate() {
             if let Some(start) = line.start {
                 if start <= t && best.map_or(true, |(_, best_start)| start >= best_start) {
                     best = Some((index, start));
@@ -2178,25 +3038,29 @@ impl App {
         best.map(|(index, _)| index)
     }
 
-    /// The line to highlight / keep in view: the most recently added line while
-    /// transcribing, otherwise the line matching the playhead.
+    /// The line to highlight / keep in view.
     fn active_line_index(&self) -> Option<usize> {
-        if self.lines.is_empty() {
+        if self.shown_lines().is_empty() {
             return None;
         }
-        if matches!(self.status, Status::Running) || self.timeline_duration.is_none() {
+        let live_streaming = self.selected_view.is_none() && matches!(self.status, Status::Running);
+        if live_streaming && !self.scroll_seek {
+            // The newest streamed utterance is the live playhead.
             self.display_order().last().copied()
         } else {
+            // Completed views, playback, and manual scroll-seeks use the audio
+            // playhead.
             self.line_for_playhead(self.playhead)
+                .or_else(|| self.display_order().first().copied())
         }
     }
 
     /// Waveform/speaker timeline strip (greyed out until audio is probed).
     fn timeline_element(&self, scheme: &Scheme) -> Element<'_, Message> {
-        let duration = self.timeline_duration.unwrap_or(0.0);
-        let enabled = duration > 0.0 && !self.peaks.is_empty();
+        let duration = self.shown_duration().unwrap_or(0.0);
+        let enabled = duration > 0.0 && !self.shown_peaks().is_empty();
         let program = Timeline {
-            peaks: self.peaks.clone(),
+            peaks: self.shown_peaks_arc(),
             turns: Arc::new(if enabled {
                 self.speaker_turns(scheme)
             } else {
@@ -2251,7 +3115,7 @@ impl App {
 
     fn speaker_turns(&self, scheme: &Scheme) -> Vec<TimelineTurn> {
         let order = self.speaker_order();
-        self.turns
+        self.shown_turns()
             .iter()
             .map(|turn| {
                 let index = order
@@ -2269,9 +3133,8 @@ impl App {
 
     /// Playback controls: play/pause, time, and a speed selector.
     fn player_element(&self, scheme: &Scheme) -> Element<'_, Message> {
-        let duration = self.timeline_duration.unwrap_or(0.0).max(0.0);
-        let running = matches!(self.status, Status::Running);
-        let ready = duration > 0.0 && self.peaks_for.is_some() && !running;
+        let duration = self.shown_duration().unwrap_or(0.0).max(0.0);
+        let ready = self.player_ready();
         let playing = self.player.as_ref().is_some_and(|player| player.is_playing());
         let glyph = if ready { scheme.ink } else { MUTED };
 
@@ -2288,10 +3151,15 @@ impl App {
         };
 
         let time_color = if ready { scheme.ink } else { MUTED };
+        let total = if duration > 0.0 {
+            format_secs(duration as f64)
+        } else {
+            "--:--".to_string()
+        };
         let time = text(format!(
             "{} / {}",
             format_secs(self.playhead as f64),
-            format_secs(duration as f64)
+            total
         ))
             .size(12)
             .style(move |_theme| text::Style {
@@ -2387,7 +3255,7 @@ impl App {
     }
 
     pub fn view(&self) -> Element<'_, Message> {
-        let scheme = Scheme::for_theme(self.dark_mode);
+        let scheme = Scheme::light();
         let output = self
             .output_dir
             .as_ref()
@@ -2400,8 +3268,8 @@ impl App {
             .iter()
             .any(|item| matches!(item.status, ItemStatus::Pending));
         let has_queue = !self.queue.is_empty();
-        let can_options = has_queue;
-        let can_add = !running;
+        let can_add = true;
+        let can_remove = !running;
         let can_output = !running && has_queue;
         let can_preset = !running && has_queue;
         let can_start = !running && pending;
@@ -2428,48 +3296,18 @@ impl App {
                 .into()
         };
 
-        let mut options_col = column![action(
-            row![
-                text("Options"),
-                icon(
-                    if self.options_open {
-                        ICON_CARET_UP
-                    } else {
-                        ICON_CARET_DOWN
-                    },
-                    12.0,
-                ),
-            ]
-            .spacing(4)
-            .align_y(iced::Alignment::Center),
-        )
-            .on_press_maybe(can_options.then_some(Message::ToggleOptions))
-            .style(move |theme: &iced::Theme, status| {
-                if can_options {
-                    pill_button_secondary(theme, status)
-                } else {
-                    greyed_button(theme, status)
-                }
-            })]
-            .spacing(8);
-
         let mut queue_list = column![].spacing(4).width(Length::Fill);
         for (index, item) in self.queue.iter().enumerate() {
-            let glyph: Element<Message> = container(match &item.status {
-                ItemStatus::Pending => icon_colored(ICON_CIRCLE_FILL, 12.0, scheme.text),
-                ItemStatus::Running => icon_colored(
-                    ICON_ARROW_RIGHT,
-                    18.0,
-                    Color {
-                        a: 0.55 + 0.45 * (0.5 + 0.5 * self.pulse.sin()),
-                        ..scheme.blue
-                    },
-                ),
-                ItemStatus::Done(_) => icon_colored(ICON_CHECK, 18.0, scheme.green),
-                ItemStatus::Failed(_) => icon_colored(ICON_X, 18.0, scheme.pink),
-            })
-                .center_x(Length::Fixed(22.0))
-                .into();
+            let badge: Element<Message> = match &item.status {
+                ItemStatus::Pending => queue_status_icon(ICON_CIRCLE, 18.0, scheme.text),
+                ItemStatus::Running => {
+                    queue_status_badge(ICON_HOURGLASS, 14.0, scheme.track, scheme.text)
+                }
+                ItemStatus::Done => queue_status_badge(ICON_CHECK, 20.0, scheme.green, scheme.ink),
+                ItemStatus::Failed(_) => {
+                    queue_status_badge(ICON_X, 16.0, scheme.pink, scheme.ink)
+                }
+            };
             let name = item
                 .path
                 .file_name()
@@ -2483,8 +3321,11 @@ impl App {
                 Some(secs) => format!("[{}]", format_secs(secs)),
                 None => "[--:--]".to_string(),
             };
+            let viewing = self.selected == Some(index) && self.selected_view.is_some();
+            let selectable = matches!(item.status, ItemStatus::Running)
+                || (matches!(item.status, ItemStatus::Done) && item.transcript.is_some());
             let mut item_row = row![
-                glyph,
+                badge,
                 text(duration),
                 text(format!("{name}{detail}")).width(Length::Fill),
             ]
@@ -2507,20 +3348,52 @@ impl App {
                         text(format!("{:.0}%", self.progress_shown * 100.0)).size(12),
                     );
                 }
-                ItemStatus::Done(_) => {
+                ItemStatus::Done => {
                     item_row = item_row.push(text("100%").size(12));
                 }
                 _ => {}
             }
 
-            item_row = item_row.push(self.tip(
-                action(icon(ICON_X, 13.0))
-                    .on_press_maybe(can_add.then_some(Message::RemoveItem(index)))
-                    .style(pill_button_secondary),
-                "Remove from queue",
-                &scheme,
-            ));
-            queue_list = queue_list.push(item_row);
+            let row_tint = scheme.warn_tint;
+            let hover_tint = scheme.bar_track;
+            let row_text = scheme.text;
+            let row_button = button(item_row)
+                .padding([2, 6])
+                .width(Length::Fill)
+                .style(move |_theme, status| {
+                    let background = if viewing {
+                        row_tint
+                    } else if selectable && matches!(status, button::Status::Hovered) {
+                        hover_tint
+                    } else {
+                        Color::TRANSPARENT
+                    };
+                    button::Style {
+                        background: Some(background.into()),
+                        text_color: row_text,
+                        border: iced::border::rounded(8.0),
+                        shadow: Shadow::default(),
+                    }
+                });
+            let row_button = if selectable {
+                row_button.on_press(Message::ViewItem(index))
+            } else {
+                row_button
+            };
+            queue_list = queue_list.push(
+                row![
+                    row_button,
+                    self.tip(
+                        action(icon(ICON_X, 13.0))
+                            .on_press_maybe(can_remove.then_some(Message::RemoveItem(index)))
+                            .style(pill_button_secondary),
+                        "Remove from queue",
+                        &scheme,
+                    ),
+                ]
+                .spacing(4)
+                .align_y(iced::Alignment::Center),
+            );
         }
 
         let mut queue_col = column![
@@ -2541,93 +3414,50 @@ impl App {
             .spacing(6);
 
         if has_queue {
-            let line_height = 30.0;
-            let height = self.queue.len() as f32 * line_height * 1.2;
-            queue_col = queue_col.push(
-                container(queue_list)
-                    .width(Length::Fill)
-                    .height(Length::Fixed(height))
-                    .align_y(iced::Alignment::Start),
-            );
+            const MAX_QUEUE_ROWS: usize = 5;
+            let rows = self.queue.len();
+            if rows > MAX_QUEUE_ROWS {
+                // Show five rows and scroll the rest.
+                let viewport = MAX_QUEUE_ROWS as f32 * 34.0;
+                queue_col = queue_col.push(
+                    scrollable(queue_list)
+                        .width(Length::Fill)
+                        .height(Length::Fixed(viewport))
+                        .style(queue_scrollbar_style),
+                );
+            } else {
+                let line_height = 34.0;
+                let height = rows as f32 * line_height * 1.2;
+                queue_col = queue_col.push(
+                    container(queue_list)
+                        .width(Length::Fill)
+                        .height(Length::Fixed(height))
+                        .align_y(iced::Alignment::Start),
+                );
+            }
         }
 
-        if self.options_open && can_options {
-            let speakers_control: Element<Message> = if running {
-                text(SpeakerOpt::from_value(self.num_speakers).to_string()).into()
-            } else {
-                pick_list(
-                    SpeakerOpt::ALL,
-                    Some(SpeakerOpt::from_value(self.num_speakers)),
-                    Message::SpeakerCountChanged,
+        let speaker_pick = pick_list(
+            SpeakerOpt::ALL,
+            Some(SpeakerOpt::from_value(self.num_speakers)),
+            Message::SpeakerCountChanged,
+        );
+        let speakers: Element<Message> = if running {
+            // Keep the dropdown visible (with its arrow) but inactive.
+            stack![
+                speaker_pick.style(greyed_pick),
+                mouse_area(
+                    container(horizontal_space())
+                        .width(Length::Fill)
+                        .height(Length::Fill),
                 )
-                    .style(pill_pick)
-                    .into()
-            };
-            options_col = options_col.push(
-                column![
-                    self.tip(
-                        row![
-                            text("Speakers"),
-                            horizontal_space(),
-                            speakers_control,
-                        ]
-                        .spacing(8)
-                        .align_y(iced::Alignment::Center),
-                        "Expected number of speakers",
-                        &scheme,
-                    ),
-                    self.tip(
-                        row![
-                            text("Timestamps"),
-                            horizontal_space(),
-                            toggler(self.timestamps)
-                            .on_toggle_maybe((!running).then_some(Message::TimestampsToggled)),
-                        ]
-                        .spacing(8)
-                        .align_y(iced::Alignment::Center),
-                        "Prefix each line with its start time",
-                        &scheme,
-                    ),
-                    self.tip(
-                        row![
-                            text("Join Speakers"),
-                            horizontal_space(),
-                            toggler(self.join_speaker)
-                            .on_toggle_maybe((!running).then_some(Message::JoinSpeakerToggled)),
-                        ]
-                        .spacing(8)
-                        .align_y(iced::Alignment::Center),
-                        "Merge consecutive lines from the same speaker",
-                        &scheme,
-                    ),
-                    self.tip(
-                        row![
-                            text("Confidence"),
-                            horizontal_space(),
-                            toggler(self.confidence)
-                            .on_toggle_maybe((!running).then_some(Message::ConfidenceToggled)),
-                        ]
-                        .spacing(8)
-                        .align_y(iced::Alignment::Center),
-                        "Tint lines the model transcribed with low confidence",
-                        &scheme,
-                    ),
-                    self.tip(
-                        row![
-                            text("Dark theme"),
-                            horizontal_space(),
-                            toggler(self.dark_mode)
-                            .on_toggle_maybe((!running).then_some(Message::DarkToggled)),
-                        ]
-                        .spacing(8)
-                        .align_y(iced::Alignment::Center),
-                        "Use the dark theme",
-                        &scheme,
-                    ),
-                ]
-                    .spacing(8),
-            );
-        }
+                .interaction(mouse::Interaction::Idle)
+                .on_press(Message::Tick),
+            ]
+            .into()
+        } else {
+            speaker_pick.style(pill_pick).into()
+        };
 
         let mut controls = column![
             row![
@@ -2643,7 +3473,10 @@ impl App {
                 .height(Length::Fixed(30.0))
                 .align_y(iced::Alignment::Center),
                 preset,
-                options_col,
+                container(text("Speakers:"))
+                .height(Length::Fixed(30.0))
+                .align_y(iced::Alignment::Center),
+                speakers,
             ]
             .spacing(8)
             .align_y(iced::Alignment::Start),
@@ -2672,6 +3505,7 @@ impl App {
             .spacing(4)
             .align_y(iced::Alignment::Center);
 
+        let file_name = self.current_file_name();
         let label = progress_label(
             &self.status,
             &self.stage,
@@ -2679,19 +3513,25 @@ impl App {
             has_queue,
             // Advance the ellipses once every 0.5s (ticks are 100ms).
             1 + (self.activity_frame / 5) % 5,
+            file_name.as_deref(),
         );
-        // Keep "Decoding" centered and stationary while its dots animate: the
-        // word sits in a fixed, centered box with a fixed dots area beside it.
+        // The file name leads the status, including while "Decoding" animates.
+        // A fixed five-dot block keeps the left side stationary.
         let label_el: Element<Message> = if self.stage.eq_ignore_ascii_case("Decoding") {
-            let dots = ".".repeat(1 + (self.activity_frame / 5) % 5);
-            row![
-                horizontal_space().width(Length::Fixed(50.0)),
-                text("Decoding"),
-                container(text(dots))
-                .width(Length::Fixed(50.0))
-                .align_x(iced::Alignment::Start),
-            ]
-                .into()
+            let active = 1 + (self.activity_frame / 5) % 5;
+            let mut dots = vec![text::Span::new(".".repeat(active)).color(scheme.text)];
+            if active < 5 {
+                dots.push(
+                    text::Span::new(".".repeat(5 - active)).color(Color::TRANSPARENT),
+                );
+            }
+            let mut row = row![];
+            if let Some(name) = &file_name {
+                row = row.push(text(format!("{name} \u{2014} ")));
+            }
+            row = row.push(text("Decoding"));
+            row = row.push(rich_text(dots));
+            row.into()
         } else {
             text(label).into()
         };
@@ -2718,43 +3558,32 @@ impl App {
 
         let mut middle = column![status_row].spacing(8).width(Length::Fill);
         middle = middle.push(self.timeline_element(&scheme));
-        let import: Element<Message> = if running {
-            stack![
-                pick_list(ImportKind::ALL, None::<ImportKind>, Message::ImportChoice)
-                .placeholder("Import\u{2026}")
-                .style(greyed_pick)
-                .handle(caret_handle(false)),
-                mouse_area(
-                    container(horizontal_space())
-                    .width(Length::Fill)
-                    .height(Length::Fill),
-                )
-                .interaction(mouse::Interaction::Idle)
-                .on_press(Message::Noop),
-            ]
-                .into()
-        } else {
+        // Imports stay available while a run is active: new files join the
+        // queue and are picked up in a follow-up pass.
+        let import: Element<Message> =
             pick_list(ImportKind::ALL, None::<ImportKind>, Message::ImportChoice)
                 .placeholder("Import\u{2026}")
                 .style(ink_pick(scheme.ink))
                 .handle(caret_handle(false))
-                .into()
-        };
+                .into();
         middle = middle.push(
             row![
                 self.player_element(&scheme),
                 action("Summary")
                 .on_press_maybe(
-                    (!running && !self.batch_runs.is_empty()).then_some(Message::OpenSummary)
+                    (!running && self.has_results()).then_some(Message::OpenSummary)
                 )
                 .style(pill_button_secondary),
                 self.tip(
                     action("Rename Speakers")
                     .on_press_maybe(
-                        (!running && !self.lines.is_empty()).then_some(Message::OpenRename)
+                        (!running
+                            && self.shown_output().is_some()
+                            && !self.shown_lines().is_empty())
+                        .then_some(Message::OpenRename)
                     )
                     .style(pill_button_secondary),
-                    "Rename speakers across the transcript",
+                    "Rename speakers in this transcript",
                     &scheme,
                 ),
                 horizontal_space(),
@@ -2765,12 +3594,41 @@ impl App {
                 .width(Length::Fill),
         );
 
+        let mut transcript_box = column![]
+            .spacing(6)
+            .width(Length::Fill)
+            .height(Length::Fill);
+        if let Some(view) = &self.selected_view {
+            let name = view
+                .audio
+                .as_ref()
+                .or(Some(&view.source))
+                .and_then(|path| path.file_name())
+                .and_then(|name| name.to_str())
+                .unwrap_or("transcript");
+            let suffix = if view.output.is_none() && self.view_error.is_none() {
+                " (read-only)"
+            } else {
+                ""
+            };
+            transcript_box = transcript_box.push(
+                row![
+                    icon_colored(ICON_CIRCLE_FILL, 8.0, scheme.blue),
+                    text(format!("Viewing {name}{suffix}")).size(12),
+                ]
+                .spacing(6)
+                .align_y(iced::Alignment::Center)
+                .padding([0, 8]),
+            );
+        }
+        transcript_box = transcript_box.push(self.transcript_element());
+
         let mut base = column![
             text("Transiel").size(32),
             queue_col,
             controls,
             middle,
-            container(self.transcript_element())
+            container(transcript_box)
             .width(Length::Fill)
             .height(Length::Fill)
             .style(move |_theme| container::Style {
@@ -2790,18 +3648,20 @@ impl App {
                     horizontal_space(),
                     action("Copy")
                     .on_press_maybe(
-                        (!self.transcript.is_empty()).then_some(Message::CopyTranscript)
+                        (!self.shown_transcript().is_empty()).then_some(Message::CopyTranscript)
                     )
                     .style(pill_button_secondary),
                     action("Save")
                     .on_press_maybe(
-                        (self.output_txt.is_some() && !self.transcript.is_empty())
+                        (self.shown_output().is_some() && !self.shown_transcript().is_empty())
                         .then_some(Message::SaveTranscript)
                     )
                     .style(pill_button_secondary),
                     action("Reveal")
                     .on_press_maybe(
-                        (self.output_txt.is_some() || self.output_dir.is_some())
+                        (self.shown_output().is_some()
+                            || self.shown_audio().is_some()
+                            || self.output_dir.is_some())
                         .then_some(Message::RevealOutput)
                     )
                     .style(pill_button_secondary),
@@ -2842,31 +3702,46 @@ impl App {
             return stack![base, overlay].into();
         }
 
-        if self.batch_warning {
-            let dialog = container(
+        if let Some(edit) = &self.line_edit {
+            let mut col = column![
+                text("Edit line").size(20),
                 column![
-                    text("Note").size(20),
-                    text(
-                        "Only the speakers of the final file can be renamed \
-                         without reimporting.",
-                    ),
-                    container(
-                        row![
-                            action("Cancel")
-                            .on_press(Message::BatchCancel)
-                            .style(color_button(scheme.pink, scheme.ink)),
-                            action("Continue")
-                            .on_press(Message::BatchContinue)
-                            .style(color_button(scheme.blue, scheme.ink)),
-                        ]
-                        .spacing(8),
-                    )
-                    .width(Length::Fill)
-                    .align_x(iced::Alignment::End),
+                    text("Speaker").size(12),
+                    text_input("Speaker", &edit.speaker)
+                        .on_input(Message::LineEditSpeaker)
+                        .style(pill_input),
                 ]
-                    .spacing(12)
-                    .width(Length::Fixed(380.0)),
-            )
+                .spacing(4),
+                column![
+                    text("Transcribed text").size(12),
+                    text_editor(&edit.content)
+                        .on_action(Message::LineEditAction)
+                        .height(Length::Fixed(160.0))
+                        .padding(6),
+                ]
+                .spacing(4),
+            ]
+            .spacing(10);
+            col = col.push(
+                container(
+                    row![
+                        action("Delete")
+                        .on_press(Message::DeleteLineEdit)
+                        .style(color_button(scheme.pink, scheme.ink)),
+                        horizontal_space(),
+                        action("Save")
+                        .on_press(Message::SaveLineEdit)
+                        .style(color_button(scheme.blue, scheme.ink)),
+                        action("Cancel")
+                        .on_press(Message::CancelLineEdit)
+                        .style(pill_button_secondary),
+                    ]
+                    .spacing(8),
+                )
+                .width(Length::Fill)
+                .align_x(iced::Alignment::End),
+            );
+            let dialog = container(col.width(Length::Fixed(560.0)))
                 .padding(16)
                 .style(move |_theme| container::Style {
                     background: Some(scheme.dialog_bg.into()),
@@ -2874,15 +3749,43 @@ impl App {
                     shadow: dialog_shadow(),
                     ..container::Style::default()
                 });
-
             return modal_overlay(base, dialog);
         }
 
         if self.summary_open {
             let lines = self.stats_lines();
             let mut body = column![text("Summary").size(20)].spacing(8);
+            const FILE_INDENT: f32 = 16.0;
+            const BODY_INDENT: f32 = 32.0;
             for line in &lines {
-                body = body.push(text(line.clone()));
+                match line {
+                    SummaryLine::File(name) => {
+                        // Dark, regular text: still larger than the body but
+                        // not competing with the "Summary" title.
+                        body = body.push(
+                            container(text(name.clone()).size(17).color(scheme.text))
+                                .width(Length::Fill)
+                                .padding(iced::Padding {
+                                    top: 0.0,
+                                    right: 0.0,
+                                    bottom: 0.0,
+                                    left: FILE_INDENT,
+                                }),
+                        );
+                    }
+                    SummaryLine::Body(line) => {
+                        body = body.push(
+                            container(text(line.clone()))
+                                .width(Length::Fill)
+                                .padding(iced::Padding {
+                                    top: 0.0,
+                                    right: 0.0,
+                                    bottom: 0.0,
+                                    left: BODY_INDENT,
+                                }),
+                        );
+                    }
+                }
             }
 
             // Cap the scrollable height so long queues stay usable.
@@ -2947,8 +3850,9 @@ impl App {
                     for line in [
                         format!("transiel {}", env!("CARGO_PKG_VERSION")),
                         "Local speaker diarization + transcription.".to_string(),
-                        "Diarization: DiariZen / pyannote.  Transcription: faster-whisper."
+                        "Diarization: pyannote segmentation + wespeaker (sherpa-onnx)."
                             .to_string(),
+                        "Transcription: whisper.cpp.".to_string(),
                         "Runs fully offline once models are downloaded.".to_string(),
                     ] {
                         col = col.push(text(line));
@@ -3213,11 +4117,15 @@ impl canvas::Program<Message> for Timeline {
 }
 
 fn speaker_palette(index: usize, scheme: &Scheme) -> Color {
-    const EXTRA: [(f32, f32, f32); 4] = [
-        (0.66, 0.62, 0.98),
-        (0.45, 0.82, 0.62),
-        (0.98, 0.78, 0.42),
-        (0.55, 0.85, 0.88),
+    const EXTRA: [(f32, f32, f32); 8] = [
+        (0.66, 0.62, 0.98), // violet
+        (0.45, 0.82, 0.62), // green
+        (0.98, 0.78, 0.42), // amber
+        (0.55, 0.85, 0.88), // teal
+        (0.96, 0.58, 0.42), // coral
+        (0.58, 0.66, 0.98), // periwinkle
+        (0.78, 0.88, 0.48), // lime
+        (0.90, 0.70, 0.97), // lavender
     ];
     match index {
         0 => scheme.sms0,
@@ -3317,6 +4225,37 @@ fn icon_colored(code: char, size: f32, color: Color) -> Element<'static, Message
         .into()
 }
 
+/// Queue status indicator: a glyph on a filled circular badge, so the running
+/// arrow and completed check stand out without changing the row text size.
+fn queue_status_badge(
+    glyph: char,
+    glyph_size: f32,
+    background: Color,
+    foreground: Color,
+) -> Element<'static, Message> {
+    container(icon_colored(glyph, glyph_size, foreground))
+        .width(Length::Fixed(26.0))
+        .height(Length::Fixed(26.0))
+        .center_x(Length::Fixed(26.0))
+        .center_y(Length::Fixed(26.0))
+        .style(move |_theme| container::Style {
+            background: Some(background.into()),
+            border: iced::border::rounded(13.0),
+            ..container::Style::default()
+        })
+        .into()
+}
+
+/// A status glyph without a filled badge (pending items: an empty ring).
+fn queue_status_icon(glyph: char, glyph_size: f32, color: Color) -> Element<'static, Message> {
+    container(icon_colored(glyph, glyph_size, color))
+        .width(Length::Fixed(26.0))
+        .height(Length::Fixed(26.0))
+        .center_x(Length::Fixed(26.0))
+        .center_y(Length::Fixed(26.0))
+        .into()
+}
+
 /// A dynamic pick-list handle: caret points down when closed (or up when
 /// `invert` is set), flipping when the menu opens.
 fn caret_handle(invert: bool) -> pick_list::Handle<Font> {
@@ -3350,10 +4289,11 @@ fn ink_pick(ink: Color) -> impl Fn(&iced::Theme, pick_list::Status) -> pick_list
 // Bootstrap Icons codepoints (see assets/bootstrap-icons.json).
 const ICON_PLAY: char = '\u{f4f4}';
 const ICON_PAUSE: char = '\u{f4c3}';
-const ICON_ARROW_RIGHT: char = '\u{f138}';
 const ICON_ARROW_UP: char = '\u{f148}';
 const ICON_ARROW_DOWN: char = '\u{f128}';
 const ICON_CIRCLE_FILL: char = '\u{f287}';
+const ICON_CIRCLE: char = '\u{f28a}';
+const ICON_HOURGLASS: char = '\u{f421}';
 const ICON_CHECK: char = '\u{f633}';
 const ICON_X: char = '\u{f659}';
 const ICON_CARET_DOWN: char = '\u{f229}';
@@ -3380,6 +4320,11 @@ fn modal_overlay<'a>(
             }),
     )
         .on_press(Message::Noop);
+    // The dialog itself also consumes stray clicks and keeps an arrow cursor
+    // on its non-interactive areas, so nothing behind it is clickable.
+    let dialog = mouse_area(dialog)
+        .interaction(mouse::Interaction::Idle)
+        .on_press(Message::Noop);
     let centered = container(dialog)
         .center(Length::Fill)
         .width(Length::Fill)
@@ -3388,12 +4333,53 @@ fn modal_overlay<'a>(
 }
 
 /// Parse "[time] Speaker: text" transcript lines into the render model.
+/// The spoken text of a rendered line, without its timestamp/speaker prefix.
+fn line_text(line: &DocLine) -> String {
+    let mut rest = line.raw.as_str();
+    if let Some(stripped) = rest.strip_prefix('[') {
+        if let Some(end) = stripped.find(']') {
+            rest = stripped[end + 1..].trim_start();
+        }
+    }
+    if !line.speaker.is_empty() {
+        if let Some(after) = rest.strip_prefix(&format!("{}: ", line.speaker)) {
+            return after.to_string();
+        }
+        if let Some(after) = rest.strip_prefix(&format!("{}:", line.speaker)) {
+            return after.trim_start().to_string();
+        }
+    }
+    rest.to_string()
+}
+
+/// The `[timestamp] ` prefix of a rendered line, if present.
+fn line_prefix(raw: &str) -> &str {
+    if !raw.starts_with('[') {
+        return "";
+    }
+    match raw.find(']') {
+        Some(end) => &raw[..(end + 2).min(raw.len())],
+        None => "",
+    }
+}
+
+/// Rewrite one line in place, preserving its timestamp and changing only the
+/// speaker and text.
+fn rewrite_line(line: &mut DocLine, speaker: &str, text: &str) {
+    let prefix = line_prefix(&line.raw).to_string();
+    line.raw = if speaker.is_empty() {
+        format!("{prefix}{text}")
+    } else {
+        format!("{prefix}{speaker}: {text}")
+    };
+    line.speaker = speaker.to_string();
+}
+
 fn parse_lines(text: &str) -> Vec<DocLine> {
     text.lines()
         .map(|line| DocLine {
             raw: line.to_string(),
             speaker: speaker_of(line),
-            confidence: 1.0,
             start: parse_time_prefix(line),
         })
         .collect()
@@ -3434,26 +4420,37 @@ fn progress_label(
     progress: f32,
     has_queue: bool,
     dots: usize,
+    file: Option<&str>,
 ) -> String {
-    match status {
+    let mut label = match status {
         Status::Idle if has_queue => "Ready".to_string(),
         Status::Idle => "Idle".to_string(),
         Status::Error(message) => format!("Error: {message}"),
         _ => {
             let label = capitalize_first(stage);
             let lower = label.to_ascii_lowercase();
-            // Animate ellipses while decoding (1..=3, cycling).
+            // Animate ellipses while decoding (1..=5, cycling).
             if lower == "decoding" {
-                return format!("{label}{}", ".".repeat(dots.clamp(1, 5)));
-            }
-            // Only transcription contributes to the bar (and its percentage).
-            if lower.starts_with("transcribing") || lower == "done" {
+                format!("{label}{}", ".".repeat(dots.clamp(1, 5)))
+            } else if lower == "done" {
+                // Keep saying "Transcribing" while the eased bar catches up;
+                // only call the run completed once the bar has reached 100%.
+                if matches!(status, Status::Done) && progress >= 0.995 {
+                    format!("Completed ({:.0}%)", progress.clamp(0.0, 1.0) * 100.0)
+                } else {
+                    format!("Transcribing ({:.0}%)", progress.clamp(0.0, 1.0) * 100.0)
+                }
+            } else if lower.starts_with("transcribing") {
                 format!("{label} ({:.0}%)", progress.clamp(0.0, 1.0) * 100.0)
             } else {
                 label
             }
         }
+    };
+    if let Some(file) = file {
+        label = format!("{file} \u{2014} {label}");
     }
+    label
 }
 
 fn capitalize_first(text: &str) -> String {
@@ -3518,6 +4515,21 @@ fn scrollbar_style(theme: &iced::Theme, status: scrollable::Status) -> scrollabl
         Color::from_rgba(0.0, 0.0, 0.0, 0.5)
     } else {
         Color::TRANSPARENT
+    };
+    style
+}
+
+/// Queue scrollbar: always visible when the list overflows.
+fn queue_scrollbar_style(theme: &iced::Theme, status: scrollable::Status) -> scrollable::Style {
+    let mut style = scrollable::default(theme, status);
+    let active = matches!(
+        status,
+        scrollable::Status::Hovered { .. } | scrollable::Status::Dragged { .. }
+    );
+    style.vertical_rail.scroller.color = if active {
+        Color::from_rgba(0.0, 0.0, 0.0, 0.55)
+    } else {
+        Color::from_rgba(0.0, 0.0, 0.0, 0.28)
     };
     style
 }
@@ -3639,7 +4651,8 @@ fn line_element(
             .height(Length::Fill),
         )
         .interaction(mouse::Interaction::Pointer)
-        .on_press(Message::SelectLine(idx)),
+        .on_press(Message::SelectLine(idx))
+        .on_right_press(Message::EditLine(idx)),
     ]
         .into()
 }
@@ -3734,7 +4747,7 @@ fn greyed_pick(theme: &iced::Theme, status: pick_list::Status) -> pick_list::Sty
     let mut style = pick_list::default(theme, status);
     style.text_color = MUTED;
     style.handle_color = MUTED;
-    style.background = Color::from_rgba(0.6, 0.6, 0.64, 0.12).into();
+    style.background = Color::from_rgb(0.88, 0.88, 0.93).into();
     style.border = iced::border::Border {
         color: Color::TRANSPARENT,
         width: 0.0,
@@ -3830,4 +4843,395 @@ fn styled_spans(
         spans.push(text::Span::new(raw.to_string()).size(size));
     }
     spans
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    /// Serializes tests that mutate the process environment.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn temp_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "transiel-app-test-{tag}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn queue_state_round_trips() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let dir = temp_dir("queue");
+        let old = std::env::var("XDG_CONFIG_HOME").ok();
+        std::env::set_var("XDG_CONFIG_HOME", &dir);
+
+        let audio = dir.join("talk.mp3");
+        std::fs::write(&audio, b"audio").unwrap();
+        let transcript = dir.join("talk-transcript.txt");
+        std::fs::write(&transcript, "[00:00] SPEAKER 1: hi\n").unwrap();
+
+        let mut app = App::new();
+        assert!(app.queue.is_empty());
+        app.queue.push(QueueItem {
+            path: audio.clone(),
+            audio: Some(audio.clone()),
+            status: ItemStatus::Done,
+            duration: Some(1.5),
+            transcript: Some(transcript.clone()),
+            stats: None,
+            turns: Vec::new(),
+            peaks: Arc::new(vec![0.1, 0.2, 0.3]),
+        });
+        app.save_queue();
+
+        let loaded = App::load_queue();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].audio.as_deref(), Some(audio.as_path()));
+        assert_eq!(loaded[0].transcript.as_deref(), Some(transcript.as_path()));
+        assert!(matches!(loaded[0].status, ItemStatus::Done));
+        assert_eq!(loaded[0].duration, Some(1.5));
+        assert_eq!(loaded[0].peaks.as_ref(), &vec![0.1, 0.2, 0.3]);
+
+        if let Some(old) = old {
+            std::env::set_var("XDG_CONFIG_HOME", old);
+        } else {
+            std::env::remove_var("XDG_CONFIG_HOME");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn matching_audio_finds_same_stem() {
+        let dir = temp_dir("matching");
+        let transcript = dir.join("interview.txt");
+        std::fs::write(&transcript, "").unwrap();
+        std::fs::write(dir.join("interview.mp3"), b"audio").unwrap();
+        std::fs::write(dir.join("other.wav"), b"audio").unwrap();
+
+        let matched = App::matching_audio(&transcript).unwrap();
+        assert_eq!(
+            matched.file_name().and_then(|name| name.to_str()),
+            Some("interview.mp3")
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn viewing_and_renaming_a_completed_item() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let dir = temp_dir("view");
+        let old = std::env::var("XDG_CONFIG_HOME").ok();
+        std::env::set_var("XDG_CONFIG_HOME", &dir);
+
+        let audio = dir.join("talk.mp3");
+        std::fs::write(&audio, b"audio").unwrap();
+        let transcript = dir.join("talk-transcript.txt");
+        std::fs::write(
+            &transcript,
+            "[00:00] SPEAKER 1: hello\n[00:05] SPEAKER 2: hi\n",
+        )
+        .unwrap();
+
+        let mut app = App::new();
+        app.queue.push(QueueItem {
+            path: audio.clone(),
+            audio: Some(audio.clone()),
+            status: ItemStatus::Done,
+            duration: Some(6.0),
+            transcript: Some(transcript.clone()),
+            stats: None,
+            turns: Vec::new(),
+            peaks: Arc::new(Vec::new()),
+        });
+
+        // Clicking the completed row opens its transcript.
+        let _ = app.view_item(0);
+        assert_eq!(app.selected, Some(0));
+        assert_eq!(app.shown_lines().len(), 2);
+        assert!(app
+            .shown_transcript()
+            .contains("SPEAKER 1: hello"));
+
+        // The view renders without panicking.
+        let _ = app.view();
+
+        // Renaming writes back to the item's transcript file.
+        app.rename_fields = vec![("SPEAKER 1".to_string(), "ALICE".to_string())];
+        app.apply_rename();
+        let saved = std::fs::read_to_string(&transcript).unwrap();
+        assert!(saved.contains("ALICE: hello"));
+        assert!(!saved.contains("SPEAKER 1"));
+
+        // A missing transcript surfaces the inline error state.
+        std::fs::remove_file(&transcript).unwrap();
+        app.return_to_live();
+        let _ = app.view_item(0);
+        assert!(app.view_error.is_some());
+        assert!(app.shown_lines().is_empty());
+
+        if let Some(old) = old {
+            std::env::set_var("XDG_CONFIG_HOME", old);
+        } else {
+            std::env::remove_var("XDG_CONFIG_HOME");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn importing_a_transcript_adds_a_completed_item() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let config = temp_dir("import-config");
+        let media = temp_dir("import-media");
+        let old = std::env::var("XDG_CONFIG_HOME").ok();
+        std::env::set_var("XDG_CONFIG_HOME", &config);
+
+        let audio = media.join("talk.mp3");
+        std::fs::write(&audio, b"audio").unwrap();
+        let transcript = media.join("talk.txt");
+        let text = "[00:00] SPEAKER 1: imported line\n";
+        std::fs::write(&transcript, text).unwrap();
+
+        let mut app = App::new();
+        assert!(app.queue.is_empty());
+        let _ = app.update(Message::ImportLoaded(Some((
+            transcript.clone(),
+            text.to_string(),
+        ))));
+
+        assert_eq!(app.queue.len(), 1);
+        assert_eq!(app.queue[0].audio.as_deref(), Some(audio.as_path()));
+        assert!(matches!(app.queue[0].status, ItemStatus::Done));
+        assert_eq!(app.selected, Some(0));
+        assert!(app.shown_transcript().contains("imported line"));
+
+        if let Some(old) = old {
+            std::env::set_var("XDG_CONFIG_HOME", old);
+        } else {
+            std::env::remove_var("XDG_CONFIG_HOME");
+        }
+        let _ = std::fs::remove_dir_all(&config);
+        let _ = std::fs::remove_dir_all(&media);
+    }
+
+    #[test]
+    fn editing_one_line_changes_only_that_line() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let config = temp_dir("edit-config");
+        let media = temp_dir("edit-media");
+        let old = std::env::var("XDG_CONFIG_HOME").ok();
+        std::env::set_var("XDG_CONFIG_HOME", &config);
+
+        let audio = media.join("talk.mp3");
+        std::fs::write(&audio, b"audio").unwrap();
+        let transcript = media.join("talk.txt");
+        std::fs::write(
+            &transcript,
+            "[00:00] SPEAKER 1: hello\n[00:05] SPEAKER 2: hi\n",
+        )
+        .unwrap();
+
+        let mut app = App::new();
+        app.queue.push(QueueItem {
+            path: audio.clone(),
+            audio: Some(audio),
+            status: ItemStatus::Done,
+            duration: Some(6.0),
+            transcript: Some(transcript.clone()),
+            stats: None,
+            turns: Vec::new(),
+            peaks: Arc::new(Vec::new()),
+        });
+        let _ = app.view_item(0);
+
+        let _ = app.update(Message::EditLine(0));
+        {
+            let edit = app.line_edit.as_mut().unwrap();
+            assert_eq!(edit.speaker, "SPEAKER 1");
+            assert_eq!(edit.content.text().trim_end(), "hello");
+            edit.speaker = "ALICE".to_string();
+            edit.content = text_editor::Content::with_text("hello there");
+        }
+        // The editor dialog renders without panicking.
+        let _ = app.view();
+
+        let _ = app.update(Message::SaveLineEdit);
+        assert!(app.line_edit.is_none());
+        let saved = std::fs::read_to_string(&transcript).unwrap();
+        assert!(saved.contains("[00:00] ALICE: hello there"));
+        assert!(saved.contains("[00:05] SPEAKER 2: hi"));
+
+        // Enter saves the form from the line editor.
+        let _ = app.update(Message::EditLine(1));
+        app.line_edit.as_mut().unwrap().content =
+            text_editor::Content::with_text("hi there");
+        let _ = app.update(Message::EnterSubmit);
+        assert!(app.line_edit.is_none());
+        let saved = std::fs::read_to_string(&transcript).unwrap();
+        assert!(saved.contains("[00:05] SPEAKER 2: hi there"));
+
+        // Delete removes the edited row.
+        let _ = app.update(Message::EditLine(0));
+        let _ = app.update(Message::DeleteLineEdit);
+        assert!(app.line_edit.is_none());
+        let saved = std::fs::read_to_string(&transcript).unwrap();
+        assert!(!saved.contains("ALICE: hello there"));
+        assert!(saved.contains("SPEAKER 2: hi there"));
+
+        if let Some(old) = old {
+            std::env::set_var("XDG_CONFIG_HOME", old);
+        } else {
+            std::env::remove_var("XDG_CONFIG_HOME");
+        }
+        let _ = std::fs::remove_dir_all(&config);
+        let _ = std::fs::remove_dir_all(&media);
+    }
+
+    #[test]
+    fn player_ready_for_completed_items_during_a_run() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let config = temp_dir("player-config");
+        let media = temp_dir("player-media");
+        let old = std::env::var("XDG_CONFIG_HOME").ok();
+        std::env::set_var("XDG_CONFIG_HOME", &config);
+
+        let audio = media.join("talk.mp3");
+        std::fs::write(&audio, b"audio").unwrap();
+        let transcript = media.join("talk.txt");
+        std::fs::write(&transcript, "[00:00] SPEAKER 1: hello\n").unwrap();
+
+        let mut app = App::new();
+        app.queue.push(QueueItem {
+            path: audio.clone(),
+            audio: Some(audio.clone()),
+            status: ItemStatus::Done,
+            duration: Some(6.0),
+            transcript: Some(transcript),
+            stats: None,
+            turns: Vec::new(),
+            peaks: Arc::new(vec![0.1; 16]),
+        });
+
+        // The live file is not playable while it is being transcribed.
+        app.status = Status::Running;
+        app.peaks_for = Some(audio);
+        assert!(!app.player_ready());
+
+        // A completed item stays playable during that same run.
+        let _ = app.view_item(0);
+        assert!(app.player_ready());
+
+        if let Some(old) = old {
+            std::env::set_var("XDG_CONFIG_HOME", old);
+        } else {
+            std::env::remove_var("XDG_CONFIG_HOME");
+        }
+        let _ = std::fs::remove_dir_all(&config);
+        let _ = std::fs::remove_dir_all(&media);
+    }
+
+    #[test]
+    fn follow_toggle_is_user_controlled_during_a_run() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let config = temp_dir("follow-config");
+        let old = std::env::var("XDG_CONFIG_HOME").ok();
+        std::env::set_var("XDG_CONFIG_HOME", &config);
+
+        let mut app = App::new();
+        app.status = Status::Running;
+        app.follow_playhead = true;
+        let _ = app.update(Message::ToggleFollowPlayhead);
+        assert!(!app.follow_playhead);
+
+        if let Some(old) = old {
+            std::env::set_var("XDG_CONFIG_HOME", old);
+        } else {
+            std::env::remove_var("XDG_CONFIG_HOME");
+        }
+        let _ = std::fs::remove_dir_all(&config);
+    }
+
+    #[test]
+    fn scrolling_moves_the_playhead_to_the_visible_line() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let config = temp_dir("scroll-config");
+        let media = temp_dir("scroll-media");
+        let old = std::env::var("XDG_CONFIG_HOME").ok();
+        std::env::set_var("XDG_CONFIG_HOME", &config);
+
+        let audio = media.join("talk.mp3");
+        std::fs::write(&audio, b"audio").unwrap();
+        let transcript = media.join("talk.txt");
+        std::fs::write(
+            &transcript,
+            "[00:00] SPEAKER 1: first\n[00:05] SPEAKER 2: second\n",
+        )
+        .unwrap();
+
+        let mut app = App::new();
+        app.queue.push(QueueItem {
+            path: audio.clone(),
+            audio: Some(audio),
+            status: ItemStatus::Done,
+            duration: Some(10.0),
+            transcript: Some(transcript),
+            stats: None,
+            turns: Vec::new(),
+            peaks: Arc::new(Vec::new()),
+        });
+        let _ = app.view_item(0);
+
+        // Two lines over a scrollable range: the top maps to the first line
+        // and the bottom maps to the last line.
+        app.transcript_content = 300.0;
+        app.seek_from_scroll(0.0, 100.0);
+        assert_eq!(app.playhead, 0.0);
+        app.seek_from_scroll(200.0, 100.0);
+        assert_eq!(app.playhead, 5.0);
+        assert!(app.scroll_seek);
+
+        if let Some(old) = old {
+            std::env::set_var("XDG_CONFIG_HOME", old);
+        } else {
+            std::env::remove_var("XDG_CONFIG_HOME");
+        }
+        let _ = std::fs::remove_dir_all(&config);
+        let _ = std::fs::remove_dir_all(&media);
+    }
+
+    #[test]
+    fn palette_has_distinct_colors_for_many_speakers() {
+        let scheme = Scheme::light();
+        let colors: Vec<Color> = (0..10).map(|index| speaker_palette(index, &scheme)).collect();
+        for i in 0..colors.len() {
+            for j in (i + 1)..colors.len() {
+                assert_ne!(colors[i], colors[j], "speakers {i} and {j} share a color");
+            }
+        }
+    }
+
+    #[test]
+    fn done_label_waits_for_the_bar() {
+        assert_eq!(
+            progress_label(&Status::Running, "done", 0.9, true, 1, None),
+            "Transcribing (90%)"
+        );
+        assert_eq!(
+            progress_label(&Status::Done, "done", 0.9, true, 1, None),
+            "Transcribing (90%)"
+        );
+        assert_eq!(
+            progress_label(&Status::Done, "done", 1.0, true, 1, None),
+            "Completed (100%)"
+        );
+        assert_eq!(
+            progress_label(&Status::Done, "transcribing 3/4", 0.75, true, 1, Some("talk.mp3")),
+            "talk.mp3 \u{2014} Transcribing 3/4 (75%)"
+        );
+    }
 }

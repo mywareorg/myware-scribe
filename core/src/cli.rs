@@ -18,7 +18,6 @@ pub fn run(args: &[String]) -> i32 {
     let mut num_speakers: Option<i32> = Some(2);
     let mut output_dir: Option<PathBuf> = None;
     let mut timestamps = true;
-    let mut join_speaker = false;
     let mut progress_json = false;
     let mut cache = true;
 
@@ -45,7 +44,6 @@ pub fn run(args: &[String]) -> i32 {
                 output_dir = args.get(i).map(PathBuf::from);
             }
             "--no-timestamps" => timestamps = false,
-            "--join-speaker" => join_speaker = true,
             "--progress-json" => progress_json = true,
             "--no-cache" => cache = false,
             other if other.starts_with('-') => {
@@ -72,7 +70,6 @@ pub fn run(args: &[String]) -> i32 {
         preset,
         num_speakers,
         timestamps,
-        join_speaker,
         cache,
         cancel: None,
     };

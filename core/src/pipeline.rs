@@ -26,7 +26,6 @@ pub struct PipelineOptions {
     pub preset: String,
     pub num_speakers: Option<i32>,
     pub timestamps: bool,
-    pub join_speaker: bool,
     pub cache: bool,
     pub cancel: Option<Arc<AtomicBool>>,
 }
@@ -79,25 +78,12 @@ fn format_timestamp(seconds: f32, use_hours: bool) -> String {
     }
 }
 
-fn join_speaker_lines(lines: Vec<Line>) -> Vec<Line> {
-    let mut merged: Vec<Line> = Vec::new();
-    for line in lines {
-        match merged.last_mut() {
-            Some(last) if last.speaker == line.speaker => {
-                last.text = format!("{} {}", last.text, line.text).trim().to_string();
-            }
-            _ => merged.push(line),
-        }
-    }
-    merged
-}
-
-fn output_path(input: &Path, output_dir: &Option<PathBuf>) -> PathBuf {
+fn output_path(input: &Path, output_dir: &Option<PathBuf>, preset: &str) -> PathBuf {
     let stem = input
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("transcript");
-    let name = format!("{stem}-transcript.txt");
+    let name = format!("{stem}-{preset}-transcription.txt");
     match output_dir {
         Some(dir) => dir.join(name),
         None => input.with_file_name(name),
@@ -426,12 +412,7 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
         });
 
         let use_hours = duration >= 3600.0;
-        let ordered = if opts.join_speaker {
-            join_speaker_lines(lines)
-        } else {
-            lines
-        };
-        let txt = ordered
+        let txt = lines
             .iter()
             .map(|line| {
                 if opts.timestamps {
@@ -448,7 +429,7 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
             .collect::<Vec<_>>()
             .join("\n");
 
-        let path = output_path(input, &opts.output_dir);
+        let path = output_path(input, &opts.output_dir, &opts.preset);
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
@@ -459,7 +440,7 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
         }
 
         let mut speaker_stats: HashMap<String, SpeakerStat> = HashMap::new();
-        for line in &ordered {
+        for line in &lines {
             let entry = speaker_stats.entry(line.speaker.clone()).or_default();
             entry.segments += 1;
             entry.words += line.text.split_whitespace().count();
@@ -488,4 +469,25 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
     }
 
     emit(Event::AllDone);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn output_name_includes_the_preset() {
+        let path = output_path(Path::new("/tmp/my-audio.mp3"), &None, "speed");
+        assert_eq!(
+            path.file_name().and_then(|name| name.to_str()),
+            Some("my-audio-speed-transcription.txt")
+        );
+
+        let out = PathBuf::from("/out");
+        let path = output_path(Path::new("/tmp/my-audio.mp3"), &Some(out), "accuracy");
+        assert_eq!(
+            path,
+            PathBuf::from("/out/my-audio-accuracy-transcription.txt")
+        );
+    }
 }

@@ -35,14 +35,36 @@ pub fn read_transcript(path: &Path) -> Option<String> {
     Some(out)
 }
 
-/// Probe duration (seconds) and a downsampled waveform (RMS peaks).
-pub fn probe_audio(path: &Path, buckets: usize) -> Option<(f64, Vec<f32>)> {
-    transiel_core::audio::probe(path, buckets).ok()
-}
-
 /// Probe the duration (seconds) of an audio file.
 pub fn probe_duration(path: &Path) -> Option<f64> {
     transiel_core::audio::duration(path).ok()
+}
+
+/// Re-derived diarization turns and waveform for a completed item.
+pub type CompletedDetails = (Option<Vec<Turn>>, Option<(f64, Vec<f32>)>);
+
+/// Read a completed item's diarization turns back out of the cache.
+pub fn load_turns(path: &Path, num_speakers: Option<i32>) -> Option<Vec<Turn>> {
+    let diarizer = transiel_core::models::diarizer_id();
+    transiel_core::cache::key(path, &diarizer, num_speakers)
+        .and_then(|key| transiel_core::cache::read(&key))
+}
+
+/// Re-derive a completed item's diarization turns (from the cache) and
+/// waveform (by probing the audio), used when a queue is restored at startup.
+pub fn load_completed(
+    path: PathBuf,
+    num_speakers: Option<i32>,
+    buckets: usize,
+) -> CompletedDetails {
+    let turns = load_turns(&path, num_speakers);
+    let probe = transiel_core::audio::waveform(&path, buckets).ok();
+    (turns, probe)
+}
+
+/// Fast waveform-only probe for backfilling restored queue items.
+pub fn probe_waveform(path: &Path, buckets: usize) -> Option<(f64, Vec<f32>)> {
+    transiel_core::audio::waveform(path, buckets).ok()
 }
 
 pub fn kill(pid: u32) {
@@ -64,8 +86,6 @@ pub fn spawn(
     inputs: Vec<PathBuf>,
     output_dir: Option<PathBuf>,
     preset: &'static str,
-    timestamps: bool,
-    join_speaker: bool,
     num_speakers: Option<i32>,
     cache: bool,
     events: Arc<Mutex<VecDeque<Event>>>,
@@ -78,8 +98,7 @@ pub fn spawn(
             output_dir,
             preset: preset.to_string(),
             num_speakers,
-            timestamps,
-            join_speaker,
+            timestamps: true,
             cache,
             cancel: Some(cancelled.clone()),
         };

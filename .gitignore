@@ -4,3 +4,4 @@ dist/
 models/
 .venv/
 *-transcript.txt
+*-transcription.txt
