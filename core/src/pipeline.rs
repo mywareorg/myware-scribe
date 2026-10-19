@@ -109,8 +109,25 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
     let transcriber = match Transcriber::load(&whisper) {
         Ok(transcriber) => Some(transcriber),
         Err(message) => {
-            emit(Event::Error { message });
-            None
+            // Fail before diarization/processing: never write an empty
+            // transcript just because the ASR model is unavailable.
+            let hint = if whisper.is_file() {
+                "run: transiel --cli models download --force"
+            } else {
+                "run: transiel --cli models download"
+            };
+            let name = if opts.preset == "speed" {
+                "Speed"
+            } else {
+                "Accuracy"
+            };
+            emit(Event::Log {
+                message: format!("{message} (expected at {})", whisper.display()),
+            });
+            emit(Event::Error {
+                message: format!("{name} model unavailable — {hint}"),
+            });
+            return;
         }
     };
 

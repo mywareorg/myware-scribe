@@ -14,6 +14,8 @@ struct ModelFile {
     label: &'static str,
     path: PathBuf,
     url: &'static str,
+    /// Exact byte length of the upstream file.
+    size: u64,
 }
 
 fn files() -> Vec<ModelFile> {
@@ -23,21 +25,25 @@ fn files() -> Vec<ModelFile> {
             label: "segmentation",
             path: models::segmentation_model(),
             url: "https://huggingface.co/csukuangfj/sherpa-onnx-pyannote-segmentation-3-0/resolve/main/model.onnx",
+            size: 5_992_913,
         },
         ModelFile {
             label: "embedding",
             path: models::embedding_model(),
             url: "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/wespeaker_en_voxceleb_resnet34_LM.onnx",
+            size: 26_530_550,
         },
         ModelFile {
             label: "whisper-speed",
             path: dir.join("ggml-base.en-q5_1.bin"),
             url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en-q5_1.bin",
+            size: 59_721_011,
         },
         ModelFile {
             label: "whisper-accuracy",
             path: dir.join("ggml-large-v3-turbo-q5_0.bin"),
             url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo-q5_0.bin",
+            size: 574_041_195,
         },
     ]
 }
@@ -46,12 +52,21 @@ fn size(path: &std::path::Path) -> Option<u64> {
     fs::metadata(path).ok().filter(|m| m.is_file()).map(|m| m.len())
 }
 
-/// Download every model. Existing non-empty files are skipped unless `force`.
+/// Download every model. Existing files are skipped only when their size
+/// matches the upstream file; `force` re-downloads regardless.
 pub fn download(force: bool, verify: bool) -> i32 {
     for model in files() {
-        if !force && size(&model.path).is_some_and(|n| n > 0) {
+        if !force && size(&model.path) == Some(model.size) {
             println!("[ok] {:16} {}", model.label, model.path.display());
             continue;
+        }
+        if let Some(actual) = size(&model.path) {
+            if actual != model.size {
+                println!(
+                    "[!] {:16} wrong size ({actual} bytes, expected {}); downloading again",
+                    model.label, model.size
+                );
+            }
         }
         if let Err(error) = fetch(&model) {
             eprintln!("[!] {}: {error}", model.label);
@@ -66,28 +81,40 @@ pub fn download(force: bool, verify: bool) -> i32 {
     }
 }
 
-/// Report which models are present (exit 1 if anything is missing/empty).
+/// Report which models are present and complete (exit 1 if anything is
+/// missing or has the wrong size).
 pub fn verify_all() -> i32 {
     let mut missing = 0;
+    let mut wrong = 0;
     for model in files() {
         match size(&model.path) {
-            Some(n) if n > 0 => println!(
+            Some(n) if n == model.size => println!(
                 "[ok] {:16} {} ({:.1} MB)",
                 model.label,
                 model.path.display(),
                 n as f64 / (1024.0 * 1024.0)
             ),
-            _ => {
+            Some(n) => {
+                println!(
+                    "[bad] {:16} {} ({n} bytes, expected {} bytes)",
+                    model.label,
+                    model.path.display(),
+                    model.size
+                );
+                wrong += 1;
+            }
+            None => {
                 println!("[missing] {:16} {}", model.label, model.path.display());
                 missing += 1;
             }
         }
     }
-    if missing > 0 {
+    if missing + wrong > 0 {
         eprintln!(
-            "\n{missing} model file(s) missing under {}",
+            "\n{missing} model file(s) missing, {wrong} with the wrong size under {}",
             models::models_dir().display()
         );
+        eprintln!("Run: transiel --cli models download");
         1
     } else {
         0
@@ -132,6 +159,16 @@ fn fetch(model: &ModelFile) -> Result<(), String> {
     drop(file);
     eprintln!();
 
+    if done != model.size {
+        let _ = fs::remove_file(&part);
+        return Err(format!(
+            "incomplete download: got {done} bytes, expected {}",
+            model.size
+        ));
+    }
+    if model.path.exists() {
+        let _ = fs::remove_file(&model.path);
+    }
     fs::rename(&part, &model.path).map_err(|e| format!("rename: {e}"))?;
     Ok(())
 }
