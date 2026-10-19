@@ -4861,6 +4861,13 @@ mod tests {
     /// Serializes tests that mutate the process environment.
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
+    /// Acquire the environment lock even after another test has panicked.
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     fn temp_dir(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
             "transiel-app-test-{tag}-{}",
@@ -4871,12 +4878,47 @@ mod tests {
         dir
     }
 
+    /// Points both the Windows and Unix config lookups at a temporary
+    /// directory, restoring the process environment when dropped.
+    struct ConfigEnv {
+        dir: PathBuf,
+        xdg: Option<std::ffi::OsString>,
+        appdata: Option<std::ffi::OsString>,
+    }
+
+    impl ConfigEnv {
+        fn new(tag: &str) -> Self {
+            let dir = temp_dir(tag);
+            let xdg = std::env::var_os("XDG_CONFIG_HOME");
+            let appdata = std::env::var_os("APPDATA");
+            // `settings_path` uses APPDATA on Windows and XDG_CONFIG_HOME
+            // elsewhere, so set both to keep tests hermetic on every platform.
+            std::env::set_var("XDG_CONFIG_HOME", &dir);
+            std::env::set_var("APPDATA", &dir);
+            Self { dir, xdg, appdata }
+        }
+    }
+
+    impl Drop for ConfigEnv {
+        fn drop(&mut self) {
+            restore_env("XDG_CONFIG_HOME", self.xdg.take());
+            restore_env("APPDATA", self.appdata.take());
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    fn restore_env(key: &str, value: Option<std::ffi::OsString>) {
+        match value {
+            Some(value) => std::env::set_var(key, value),
+            None => std::env::remove_var(key),
+        }
+    }
+
     #[test]
     fn queue_state_round_trips() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        let dir = temp_dir("queue");
-        let old = std::env::var("XDG_CONFIG_HOME").ok();
-        std::env::set_var("XDG_CONFIG_HOME", &dir);
+        let _guard = env_lock();
+        let config = ConfigEnv::new("queue");
+        let dir = config.dir.clone();
 
         let audio = dir.join("talk.mp3");
         std::fs::write(&audio, b"audio").unwrap();
@@ -4904,13 +4946,6 @@ mod tests {
         assert!(matches!(loaded[0].status, ItemStatus::Done));
         assert_eq!(loaded[0].duration, Some(1.5));
         assert_eq!(loaded[0].peaks.as_ref(), &vec![0.1, 0.2, 0.3]);
-
-        if let Some(old) = old {
-            std::env::set_var("XDG_CONFIG_HOME", old);
-        } else {
-            std::env::remove_var("XDG_CONFIG_HOME");
-        }
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -4932,10 +4967,9 @@ mod tests {
 
     #[test]
     fn viewing_and_renaming_a_completed_item() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        let dir = temp_dir("view");
-        let old = std::env::var("XDG_CONFIG_HOME").ok();
-        std::env::set_var("XDG_CONFIG_HOME", &dir);
+        let _guard = env_lock();
+        let config = ConfigEnv::new("view");
+        let dir = config.dir.clone();
 
         let audio = dir.join("talk.mp3");
         std::fs::write(&audio, b"audio").unwrap();
@@ -4982,22 +5016,13 @@ mod tests {
         let _ = app.view_item(0);
         assert!(app.view_error.is_some());
         assert!(app.shown_lines().is_empty());
-
-        if let Some(old) = old {
-            std::env::set_var("XDG_CONFIG_HOME", old);
-        } else {
-            std::env::remove_var("XDG_CONFIG_HOME");
-        }
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn importing_a_transcript_adds_a_completed_item() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        let config = temp_dir("import-config");
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("import-config");
         let media = temp_dir("import-media");
-        let old = std::env::var("XDG_CONFIG_HOME").ok();
-        std::env::set_var("XDG_CONFIG_HOME", &config);
 
         let audio = media.join("talk.mp3");
         std::fs::write(&audio, b"audio").unwrap();
@@ -5018,22 +5043,14 @@ mod tests {
         assert_eq!(app.selected, Some(0));
         assert!(app.shown_transcript().contains("imported line"));
 
-        if let Some(old) = old {
-            std::env::set_var("XDG_CONFIG_HOME", old);
-        } else {
-            std::env::remove_var("XDG_CONFIG_HOME");
-        }
-        let _ = std::fs::remove_dir_all(&config);
         let _ = std::fs::remove_dir_all(&media);
     }
 
     #[test]
     fn editing_one_line_changes_only_that_line() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        let config = temp_dir("edit-config");
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("edit-config");
         let media = temp_dir("edit-media");
-        let old = std::env::var("XDG_CONFIG_HOME").ok();
-        std::env::set_var("XDG_CONFIG_HOME", &config);
 
         let audio = media.join("talk.mp3");
         std::fs::write(&audio, b"audio").unwrap();
@@ -5091,22 +5108,14 @@ mod tests {
         assert!(!saved.contains("ALICE: hello there"));
         assert!(saved.contains("SPEAKER 2: hi there"));
 
-        if let Some(old) = old {
-            std::env::set_var("XDG_CONFIG_HOME", old);
-        } else {
-            std::env::remove_var("XDG_CONFIG_HOME");
-        }
-        let _ = std::fs::remove_dir_all(&config);
         let _ = std::fs::remove_dir_all(&media);
     }
 
     #[test]
     fn player_ready_for_completed_items_during_a_run() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        let config = temp_dir("player-config");
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("player-config");
         let media = temp_dir("player-media");
-        let old = std::env::var("XDG_CONFIG_HOME").ok();
-        std::env::set_var("XDG_CONFIG_HOME", &config);
 
         let audio = media.join("talk.mp3");
         std::fs::write(&audio, b"audio").unwrap();
@@ -5134,43 +5143,26 @@ mod tests {
         let _ = app.view_item(0);
         assert!(app.player_ready());
 
-        if let Some(old) = old {
-            std::env::set_var("XDG_CONFIG_HOME", old);
-        } else {
-            std::env::remove_var("XDG_CONFIG_HOME");
-        }
-        let _ = std::fs::remove_dir_all(&config);
         let _ = std::fs::remove_dir_all(&media);
     }
 
     #[test]
     fn follow_toggle_is_user_controlled_during_a_run() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        let config = temp_dir("follow-config");
-        let old = std::env::var("XDG_CONFIG_HOME").ok();
-        std::env::set_var("XDG_CONFIG_HOME", &config);
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("follow-config");
 
         let mut app = App::new();
         app.status = Status::Running;
         app.follow_playhead = true;
         let _ = app.update(Message::ToggleFollowPlayhead);
         assert!(!app.follow_playhead);
-
-        if let Some(old) = old {
-            std::env::set_var("XDG_CONFIG_HOME", old);
-        } else {
-            std::env::remove_var("XDG_CONFIG_HOME");
-        }
-        let _ = std::fs::remove_dir_all(&config);
     }
 
     #[test]
     fn scrolling_moves_the_playhead_to_the_visible_line() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        let config = temp_dir("scroll-config");
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("scroll-config");
         let media = temp_dir("scroll-media");
-        let old = std::env::var("XDG_CONFIG_HOME").ok();
-        std::env::set_var("XDG_CONFIG_HOME", &config);
 
         let audio = media.join("talk.mp3");
         std::fs::write(&audio, b"audio").unwrap();
@@ -5203,21 +5195,13 @@ mod tests {
         assert_eq!(app.playhead, 5.0);
         assert!(app.scroll_seek);
 
-        if let Some(old) = old {
-            std::env::set_var("XDG_CONFIG_HOME", old);
-        } else {
-            std::env::remove_var("XDG_CONFIG_HOME");
-        }
-        let _ = std::fs::remove_dir_all(&config);
         let _ = std::fs::remove_dir_all(&media);
     }
 
     #[test]
     fn preflight_error_keeps_pending_items_retryable() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        let config = temp_dir("preflight-config");
-        let old = std::env::var("XDG_CONFIG_HOME").ok();
-        std::env::set_var("XDG_CONFIG_HOME", &config);
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("preflight-config");
 
         let mut app = App::new();
         let audio = PathBuf::from("/tmp/audio.mp3");
@@ -5242,13 +5226,6 @@ mod tests {
         assert!(matches!(app.queue[0].status, ItemStatus::Pending));
         assert!(matches!(app.status, Status::Error(_)));
         assert!(!app.batch);
-
-        if let Some(old) = old {
-            std::env::set_var("XDG_CONFIG_HOME", old);
-        } else {
-            std::env::remove_var("XDG_CONFIG_HOME");
-        }
-        let _ = std::fs::remove_dir_all(&config);
     }
 
     #[test]
