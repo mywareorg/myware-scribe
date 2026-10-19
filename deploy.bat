@@ -48,6 +48,18 @@ if exist "%SRC%\sample-short.mp3" (
   copy /y "%SRC%\audio\sample-short.mp3" "%INSTALL_DIR%\sample-short.mp3" >nul
 )
 
+rem Explorer and the Start menu show the shortcut name, so users see
+rem "transiel" instead of "transiel.exe". The target keeps its .exe extension
+rem because Windows needs it to launch the program.
+set "START_MENU=%APPDATA%\Microsoft\Windows\Start Menu\Programs"
+if not exist "%START_MENU%" mkdir "%START_MENU%" >nul 2>&1
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$s=(New-Object -ComObject WScript.Shell).CreateShortcut('%START_MENU%\transiel.lnk'); $s.TargetPath='%INSTALL_DIR%\transiel.exe'; $s.WorkingDirectory='%INSTALL_DIR%'; $s.IconLocation='%INSTALL_DIR%\transiel.exe,0'; $s.Description='transiel'; $s.Save()" >nul 2>&1
+if errorlevel 1 (
+  echo [!] Could not create the Start Menu shortcut.
+) else (
+  echo Added a Start Menu shortcut named "transiel"
+)
+
 echo Adding "%INSTALL_DIR%" to the user PATH
 powershell -NoProfile -ExecutionPolicy Bypass -Command "$dir='%INSTALL_DIR%'; $p=[Environment]::GetEnvironmentVariable('Path','User'); if ($null -eq $p) { $p='' }; $parts=@($p.Split(';') | Where-Object { $_ -ne '' -and ($_.TrimEnd('\') -ine $dir.TrimEnd('\')) }); [Environment]::SetEnvironmentVariable('Path', (@($parts + $dir) -join ';'), 'User'); Write-Host 'PATH updated'"
 

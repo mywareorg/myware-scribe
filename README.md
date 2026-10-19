@@ -151,9 +151,10 @@ diarization cache.
 ## Deploy (Windows)
 
 `deploy.bat` (shipped beside `transiel.exe`) installs the exe to
-`%LOCALAPPDATA%\Programs\transiel`, adds it to the user `PATH`, and downloads the
-models with the built-in `curl.exe` (progress shows in the console). Then open a
-new terminal and run `transiel`. `undeploy.bat` removes the install
+`%LOCALAPPDATA%\Programs\transiel`, creates a Start Menu shortcut named
+`transiel`, adds it to the user `PATH`, and downloads the models with the
+built-in `curl.exe` (progress shows in the console). Then open a new terminal and
+run `transiel`. `undeploy.bat` removes the install and shortcut
 (`/keepmodels` keeps the models).
 
 ## Licenses

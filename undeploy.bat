@@ -7,6 +7,7 @@ set "KEEP="
 if /i "%~1"=="/keepmodels" set "KEEP=1"
 set "INSTALL_DIR=%LOCALAPPDATA%\Programs\transiel"
 set "MODELS=%LOCALAPPDATA%\transiel\models"
+set "SHORTCUT=%APPDATA%\Microsoft\Windows\Start Menu\Programs\transiel.lnk"
 
 tasklist /fi "imagename eq transiel.exe" 2>nul | find /i "transiel.exe" >nul
 if not errorlevel 1 (
@@ -17,6 +18,10 @@ if not errorlevel 1 (
 if exist "%INSTALL_DIR%" (
   echo Removing "%INSTALL_DIR%"
   rmdir /s /q "%INSTALL_DIR%"
+)
+if exist "%SHORTCUT%" (
+  echo Removing "%SHORTCUT%"
+  del /q "%SHORTCUT%"
 )
 if not defined KEEP if exist "%MODELS%" (
   echo Removing models "%MODELS%"
