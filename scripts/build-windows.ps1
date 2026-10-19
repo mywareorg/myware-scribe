@@ -160,10 +160,21 @@ try {
     }
 
     $env:SHERPA_STATIC_CRT = "1"
+    # sherpa-rs builds its wrapper as a cdylib, and that link does not inherit
+    # the Windows system libraries that ONNX Runtime (ETW/registry) and
+    # PortAudio need. Pass them to every link step.
+    $rustFlags = @()
+    if ($env:RUSTFLAGS) { $rustFlags += $env:RUSTFLAGS }
     if (-not ($env:RUSTFLAGS -match "crt-static")) {
-        $env:RUSTFLAGS = (@($env:RUSTFLAGS, "-C target-feature=+crt-static") |
-                Where-Object { $_ }) -join " "
+        $rustFlags += "-C target-feature=+crt-static"
     }
+    foreach ($lib in @("advapi32", "ole32", "oleaut32", "uuid", "winmm")) {
+        $flag = "-C link-arg=$lib.lib"
+        if (-not ($env:RUSTFLAGS -match [regex]::Escape("link-arg=$lib.lib"))) {
+            $rustFlags += $flag
+        }
+    }
+    $env:RUSTFLAGS = $rustFlags -join " "
     if ($TargetDir) {
         $env:CARGO_TARGET_DIR = $TargetDir
     }
