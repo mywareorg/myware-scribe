@@ -46,7 +46,7 @@ fn attach_console() {
             std::ptr::null(),
             OPEN_EXISTING,
             0,
-            0,
+            std::ptr::null_mut(),
         );
         if handle != INVALID_HANDLE_VALUE {
             SetStdHandle(STD_OUTPUT_HANDLE, handle);
