@@ -2581,15 +2581,23 @@ impl App {
                 }
                 Event::Error { message } => {
                     self.stage = "error".to_string();
+                    let had_current = self.current.is_some();
                     if let Some(index) = self.current.take() {
                         self.queue[index].status = ItemStatus::Failed(message.clone());
                     }
                     if self.batch {
-                        // A process-level failure (the pipeline died without
-                        // signalling completion) leaves the rest unprocessed.
-                        for item in self.queue.iter_mut() {
-                            if matches!(item.status, ItemStatus::Pending | ItemStatus::Running) {
-                                item.status = ItemStatus::Failed(message.clone());
+                        // A process-level failure mid-file leaves the rest
+                        // unprocessed; mark them failed. A preflight failure
+                        // (no file started, e.g. a missing model) keeps the
+                        // queue pending so it can be retried after fixing it.
+                        if had_current {
+                            for item in self.queue.iter_mut() {
+                                if matches!(
+                                    item.status,
+                                    ItemStatus::Pending | ItemStatus::Running
+                                ) {
+                                    item.status = ItemStatus::Failed(message.clone());
+                                }
                             }
                         }
                         self.batch = false;
@@ -5202,6 +5210,45 @@ mod tests {
         }
         let _ = std::fs::remove_dir_all(&config);
         let _ = std::fs::remove_dir_all(&media);
+    }
+
+    #[test]
+    fn preflight_error_keeps_pending_items_retryable() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let config = temp_dir("preflight-config");
+        let old = std::env::var("XDG_CONFIG_HOME").ok();
+        std::env::set_var("XDG_CONFIG_HOME", &config);
+
+        let mut app = App::new();
+        let audio = PathBuf::from("/tmp/audio.mp3");
+        app.queue.push(QueueItem {
+            path: audio.clone(),
+            audio: Some(audio),
+            status: ItemStatus::Pending,
+            duration: None,
+            transcript: None,
+            stats: None,
+            turns: Vec::new(),
+            peaks: Arc::new(Vec::new()),
+        });
+        app.batch = true;
+        app.status = Status::Running;
+        app.events.lock().unwrap().push_back(Event::Error {
+            message: "Accuracy model unavailable — run: transiel --cli models download"
+                .to_string(),
+        });
+
+        let _ = app.drain_events();
+        assert!(matches!(app.queue[0].status, ItemStatus::Pending));
+        assert!(matches!(app.status, Status::Error(_)));
+        assert!(!app.batch);
+
+        if let Some(old) = old {
+            std::env::set_var("XDG_CONFIG_HOME", old);
+        } else {
+            std::env::remove_var("XDG_CONFIG_HOME");
+        }
+        let _ = std::fs::remove_dir_all(&config);
     }
 
     #[test]

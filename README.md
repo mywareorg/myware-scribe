@@ -66,7 +66,12 @@ Download everything at once (also what `deploy.bat` runs on Windows):
 transiel --cli models download --verify
 ```
 
-- `ggml-large-v3-turbo-q5_0.bin` (accuracy), `ggml-base.en-q5_1.bin` (speed)
+Existing files are skipped only when their exact size matches upstream; partial
+or corrupt downloads are fetched again. A missing preset model stops the run
+before any transcript is written.
+
+- `ggml-large-v3-turbo-q5_0.bin` (accuracy, 574 MB),
+  `ggml-base.en-q5_1.bin` (speed)
 - `sherpa-onnx-pyannote-segmentation-3-0/model.onnx`
 - `wespeaker_en_voxceleb_resnet34_LM.onnx`
 
@@ -74,7 +79,8 @@ Overrides: `TRANSIEL_MODELS_DIR` (root), `TRANSIEL_SEGMENTATION_MODEL`,
 `TRANSIEL_EMBEDDING_MODEL`, `TRANSIEL_WHISPER_MODEL`. Diarization is cached
 under `TRANSIEL_CACHE_DIR` (or the platform cache dir) and reused on re-runs.
 
-Report what is present (exit non-zero if anything is missing):
+Report what is present (exit non-zero if anything is missing or has the wrong
+size):
 
 ```bash
 transiel --cli models
