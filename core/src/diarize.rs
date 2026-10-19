@@ -10,6 +10,9 @@ use std::path::Path;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
+#[cfg(windows)]
+use crate::sherpa_dynamic as ffi;
+#[cfg(not(windows))]
 use sherpa_rs_sys as ffi;
 
 use crate::event::Turn;
@@ -20,6 +23,16 @@ pub const CLUSTER_THRESHOLD: f32 = 0.5;
 /// Progress is stored as a fraction scaled by this constant.
 const PROGRESS_SCALE: f32 = 1_000_000.0;
 
+/// Verify that the diarization backend is available. On Windows this loads
+/// the shipped sherpa-onnx DLL and resolves its symbols.
+pub fn ensure_available() -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        crate::sherpa_dynamic::ensure_loaded()?;
+    }
+    Ok(())
+}
+
 /// Diarize 16 kHz mono samples. `num_speakers` fixes the cluster count; `None`
 /// lets the clustering decide using `threshold`.
 pub fn diarize(
@@ -29,7 +42,14 @@ pub fn diarize(
     num_speakers: Option<i32>,
     threshold: f32,
 ) -> Result<Vec<Turn>, String> {
-    run(samples, segmentation, embedding, num_speakers, threshold, None)
+    run(
+        samples,
+        segmentation,
+        embedding,
+        num_speakers,
+        threshold,
+        None,
+    )
 }
 
 /// Same as [`diarize`], reporting progress (0..1 scaled) into `progress`.
@@ -59,6 +79,9 @@ fn run(
     threshold: f32,
     progress: Option<Arc<AtomicU32>>,
 ) -> Result<Vec<Turn>, String> {
+    #[cfg(windows)]
+    ffi::ensure_loaded()?;
+
     let threads = num_cpus::get_physical().max(1) as i32;
 
     let embedding = CString::new(embedding.to_string_lossy().as_bytes())

@@ -37,12 +37,30 @@ try {
     $libClang = Resolve-LibClang
     if ($libClang) {
         $env:LIBCLANG_PATH = $libClang
-    } elseif (-not $env:SHERPA_SKIP_GENERATE_BINDINGS) {
-        Write-Warn "LLVM was not found; using the bundled sherpa bindings for this run."
-        $env:SHERPA_SKIP_GENERATE_BINDINGS = "1"
+    } elseif (-not $env:WHISPER_DONT_GENERATE_BINDINGS) {
+        Write-Warn "LLVM was not found; using the bundled whisper bindings for this run."
+        $env:WHISPER_DONT_GENERATE_BINDINGS = "1"
     }
 
-    $env:SHERPA_STATIC_CRT = "1"
+    # Cargo runs the binary from the profile directory, so stage the runtime
+    # DLLs there. The release zip places them beside the exe instead.
+    $sherpaLib = Ensure-SherpaDlls
+    $json = (& cargo metadata --no-deps --format-version 1) -join "`n"
+    if ($LASTEXITCODE -ne 0) {
+        throw "cargo metadata failed with exit code $LASTEXITCODE"
+    }
+    $metadata = $json | ConvertFrom-Json
+    $dirName = switch ($Profile) {
+        "dev" { "debug" }
+        "test" { "debug" }
+        default { $Profile }
+    }
+    $profileDir = Join-Path $metadata.target_directory $dirName
+    New-Item -ItemType Directory -Path $profileDir -Force | Out-Null
+    foreach ($dll in @("sherpa-onnx-c-api.dll", "onnxruntime.dll")) {
+        Copy-Item (Join-Path $sherpaLib $dll) $profileDir -Force
+    }
+
     & cargo run --profile $Profile
     if ($LASTEXITCODE -ne 0) {
         throw "cargo run failed with exit code $LASTEXITCODE"

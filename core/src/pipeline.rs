@@ -93,7 +93,11 @@ fn output_path(input: &Path, output_dir: &Option<PathBuf>, preset: &str) -> Path
 /// Run the pipeline over all inputs, emitting progress events.
 pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
     let total = opts.inputs.len().max(1);
-    let is_cancelled = || opts.cancel.as_ref().is_some_and(|c| c.load(Ordering::SeqCst));
+    let is_cancelled = || {
+        opts.cancel
+            .as_ref()
+            .is_some_and(|c| c.load(Ordering::SeqCst))
+    };
 
     let segmentation = models::segmentation_model();
     let embedding = models::embedding_model();
@@ -105,6 +109,11 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
         label: "Loading models".to_string(),
         progress: 0.0,
     });
+
+    if let Err(message) = diarize::ensure_available() {
+        emit(Event::Error { message });
+        return;
+    }
 
     let transcriber = match Transcriber::load(&whisper) {
         Ok(transcriber) => Some(transcriber),
@@ -134,7 +143,11 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
     // Parallel ASR: a small pool of workers sharing one model (each call creates
     // its own decode state). Per-call threads split the physical cores.
     let physical = num_cpus::get_physical().max(1);
-    let env_int = |name: &str| std::env::var(name).ok().and_then(|v| v.parse::<usize>().ok());
+    let env_int = |name: &str| {
+        std::env::var(name)
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+    };
     let workers = env_int("TRANSIEL_ASR_WORKERS")
         .unwrap_or(physical.min(4))
         .max(1);

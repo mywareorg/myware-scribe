@@ -5,16 +5,14 @@ Build transiel for Windows, stage a release folder, and optionally zip it.
 
 .DESCRIPTION
 Enters the Visual Studio developer environment (so cl.exe, rc.exe, the Windows
-SDK, and CMake are on PATH), configures the static MSVC CRT used by the
-prebuilt sherpa-onnx/ONNX Runtime libraries, adds the Windows system libraries
-they need, builds the release binary, checks its runtime dependencies, stages
-deploy.bat/undeploy.bat/README/LICENSE plus the sample audio, and writes a zip
-with a SHA-256 checksum.
+SDK, and CMake are on PATH), configures the static CRT for the executable,
+stages the sherpa-onnx shared DLLs beside it, builds the release binary, checks
+its runtime dependencies, stages deploy.bat/undeploy.bat/README/LICENSE plus
+the sample audio, and writes a zip with a SHA-256 checksum.
 
-On Windows, Cargo downloads the prebuilt sherpa-onnx v1.12.9 static package
-instead of compiling sherpa-onnx and ONNX Runtime from source. Only whisper.cpp
-is built locally. Tests run in release mode because the debug profile links
-msvcrtd on Windows.
+The app loads sherpa-onnx and ONNX Runtime from the shipped DLLs at runtime, so
+only whisper.cpp is compiled locally. Tests run in release mode because the
+debug profile links msvcrtd on Windows.
 
 Requires:
   - Visual Studio 2022 Build Tools with "Desktop development with C++"
@@ -87,21 +85,21 @@ try {
         throw "The active Rust toolchain is not MSVC ($hostLine). Run: rustup default stable-x86_64-pc-windows-msvc"
     }
 
-    $libClang = Resolve-LibClang
-    if ($libClang) {
-        $env:LIBCLANG_PATH = $libClang
-        Write-Step "Using libclang at $libClang"
-    } elseif ($SkipBindgen) {
-        Write-Warn "LLVM was not found; falling back to the bundled sherpa bindings."
-        $env:SHERPA_SKIP_GENERATE_BINDINGS = "1"
+    if ($SkipBindgen) {
+        $env:WHISPER_DONT_GENERATE_BINDINGS = "1"
     } else {
-        throw "libclang was not found. Install LLVM (winget install LLVM.LLVM) or pass -SkipBindgen."
+        $libClang = Resolve-LibClang
+        if ($libClang) {
+            $env:LIBCLANG_PATH = $libClang
+            Write-Step "Using libclang at $libClang"
+        } else {
+            Write-Warn "LLVM was not found; using the bundled whisper bindings."
+            $env:WHISPER_DONT_GENERATE_BINDINGS = "1"
+        }
     }
 
-    # The prebuilt sherpa-onnx/ONNX Runtime static libraries are built with
-    # the static MSVC CRT (/MT), so Rust and the source-build fallback must
-    # use it too.
-    $env:SHERPA_STATIC_CRT = "1"
+    # Keep the executable self-contained. sherpa-onnx and ONNX Runtime are
+    # loaded from DLLs at runtime, so no native static libraries are linked.
     $rustFlags = @()
     if ($env:RUSTFLAGS) {
         # Preserve extra flags, but drop any existing crt-static selection so
@@ -119,12 +117,6 @@ try {
         }
     }
     $rustFlags += @("-C", "target-feature=+crt-static")
-    # sherpa-onnx's static libraries do not carry their Windows system
-    # dependencies, so pass the libraries ONNX Runtime (ETW/registry) and
-    # PortAudio need to the final link.
-    foreach ($lib in @("advapi32", "ole32", "oleaut32", "uuid", "winmm")) {
-        $rustFlags += @("-C", "link-arg=$lib.lib")
-    }
     $env:RUSTFLAGS = $rustFlags -join " "
     if ($TargetDir) {
         $env:CARGO_TARGET_DIR = $TargetDir
@@ -195,6 +187,14 @@ try {
     New-Item -ItemType Directory -Path $stage -Force | Out-Null
 
     Copy-Item $binary (Join-Path $stage "transiel.exe")
+    $sherpaLib = Ensure-SherpaDlls
+    foreach ($dll in @("sherpa-onnx-c-api.dll", "onnxruntime.dll")) {
+        $source = Join-Path $sherpaLib $dll
+        if (-not (Test-Path $source)) {
+            throw "$dll was not found in $sherpaLib"
+        }
+        Copy-Item $source (Join-Path $stage $dll)
+    }
     foreach ($file in @("deploy.bat", "undeploy.bat", "README.md", "LICENSE")) {
         $source = Join-Path $root $file
         if (Test-Path $source) {

@@ -14,6 +14,20 @@ if not exist "%SRC%\transiel.exe" (
   exit /b 1
 )
 
+if not exist "%SRC%\sherpa-onnx-c-api.dll" (
+  echo [!] sherpa-onnx-c-api.dll is missing from the release folder.
+  exit /b 1
+)
+
+if not exist "%SRC%\onnxruntime.dll" (
+  echo [!] onnxruntime.dll is missing from the release folder.
+  exit /b 1
+)
+
+rem Files extracted from a downloaded zip may carry a Mark-of-the-Web that
+rem blocks loading the DLLs. Clear it for the release files.
+powershell -NoProfile -ExecutionPolicy Bypass -Command "Get-ChildItem -LiteralPath '%SRC%' -File | Unblock-File -ErrorAction SilentlyContinue"
+
 tasklist /fi "imagename eq transiel.exe" 2>nul | find /i "transiel.exe" >nul
 if not errorlevel 1 (
   echo [!] transiel.exe is running. Close it, then re-run deploy.bat.
@@ -24,6 +38,15 @@ echo Installing transiel to "%INSTALL_DIR%"
 if exist "%INSTALL_DIR%" rmdir /s /q "%INSTALL_DIR%"
 mkdir "%INSTALL_DIR%" >nul
 copy /y "%SRC%\transiel.exe" "%INSTALL_DIR%\transiel.exe" >nul
+if exist "%SRC%\sherpa-onnx-c-api.dll" (
+  copy /y "%SRC%\sherpa-onnx-c-api.dll" "%INSTALL_DIR%\" >nul
+  copy /y "%SRC%\onnxruntime.dll" "%INSTALL_DIR%\" >nul
+)
+if exist "%SRC%\sample-short.mp3" (
+  copy /y "%SRC%\sample-short.mp3" "%INSTALL_DIR%\sample-short.mp3" >nul
+) else if exist "%SRC%\audio\sample-short.mp3" (
+  copy /y "%SRC%\audio\sample-short.mp3" "%INSTALL_DIR%\sample-short.mp3" >nul
+)
 
 echo Adding "%INSTALL_DIR%" to the user PATH
 powershell -NoProfile -ExecutionPolicy Bypass -Command "$dir='%INSTALL_DIR%'; $p=[Environment]::GetEnvironmentVariable('Path','User'); if ($null -eq $p) { $p='' }; $parts=@($p.Split(';') | Where-Object { $_ -ne '' -and ($_.TrimEnd('\') -ine $dir.TrimEnd('\')) }); [Environment]::SetEnvironmentVariable('Path', (@($parts + $dir) -join ';'), 'User'); Write-Host 'PATH updated'"

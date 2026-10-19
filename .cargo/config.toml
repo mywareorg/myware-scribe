@@ -3,18 +3,10 @@
 [target.x86_64-unknown-linux-gnu]
 rustflags = ["-C", "relocation-model=dynamic-no-pic"]
 
-# Match the prebuilt sherpa-onnx/ONNX Runtime static libraries, which are
-# built with the static MSVC CRT (/MT), and provide the Windows system
-# libraries they need (ETW/registry) but do not carry themselves.
+# The executable is self-contained (sherpa-onnx and ONNX Runtime are loaded
+# from DLLs at runtime).
 [target.x86_64-pc-windows-msvc]
-rustflags = [
-    "-C", "target-feature=+crt-static",
-    "-C", "link-arg=advapi32.lib",
-    "-C", "link-arg=ole32.lib",
-    "-C", "link-arg=oleaut32.lib",
-    "-C", "link-arg=uuid.lib",
-    "-C", "link-arg=winmm.lib",
-]
+rustflags = ["-C", "target-feature=+crt-static"]
 
 # Fast edit/run loop: no LTO, parallel codegen, incremental.
 [alias]
