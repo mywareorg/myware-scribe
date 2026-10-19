@@ -73,6 +73,123 @@ function Add-CMakeIfNeeded {
     }
 }
 
+function Find-SevenZip {
+    $candidates = @(
+        "C:\Program Files\7-Zip\7z.exe",
+        "C:\Program Files (x86)\7-Zip\7z.exe"
+    )
+    $command = Get-Command 7z.exe -ErrorAction SilentlyContinue
+    if ($command) { $candidates = @($command.Source) + $candidates }
+    return $candidates |
+        Where-Object { $_ -and (Test-Path $_) } |
+        Select-Object -First 1
+}
+
+function Get-PortableSevenZip {
+    param([Parameter(Mandatory = $true)][string]$CacheRoot)
+
+    $dir = Join-Path $CacheRoot "7za"
+    $exe = Join-Path $dir "7za.exe"
+    if (Test-Path $exe) {
+        $env:PATH = "$dir;$env:PATH"
+        return $exe
+    }
+
+    $url = "https://www.7-zip.org/a/7za920.zip"
+    $expected = "2a3afe19c180f8373fa02ff00254d5394fec0349f5804e0ad2f6067854ff28ac"
+    $zip = Join-Path $CacheRoot "7za920.zip"
+
+    New-Item -ItemType Directory -Path $CacheRoot -Force | Out-Null
+    if (-not (Test-Path $zip)) {
+        Write-Step "Downloading the standalone 7-Zip extractor"
+        Invoke-WebRequest -Uri $url -OutFile $zip -UseBasicParsing
+    }
+
+    $actual = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($actual -ne $expected) {
+        Remove-Item $zip -Force -ErrorAction SilentlyContinue
+        throw "7za archive checksum mismatch (expected $expected, got $actual)"
+    }
+
+    Write-Step "Installing the standalone 7-Zip extractor"
+    Expand-Archive -Path $zip -DestinationPath $dir -Force
+    if (-not (Test-Path $exe)) {
+        throw "7za.exe was not found after extracting $zip"
+    }
+    $env:PATH = "$dir;$env:PATH"
+    return $exe
+}
+
+function Expand-SevenZip {
+    param(
+        [Parameter(Mandatory = $true)][string]$SevenZip,
+        [Parameter(Mandatory = $true)][string]$Archive,
+        [Parameter(Mandatory = $true)][string]$Destination
+    )
+
+    & $SevenZip x -y "-o$Destination" $Archive
+    if ($LASTEXITCODE -ne 0) { return $false }
+
+    # 7-Zip extracts one compression layer at a time. A .tar.bz2 first becomes
+    # a .tar; extract that too so the caller sees the package directories.
+    $inner = Join-Path $Destination ([System.IO.Path]::GetFileNameWithoutExtension($Archive))
+    if ((Test-Path $inner) -and ($inner -like "*.tar")) {
+        & $SevenZip x -y "-o$Destination" $inner
+        if ($LASTEXITCODE -ne 0) { return $false }
+        Remove-Item $inner -Force -ErrorAction SilentlyContinue
+    }
+    return $true
+}
+
+function Expand-SherpaArchive {
+    param(
+        [Parameter(Mandatory = $true)][string]$Archive,
+        [Parameter(Mandatory = $true)][string]$Destination
+    )
+
+    if (-not (Test-Path $Destination)) {
+        New-Item -ItemType Directory -Path $Destination -Force | Out-Null
+    }
+
+    $sevenZip = Find-SevenZip
+    if ($sevenZip) {
+        Write-Step "Extracting sherpa-onnx archive with 7-Zip"
+        if (Expand-SevenZip -SevenZip $sevenZip -Archive $Archive -Destination $Destination) {
+            return
+        }
+        Write-Warn "7-Zip could not extract the archive; trying another extractor."
+    }
+
+    # Windows 10's built-in tar is bsdtar without bzip2 support; it tries to
+    # launch an external `bzip2 -d`. Git for Windows ships one.
+    $bzip2Command = Get-Command bzip2.exe -ErrorAction SilentlyContinue
+    $bzip2Paths = @(
+        "C:\Program Files\Git\usr\bin\bzip2.exe",
+        "C:\Program Files\Git\mingw64\bin\bzip2.exe",
+        "C:\Program Files (x86)\Git\usr\bin\bzip2.exe",
+        "C:\Program Files\Git\bin\bzip2.exe"
+    )
+    if ($bzip2Command) { $bzip2Paths = @($bzip2Command.Source) + $bzip2Paths }
+    $bzip2 = $bzip2Paths |
+        Where-Object { $_ -and (Test-Path $_) } |
+        Select-Object -First 1
+    if ($bzip2) {
+        $env:PATH = "$(Split-Path -Parent $bzip2);$env:PATH"
+        Write-Step "Extracting sherpa-onnx archive with tar"
+        & tar.exe -xf $Archive -C $Destination
+        if ($LASTEXITCODE -eq 0) { return }
+        Write-Warn "tar could not extract the archive; using the standalone 7-Zip extractor."
+    }
+
+    $sevenZip = Get-PortableSevenZip -CacheRoot $Destination
+    Write-Step "Extracting sherpa-onnx archive with the standalone 7-Zip extractor"
+    if (Expand-SevenZip -SevenZip $sevenZip -Archive $Archive -Destination $Destination) {
+        return
+    }
+
+    throw "Could not extract $Archive. Remove the cache and rerun the script."
+}
+
 function Ensure-SherpaDlls {
     param(
         [string]$CacheRoot
@@ -112,10 +229,7 @@ function Ensure-SherpaDlls {
 
     Write-Step "Extracting sherpa-onnx shared libraries"
     if (Test-Path $root) { Remove-Item $root -Recurse -Force }
-    & tar.exe -xf $path -C $CacheRoot
-    if ($LASTEXITCODE -ne 0) {
-        throw "could not extract $path (tar exit code $LASTEXITCODE)"
-    }
+    Expand-SherpaArchive -Archive $path -Destination $CacheRoot
     if (-not (Test-Path $cApi)) {
         throw "sherpa-onnx-c-api.dll was not found after extracting $path"
     }

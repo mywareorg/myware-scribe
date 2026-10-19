@@ -55,6 +55,13 @@ The app loads `sherpa-onnx-c-api.dll` and `onnxruntime.dll` from beside
 both DLLs, the deploy scripts, README, LICENSE, and the sample. Set
 `TRANSIEL_SHERPA_DLL` to an explicit path to override the DLL location.
 
+The sherpa-onnx release is a `.tar.bz2`. Windows' built-in tar has no bzip2
+support, so the script uses installed 7-Zip or Git for Windows' `bzip2` when
+available. If neither is present, it downloads a small standalone 7-Zip
+extractor into `%LOCALAPPDATA%\transiel\cache` automatically. Alternatively,
+extract the archive manually into
+`%LOCALAPPDATA%\transiel\cache\sherpa-onnx-v1.12.9-win-x64-shared`.
+
 For the edit/run loop, use the fast iteration profile:
 
 ```powershell
