@@ -2,6 +2,7 @@
 
 mod app;
 mod backend;
+mod theme;
 
 use app::App;
 
@@ -66,7 +67,7 @@ fn main() -> iced::Result {
         std::process::exit(transiel_core::cli::run(&args[2..]));
     }
 
-    iced::application("transiel", App::update, App::view)
+    iced::application("Transiel", App::update, App::view)
         .theme(App::theme)
         .subscription(App::subscription)
         .font(include_bytes!("../assets/bootstrap-icons.ttf").as_slice())

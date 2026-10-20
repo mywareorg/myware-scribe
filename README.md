@@ -92,12 +92,10 @@ Download everything at once (also what `deploy.bat` runs on Windows):
 transiel --cli models download --verify
 ```
 
-Existing files are skipped only when their exact size matches upstream; partial
-or corrupt downloads are fetched again. A missing preset model stops the run
-before any transcript is written.
+If models are missing on first launch, the GUI shows a **Download models** card
+and fetches the same files in the background with progress.
 
-- `ggml-large-v3-turbo-q5_0.bin` (accuracy, 574 MB),
-  `ggml-base.en-q5_1.bin` (speed)
+- `ggml-large-v3-turbo-q5_0.bin` (accuracy), `ggml-base.en-q5_1.bin` (speed)
 - `sherpa-onnx-pyannote-segmentation-3-0/model.onnx`
 - `wespeaker_en_voxceleb_resnet34_LM.onnx`
 
@@ -134,13 +132,17 @@ written next to the audio or into `--output-dir`.
 
 ## GUI
 
-Run `transiel` with no arguments. Add files/folders to the queue, choose a
-preset and speaker count, then Transcribe. Files added (or imported) while a run
-is active join the queue and are processed in a follow-up pass automatically.
+Run `transiel` with no arguments. Add files/folders to the queue, or drag audio
+files and folders anywhere into the window, then choose a preset and speaker
+count and press Transcribe. The moon/sun button in the header switches between
+light and dark themes. Files added (or imported) while a run is active join the
+queue and are processed in a follow-up pass automatically. The gear button
+(or `Ctrl+,`) opens Settings for the theme, transcript text size, preset,
+speaker count, playback speed, follow mode, and save location.
 
 Completed rows stay in the queue: click one to revisit that file's transcript,
 speaker timeline, waveform and playback. Renaming speakers or saving writes back
-to that file's `.txt`. `Import → Transcription` adds an existing transcript as a
+to that file's `.txt`. `Import → Transcript` adds an existing transcript as a
 completed item (a same-stem audio file beside it is attached automatically);
 `Import → Audio` queues a file for transcription.
 

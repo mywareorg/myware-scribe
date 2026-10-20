@@ -1,5 +1,5 @@
-//! Model location resolution (models are provisioned by the deploy script;
-//! the app never downloads).
+//! Model location resolution. Models are provisioned by the deploy script, or
+//! downloaded on demand from the GUI.
 
 use std::path::PathBuf;
 

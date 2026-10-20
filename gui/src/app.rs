@@ -2,22 +2,24 @@ use std::collections::{HashSet, VecDeque};
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use iced::keyboard::{self, Key, Modifiers};
-use serde::{Deserialize, Serialize};
 use iced::widget::{
-    button, canvas, column, container, horizontal_space, mouse_area, pick_list, progress_bar,
-    rich_text, row, scrollable, stack, text, text_editor, text_input, tooltip,
+    button, canvas, column, container, horizontal_rule, horizontal_space, mouse_area, pick_list,
+    progress_bar, rich_text, row, scrollable, stack, text, text_editor, text_input, tooltip,
 };
 use iced::{
     font, mouse, Color, Element, Font, Length, Pixels, Point, Rectangle, Renderer, Shadow, Size,
     Subscription, Task, Theme, Vector,
 };
 use rodio::{Decoder, OutputStream, Sink};
+use serde::{Deserialize, Serialize};
 
 use crate::backend::{self, Event};
+use crate::theme::{self, AppTheme, Scheme};
+use transiel_core::download::{self, DownloadEvent, ModelStatus};
 
 const AUDIO_EXTS: &[&str] = &[
     "mp3", "wav", "m4a", "aac", "flac", "ogg", "opus", "wma", "mp4", "mkv", "mov", "webm", "avi",
@@ -25,6 +27,22 @@ const AUDIO_EXTS: &[&str] = &[
 
 /// Height of the waveform/speaker timeline strip.
 const TIMELINE_HEIGHT: f32 = 72.0;
+
+/// Logical 4:3 sizing for the window (default) and floors.
+const DEFAULT_W: f32 = 1024.0;
+const DEFAULT_H: f32 = 768.0; // 1024 * 3 / 4
+const MIN_W: f32 = 800.0;
+const MIN_H: f32 = 600.0;
+
+/// Aspect-ratio snap grid (pixels). 4 keeps things crisp.
+const ASPECT_SNAP_PX: f32 = 4.0;
+const ASPECT: f32 = 4.0 / 3.0; // w/h
+const ASPECT_INV: f32 = 3.0 / 4.0; // h/w
+
+/// Golden-ratio split for the body row. The transcripts side gets the
+/// longer portion: phi ~= 1.618, so left = 1/phi (~38.2%), right = 1 (~61.8%).
+const LEFT_PORTION: u16 = 382; // 1000 * (1 - 1/phi)
+const RIGHT_PORTION: u16 = 618;
 
 /// Number of RMS buckets requested when probing an audio file for the timeline.
 const TIMELINE_BUCKETS: usize = 2000;
@@ -252,7 +270,7 @@ impl ImportKind {
 
     fn label(self) -> &'static str {
         match self {
-            ImportKind::Transcription => "Transcription",
+            ImportKind::Transcription => "Transcript",
             ImportKind::Audio => "Audio",
         }
     }
@@ -338,50 +356,7 @@ struct Settings {
     window_x: Option<f32>,
     window_y: Option<f32>,
     output_dir: Option<String>,
-}
-
-struct Scheme {
-    panel_bg: Color,
-    dialog_bg: Color,
-    track: Color,
-    bar_track: Color,
-    timeline_bg: Color,
-    blue: Color,
-    pink: Color,
-    green: Color,
-    ink: Color,
-    text: Color,
-    sms0: Color,
-    sms1: Color,
-    warn_tint: Color,
-    search_hl: Color,
-    search_active: Color,
-    tip_bg: Color,
-    tip_text: Color,
-}
-
-impl Scheme {
-    fn light() -> Scheme {
-        Scheme {
-            panel_bg: Color::from_rgb(0.96, 0.97, 0.995),
-            dialog_bg: Color::from_rgb(0.99, 0.99, 1.0),
-            track: Color::from_rgb(0.88, 0.88, 0.93),
-            bar_track: Color::from_rgb(0.88, 0.88, 0.93),
-            timeline_bg: Color::from_rgb(0.88, 0.88, 0.93),
-            blue: Color::from_rgb(0.357, 0.808, 0.980),
-            pink: Color::from_rgb(0.961, 0.663, 0.722),
-            green: Color::from_rgb(0.30, 0.72, 0.42),
-            ink: Color::from_rgb(0.13, 0.13, 0.17),
-            text: Color::from_rgb(0.13, 0.13, 0.17),
-            sms0: Color::from_rgb(0.357, 0.808, 0.980),
-            sms1: Color::from_rgb(0.961, 0.663, 0.722),
-            warn_tint: Color::from_rgba(0.529, 0.867, 1.0, 0.35),
-            search_hl: Color::from_rgba(1.0, 0.85, 0.3, 0.5),
-            search_active: Color::from_rgba(1.0, 0.72, 0.2, 0.8),
-            tip_bg: Color::from_rgb(0.99, 0.99, 1.0),
-            tip_text: Color::from_rgb(0.13, 0.13, 0.17),
-        }
-    }
+    theme: Option<String>,
 }
 
 impl fmt::Display for Preset {
@@ -397,6 +372,13 @@ enum Status {
     Done,
     Cancelled,
     Error(String),
+}
+
+/// State of an in-flight model download.
+struct ModelDownload {
+    label: String,
+    done: u64,
+    total: Option<u64>,
 }
 
 /// One line in the completion summary: a file name (styled prominently) or
@@ -426,6 +408,11 @@ pub enum Message {
     ZoomOut,
     ZoomReset,
     ToggleFollowPlayhead,
+    ToggleTheme,
+    SetTheme(AppTheme),
+    OpenSettings,
+    CloseSettings,
+    DownloadModels,
     DismissToast,
     WaveZoom(f32),
     HelpChoice(HelpKind),
@@ -482,6 +469,7 @@ pub enum Message {
 pub struct App {
     output_dir: Option<PathBuf>,
     preset: Preset,
+    theme_mode: AppTheme,
     stage: String,
     progress: f32,
     progress_shown: f32,
@@ -525,6 +513,7 @@ pub struct App {
     console_lines: Vec<String>,
     toast: Option<(String, Instant)>,
     help_open: Option<HelpKind>,
+    settings_open: bool,
     search_query: String,
     search_index: usize,
     playback_speed: f32,
@@ -552,12 +541,49 @@ pub struct App {
     /// Background waveform backfill for completed items without cached peaks.
     backfill_active: bool,
     waveform_tried: HashSet<PathBuf>,
+    /// Presence of the bundled-on-demand models, refreshed periodically.
+    models: Vec<ModelStatus>,
+    model_download: Option<ModelDownload>,
+    model_error: Option<String>,
+    model_events: Arc<Mutex<VecDeque<DownloadEvent>>>,
+    last_model_check: Option<Instant>,
+    /// A file is hovering over the window.
+    drag_hover: bool,
 }
 
 impl Default for App {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Snap a requested window size to the 4:3 grid, honoring `MIN_W`/`MIN_H`.
+/// Pick the dimension the user actually moved (heuristic: the one that
+/// changed more from `last`) and derive the other from it. Both outputs
+/// are rounded to `ASPECT_SNAP_PX` and clamped to the floors without
+/// breaking the ratio.
+fn aspect_clamp(requested: Size, last: Size) -> Size {
+    let dw = (requested.width - last.width).abs();
+    let dh = (requested.height - last.height).abs();
+    // 4:3 means w/h = 4/3, so h = w * 3/4 and w = h * 4/3.
+    let (raw_w, raw_h) = if dw >= dh {
+        let h = (requested.width * ASPECT_INV / ASPECT_SNAP_PX).round() * ASPECT_SNAP_PX;
+        (requested.width, h)
+    } else {
+        let w = (requested.height * ASPECT / ASPECT_SNAP_PX).round() * ASPECT_SNAP_PX;
+        (w, requested.height)
+    };
+    let (mut w, mut h) = (raw_w, raw_h);
+    // Enforce min floor without breaking the ratio.
+    if w < MIN_W {
+        h = (MIN_W * ASPECT_INV / ASPECT_SNAP_PX).round() * ASPECT_SNAP_PX;
+        w = MIN_W;
+    }
+    if h < MIN_H {
+        w = (MIN_H * ASPECT / ASPECT_SNAP_PX).round() * ASPECT_SNAP_PX;
+        h = MIN_H;
+    }
+    Size::new(w, h)
 }
 
 impl App {
@@ -569,6 +595,11 @@ impl App {
                 .preset
                 .as_deref()
                 .and_then(Preset::from_arg)
+                .unwrap_or_default(),
+            theme_mode: settings
+                .theme
+                .as_deref()
+                .and_then(AppTheme::from_arg)
                 .unwrap_or_default(),
             stage: "idle".to_string(),
             progress: 0.0,
@@ -613,6 +644,7 @@ impl App {
             console_lines: Vec::new(),
             toast: None,
             help_open: None,
+            settings_open: false,
             waveform_zoom: settings.waveform_zoom.unwrap_or(1.0),
             search_query: String::new(),
             search_index: 0,
@@ -639,6 +671,12 @@ impl App {
             line_edit: None,
             backfill_active: false,
             waveform_tried: HashSet::new(),
+            models: download::status(),
+            model_download: None,
+            model_error: None,
+            model_events: Arc::new(Mutex::new(VecDeque::new())),
+            last_model_check: Some(Instant::now()),
+            drag_hover: false,
         }
     }
 
@@ -648,9 +686,11 @@ impl App {
                 .ok()
                 .map(|base| PathBuf::from(base).join("transiel").join("settings.json"))
         } else {
-            let base = std::env::var("XDG_CONFIG_HOME")
-                .ok()
-                .or_else(|| std::env::var("HOME").ok().map(|home| format!("{home}/.config")))?;
+            let base = std::env::var("XDG_CONFIG_HOME").ok().or_else(|| {
+                std::env::var("HOME")
+                    .ok()
+                    .map(|home| format!("{home}/.config"))
+            })?;
             Some(PathBuf::from(base).join("transiel").join("settings.json"))
         }
     }
@@ -685,6 +725,7 @@ impl App {
                 .output_dir
                 .as_ref()
                 .map(|path| path.display().to_string()),
+            theme: Some(self.theme_mode.arg().to_string()),
         };
         if let Ok(text) = serde_json::to_string_pretty(&settings) {
             let _ = std::fs::write(path, text);
@@ -716,9 +757,9 @@ impl App {
                 let mut status = match record.status.as_str() {
                     // A run interrupted by a restart is simply pending again.
                     "running" => ItemStatus::Pending,
-                    "failed" => ItemStatus::Failed(
-                        record.message.unwrap_or_else(|| "failed".to_string()),
-                    ),
+                    "failed" => {
+                        ItemStatus::Failed(record.message.unwrap_or_else(|| "failed".to_string()))
+                    }
                     "done" => ItemStatus::Done,
                     _ => ItemStatus::Pending,
                 };
@@ -752,7 +793,10 @@ impl App {
                 .iter()
                 .map(|item| QueueRecord {
                     audio: item.audio.as_ref().map(|path| path.display().to_string()),
-                    transcript: item.transcript.as_ref().map(|path| path.display().to_string()),
+                    transcript: item
+                        .transcript
+                        .as_ref()
+                        .map(|path| path.display().to_string()),
                     duration: item.duration,
                     status: match &item.status {
                         ItemStatus::Pending => "pending",
@@ -957,8 +1001,7 @@ impl App {
                         audio,
                         output: None,
                     });
-                    self.view_error =
-                        Some(format!("Could not read {}: {error}", source.display()));
+                    self.view_error = Some(format!("Could not read {}: {error}", source.display()));
                     return scrollable::snap_to(
                         transcript_id(),
                         scrollable::RelativeOffset { x: 0.0, y: 0.0 },
@@ -1016,9 +1059,7 @@ impl App {
             } else if needs_turns {
                 tasks.push(Task::perform(
                     async move { backend::load_turns(&audio, num_speakers) },
-                    move |turns| {
-                        Message::ViewDetailsLoaded(index, source.clone(), turns, None)
-                    },
+                    move |turns| Message::ViewDetailsLoaded(index, source.clone(), turns, None),
                 ));
             }
         }
@@ -1070,7 +1111,7 @@ impl App {
         iced::window::Settings {
             size: Self::window_size_from(&settings),
             position,
-            min_size: Some(Size::new(640.0, 480.0)),
+            min_size: Some(Size::new(MIN_W, MIN_H)),
             icon: Self::window_icon(),
             ..iced::window::Settings::default()
         }
@@ -1086,27 +1127,121 @@ impl App {
     }
 
     fn window_size_from(settings: &Settings) -> Size {
-        // Cap the height so the window never opens taller than common screens.
-        const MAX_HEIGHT: f32 = 1000.0;
         match (settings.window_width, settings.window_height) {
             (Some(width), Some(height)) if width >= 100.0 && height >= 100.0 => {
-                Size::new(width, height.min(MAX_HEIGHT))
+                // Re-snap whatever was persisted to the 4:3 grid, in case a
+                // legacy size from an earlier version was stored without
+                // aspect enforcement.
+                aspect_clamp(Size::new(width, height), Size::new(width, height))
             }
-            _ => Size::new(640.0, 900.0),
+            _ => Size::new(DEFAULT_W, DEFAULT_H),
         }
     }
 
     pub fn theme(&self) -> iced::Theme {
-        iced::Theme::custom(
-            "Transgender".to_string(),
-            iced::theme::Palette {
-                background: Color::WHITE,
-                text: Color::from_rgb(0.13, 0.13, 0.17),
-                primary: Color::from_rgb(0.357, 0.808, 0.980),
-                success: Color::from_rgb(0.357, 0.808, 0.980),
-                danger: Color::from_rgb(0.961, 0.663, 0.722),
-            },
-        )
+        self.theme_mode.iced()
+    }
+
+    /// Colours for the current appearance mode.
+    fn scheme(&self) -> Scheme {
+        self.theme_mode.scheme()
+    }
+
+    /// True when every model file needed by the pipeline is present.
+    fn models_ready(&self) -> bool {
+        !self.models.is_empty() && self.models.iter().all(ModelStatus::present)
+    }
+
+    fn refresh_models(&mut self) {
+        self.models = download::status();
+        self.last_model_check = Some(Instant::now());
+        if self.models_ready() {
+            self.model_error = None;
+        }
+    }
+
+    /// Start the one-time model download on a background thread. Progress is
+    /// delivered through `model_events` and drained on `Tick`.
+    fn start_model_download(&mut self) {
+        if self.model_download.is_some() {
+            return;
+        }
+        self.model_error = None;
+        self.model_download = Some(ModelDownload {
+            label: "starting".to_string(),
+            done: 0,
+            total: None,
+        });
+        let events = self.model_events.clone();
+        if let Ok(mut queue) = events.lock() {
+            queue.clear();
+        }
+        let spawned = std::thread::Builder::new()
+            .name("model-download".to_string())
+            .spawn(move || {
+                download::download_with(false, true, &mut |event| {
+                    if let Ok(mut queue) = events.lock() {
+                        queue.push_back(event);
+                    }
+                });
+            });
+        if spawned.is_err() {
+            self.model_download = None;
+            self.model_error = Some("Could not start the download".to_string());
+        }
+    }
+
+    fn drain_model_download(&mut self) {
+        loop {
+            let event = self
+                .model_events
+                .lock()
+                .ok()
+                .and_then(|mut queue| queue.pop_front());
+            let Some(event) = event else {
+                break;
+            };
+            match event {
+                DownloadEvent::Started { label } => {
+                    if let Some(state) = &mut self.model_download {
+                        state.label = friendly_model(label).to_string();
+                        state.done = 0;
+                        state.total = None;
+                    }
+                }
+                DownloadEvent::Progress { label, done, total } => {
+                    if let Some(state) = &mut self.model_download {
+                        state.label = friendly_model(label).to_string();
+                        state.done = done;
+                        state.total = total;
+                    }
+                }
+                DownloadEvent::Completed { label, .. } => {
+                    if let Some(state) = &mut self.model_download {
+                        state.label = friendly_model(label).to_string();
+                        if let Some(total) = state.total {
+                            state.done = total;
+                        }
+                    }
+                }
+                DownloadEvent::Failed { label, message } => {
+                    self.model_error = Some(format!("{}: {message}", friendly_model(label)));
+                }
+                DownloadEvent::Finished { ok } => {
+                    self.model_download = None;
+                    self.refresh_models();
+                    if ok {
+                        self.toast = Some(("Models downloaded".to_string(), Instant::now()));
+                    } else {
+                        if self.model_error.is_none() {
+                            self.model_error =
+                                Some("One or more model files could not be downloaded".to_string());
+                        }
+                        self.toast = Some(("Model download failed".to_string(), Instant::now()));
+                    }
+                }
+            }
+        }
     }
 
     pub fn subscription(&self) -> Subscription<Message> {
@@ -1129,6 +1264,7 @@ impl App {
             Key::Named(Named::ArrowRight) => Some(Message::SeekBy(5.0)),
             Key::Named(Named::ArrowLeft) => Some(Message::SeekBy(-5.0)),
             Key::Character(character) if modifiers.command() => match character.as_str() {
+                "," => Some(Message::OpenSettings),
                 "o" => Some(Message::AddFiles),
                 "f" => Some(Message::FocusFind),
                 "=" | "+" => Some(Message::ZoomIn),
@@ -1189,7 +1325,13 @@ impl App {
             Message::WindowEvent(event) => {
                 match event {
                     iced::window::Event::Resized(size) => {
-                        self.window_size = size;
+                        // Iced 0.13 reports the OS-driven size; we cannot push
+                        // a corrected resize back to the OS during a manual
+                        // drag. Snap the size we *record* (and persist) to the
+                        // 4:3 grid so the next launch and the layout math
+                        // always see an aspect-locked window.
+                        let previous = self.window_size;
+                        self.window_size = aspect_clamp(size, previous);
                         self.window_dirty = true;
                         self.last_window_change = Some(Instant::now());
                     }
@@ -1197,6 +1339,43 @@ impl App {
                         self.window_position = Some(point);
                         self.window_dirty = true;
                         self.last_window_change = Some(Instant::now());
+                    }
+                    iced::window::Event::FileHovered(_) => {
+                        self.drag_hover = true;
+                    }
+                    iced::window::Event::FilesHoveredLeft => {
+                        self.drag_hover = false;
+                    }
+                    iced::window::Event::FileDropped(path) => {
+                        self.drag_hover = false;
+                        let paths = if path.is_dir() {
+                            audio_files_in(&path)
+                        } else if is_audio(&path) {
+                            vec![path]
+                        } else {
+                            Vec::new()
+                        };
+                        if paths.is_empty() {
+                            self.toast = Some((
+                                "Drop audio files to add them to the queue".to_string(),
+                                Instant::now(),
+                            ));
+                            return Task::none();
+                        }
+                        let added = self.add_paths(paths);
+                        if added.is_empty() {
+                            self.toast = Some(("Already in the queue".to_string(), Instant::now()));
+                            return Task::none();
+                        }
+                        let count = added.len();
+                        self.toast = Some((
+                            format!(
+                                "Added {count} file{} to the queue",
+                                if count == 1 { "" } else { "s" }
+                            ),
+                            Instant::now(),
+                        ));
+                        return Self::probe_items(added);
                     }
                     _ => {}
                 }
@@ -1356,6 +1535,9 @@ impl App {
                 }
             }
             Message::EnterSubmit => {
+                if self.settings_open {
+                    return Task::none();
+                }
                 if self.line_edit.is_some() {
                     // Enter saves the line editor from any of its fields.
                     self.apply_line_edit();
@@ -1373,6 +1555,9 @@ impl App {
                 }
             }
             Message::ShiftEnterSubmit => {
+                if self.settings_open {
+                    return Task::none();
+                }
                 if self.line_edit.is_some() {
                     return Task::none();
                 } else if !self.rename_open {
@@ -1423,6 +1608,30 @@ impl App {
                 self.save_settings();
                 Task::none()
             }
+            Message::ToggleTheme => {
+                self.theme_mode = self.theme_mode.toggled();
+                self.save_settings();
+                Task::none()
+            }
+            Message::SetTheme(mode) => {
+                self.theme_mode = mode;
+                self.save_settings();
+                Task::none()
+            }
+            Message::OpenSettings => {
+                self.settings_open = true;
+                self.help_open = None;
+                self.toast = None;
+                Task::none()
+            }
+            Message::CloseSettings => {
+                self.settings_open = false;
+                Task::none()
+            }
+            Message::DownloadModels => {
+                self.start_model_download();
+                Task::none()
+            }
             Message::DismissToast => {
                 self.toast = None;
                 Task::none()
@@ -1451,6 +1660,8 @@ impl App {
                     self.line_edit = None;
                 } else if self.rename_open {
                     self.rename_open = false;
+                } else if self.settings_open {
+                    self.settings_open = false;
                 } else if self.summary_open {
                     self.summary_open = false;
                     if self.pending_rename {
@@ -1468,14 +1679,14 @@ impl App {
                 Task::none()
             }
             Message::ShortcutPlay => {
-                if self.rename_open || self.line_edit.is_some() {
+                if self.rename_open || self.line_edit.is_some() || self.settings_open {
                     return Task::none();
                 }
                 self.toggle_playback();
                 Task::none()
             }
             Message::SeekBy(delta) => {
-                if self.rename_open || self.line_edit.is_some() {
+                if self.rename_open || self.line_edit.is_some() || self.settings_open {
                     return Task::none();
                 }
                 if self.shown_duration().is_some() {
@@ -1498,8 +1709,15 @@ impl App {
             },
             Message::ImportLoaded(loaded) => {
                 let Some((transcript, text)) = loaded else {
+                    self.toast =
+                        Some(("Could not read that transcript".to_string(), Instant::now()));
                     return Task::none();
                 };
+                let imported_name = transcript
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| transcript.display().to_string());
+                self.toast = Some((format!("Imported {imported_name}"), Instant::now()));
                 let audio = Self::matching_audio(&transcript);
                 // Reuse the entry for the same transcript; attach the audio to a
                 // still-pending entry for the same audio instead of duplicating.
@@ -1565,6 +1783,18 @@ impl App {
             Message::FilesPicked(paths) => {
                 if let Some(paths) = paths {
                     let added = self.add_paths(paths);
+                    if added.is_empty() {
+                        self.toast = Some(("Already in the queue".to_string(), Instant::now()));
+                        return Task::none();
+                    }
+                    self.toast = Some((
+                        format!(
+                            "Added {} {} to the queue",
+                            added.len(),
+                            if added.len() == 1 { "file" } else { "files" }
+                        ),
+                        Instant::now(),
+                    ));
                     return Self::probe_items(added);
                 }
                 Task::none()
@@ -1575,7 +1805,25 @@ impl App {
             ),
             Message::FolderPicked(dir) => {
                 if let Some(dir) = dir {
-                    let added = self.add_paths(audio_files_in(&dir));
+                    let files = audio_files_in(&dir);
+                    if files.is_empty() {
+                        self.toast =
+                            Some(("No audio files in that folder".to_string(), Instant::now()));
+                        return Task::none();
+                    }
+                    let added = self.add_paths(files);
+                    if added.is_empty() {
+                        self.toast = Some(("Already in the queue".to_string(), Instant::now()));
+                        return Task::none();
+                    }
+                    self.toast = Some((
+                        format!(
+                            "Added {} {} to the queue",
+                            added.len(),
+                            if added.len() == 1 { "file" } else { "files" }
+                        ),
+                        Instant::now(),
+                    ));
                     return Self::probe_items(added);
                 }
                 Task::none()
@@ -1614,13 +1862,13 @@ impl App {
                             *current -= 1;
                         }
                     }
-                    self.selected = self.selected.and_then(|selected| {
-                        match selected.cmp(&index) {
+                    self.selected = self
+                        .selected
+                        .and_then(|selected| match selected.cmp(&index) {
                             std::cmp::Ordering::Equal => None,
                             std::cmp::Ordering::Greater => Some(selected - 1),
                             std::cmp::Ordering::Less => Some(selected),
-                        }
-                    });
+                        });
                     if self.selected.is_none() {
                         self.selected_view = None;
                         self.view_error = None;
@@ -1810,8 +2058,7 @@ impl App {
                         .iter()
                         .any(|item| item.audio.as_deref() == Some(path.as_path()))
                     {
-                        self.toast =
-                            Some(("Already in the queue".to_string(), Instant::now()));
+                        self.toast = Some(("Already in the queue".to_string(), Instant::now()));
                         return Task::none();
                     }
                     let added = self.add_paths(vec![path]);
@@ -1821,8 +2068,7 @@ impl App {
                             .and_then(|name| name.to_str())
                             .unwrap_or("file")
                             .to_string();
-                        self.toast =
-                            Some((format!("Added {name} to the queue"), Instant::now()));
+                        self.toast = Some((format!("Added {name} to the queue"), Instant::now()));
                         return Self::probe_items(added);
                     }
                 }
@@ -1849,7 +2095,7 @@ impl App {
                 Task::none()
             }
             Message::PresetChanged(preset) => {
-                if matches!(self.status, Status::Running) || self.queue.is_empty() {
+                if matches!(self.status, Status::Running) {
                     return Task::none();
                 }
                 self.preset = preset;
@@ -1857,7 +2103,9 @@ impl App {
                 Task::none()
             }
             Message::Start => {
-                self.start();
+                if !self.settings_open {
+                    self.start();
+                }
                 Task::none()
             }
             Message::Cancel => {
@@ -1866,6 +2114,14 @@ impl App {
             }
             Message::Tick => {
                 let mut tasks = vec![self.drain_events()];
+                self.drain_model_download();
+                if self.model_download.is_none()
+                    && self
+                        .last_model_check
+                        .is_none_or(|last| last.elapsed() > Duration::from_secs(5))
+                {
+                    self.refresh_models();
+                }
                 if self.transcript_dirty && self.selected_view.is_none() {
                     self.transcript_dirty = false;
                     let mut out = String::new();
@@ -1908,8 +2164,7 @@ impl App {
 
                 // Ease an overall bar that continues smoothly across queued files.
                 let total_items = self.queue.len().max(1) as f32;
-                let animating =
-                    matches!(self.status, Status::Running) || self.completion_pending;
+                let animating = matches!(self.status, Status::Running) || self.completion_pending;
                 let target_overall = if animating {
                     (self.current_index.unwrap_or(0) as f32 + self.progress) / total_items
                 } else {
@@ -1942,8 +2197,7 @@ impl App {
                         if let Some(last) = self.last_tick {
                             let dt = (now - last).as_secs_f32();
                             let limit = self.shown_duration().unwrap_or(f32::MAX);
-                            self.playhead =
-                                (self.playhead + dt * self.playback_speed).min(limit);
+                            self.playhead = (self.playhead + dt * self.playback_speed).min(limit);
                         }
                         self.last_tick = Some(now);
                     } else {
@@ -2025,10 +2279,7 @@ impl App {
                 seen.push(line.speaker.clone());
             }
         }
-        self.rename_fields = seen
-            .into_iter()
-            .map(|name| (name, String::new()))
-            .collect();
+        self.rename_fields = seen.into_iter().map(|name| (name, String::new())).collect();
         self.rename_focus = 0;
         self.rename_open = true;
         self.toast = None;
@@ -2183,8 +2434,7 @@ impl App {
             };
             self.player = Player::new(&path);
             if self.player.is_none() {
-                self.toast =
-                    Some(("Could not open the audio file".to_string(), Instant::now()));
+                self.toast = Some(("Could not open the audio file".to_string(), Instant::now()));
                 return;
             }
             if let Some(player) = &self.player {
@@ -2218,6 +2468,14 @@ impl App {
     /// keeps a completed transcript (and its playback) visible across an
     /// automatic follow-up pass; explicit starts always return to live.
     fn begin_batch(&mut self, preserve_view: bool) {
+        if !self.models_ready() {
+            self.status = Status::Error("transcription models are missing".to_string());
+            self.toast = Some((
+                "Download the transcription models before starting".to_string(),
+                Instant::now(),
+            ));
+            return;
+        }
         let preserve = preserve_view && self.keep_pinned_view();
         let inputs: Vec<PathBuf> = self
             .queue
@@ -2379,11 +2637,7 @@ impl App {
         let speaker = edit.speaker.trim().to_string();
         // One transcript line must stay one physical line: collapse any
         // newlines typed into the editor into spaces.
-        let text = edit
-            .content
-            .text()
-            .trim_end()
-            .replace(['\n', '\r'], " ");
+        let text = edit.content.text().trim_end().replace(['\n', '\r'], " ");
         self.line_edit = None;
 
         if let Some(view) = self.selected_view.as_mut() {
@@ -2453,7 +2707,11 @@ impl App {
                 .and_then(|mut queue| queue.pop_front());
             let Some(event) = event else { break };
             match event {
-                Event::Stage { stage, label, progress } => {
+                Event::Stage {
+                    stage,
+                    label,
+                    progress,
+                } => {
                     self.stage = if label.is_empty() { stage } else { label };
                     self.progress = progress.clamp(0.0, 1.0);
                 }
@@ -2691,8 +2949,7 @@ impl App {
             format!("Preset: {}", s.preset),
         ];
         if !s.speaker_stats.is_empty() {
-            let mut stats: Vec<(&String, &backend::SpeakerStat)> =
-                s.speaker_stats.iter().collect();
+            let mut stats: Vec<(&String, &backend::SpeakerStat)> = s.speaker_stats.iter().collect();
             stats.sort_by(|a, b| {
                 b.1.seconds
                     .partial_cmp(&a.1.seconds)
@@ -2716,7 +2973,9 @@ impl App {
             return Some(format_secs(secs));
         }
         if matches!(self.status, Status::Running) {
-            return self.run_start.map(|start| format_secs(start.elapsed().as_secs_f64()));
+            return self
+                .run_start
+                .map(|start| format_secs(start.elapsed().as_secs_f64()));
         }
         None
     }
@@ -2728,17 +2987,22 @@ impl App {
         for line in &self.console_lines {
             col = col.push(text(line.clone()).size(12));
         }
-        container(scrollable(col).id(console_id()).height(Length::Fill).width(Length::Fill))
-            .width(Length::Fill)
-            .height(Length::Fixed(150.0))
-            .padding(8)
-            .style(move |_theme| container::Style {
-                background: Some(background.into()),
-                border: iced::border::rounded(8.0),
-                shadow: soft_shadow(),
-                ..container::Style::default()
-            })
-            .into()
+        container(
+            scrollable(col)
+                .id(console_id())
+                .height(Length::Fill)
+                .width(Length::Fill),
+        )
+        .width(Length::Fill)
+        .height(Length::Fixed(150.0))
+        .padding(8)
+        .style(move |_theme| container::Style {
+            background: Some(background.into()),
+            border: iced::border::rounded(8.0),
+            shadow: soft_shadow(),
+            ..container::Style::default()
+        })
+        .into()
     }
 
     /// Line indices (into the displayed transcript) containing the query.
@@ -2787,7 +3051,10 @@ impl App {
         if content <= 0.0 || viewport <= 0.0 {
             return None;
         }
-        let rank = self.display_order().iter().position(|index| *index == line)?;
+        let rank = self
+            .display_order()
+            .iter()
+            .position(|index| *index == line)?;
         let line_height = content / total;
         Some(
             ((rank as f32 + 0.5) * line_height - viewport / 2.0)
@@ -2799,10 +3066,7 @@ impl App {
         match self.follow_target(line) {
             Some(y) => {
                 self.scroll_target = Some(y);
-                scrollable::scroll_to(
-                    transcript_id(),
-                    scrollable::AbsoluteOffset { x: 0.0, y },
-                )
+                scrollable::scroll_to(transcript_id(), scrollable::AbsoluteOffset { x: 0.0, y })
             }
             None => Task::none(),
         }
@@ -2848,9 +3112,491 @@ impl App {
         }
     }
 
+    /// Friendly placeholder shown when there is no text to render yet.
+    fn empty_transcript_state(&self, scheme: &Scheme) -> Element<'_, Message> {
+        let running = matches!(self.status, Status::Running);
+        let selected = self.selected_view.is_some();
+        let has_queue = !self.queue.is_empty();
+        let has_done = self.has_results();
+        let pending = self
+            .queue
+            .iter()
+            .any(|item| matches!(item.status, ItemStatus::Pending));
+
+        let (glyph, tint, title, body) = if running {
+            let detail = if self.stage.is_empty() || self.stage == "starting" {
+                "Preparing the audio and models".to_string()
+            } else {
+                capitalize_first(&self.stage)
+            };
+            (
+                ICON_HOURGLASS,
+                scheme.warn_tint,
+                "Listening for speech",
+                format!("{detail}. Lines will appear here as they are transcribed."),
+            )
+        } else if selected {
+            (
+                ICON_FILE_TEXT,
+                scheme.track,
+                "Empty transcript",
+                "This transcript has no lines to display.".to_string(),
+            )
+        } else if !has_queue {
+            (
+                ICON_MIC,
+                scheme.warn_tint,
+                "Drop audio to begin",
+                "Drag audio files anywhere into the window, or add them from the left panel."
+                    .to_string(),
+            )
+        } else if has_done {
+            (
+                ICON_FILE_TEXT,
+                scheme.track,
+                "Choose a transcript",
+                "Select a completed file in the queue to read it here.".to_string(),
+            )
+        } else if pending {
+            (
+                ICON_PLAY,
+                scheme.track,
+                "Ready to transcribe",
+                "Press Transcribe (or Ctrl+Enter) to start the queue.".to_string(),
+            )
+        } else {
+            (
+                ICON_CIRCLE,
+                scheme.track,
+                "Nothing here yet",
+                "Add audio files to the queue to get started.".to_string(),
+            )
+        };
+
+        let mut actions = row![].spacing(8).align_y(iced::Alignment::Center);
+        if !has_queue {
+            actions = actions.push(
+                action("Add File(s)")
+                    .on_press(Message::AddFiles)
+                    .style(color_button(scheme.blue, scheme.on_accent)),
+            );
+            actions = actions.push(
+                action("Add Folder")
+                    .on_press(Message::AddFolder)
+                    .style(pill_button_secondary),
+            );
+        } else if pending && !has_done {
+            actions = actions.push(
+                action("Transcribe")
+                    .on_press_maybe(self.models_ready().then_some(Message::Start))
+                    .style(color_button(scheme.green, scheme.on_accent)),
+            );
+            actions = actions.push(
+                action("Add File(s)")
+                    .on_press(Message::AddFiles)
+                    .style(pill_button_secondary),
+            );
+        }
+
+        let icon = container(icon_colored(glyph, 26.0, scheme.blue))
+            .width(Length::Fixed(56.0))
+            .height(Length::Fixed(56.0))
+            .center_x(Length::Fixed(56.0))
+            .center_y(Length::Fixed(56.0))
+            .style(move |_theme| container::Style {
+                background: Some(tint.into()),
+                border: iced::border::rounded(28.0),
+                ..container::Style::default()
+            });
+
+        let mut content = column![
+            icon,
+            text(title).size(22).font(Font {
+                weight: font::Weight::Bold,
+                ..Font::DEFAULT
+            }),
+            text(body).size(14).color(scheme.muted).width(Length::Fill),
+        ]
+        .spacing(10)
+        .align_x(iced::Alignment::Center);
+
+        if !has_queue || (pending && !has_done) {
+            content = content.push(container(actions).padding([8, 0]));
+        }
+
+        container(container(content).center_x(Length::Fill).max_width(380.0))
+            .center(Length::Fill)
+            .padding(24)
+            .into()
+    }
+
+    /// Short summary shown beside the queue title, e.g. "3 files · 12:34".
+    fn queue_summary_text(&self) -> String {
+        let count = self.queue.len();
+        if count == 0 {
+            return "No files yet".to_string();
+        }
+        let known: f64 = self.queue.iter().filter_map(|item| item.duration).sum();
+        let known_count = self
+            .queue
+            .iter()
+            .filter(|item| item.duration.is_some())
+            .count();
+        let files = if count == 1 {
+            "1 file".to_string()
+        } else {
+            format!("{count} files")
+        };
+        if known_count == 0 {
+            files
+        } else if known_count == count {
+            format!("{files} \u{00b7} {}", format_secs(known))
+        } else {
+            format!("{files} \u{00b7} {} known", format_secs(known))
+        }
+    }
+
+    /// The queue card in the left panel: header, add/import toolbar, list and
+    /// run controls.
+    fn queue_panel(&self, scheme: &Scheme) -> Element<'_, Message> {
+        let scheme = *scheme;
+        let running = matches!(self.status, Status::Running);
+        let has_queue = !self.queue.is_empty();
+        let can_start = !running
+            && self
+                .queue
+                .iter()
+                .any(|item| matches!(item.status, ItemStatus::Pending))
+            && self.models_ready();
+
+        let header = row![
+            text("Queue").size(theme::TEXT_MD).font(Font {
+                weight: font::Weight::Bold,
+                ..Font::DEFAULT
+            }),
+            text(self.queue_summary_text())
+                .size(theme::TEXT_XS)
+                .color(scheme.muted),
+        ]
+        .spacing(8)
+        .align_y(iced::Alignment::Center);
+
+        let add_button = self.tip(
+            action(
+                row![
+                    icon_colored(ICON_PLUS, 14.0, scheme.on_accent),
+                    text("Add").size(12),
+                ]
+                .spacing(4)
+                .align_y(iced::Alignment::Center),
+            )
+            .on_press(Message::AddFiles)
+            .style(color_button(scheme.blue, scheme.on_accent)),
+            "Add audio files",
+            &scheme,
+        );
+
+        let folder_button = self.tip(
+            action(icon(ICON_FOLDER_PLUS, 15.0))
+                .on_press(Message::AddFolder)
+                .style(pill_button_secondary),
+            "Add a folder",
+            &scheme,
+        );
+
+        let import_picker: Element<Message> =
+            pick_list(ImportKind::ALL, None::<ImportKind>, Message::ImportChoice)
+                .placeholder("Import")
+                .style(ink_pick(scheme.ink))
+                .handle(caret_handle(false))
+                .into();
+
+        let clear_button = self.tip(
+            action(icon(ICON_TRASH, 15.0))
+                .on_press_maybe((!running && has_queue).then_some(Message::ClearQueue))
+                .style(pill_button_secondary),
+            "Clear queue",
+            &scheme,
+        );
+
+        let toolbar = row![
+            add_button,
+            folder_button,
+            import_picker,
+            horizontal_space(),
+            clear_button,
+        ]
+        .spacing(theme::SPACE_SM)
+        .align_y(iced::Alignment::Center);
+
+        let body: Element<Message> = if has_queue {
+            let mut rows = column![].spacing(4).width(Length::Fill);
+            for index in 0..self.queue.len() {
+                rows = rows.push(self.queue_row(index, &scheme));
+            }
+            scrollable(rows)
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .style(queue_scrollbar_style)
+                .into()
+        } else {
+            container(
+                column![
+                    icon_colored(ICON_MIC, 20.0, scheme.muted),
+                    text("No audio queued")
+                        .size(theme::TEXT_SM)
+                        .color(scheme.text),
+                    text("Add files or drop them here")
+                        .size(theme::TEXT_XS)
+                        .color(scheme.muted),
+                ]
+                .spacing(6)
+                .align_x(iced::Alignment::Center),
+            )
+            .center(Length::Fill)
+            .into()
+        };
+
+        let output = self
+            .output_dir
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "Audio source directory".to_string());
+        let output_short = ellipsize_middle(&output, 30);
+        let output_row = row![
+            action("Save Location")
+                .on_press_maybe((!running && has_queue).then_some(Message::PickOutput))
+                .style(pill_button_secondary),
+            text(output_short)
+                .size(theme::TEXT_XS)
+                .color(scheme.muted)
+                .width(Length::Fill),
+        ]
+        .spacing(8)
+        .align_y(iced::Alignment::Center);
+
+        let preset: Element<Message> = if !running && has_queue {
+            pick_list(Preset::ALL, Some(self.preset), Message::PresetChanged)
+                .style(pill_pick)
+                .width(Length::Fill)
+                .into()
+        } else {
+            // Keep the real pick_list (so iced draws its arrow) but put a
+            // click-capturing layer on top so it cannot be opened.
+            stack![
+                pick_list(Preset::ALL, Some(self.preset), Message::PresetChanged)
+                    .style(greyed_pick(scheme))
+                    .width(Length::Fill),
+                mouse_area(
+                    container(horizontal_space())
+                        .width(Length::Fill)
+                        .height(Length::Fill),
+                )
+                .interaction(mouse::Interaction::Idle)
+                .on_press(Message::Tick),
+            ]
+            .into()
+        };
+
+        let speaker_pick = pick_list(
+            SpeakerOpt::ALL,
+            Some(SpeakerOpt::from_value(self.num_speakers)),
+            Message::SpeakerCountChanged,
+        );
+        let speakers: Element<Message> = if running {
+            stack![
+                speaker_pick.style(greyed_pick(scheme)).width(Length::Fill),
+                mouse_area(
+                    container(horizontal_space())
+                        .width(Length::Fill)
+                        .height(Length::Fill),
+                )
+                .interaction(mouse::Interaction::Idle)
+                .on_press(Message::Tick),
+            ]
+            .into()
+        } else {
+            speaker_pick.style(pill_pick).width(Length::Fill).into()
+        };
+
+        let option_label = |label: &'static str| text(label).size(11).color(scheme.muted);
+        let options = row![
+            column![option_label("Preset"), preset]
+                .spacing(2)
+                .width(Length::Fill),
+            column![option_label("Speakers"), speakers]
+                .spacing(2)
+                .width(Length::Fill),
+        ]
+        .spacing(8);
+
+        let controls = column![
+            output_row,
+            options,
+            row![
+                action("Transcribe")
+                    .on_press_maybe(can_start.then_some(Message::Start))
+                    .style(color_button(scheme.green, scheme.on_accent)),
+                action("Cancel")
+                    .on_press_maybe(running.then_some(Message::Cancel))
+                    .style(color_button(scheme.pink, scheme.on_accent)),
+            ]
+            .spacing(8)
+            .align_y(iced::Alignment::Center),
+        ]
+        .spacing(12);
+
+        let content = column![header, toolbar, body, horizontal_rule(1), controls,]
+            .spacing(12)
+            .height(Length::Fill);
+
+        container(content)
+            .padding(12)
+            .width(Length::FillPortion(LEFT_PORTION))
+            .height(Length::Fill)
+            .style(move |_theme| container::Style {
+                background: Some(scheme.panel_bg.into()),
+                border: iced::border::rounded(16.0),
+                shadow: soft_shadow(),
+                ..container::Style::default()
+            })
+            .into()
+    }
+
+    /// One queue row: status, two-line label, optional progress and remove.
+    fn queue_row(&self, index: usize, scheme: &Scheme) -> Element<'static, Message> {
+        let item = &self.queue[index];
+        let scheme = *scheme;
+        let running = matches!(self.status, Status::Running);
+        let can_remove = !running;
+        let viewing = self.selected == Some(index) && self.selected_view.is_some();
+        let selectable = matches!(item.status, ItemStatus::Running)
+            || (matches!(item.status, ItemStatus::Done) && item.transcript.is_some());
+
+        let name = item
+            .path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| item.path.display().to_string());
+        let name = ellipsize_middle(&name, 34);
+        let duration = item
+            .duration
+            .map(format_secs)
+            .unwrap_or_else(|| "--:--".to_string());
+
+        let (meta, meta_color) = match &item.status {
+            ItemStatus::Pending => (format!("{duration} \u{00b7} Queued"), scheme.muted),
+            ItemStatus::Running => (
+                format!(
+                    "{duration} \u{00b7} Transcribing {:.0}%",
+                    self.progress_shown * 100.0
+                ),
+                scheme.muted,
+            ),
+            ItemStatus::Done => (format!("{duration} \u{00b7} Done"), scheme.muted),
+            ItemStatus::Failed(message) => (
+                format!("{duration} \u{00b7} {}", ellipsize(message, 38)),
+                scheme.danger,
+            ),
+        };
+
+        let badge: Element<'static, Message> = match &item.status {
+            ItemStatus::Pending => queue_status_icon(ICON_CIRCLE, 18.0, scheme.text),
+            ItemStatus::Running => {
+                queue_status_badge(ICON_HOURGLASS, 14.0, scheme.track, scheme.text)
+            }
+            ItemStatus::Done => {
+                queue_status_badge(ICON_CHECK, 18.0, scheme.green, scheme.on_accent)
+            }
+            ItemStatus::Failed(_) => {
+                queue_status_badge(ICON_X, 15.0, scheme.danger, scheme.on_accent)
+            }
+        };
+
+        let label = column![
+            text(name)
+                .size(theme::TEXT_SM)
+                .color(scheme.text)
+                .font(Font {
+                    weight: font::Weight::Medium,
+                    ..Font::DEFAULT
+                }),
+            text(meta).size(11).color(meta_color),
+        ]
+        .spacing(1)
+        .width(Length::Fill);
+
+        let mut content = row![badge, label]
+            .spacing(8)
+            .align_y(iced::Alignment::Center);
+
+        if matches!(item.status, ItemStatus::Running) {
+            content = content.push(
+                progress_bar(0.0..=1.0, self.progress_shown)
+                    .width(Length::Fixed(52.0))
+                    .height(Length::Fixed(6.0))
+                    .style(move |_theme| progress_bar::Style {
+                        background: scheme.bar_track.into(),
+                        bar: scheme.blue.into(),
+                        border: iced::border::rounded(3.0),
+                    }),
+            );
+        }
+
+        content = content.push(
+            self.tip(
+                action(icon(ICON_X, 11.0))
+                    .on_press_maybe(can_remove.then_some(Message::RemoveItem(index)))
+                    .style(subtle_icon_button),
+                "Remove from queue",
+                &scheme,
+            ),
+        );
+
+        let row_tint = Color {
+            a: 0.12,
+            ..scheme.blue
+        };
+        let hover_tint = scheme.bar_track;
+        let row_text = scheme.text;
+        let row_button =
+            button(content)
+                .padding([6, 8])
+                .width(Length::Fill)
+                .style(move |_theme, status| {
+                    let background = if viewing {
+                        row_tint
+                    } else if selectable && matches!(status, button::Status::Hovered) {
+                        hover_tint
+                    } else {
+                        Color::TRANSPARENT
+                    };
+                    let border_color = if viewing {
+                        scheme.blue
+                    } else {
+                        Color::TRANSPARENT
+                    };
+                    button::Style {
+                        background: Some(background.into()),
+                        text_color: row_text,
+                        border: iced::border::Border {
+                            color: border_color,
+                            width: 1.0,
+                            radius: 10.0.into(),
+                        },
+                        shadow: Shadow::default(),
+                    }
+                });
+        if selectable {
+            row_button.on_press(Message::ViewItem(index)).into()
+        } else {
+            row_button.into()
+        }
+    }
+
     /// Transcript view: per-line (search tinted) or SMS bubbles.
     fn transcript_element(&self) -> Element<'_, Message> {
-        let scheme = Scheme::light();
+        let scheme = self.scheme();
         if let Some(error) = &self.view_error {
             let mut col = column![
                 text("Transcript unavailable").size(20),
@@ -2868,11 +3614,14 @@ impl App {
                     col = col.push(
                         action("Transcribe again")
                             .on_press(Message::RequeueItem(index))
-                            .style(color_button(scheme.green, scheme.ink)),
+                            .style(color_button(scheme.green, scheme.on_accent)),
                     );
                 }
             }
             return col.into();
+        }
+        if self.shown_transcript().trim().is_empty() && self.shown_lines().is_empty() {
+            return self.empty_transcript_state(&scheme);
         }
         let query = self.search_query.trim().to_string();
         let matches = if query.is_empty() {
@@ -2887,8 +3636,7 @@ impl App {
         let display: Vec<usize> = self.display_order();
         let playhead_line = self.active_line_index();
         let lines = self.shown_lines();
-        // SMS bubbles alternate sides per message, rather than giving each
-        // speaker a fixed column.
+        // Each speaker keeps a fixed side of the transcript in bubble mode.
         for idx in display {
             let line = &lines[idx];
             if line.raw.trim().is_empty() {
@@ -2901,7 +3649,6 @@ impl App {
                     .iter()
                     .position(|name| *name == line.speaker)
                     .unwrap_or(0);
-                // Each speaker keeps a fixed side (their own column).
                 let left = index.is_multiple_of(2);
                 let tint = if matched {
                     Some(if Some(idx) == active_line {
@@ -2912,47 +3659,50 @@ impl App {
                 } else {
                     None
                 };
-                col = col.push(
-                    stack![
-                        sms_row(
-                            line.raw.trim(),
-                            left,
-                            speaker_palette(index, &scheme),
-                            scheme.ink,
-                            tint,
-                            &query,
-                            scheme.search_hl,
-                            size,
-                            active,
-                        ),
-                        mouse_area(
-                            container(horizontal_space())
+                let stamp = line
+                    .start
+                    .map(|seconds| format_timestamp(seconds as f64))
+                    .unwrap_or_default();
+                let content = line_text(line);
+                col = col.push(stack![
+                    sms_row(
+                        &content,
+                        &line.speaker,
+                        &stamp,
+                        left,
+                        speaker_palette(index, &scheme),
+                        scheme.ink,
+                        tint,
+                        &query,
+                        scheme.search_hl,
+                        size,
+                        active,
+                    ),
+                    mouse_area(
+                        container(horizontal_space())
                             .width(Length::Fill)
                             .height(Length::Fill),
-                        )
-                        .interaction(mouse::Interaction::Pointer)
-                        .on_press(Message::SelectLine(idx))
-                        .on_right_press(Message::EditLine(idx)),
-                    ],
-                );
+                    )
+                    .interaction(mouse::Interaction::Pointer)
+                    .on_press(Message::SelectLine(idx))
+                    .on_right_press(Message::EditLine(idx)),
+                ]);
             } else {
-                let speaker_bg = speaker_order
+                let accent = speaker_order
                     .iter()
                     .position(|name| *name == line.speaker)
-                    .map(|index| speaker_palette(index, &scheme));
-                let tint = if matched {
-                    Some(if Some(idx) == active_line {
-                        scheme.search_active
-                    } else {
-                        scheme.search_hl
-                    })
+                    .map(|index| speaker_palette(index, &scheme))
+                    .unwrap_or(scheme.muted);
+                let search_tint = matched.then_some(if Some(idx) == active_line {
+                    scheme.search_active
                 } else {
-                    speaker_bg
-                };
+                    scheme.search_hl
+                });
                 col = col.push(line_element(
                     line,
                     idx,
-                    tint,
+                    accent,
+                    search_tint,
                     &query,
                     scheme.search_hl,
                     &scheme,
@@ -2962,25 +3712,112 @@ impl App {
             }
         }
 
-        stack![
-            scrollable(col)
+        scrollable(col)
             .id(transcript_id())
             .on_scroll(Message::TranscriptScrolled)
             .height(Length::Fill)
             .width(Length::Fill)
-            .style(scrollbar_style),
-            container(self.view_controls(&scheme))
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .align_x(iced::Alignment::End)
-            .align_y(iced::Alignment::End)
-            .padding(10),
-        ]
+            .style(scrollbar_style)
             .into()
     }
 
-    /// Zoom / Follow / SMS controls overlaid on the transcript (bottom-right).
-    fn view_controls(&self, scheme: &Scheme) -> Element<'_, Message> {
+    /// Header above the transcript: what is on screen plus reading controls.
+    fn transcript_header(&self, scheme: &Scheme) -> Option<Element<'_, Message>> {
+        let scheme = *scheme;
+        let has_lines = !self.shown_lines().is_empty();
+        let viewing = self.selected_view.is_some();
+        let running = matches!(self.status, Status::Running);
+        if !has_lines && !viewing && !running {
+            return None;
+        }
+
+        let (glyph, tint, title, meta) = if let Some(view) = &self.selected_view {
+            let name = view
+                .audio
+                .as_ref()
+                .or(Some(&view.source))
+                .and_then(|path| path.file_name())
+                .and_then(|name| name.to_str())
+                .unwrap_or("transcript");
+            let mut meta = Vec::new();
+            if let Some(duration) = view.duration.filter(|duration| *duration > 0.0) {
+                meta.push(format_secs(duration as f64));
+            }
+            if view.output.is_none() && self.view_error.is_none() {
+                meta.push("read-only".to_string());
+            }
+            (
+                ICON_FILE_TEXT,
+                scheme.blue,
+                ellipsize_middle(name, 48),
+                meta.join(" \u{00b7} "),
+            )
+        } else if running {
+            (
+                ICON_MIC,
+                scheme.green,
+                self.current_file_name()
+                    .unwrap_or_else(|| "Live transcript".to_string()),
+                "Transcribing now".to_string(),
+            )
+        } else {
+            (
+                ICON_FILE_TEXT,
+                scheme.blue,
+                "Transcript".to_string(),
+                String::new(),
+            )
+        };
+
+        let badge = container(icon_colored(glyph, 13.0, tint))
+            .width(Length::Fixed(26.0))
+            .height(Length::Fixed(26.0))
+            .center_x(Length::Fixed(26.0))
+            .center_y(Length::Fixed(26.0))
+            .style(move |_theme| container::Style {
+                background: Some(Color { a: 0.16, ..tint }.into()),
+                border: iced::border::rounded(13.0),
+                ..container::Style::default()
+            });
+        let mut label = column![text(title).size(13).font(Font {
+            weight: font::Weight::Medium,
+            ..Font::DEFAULT
+        })]
+        .spacing(1);
+        if !meta.is_empty() {
+            label = label.push(text(meta).size(11).color(scheme.muted));
+        }
+
+        let controls: Element<Message> = if has_lines {
+            self.transcript_controls(&scheme)
+        } else {
+            horizontal_space().into()
+        };
+
+        let header = container(
+            row![
+                row![badge, label]
+                    .spacing(8)
+                    .align_y(iced::Alignment::Center),
+                horizontal_space(),
+                controls,
+            ]
+            .align_y(iced::Alignment::Center),
+        )
+        .width(Length::Fill)
+        .padding([2, 8]);
+        let divider = container(horizontal_space())
+            .width(Length::Fill)
+            .height(Length::Fixed(1.0))
+            .style(move |_theme| container::Style {
+                background: Some(scheme.border.into()),
+                ..container::Style::default()
+            });
+        Some(column![header, divider].spacing(4).into())
+    }
+
+    /// Zoom / Follow / SMS controls in the transcript header.
+    fn transcript_controls(&self, scheme: &Scheme) -> Element<'_, Message> {
         let follow: Element<Message> = if self.follow_playhead {
             row![icon(ICON_CHECK, 12.0), text("Follow")]
                 .spacing(4)
@@ -2997,40 +3834,60 @@ impl App {
         } else {
             text("SMS").into()
         };
-        let sms_on = self.sms_mode;
+        let follow_style: fn(&iced::Theme, button::Status) -> button::Style =
+            if self.follow_playhead {
+                pill_button_active
+            } else {
+                pill_button_secondary
+            };
+        let sms_style: fn(&iced::Theme, button::Status) -> button::Style = if self.sms_mode {
+            pill_button_active
+        } else {
+            pill_button_secondary
+        };
+        let follow_tip = if self.follow_playhead {
+            "Stop keeping the active line in view"
+        } else {
+            "Keep the active line in view"
+        };
+        let sms_tip = if self.sms_mode {
+            "Show transcripts as lines"
+        } else {
+            "Show the transcript as chat bubbles"
+        };
         row![
             self.tip(
-                action(icon(ICON_ZOOM_IN, 14.0))
-                .on_press(Message::ZoomIn)
-                .style(pill_button_secondary),
-                "Zoom text in",
-                scheme,
-            ),
-            self.tip(
                 action(icon(ICON_ZOOM_OUT, 14.0))
-                .on_press(Message::ZoomOut)
-                .style(pill_button_secondary),
+                    .on_press(Message::ZoomOut)
+                    .style(pill_button_secondary),
                 "Zoom text out",
                 scheme,
             ),
             self.tip(
+                action(icon(ICON_ZOOM_IN, 14.0))
+                    .on_press(Message::ZoomIn)
+                    .style(pill_button_secondary),
+                "Zoom text in",
+                scheme,
+            ),
+            self.tip(
                 action(follow)
-                .on_press(Message::ToggleFollowPlayhead)
-                .style(pill_button_secondary),
-                "Keep the active line in view",
+                    .on_press(Message::ToggleFollowPlayhead)
+                    .style(follow_style),
+                follow_tip,
                 scheme,
             ),
             self.tip(
                 action(sms)
-                .on_press(Message::SmsToggled(!sms_on))
-                .style(pill_button_secondary),
-                "Show the transcript as chat bubbles",
+                    .on_press(Message::SmsToggled(!self.sms_mode))
+                    .style(sms_style),
+                sms_tip,
                 scheme,
             ),
         ]
-            .spacing(6)
-            .align_y(iced::Alignment::Center)
-            .into()
+        .spacing(6)
+        .align_y(iced::Alignment::Center)
+        .into()
     }
 
     /// Index of the last line whose start time is at or before `t`.
@@ -3095,30 +3952,35 @@ impl App {
         column.into()
     }
 
-    /// Colour swatches + names for the speakers on the timeline.
+    /// Colour swatches + names for the speakers on the timeline. Chunks into
+    /// rows so a large cast does not overflow the panel.
     fn timeline_legend(&self, scheme: &Scheme) -> Element<'_, Message> {
         let order = self.speaker_order();
-        let mut row = row![].spacing(12).align_y(iced::Alignment::Center);
-        for (index, name) in order.iter().enumerate() {
-            let color = speaker_palette(index, scheme);
-            let label = name.clone();
-            row = row.push(
-                row![
-                    container(horizontal_space())
-                    .width(Length::Fixed(12.0))
-                    .height(Length::Fixed(12.0))
-                    .style(move |_theme| container::Style {
-                        background: Some(color.into()),
-                        border: iced::border::rounded(3.0),
-                        ..container::Style::default()
-                    }),
-                    text(label).size(12),
-                ]
+        let mut rows = column![].spacing(6);
+        for (chunk_index, chunk) in order.chunks(4).enumerate() {
+            let mut row = row![].spacing(12).align_y(iced::Alignment::Center);
+            for (offset, name) in chunk.iter().enumerate() {
+                let color = speaker_palette(chunk_index * 4 + offset, scheme);
+                let label = name.clone();
+                row = row.push(
+                    row![
+                        container(horizontal_space())
+                            .width(Length::Fixed(12.0))
+                            .height(Length::Fixed(12.0))
+                            .style(move |_theme| container::Style {
+                                background: Some(color.into()),
+                                border: iced::border::rounded(3.0),
+                                ..container::Style::default()
+                            }),
+                        text(label).size(12),
+                    ]
                     .spacing(4)
                     .align_y(iced::Alignment::Center),
-            );
+                );
+            }
+            rows = rows.push(row);
         }
-        row.into()
+        rows.into()
     }
 
     fn speaker_turns(&self, scheme: &Scheme) -> Vec<TimelineTurn> {
@@ -3143,32 +4005,47 @@ impl App {
     fn player_element(&self, scheme: &Scheme) -> Element<'_, Message> {
         let duration = self.shown_duration().unwrap_or(0.0).max(0.0);
         let ready = self.player_ready();
-        let playing = self.player.as_ref().is_some_and(|player| player.is_playing());
-        let glyph = if ready { scheme.ink } else { MUTED };
+        let playing = self
+            .player
+            .as_ref()
+            .is_some_and(|player| player.is_playing());
+        let glyph = if ready { scheme.ink } else { scheme.muted };
 
         let play_icon = if playing { ICON_PAUSE } else { ICON_PLAY };
         let play_button: Element<Message> = if ready {
-            action(icon_colored(play_icon, 14.0, glyph))
+            action(icon_colored(play_icon, 15.0, scheme.on_accent))
                 .on_press(Message::PlayerToggle)
-                .style(pill_button_secondary)
+                .style(color_button(scheme.blue, scheme.on_accent))
+                .padding([8, 10])
                 .into()
         } else {
-            action(icon_colored(ICON_PLAY, 14.0, glyph))
-                .style(greyed_button)
+            action(icon_colored(ICON_PLAY, 15.0, glyph))
+                .style(greyed_button(*scheme))
+                .padding([8, 10])
                 .into()
         };
+        let skip_back: Element<Message> = self.tip(
+            action(icon_colored(ICON_REWIND, 13.0, glyph))
+                .on_press_maybe(ready.then_some(Message::SeekBy(-5.0)))
+                .style(pill_button_secondary),
+            "Back 5 seconds",
+            scheme,
+        );
+        let skip_forward: Element<Message> = self.tip(
+            action(icon_colored(ICON_FORWARD, 13.0, glyph))
+                .on_press_maybe(ready.then_some(Message::SeekBy(5.0)))
+                .style(pill_button_secondary),
+            "Forward 5 seconds",
+            scheme,
+        );
 
-        let time_color = if ready { scheme.ink } else { MUTED };
+        let time_color = if ready { scheme.ink } else { scheme.muted };
         let total = if duration > 0.0 {
             format_secs(duration as f64)
         } else {
             "--:--".to_string()
         };
-        let time = text(format!(
-            "{} / {}",
-            format_secs(self.playhead as f64),
-            total
-        ))
+        let time = text(format!("{} / {}", format_secs(self.playhead as f64), total))
             .size(12)
             .style(move |_theme| text::Style {
                 color: Some(time_color),
@@ -3180,40 +4057,43 @@ impl App {
                 Some(Speed::from_factor(self.playback_speed)),
                 Message::SpeedChanged,
             )
-                .style(speed_pick)
-                .handle(caret_handle(false))
-                .into()
+            .style(speed_pick)
+            .handle(caret_handle(false))
+            .into()
         } else {
             stack![
                 pick_list(Speed::ALL, Some(Speed::One), Message::SpeedChanged)
-                .style(greyed_pick)
-                .handle(caret_handle(false)),
+                    .style(greyed_pick(*scheme))
+                    .handle(caret_handle(false)),
                 mouse_area(
                     container(horizontal_space())
-                    .width(Length::Fill)
-                    .height(Length::Fill),
+                        .width(Length::Fill)
+                        .height(Length::Fill),
                 )
                 .interaction(mouse::Interaction::Idle)
                 .on_press(Message::Tick),
             ]
-                .into()
+            .into()
         };
 
-        row![play_button, time, speed]
-            .spacing(8)
+        row![skip_back, play_button, skip_forward, time, speed]
+            .spacing(6)
             .align_y(iced::Alignment::Center)
             .into()
     }
 
     /// Find controls, always shown on the player row.
-    fn search_element(&self, _scheme: &Scheme) -> Element<'_, Message> {
+    fn search_element(&self, scheme: &Scheme) -> Element<'_, Message> {
         let count = self.matching_lines().len();
-        let status = if self.search_query.trim().is_empty() {
-            String::new()
+        let (status, status_color) = if self.search_query.trim().is_empty() {
+            (String::new(), scheme.muted)
         } else if count == 0 {
-            "no matches".to_string()
+            ("no matches".to_string(), scheme.danger)
         } else {
-            format!("{} / {}", self.search_index + 1, count)
+            (
+                format!("{} / {}", self.search_index + 1, count),
+                scheme.muted,
+            )
         };
         let query_input = text_input("Find", &self.search_query)
             .id(find_id())
@@ -3226,10 +4106,15 @@ impl App {
         let next = action(icon(ICON_ARROW_DOWN, 14.0))
             .on_press(Message::FindNext)
             .style(pill_button_secondary);
-        row![query_input, text(status).size(12), prev, next]
-            .spacing(8)
-            .align_y(iced::Alignment::Center)
-            .into()
+        row![
+            query_input,
+            text(status).size(12).color(status_color),
+            prev,
+            next
+        ]
+        .spacing(8)
+        .align_y(iced::Alignment::Center)
+        .into()
     }
 
     /// Wrap `content` with a tooltip.
@@ -3241,7 +4126,7 @@ impl App {
     ) -> Element<'a, Message> {
         let background = scheme.tip_bg;
         let text_color = scheme.tip_text;
-        let border_color = scheme.tip_text;
+        let border_color = scheme.border;
         tooltip(
             content,
             container(text(label).size(12))
@@ -3259,259 +4144,353 @@ impl App {
                 }),
             tooltip::Position::Top,
         )
-            .into()
+        .into()
     }
 
-    pub fn view(&self) -> Element<'_, Message> {
-        let scheme = Scheme::light();
-        let output = self
-            .output_dir
-            .as_ref()
-            .map(|p| p.display().to_string())
-            .unwrap_or_else(|| "(Default: audio source directory)".to_string());
+    /// First-run / missing-model notice with an inline download action.
+    fn model_notice(&self, scheme: &Scheme) -> Option<Element<'_, Message>> {
+        let scheme = *scheme;
+        if self.models_ready() && self.model_download.is_none() {
+            return None;
+        }
 
-        let running = matches!(self.status, Status::Running);
-        let pending = self
-            .queue
+        let missing: Vec<&str> = self
+            .models
             .iter()
-            .any(|item| matches!(item.status, ItemStatus::Pending));
-        let has_queue = !self.queue.is_empty();
-        let can_add = true;
-        let can_remove = !running;
-        let can_output = !running && has_queue;
-        let can_preset = !running && has_queue;
-        let can_start = !running && pending;
-        let can_cancel = running;
+            .filter(|model| !model.present())
+            .map(|model| friendly_model(model.label))
+            .collect();
+        let missing = missing.join(", ");
+        let downloading = self.model_download.is_some();
 
-        let preset: Element<Message> = if can_preset {
-            pick_list(Preset::ALL, Some(self.preset), Message::PresetChanged)
-                .style(pill_pick)
-                .into()
+        let (title, body) = if let Some(error) = &self.model_error {
+            (
+                "Could not download models".to_string(),
+                format!("{error}. Check your connection and try again."),
+            )
+        } else if downloading {
+            ("Downloading models".to_string(), String::new())
+        } else if missing.is_empty() {
+            (
+                "Transcription models are missing".to_string(),
+                "Download the model files once to enable offline transcription.".to_string(),
+            )
         } else {
-            // Keep the real pick_list (so iced draws its arrow) but put a
-            // click-capturing layer on top so it cannot be opened.
-            stack![
-                pick_list(Preset::ALL, Some(self.preset), Message::PresetChanged)
-                .style(greyed_pick),
-                mouse_area(
-                    container(horizontal_space())
-                    .width(Length::Fill)
-                    .height(Length::Fill),
-                )
-                .interaction(mouse::Interaction::Idle)
-                .on_press(Message::Tick),
-            ]
-                .into()
+            (
+                "Transcription models are missing".to_string(),
+                format!("Missing: {missing}. One-time download, about 650 MB."),
+            )
         };
 
-        let mut queue_list = column![].spacing(4).width(Length::Fill);
-        for (index, item) in self.queue.iter().enumerate() {
-            let badge: Element<Message> = match &item.status {
-                ItemStatus::Pending => queue_status_icon(ICON_CIRCLE, 18.0, scheme.text),
-                ItemStatus::Running => {
-                    queue_status_badge(ICON_HOURGLASS, 14.0, scheme.track, scheme.text)
+        let details: Element<Message> = if let Some(state) = &self.model_download {
+            let transfer = match state.total {
+                Some(total) if total > 0 => {
+                    format!("{} of {}", format_bytes(state.done), format_bytes(total))
                 }
-                ItemStatus::Done => queue_status_badge(ICON_CHECK, 20.0, scheme.green, scheme.ink),
-                ItemStatus::Failed(_) => {
-                    queue_status_badge(ICON_X, 16.0, scheme.pink, scheme.ink)
-                }
+                _ => format!("{} downloaded", format_bytes(state.done)),
             };
-            let name = item
-                .path
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_else(|| item.path.display().to_string());
-            let detail = match &item.status {
-                ItemStatus::Failed(message) => format!(" \u{2014} {message}"),
-                _ => String::new(),
-            };
-            let duration = match item.duration {
-                Some(secs) => format!("[{}]", format_secs(secs)),
-                None => "[--:--]".to_string(),
-            };
-            let viewing = self.selected == Some(index) && self.selected_view.is_some();
-            let selectable = matches!(item.status, ItemStatus::Running)
-                || (matches!(item.status, ItemStatus::Done) && item.transcript.is_some());
-            let mut item_row = row![
-                badge,
-                text(duration),
-                text(format!("{name}{detail}")).width(Length::Fill),
+            column![
+                text(format!("Downloading {}", state.label))
+                    .size(14)
+                    .font(Font {
+                        weight: font::Weight::Bold,
+                        ..Font::DEFAULT
+                    }),
+                text(transfer).size(12).color(scheme.muted),
             ]
-                .spacing(8)
-                .align_y(iced::Alignment::Center);
+            .spacing(2)
+            .into()
+        } else {
+            column![
+                text(title).size(14).font(Font {
+                    weight: font::Weight::Bold,
+                    ..Font::DEFAULT
+                }),
+                text(body).size(12).color(scheme.muted),
+            ]
+            .spacing(2)
+            .into()
+        };
 
-            match &item.status {
-                ItemStatus::Running => {
-                    item_row = item_row.push(
-                        progress_bar(0.0..=1.0, self.progress_shown)
-                            .width(Length::Fixed(90.0))
-                            .height(Length::Fixed(10.0))
-                            .style(move |_theme| progress_bar::Style {
-                                background: scheme.bar_track.into(),
-                                bar: scheme.blue.into(),
-                                border: iced::border::rounded(5.0),
-                            }),
-                    );
-                    item_row = item_row.push(
-                        text(format!("{:.0}%", self.progress_shown * 100.0)).size(12),
-                    );
-                }
-                ItemStatus::Done => {
-                    item_row = item_row.push(text("100%").size(12));
-                }
-                _ => {}
-            }
+        let details = container(details).width(Length::Fill);
 
-            let row_tint = scheme.warn_tint;
-            let hover_tint = scheme.bar_track;
-            let row_text = scheme.text;
-            let row_button = button(item_row)
-                .padding([2, 6])
-                .width(Length::Fill)
-                .style(move |_theme, status| {
-                    let background = if viewing {
-                        row_tint
-                    } else if selectable && matches!(status, button::Status::Hovered) {
-                        hover_tint
-                    } else {
-                        Color::TRANSPARENT
-                    };
-                    button::Style {
-                        background: Some(background.into()),
-                        text_color: row_text,
-                        border: iced::border::rounded(8.0),
-                        shadow: Shadow::default(),
-                    }
-                });
-            let row_button = if selectable {
-                row_button.on_press(Message::ViewItem(index))
+        let icon = container(icon_colored(ICON_DOWNLOAD, 16.0, scheme.ink))
+            .width(Length::Fixed(32.0))
+            .height(Length::Fixed(32.0))
+            .center_x(Length::Fixed(32.0))
+            .center_y(Length::Fixed(32.0))
+            .style(move |_theme| container::Style {
+                background: Some(scheme.warn_tint.into()),
+                border: iced::border::rounded(16.0),
+                ..container::Style::default()
+            });
+
+        let mut header = row![icon, details]
+            .spacing(10)
+            .align_y(iced::Alignment::Center);
+
+        if let Some(state) = &self.model_download {
+            let percent = state
+                .total
+                .filter(|total| *total > 0)
+                .map(|total| format!("{:.0}%", state.done as f32 / total as f32 * 100.0))
+                .unwrap_or_default();
+            header = header.push(text(percent).size(13));
+        } else {
+            let label = if self.model_error.is_some() {
+                "Retry download"
             } else {
-                row_button
+                "Download models"
             };
-            queue_list = queue_list.push(
-                row![
-                    row_button,
-                    self.tip(
-                        action(icon(ICON_X, 13.0))
-                            .on_press_maybe(can_remove.then_some(Message::RemoveItem(index)))
-                            .style(pill_button_secondary),
-                        "Remove from queue",
-                        &scheme,
-                    ),
-                ]
-                .spacing(4)
-                .align_y(iced::Alignment::Center),
+            header = header.push(
+                action(label)
+                    .on_press(Message::DownloadModels)
+                    .style(color_button(scheme.blue, scheme.on_accent)),
             );
         }
 
-        let mut queue_col = column![
-            row![
-                action("Add File(s)")
-                .on_press_maybe(can_add.then_some(Message::AddFiles))
-                .style(color_button(scheme.blue, scheme.ink)),
-                action("Add Folder")
-                .on_press_maybe(can_add.then_some(Message::AddFolder))
-                .style(color_button(scheme.blue, scheme.ink)),
-                action("Clear")
-                .on_press_maybe((!running && has_queue).then_some(Message::ClearQueue))
-                .style(color_button(scheme.pink, scheme.ink)),
-            ]
-            .spacing(8)
-            .align_y(iced::Alignment::Center),
-        ]
-            .spacing(6);
-
-        if has_queue {
-            const MAX_QUEUE_ROWS: usize = 5;
-            let rows = self.queue.len();
-            if rows > MAX_QUEUE_ROWS {
-                // Show five rows and scroll the rest.
-                let viewport = MAX_QUEUE_ROWS as f32 * 34.0;
-                queue_col = queue_col.push(
-                    scrollable(queue_list)
-                        .width(Length::Fill)
-                        .height(Length::Fixed(viewport))
-                        .style(queue_scrollbar_style),
-                );
-            } else {
-                let line_height = 34.0;
-                let height = rows as f32 * line_height * 1.2;
-                queue_col = queue_col.push(
-                    container(queue_list)
-                        .width(Length::Fill)
-                        .height(Length::Fixed(height))
-                        .align_y(iced::Alignment::Start),
-                );
-            }
+        let mut content = column![header].spacing(8);
+        if let Some(state) = &self.model_download {
+            let fraction = state
+                .total
+                .filter(|total| *total > 0)
+                .map(|total| (state.done as f32 / total as f32).clamp(0.0, 1.0))
+                .unwrap_or(0.0);
+            content = content.push(
+                progress_bar(0.0..=1.0, fraction)
+                    .width(Length::Fill)
+                    .height(Length::Fixed(8.0))
+                    .style(move |_theme| progress_bar::Style {
+                        background: scheme.bar_track.into(),
+                        bar: scheme.blue.into(),
+                        border: iced::border::rounded(4.0),
+                    }),
+            );
         }
 
-        let speaker_pick = pick_list(
-            SpeakerOpt::ALL,
-            Some(SpeakerOpt::from_value(self.num_speakers)),
-            Message::SpeakerCountChanged,
+        Some(
+            container(content)
+                .width(Length::Fill)
+                .padding(12)
+                .style(move |_theme| container::Style {
+                    background: Some(scheme.dialog_bg.into()),
+                    border: iced::border::Border {
+                        color: scheme.border,
+                        width: 1.0,
+                        radius: 12.0.into(),
+                    },
+                    shadow: soft_shadow(),
+                    ..container::Style::default()
+                })
+                .into(),
+        )
+    }
+
+    fn settings_dialog(&self, scheme: &Scheme) -> Element<'_, Message> {
+        let scheme = *scheme;
+        let running = matches!(self.status, Status::Running);
+
+        let theme = settings_control(
+            pick_list(AppTheme::ALL, Some(self.theme_mode), Message::SetTheme)
+                .style(ink_pick(scheme.ink))
+                .handle(caret_handle(false))
+                .width(Length::Fixed(150.0)),
         );
-        let speakers: Element<Message> = if running {
-            // Keep the dropdown visible (with its arrow) but inactive.
-            stack![
-                speaker_pick.style(greyed_pick),
-                mouse_area(
-                    container(horizontal_space())
-                        .width(Length::Fill)
-                        .height(Length::Fill),
-                )
-                .interaction(mouse::Interaction::Idle)
-                .on_press(Message::Tick),
+
+        let font_on = self.font_scale;
+        let font_controls = settings_control(
+            row![
+                action(icon(ICON_ZOOM_OUT, 14.0))
+                    .on_press_maybe((font_on > 0.6).then_some(Message::ZoomOut))
+                    .style(pill_button_secondary),
+                container(text(format!("{:.0}%", font_on * 100.0)).size(theme::TEXT_XS))
+                    .width(Length::Fixed(44.0))
+                    .center_x(Length::Fixed(44.0)),
+                action(icon(ICON_ZOOM_IN, 14.0))
+                    .on_press_maybe((font_on < 2.5).then_some(Message::ZoomIn))
+                    .style(pill_button_secondary),
+                action("Reset")
+                    .on_press(Message::ZoomReset)
+                    .style(pill_button_secondary),
             ]
-            .into()
+            .spacing(6)
+            .align_y(iced::Alignment::Center),
+        );
+
+        let preset: Element<Message> = if running {
+            text("Locked while transcribing")
+                .size(theme::TEXT_XS)
+                .color(scheme.muted)
+                .into()
         } else {
-            speaker_pick.style(pill_pick).into()
+            pick_list(Preset::ALL, Some(self.preset), Message::PresetChanged)
+                .style(pill_pick)
+                .handle(caret_handle(false))
+                .width(Length::Fixed(150.0))
+                .into()
+        };
+        let speakers: Element<Message> = if running {
+            text("Locked while transcribing")
+                .size(theme::TEXT_XS)
+                .color(scheme.muted)
+                .into()
+        } else {
+            pick_list(
+                SpeakerOpt::ALL,
+                Some(SpeakerOpt::from_value(self.num_speakers)),
+                Message::SpeakerCountChanged,
+            )
+            .style(pill_pick)
+            .handle(caret_handle(false))
+            .width(Length::Fixed(150.0))
+            .into()
         };
 
-        let mut controls = column![
-            row![
-                action("Save Location")
-                .on_press_maybe(can_output.then_some(Message::PickOutput))
-                .style(color_button(scheme.blue, scheme.ink)),
-                text(output.clone()),
-            ]
-            .spacing(8)
-            .align_y(iced::Alignment::Center),
-            row![
-                container(text("Preset:"))
-                .height(Length::Fixed(30.0))
-                .align_y(iced::Alignment::Center),
-                preset,
-                container(text("Speakers:"))
-                .height(Length::Fixed(30.0))
-                .align_y(iced::Alignment::Center),
-                speakers,
-            ]
-            .spacing(8)
-            .align_y(iced::Alignment::Start),
-        ]
-            .spacing(16);
-
-        controls = controls.push(
-            row![
-                action("Transcribe")
-                .on_press_maybe(can_start.then_some(Message::Start))
-                .style(color_button(scheme.green, scheme.ink)),
-                action("Cancel")
-                .on_press_maybe(can_cancel.then_some(Message::Cancel))
-                .style(color_button(scheme.pink, scheme.ink)),
-            ]
-                .spacing(8)
-                .align_y(iced::Alignment::Center),
+        let speed = settings_control(
+            pick_list(
+                Speed::ALL,
+                Some(Speed::from_factor(self.playback_speed)),
+                Message::SpeedChanged,
+            )
+            .style(speed_pick)
+            .handle(caret_handle(false))
+            .width(Length::Fixed(150.0)),
         );
 
+        let follow_on = self.follow_playhead;
+        let follow = settings_control(
+            action(text(if follow_on { "On" } else { "Off" }).size(theme::TEXT_XS))
+                .on_press(Message::ToggleFollowPlayhead)
+                .style(move |theme, status| {
+                    if follow_on {
+                        pill_button_active(theme, status)
+                    } else {
+                        pill_button_secondary(theme, status)
+                    }
+                })
+                .width(Length::Fixed(64.0)),
+        );
+
+        let location = self
+            .output_dir
+            .as_ref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "Next to each audio file".to_string());
+        let change = settings_control(
+            action("Change")
+                .on_press_maybe((!running).then_some(Message::PickOutput))
+                .style(pill_button_secondary),
+        );
+        let save_row = row![
+            column![
+                text("Save location")
+                    .size(theme::TEXT_SM)
+                    .color(scheme.text),
+                text(ellipsize_middle(&location, 46))
+                    .size(11)
+                    .color(scheme.muted),
+            ]
+            .spacing(1)
+            .width(Length::Fill),
+            change,
+        ]
+        .spacing(theme::SPACE_LG)
+        .align_y(iced::Alignment::Center)
+        .width(Length::Fill);
+
+        let mut body = column![].spacing(theme::SPACE_SM).width(Length::Fill);
+        body = body.push(settings_section_label("Appearance", scheme));
+        body = body.push(settings_row("Theme", theme, scheme));
+        body = body.push(settings_row("Transcript text size", font_controls, scheme));
+        body = body.push(settings_divider(scheme));
+        body = body.push(settings_section_label("Transcription", scheme));
+        body = body.push(settings_row("Preset", preset, scheme));
+        body = body.push(settings_row("Speakers", speakers, scheme));
+        body = body.push(settings_divider(scheme));
+        body = body.push(settings_section_label("Playback", scheme));
+        body = body.push(settings_row("Speed", speed, scheme));
+        body = body.push(settings_row("Follow playhead", follow, scheme));
+        body = body.push(settings_divider(scheme));
+        body = body.push(settings_section_label("Storage", scheme));
+        body = body.push(save_row);
+
+        let height = (self.window_size.height * 0.46).clamp(300.0, 360.0);
+        let scroll = scrollable(body)
+            .width(Length::Fill)
+            .height(Length::Fixed(height));
+
+        let title = row![
+            column![
+                text("Settings").size(theme::TEXT_LG),
+                text("Appearance and defaults")
+                    .size(theme::TEXT_XS)
+                    .color(scheme.muted),
+            ]
+            .spacing(1),
+            horizontal_space(),
+            action(icon(ICON_X, 14.0))
+                .on_press(Message::CloseSettings)
+                .style(subtle_icon_button),
+        ]
+        .align_y(iced::Alignment::Center);
+
+        let footer = row![
+            text("Changes save automatically")
+                .size(11)
+                .color(scheme.muted),
+            horizontal_space(),
+            action("Done")
+                .on_press(Message::CloseSettings)
+                .style(color_button(scheme.blue, scheme.on_accent)),
+        ]
+        .align_y(iced::Alignment::Center)
+        .width(Length::Fill);
+
+        modal_card(
+            column![title, scroll, footer].spacing(theme::SPACE_LG),
+            480.0,
+            scheme,
+        )
+    }
+
+    /// Draw the toast above whatever the view built (including modals).
+    fn with_toast<'a>(&self, base: Element<'a, Message>, scheme: Scheme) -> Element<'a, Message> {
+        let Some((message, _)) = &self.toast else {
+            return base;
+        };
+        let toast = mouse_area(
+            container(text(message.clone()).size(13))
+                .padding([8, 14])
+                .style(move |_theme| container::Style {
+                    background: Some(scheme.toast_bg.into()),
+                    text_color: Some(scheme.toast_text),
+                    border: iced::border::rounded(PILL),
+                    shadow: soft_shadow(),
+                    ..container::Style::default()
+                }),
+        )
+        .on_press(Message::DismissToast);
+        let overlay = container(toast)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .align_x(iced::Alignment::End)
+            .align_y(iced::Alignment::Start)
+            .padding(20);
+        stack![base, overlay].into()
+    }
+
+    pub fn view(&self) -> Element<'_, Message> {
+        let scheme = self.scheme();
+        let running = matches!(self.status, Status::Running);
+        let has_queue = !self.queue.is_empty();
         let global_progress = self.overall_shown;
 
         let clock = row![
             icon_colored(ICON_CLOCK, 14.0, scheme.text),
             text(self.elapsed().unwrap_or_default()).width(Length::Fixed(60.0)),
         ]
-            .spacing(4)
-            .align_y(iced::Alignment::Center);
+        .spacing(4)
+        .align_y(iced::Alignment::Center);
 
         let file_name = self.current_file_name();
         let label = progress_label(
@@ -3529,9 +4508,7 @@ impl App {
             let active = 1 + (self.activity_frame / 5) % 5;
             let mut dots = vec![text::Span::new(".".repeat(active)).color(scheme.text)];
             if active < 5 {
-                dots.push(
-                    text::Span::new(".".repeat(5 - active)).color(Color::TRANSPARENT),
-                );
+                dots.push(text::Span::new(".".repeat(5 - active)).color(Color::TRANSPARENT));
             }
             let mut row = row![];
             if let Some(name) = &file_name {
@@ -3548,124 +4525,77 @@ impl App {
             clock,
             stack![
                 progress_bar(0.0..=1.0, global_progress)
-                .width(Length::Fill)
-                .height(Length::Fixed(28.0))
-                .style(move |_theme| progress_bar::Style {
-                    background: scheme.bar_track.into(),
-                    bar: scheme.blue.into(),
-                    border: iced::border::rounded(14.0),
-                }),
+                    .width(Length::Fill)
+                    .height(Length::Fixed(28.0))
+                    .style(move |_theme| progress_bar::Style {
+                        background: scheme.bar_track.into(),
+                        bar: scheme.blue.into(),
+                        border: iced::border::rounded(14.0),
+                    }),
                 container(label_el)
-                .center_x(Length::Fill)
-                .center_y(Length::Fill),
+                    .center_x(Length::Fill)
+                    .center_y(Length::Fill),
             ]
             .width(Length::Fill),
         ]
-            .spacing(2)
-            .align_y(iced::Alignment::Center);
+        .spacing(2)
+        .align_y(iced::Alignment::Center);
 
         let mut middle = column![status_row].spacing(8).width(Length::Fill);
         middle = middle.push(self.timeline_element(&scheme));
-        // Imports stay available while a run is active: new files join the
-        // queue and are picked up in a follow-up pass.
-        let import: Element<Message> =
-            pick_list(ImportKind::ALL, None::<ImportKind>, Message::ImportChoice)
-                .placeholder("Import\u{2026}")
-                .style(ink_pick(scheme.ink))
-                .handle(caret_handle(false))
-                .into();
         middle = middle.push(
             row![
                 self.player_element(&scheme),
                 action("Summary")
-                .on_press_maybe(
-                    (!running && self.has_results()).then_some(Message::OpenSummary)
-                )
-                .style(pill_button_secondary),
-                self.tip(
-                    action("Rename Speakers")
                     .on_press_maybe(
-                        (!running
-                            && self.shown_output().is_some()
-                            && !self.shown_lines().is_empty())
-                        .then_some(Message::OpenRename)
+                        (!running && self.has_results()).then_some(Message::OpenSummary)
                     )
                     .style(pill_button_secondary),
+                self.tip(
+                    action("Rename Speakers")
+                        .on_press_maybe(
+                            (!running
+                                && self.shown_output().is_some()
+                                && !self.shown_lines().is_empty())
+                            .then_some(Message::OpenRename)
+                        )
+                        .style(pill_button_secondary),
                     "Rename speakers in this transcript",
                     &scheme,
                 ),
-                horizontal_space(),
-                import,
             ]
-                .spacing(8)
-                .align_y(iced::Alignment::Center)
-                .width(Length::Fill),
+            .spacing(8)
+            .align_y(iced::Alignment::Center)
+            .width(Length::Fill),
         );
 
         let mut transcript_box = column![]
             .spacing(6)
             .width(Length::Fill)
             .height(Length::Fill);
-        if let Some(view) = &self.selected_view {
-            let name = view
-                .audio
-                .as_ref()
-                .or(Some(&view.source))
-                .and_then(|path| path.file_name())
-                .and_then(|name| name.to_str())
-                .unwrap_or("transcript");
-            let suffix = if view.output.is_none() && self.view_error.is_none() {
-                " (read-only)"
-            } else {
-                ""
-            };
-            transcript_box = transcript_box.push(
-                row![
-                    icon_colored(ICON_CIRCLE_FILL, 8.0, scheme.blue),
-                    text(format!("Viewing {name}{suffix}")).size(12),
-                ]
-                .spacing(6)
-                .align_y(iced::Alignment::Center)
-                .padding([0, 8]),
-            );
+        if let Some(header) = self.transcript_header(&scheme) {
+            transcript_box = transcript_box.push(header);
         }
         transcript_box = transcript_box.push(self.transcript_element());
 
-        let mut base = column![
-            text("Transiel").size(32),
-            queue_col,
-            controls,
-            middle,
-            container(transcript_box)
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .style(move |_theme| container::Style {
-                background: Some(scheme.panel_bg.into()),
-                border: iced::border::rounded(16.0),
-                shadow: soft_shadow(),
-                ..container::Style::default()
-            }),
-        ]
-            .spacing(8)
-            .padding(12);
+        let left_panel: Element<Message> = self.queue_panel(&scheme);
 
-        base = base.push(
-            container(
-                row![
-                    self.search_element(&scheme),
-                    horizontal_space(),
-                    action("Copy")
+        let search_actions_row: Element<Message> = container(
+            row![
+                self.search_element(&scheme),
+                horizontal_space(),
+                action("Copy")
                     .on_press_maybe(
                         (!self.shown_transcript().is_empty()).then_some(Message::CopyTranscript)
                     )
                     .style(pill_button_secondary),
-                    action("Save")
+                action("Save")
                     .on_press_maybe(
                         (self.shown_output().is_some() && !self.shown_transcript().is_empty())
-                        .then_some(Message::SaveTranscript)
+                            .then_some(Message::SaveTranscript)
                     )
                     .style(pill_button_secondary),
-                    action("Reveal")
+                action("Reveal")
                     .on_press_maybe(
                         (self.shown_output().is_some()
                             || self.shown_audio().is_some()
@@ -3673,41 +4603,108 @@ impl App {
                         .then_some(Message::RevealOutput)
                     )
                     .style(pill_button_secondary),
-                    pick_list(HelpKind::ALL, None::<HelpKind>, Message::HelpChoice)
+                pick_list(HelpKind::ALL, None::<HelpKind>, Message::HelpChoice)
                     .placeholder("Help\u{2026}")
                     .style(ink_pick(scheme.ink))
                     .handle(caret_handle(true)),
-                ]
-                    .spacing(8)
-                    .align_y(iced::Alignment::Center),
-            )
-                .width(Length::Fill),
+            ]
+            .spacing(8)
+            .align_y(iced::Alignment::Center),
+        )
+        .width(Length::Fill)
+        .into();
+
+        let mut right = column![]
+            .spacing(12)
+            .width(Length::FillPortion(RIGHT_PORTION))
+            .height(Length::Fill);
+        if let Some(notice) = self.model_notice(&scheme) {
+            right = right.push(notice);
+        }
+        // In the empty state the progress/timeline/player chrome has nothing to
+        // act on; let the welcome card own the panel instead.
+        let show_middle = has_queue || self.selected_view.is_some() || running;
+        if show_middle {
+            right = right.push(middle);
+        }
+        right = right.push(
+            container(transcript_box)
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .style(move |_theme| container::Style {
+                    background: Some(scheme.panel_bg.into()),
+                    border: iced::border::rounded(16.0),
+                    shadow: soft_shadow(),
+                    ..container::Style::default()
+                }),
         );
+        if has_queue {
+            right = right.push(search_actions_row);
+        }
+        let right_panel: Element<Message> = right.into();
+
+        let (theme_icon, theme_tip) = if self.theme_mode == AppTheme::Dark {
+            (ICON_SUN, "Switch to light theme")
+        } else {
+            (ICON_MOON, "Switch to dark theme")
+        };
+
+        let header = row![
+            iced::widget::image(logo_handle())
+                .width(Length::Fixed(32.0))
+                .height(Length::Fixed(32.0)),
+            column![
+                text("Transiel").size(theme::TEXT_XL).font(Font {
+                    weight: font::Weight::Bold,
+                    ..Font::DEFAULT
+                }),
+                text("Local transcription & speaker diarization")
+                    .size(theme::TEXT_XS)
+                    .color(scheme.muted),
+            ]
+            .spacing(theme::SPACE_2XS),
+            horizontal_space(),
+            self.tip(
+                action(icon(theme_icon, 16.0))
+                    .on_press(Message::ToggleTheme)
+                    .style(pill_button_secondary),
+                theme_tip,
+                &scheme,
+            ),
+            self.tip(
+                action(icon(ICON_GEAR, 16.0))
+                    .on_press(Message::OpenSettings)
+                    .style(pill_button_secondary),
+                "Settings (Ctrl+,)",
+                &scheme,
+            ),
+            self.tip(
+                action(icon(ICON_HELP, 16.0))
+                    .on_press(Message::HelpChoice(HelpKind::About))
+                    .style(pill_button_secondary),
+                "Help",
+                &scheme,
+            ),
+        ]
+        .spacing(theme::SPACE_SM)
+        .align_y(iced::Alignment::Center);
+
+        let mut base = column![
+            header,
+            row![left_panel, right_panel]
+                .spacing(12)
+                .height(Length::Fill),
+        ]
+        .spacing(8)
+        .padding(12);
 
         if self.console_open {
             base = base.push(self.console_panel(&scheme));
         }
 
-        if let Some((message, _)) = &self.toast {
-            let toast = mouse_area(
-                container(text(message.clone()).size(13))
-                    .padding([8, 14])
-                    .style(move |_theme| container::Style {
-                        background: Some(scheme.blue.into()),
-                        text_color: Some(scheme.ink),
-                        border: iced::border::rounded(PILL),
-                        shadow: soft_shadow(),
-                        ..container::Style::default()
-                    }),
-            )
-                .on_press(Message::DismissToast);
-            let overlay = container(toast)
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .align_x(iced::Alignment::End)
-                .align_y(iced::Alignment::Start)
-                .padding(20);
-            return stack![base, overlay].into();
+        let mut base: Element<Message> = base.into();
+        if self.drag_hover {
+            base = drop_overlay(base, scheme);
         }
 
         if let Some(edit) = &self.line_edit {
@@ -3734,30 +4731,23 @@ impl App {
                 container(
                     row![
                         action("Delete")
-                        .on_press(Message::DeleteLineEdit)
-                        .style(color_button(scheme.pink, scheme.ink)),
+                            .on_press(Message::DeleteLineEdit)
+                            .style(color_button(scheme.danger, scheme.on_accent)),
                         horizontal_space(),
                         action("Save")
-                        .on_press(Message::SaveLineEdit)
-                        .style(color_button(scheme.blue, scheme.ink)),
+                            .on_press(Message::SaveLineEdit)
+                            .style(color_button(scheme.blue, scheme.on_accent)),
                         action("Cancel")
-                        .on_press(Message::CancelLineEdit)
-                        .style(pill_button_secondary),
+                            .on_press(Message::CancelLineEdit)
+                            .style(pill_button_secondary),
                     ]
                     .spacing(8),
                 )
                 .width(Length::Fill)
                 .align_x(iced::Alignment::End),
             );
-            let dialog = container(col.width(Length::Fixed(560.0)))
-                .padding(16)
-                .style(move |_theme| container::Style {
-                    background: Some(scheme.dialog_bg.into()),
-                    border: iced::border::rounded(16.0),
-                    shadow: dialog_shadow(),
-                    ..container::Style::default()
-                });
-            return modal_overlay(base, dialog);
+            let dialog = modal_card(col, 560.0, scheme);
+            return self.with_toast(modal_overlay(base, dialog, scheme), scheme);
         }
 
         if self.summary_open {
@@ -3782,16 +4772,15 @@ impl App {
                         );
                     }
                     SummaryLine::Body(line) => {
-                        body = body.push(
-                            container(text(line.clone()))
-                                .width(Length::Fill)
-                                .padding(iced::Padding {
+                        body =
+                            body.push(container(text(line.clone())).width(Length::Fill).padding(
+                                iced::Padding {
                                     top: 0.0,
                                     right: 0.0,
                                     bottom: 0.0,
                                     left: BODY_INDENT,
-                                }),
-                        );
+                                },
+                            ));
                     }
                 }
             }
@@ -3811,23 +4800,21 @@ impl App {
                 container(
                     row![action("Close")
                         .on_press(Message::CloseSummary)
-                        .style(color_button(scheme.blue, scheme.ink))]
+                        .style(color_button(scheme.blue, scheme.on_accent))]
                     .spacing(8),
                 )
                 .width(Length::Fill)
                 .align_x(iced::Alignment::End),
             ]
-                .spacing(8);
+            .spacing(8);
 
-            let dialog = container(col.width(Length::Fixed(380.0)))
-                .padding(16)
-                .style(move |_theme| container::Style {
-                    background: Some(scheme.dialog_bg.into()),
-                    border: iced::border::rounded(16.0),
-                    shadow: dialog_shadow(),
-                    ..container::Style::default()
-                });
-            return modal_overlay(base, dialog);
+            let dialog = modal_card(col, 380.0, scheme);
+            return self.with_toast(modal_overlay(base, dialog, scheme), scheme);
+        }
+
+        if self.settings_open {
+            let dialog = self.settings_dialog(&scheme);
+            return self.with_toast(modal_overlay(base, dialog, scheme), scheme);
         }
 
         if let Some(kind) = self.help_open {
@@ -3838,6 +4825,7 @@ impl App {
                     const KEY_WIDTH: f32 = 150.0;
                     for (key, description) in [
                         ("Ctrl+O", "Add files"),
+                        ("Ctrl+,", "Settings"),
                         ("Ctrl+F", "Find"),
                         ("Ctrl+Enter", "Transcribe"),
                         ("Ctrl + / - / 0", "Transcript font zoom"),
@@ -3846,10 +4834,7 @@ impl App {
                         ("Esc", "Dismiss"),
                     ] {
                         col = col.push(
-                            row![
-                                text(key).width(Length::Fixed(KEY_WIDTH)),
-                                text(description),
-                            ]
+                            row![text(key).width(Length::Fixed(KEY_WIDTH)), text(description),]
                                 .spacing(12),
                         );
                     }
@@ -3858,8 +4843,7 @@ impl App {
                     for line in [
                         format!("transiel {}", env!("CARGO_PKG_VERSION")),
                         "Local speaker diarization + transcription.".to_string(),
-                        "Diarization: pyannote segmentation + wespeaker (sherpa-onnx)."
-                            .to_string(),
+                        "Diarization: pyannote segmentation + wespeaker (sherpa-onnx).".to_string(),
                         "Transcription: whisper.cpp.".to_string(),
                         "Runs fully offline once models are downloaded.".to_string(),
                     ] {
@@ -3872,25 +4856,18 @@ impl App {
                 container(
                     row![action("Close")
                         .on_press(Message::CloseHelp)
-                        .style(color_button(scheme.blue, scheme.ink))]
-                        .spacing(8),
+                        .style(color_button(scheme.blue, scheme.on_accent))]
+                    .spacing(8),
                 )
-                    .width(Length::Fill)
-                    .align_x(iced::Alignment::End),
+                .width(Length::Fill)
+                .align_x(iced::Alignment::End),
             );
-            let dialog = container(col.width(Length::Fixed(460.0)))
-                .padding(16)
-                .style(move |_theme| container::Style {
-                    background: Some(scheme.dialog_bg.into()),
-                    border: iced::border::rounded(16.0),
-                    shadow: dialog_shadow(),
-                    ..container::Style::default()
-                });
-            return modal_overlay(base, dialog);
+            let dialog = modal_card(col, 460.0, scheme);
+            return self.with_toast(modal_overlay(base, dialog, scheme), scheme);
         }
 
         if !self.rename_open {
-            return base.into();
+            return self.with_toast(base, scheme);
         }
 
         let mut col = column![text("Rename Speakers").size(20)].spacing(8);
@@ -3902,41 +4879,33 @@ impl App {
                 row![
                     text(original.clone()).width(Length::Fixed(120.0)),
                     text_input(original.as_str(), value)
-                    .id(rename_id(index))
-                    .on_input(move |text| Message::RenameName(index, text))
-                    .on_submit(Message::RenameSave)
-                    .width(Length::Fill)
-                    .style(pill_input),
+                        .id(rename_id(index))
+                        .on_input(move |text| Message::RenameName(index, text))
+                        .on_submit(Message::RenameSave)
+                        .width(Length::Fill)
+                        .style(pill_input),
                 ]
-                    .spacing(8)
-                    .align_y(iced::Alignment::Center),
+                .spacing(8)
+                .align_y(iced::Alignment::Center),
             );
         }
         col = col.push(
             container(
                 row![
                     action("Save")
-                    .on_press(Message::RenameSave)
-                    .style(color_button(scheme.blue, scheme.ink)),
+                        .on_press(Message::RenameSave)
+                        .style(color_button(scheme.blue, scheme.on_accent)),
                     action("Cancel")
-                    .on_press(Message::RenameCancel)
-                    .style(color_button(scheme.pink, scheme.ink)),
+                        .on_press(Message::RenameCancel)
+                        .style(pill_button_secondary),
                 ]
-                    .spacing(8),
+                .spacing(8),
             )
-                .width(Length::Fill)
-                .align_x(iced::Alignment::End),
+            .width(Length::Fill)
+            .align_x(iced::Alignment::End),
         );
-        let dialog = container(col.width(Length::Fixed(380.0)))
-            .padding(16)
-            .style(move |_theme| container::Style {
-                background: Some(scheme.dialog_bg.into()),
-                border: iced::border::rounded(16.0),
-                shadow: dialog_shadow(),
-                ..container::Style::default()
-            });
-
-        modal_overlay(base, dialog)
+        let dialog = modal_card(col, 380.0, scheme);
+        self.with_toast(modal_overlay(base, dialog, scheme), scheme)
     }
 }
 
@@ -4067,12 +5036,7 @@ impl canvas::Program<Message> for Timeline {
 
         let count = self.peaks.len();
         if count > 0 {
-            let peak_max = self
-                .peaks
-                .iter()
-                .copied()
-                .fold(0.0_f32, f32::max)
-                .max(1e-6);
+            let peak_max = self.peaks.iter().copied().fold(0.0_f32, f32::max).max(1e-6);
             let half = mid * 0.92;
             let span = 1.0 / self.zoom.max(1.0);
             let left = self.visible_left();
@@ -4125,24 +5089,7 @@ impl canvas::Program<Message> for Timeline {
 }
 
 fn speaker_palette(index: usize, scheme: &Scheme) -> Color {
-    const EXTRA: [(f32, f32, f32); 8] = [
-        (0.66, 0.62, 0.98), // violet
-        (0.45, 0.82, 0.62), // green
-        (0.98, 0.78, 0.42), // amber
-        (0.55, 0.85, 0.88), // teal
-        (0.96, 0.58, 0.42), // coral
-        (0.58, 0.66, 0.98), // periwinkle
-        (0.78, 0.88, 0.48), // lime
-        (0.90, 0.70, 0.97), // lavender
-    ];
-    match index {
-        0 => scheme.sms0,
-        1 => scheme.sms1,
-        other => {
-            let (r, g, b) = EXTRA[(other - 2) % EXTRA.len()];
-            Color::from_rgb(r, g, b)
-        }
-    }
+    scheme.speaker_colors[index % scheme.speaker_colors.len()]
 }
 
 /// Audio playback through rodio; the `OutputStream` must stay alive.
@@ -4214,6 +5161,19 @@ impl Player {
     fn set_speed(&self, factor: f32) {
         self.sink.set_speed(factor.max(0.1));
     }
+}
+
+/// Bundled brand mark, decoded once and shared with the image widget.
+fn logo_handle() -> iced::widget::image::Handle {
+    static LOGO: OnceLock<iced::widget::image::Handle> = OnceLock::new();
+    LOGO.get_or_init(|| {
+        let image = image::load_from_memory(include_bytes!("../../icons/transiel-logo-256.png"))
+            .expect("bundled transiel logo")
+            .into_rgba8();
+        let (width, height) = image.dimensions();
+        iced::widget::image::Handle::from_rgba(width, height, image.into_raw())
+    })
+    .clone()
 }
 
 /// A Bootstrap Icons glyph rendered as an element.
@@ -4297,9 +5257,10 @@ fn ink_pick(ink: Color) -> impl Fn(&iced::Theme, pick_list::Status) -> pick_list
 // Bootstrap Icons codepoints (see assets/bootstrap-icons.json).
 const ICON_PLAY: char = '\u{f4f4}';
 const ICON_PAUSE: char = '\u{f4c3}';
+const ICON_REWIND: char = '\u{f818}';
+const ICON_FORWARD: char = '\u{f7f3}';
 const ICON_ARROW_UP: char = '\u{f148}';
 const ICON_ARROW_DOWN: char = '\u{f128}';
-const ICON_CIRCLE_FILL: char = '\u{f287}';
 const ICON_CIRCLE: char = '\u{f28a}';
 const ICON_HOURGLASS: char = '\u{f421}';
 const ICON_CHECK: char = '\u{f633}';
@@ -4309,12 +5270,129 @@ const ICON_CARET_UP: char = '\u{f235}';
 const ICON_ZOOM_IN: char = '\u{f62c}';
 const ICON_ZOOM_OUT: char = '\u{f62d}';
 const ICON_CLOCK: char = '\u{f293}';
+const ICON_MOON: char = '\u{f494}';
+const ICON_SUN: char = '\u{f5a1}';
+const ICON_HELP: char = '\u{f505}';
+const ICON_GEAR: char = '\u{f3e2}';
+const ICON_MIC: char = '\u{f490}';
+const ICON_FILE_TEXT: char = '\u{f38b}';
+const ICON_DOWNLOAD: char = '\u{f30a}';
+const ICON_PLUS: char = '\u{f4fe}';
+const ICON_FOLDER_PLUS: char = '\u{f3d3}';
+const ICON_TRASH: char = '\u{f5de}';
+
+/// Full-window drop target shown while a file hovers over the app.
+fn drop_overlay<'a>(base: impl Into<Element<'a, Message>>, scheme: Scheme) -> Element<'a, Message> {
+    let card = container(
+        column![
+            icon_colored(ICON_DOWNLOAD, 32.0, scheme.blue),
+            text("Drop to add audio").size(22).font(Font {
+                weight: font::Weight::Bold,
+                ..Font::DEFAULT
+            }),
+            text("MP3, WAV, M4A, FLAC, and more")
+                .size(13)
+                .color(scheme.muted),
+        ]
+        .spacing(8)
+        .align_x(iced::Alignment::Center),
+    )
+    .padding(36)
+    .style(move |_theme| container::Style {
+        background: Some(scheme.dialog_bg.into()),
+        border: iced::border::Border {
+            color: scheme.blue,
+            width: 2.0,
+            radius: 16.0.into(),
+        },
+        shadow: dialog_shadow(),
+        ..container::Style::default()
+    });
+
+    let overlay = container(card)
+        .center(Length::Fill)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .padding(24)
+        .style(move |_theme| container::Style {
+            background: Some(scheme.scrim.into()),
+            ..container::Style::default()
+        });
+
+    stack![base.into(), overlay].into()
+}
+
+/// Standard dialog surface shared by every modal.
+fn modal_card<'a>(
+    content: impl Into<Element<'a, Message>>,
+    width: f32,
+    scheme: Scheme,
+) -> Element<'a, Message> {
+    container(content)
+        .width(Length::Fixed(width))
+        .padding(16)
+        .style(move |_theme| container::Style {
+            background: Some(scheme.dialog_bg.into()),
+            border: iced::border::rounded(16.0),
+            shadow: dialog_shadow(),
+            ..container::Style::default()
+        })
+        .into()
+}
+
+fn settings_row<'a>(
+    label: &'a str,
+    control: impl Into<Element<'a, Message>>,
+    scheme: Scheme,
+) -> Element<'a, Message> {
+    row![
+        text(label)
+            .size(theme::TEXT_SM)
+            .color(scheme.text)
+            .width(Length::Fill),
+        control.into(),
+    ]
+    .spacing(theme::SPACE_LG)
+    .align_y(iced::Alignment::Center)
+    .width(Length::Fill)
+    .into()
+}
+
+fn settings_control<'a>(control: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
+    container(control)
+        .width(Length::Fixed(230.0))
+        .align_x(iced::Alignment::End)
+        .into()
+}
+
+fn settings_section_label<'a>(label: &'a str, scheme: Scheme) -> Element<'a, Message> {
+    text(label)
+        .size(11)
+        .font(Font {
+            weight: font::Weight::Bold,
+            ..Font::DEFAULT
+        })
+        .color(scheme.muted)
+        .into()
+}
+
+fn settings_divider<'a>(scheme: Scheme) -> Element<'a, Message> {
+    container(horizontal_space())
+        .width(Length::Fill)
+        .height(Length::Fixed(1.0))
+        .style(move |_theme| container::Style {
+            background: Some(scheme.border.into()),
+            ..container::Style::default()
+        })
+        .into()
+}
 
 /// Layer `dialog` over `base` behind a dimming backdrop that swallows clicks,
 /// so a visible modal blocks everything outside it.
 fn modal_overlay<'a>(
     base: impl Into<Element<'a, Message>>,
     dialog: impl Into<Element<'a, Message>>,
+    scheme: Scheme,
 ) -> Element<'a, Message> {
     let base = base.into();
     let dialog = dialog.into();
@@ -4322,12 +5400,12 @@ fn modal_overlay<'a>(
         container(horizontal_space())
             .width(Length::Fill)
             .height(Length::Fill)
-            .style(|_theme| container::Style {
-                background: Some(Color::from_rgba(0.0, 0.0, 0.0, 0.4).into()),
+            .style(move |_theme| container::Style {
+                background: Some(scheme.scrim.into()),
                 ..container::Style::default()
             }),
     )
-        .on_press(Message::Noop);
+    .on_press(Message::Noop);
     // The dialog itself also consumes stray clicks and keeps an arrow cursor
     // on its non-interactive areas, so nothing behind it is clickable.
     let dialog = mouse_area(dialog)
@@ -4468,6 +5546,59 @@ fn capitalize_first(text: &str) -> String {
     }
 }
 
+/// Human-readable name for a model file's internal label.
+fn friendly_model(label: &str) -> &'static str {
+    match label {
+        "segmentation" => "speaker segmentation",
+        "embedding" => "speaker embedding",
+        "whisper-speed" => "Whisper speed model",
+        "whisper-accuracy" => "Whisper accuracy model",
+        _ => "model",
+    }
+}
+
+fn format_bytes(bytes: u64) -> String {
+    const MB: f64 = 1024.0 * 1024.0;
+    if bytes as f64 >= MB {
+        format!("{:.0} MB", bytes as f64 / MB)
+    } else if bytes >= 1024 {
+        format!("{:.0} KB", bytes as f64 / 1024.0)
+    } else {
+        format!("{bytes} B")
+    }
+}
+
+/// Truncate the end of `text`, keeping it within `max` characters.
+fn ellipsize(text: &str, max: usize) -> String {
+    let count = text.chars().count();
+    if count <= max {
+        return text.to_string();
+    }
+    if max <= 1 {
+        return "\u{2026}".to_string();
+    }
+    let mut out: String = text.chars().take(max - 1).collect();
+    out.push('\u{2026}');
+    out
+}
+
+/// Truncate the middle of `text`, so a file extension or path tail survives.
+fn ellipsize_middle(text: &str, max: usize) -> String {
+    let count = text.chars().count();
+    if count <= max {
+        return text.to_string();
+    }
+    if max <= 1 {
+        return "\u{2026}".to_string();
+    }
+    let tail = (max / 3).min(count - 1);
+    let head = max.saturating_sub(tail + 1);
+    let mut out: String = text.chars().take(head).collect();
+    out.push('\u{2026}');
+    out.extend(text.chars().skip(count - tail));
+    out
+}
+
 fn format_secs(secs: f64) -> String {
     let total = secs.max(0.0).round() as u64;
     let hours = total / 3600;
@@ -4519,8 +5650,9 @@ fn scrollbar_style(theme: &iced::Theme, status: scrollable::Status) -> scrollabl
         status,
         scrollable::Status::Hovered { .. } | scrollable::Status::Dragged { .. }
     );
+    let ink = theme.palette().text;
     style.vertical_rail.scroller.color = if visible {
-        Color::from_rgba(0.0, 0.0, 0.0, 0.5)
+        Color { a: 0.5, ..ink }
     } else {
         Color::TRANSPARENT
     };
@@ -4534,16 +5666,19 @@ fn queue_scrollbar_style(theme: &iced::Theme, status: scrollable::Status) -> scr
         status,
         scrollable::Status::Hovered { .. } | scrollable::Status::Dragged { .. }
     );
+    let ink = theme.palette().text;
     style.vertical_rail.scroller.color = if active {
-        Color::from_rgba(0.0, 0.0, 0.0, 0.55)
+        Color { a: 0.55, ..ink }
     } else {
-        Color::from_rgba(0.0, 0.0, 0.0, 0.28)
+        Color { a: 0.28, ..ink }
     };
     style
 }
 
 fn sms_row(
     content: &str,
+    speaker: &str,
+    stamp: &str,
     left: bool,
     color: Color,
     ink: Color,
@@ -4558,15 +5693,47 @@ fn sms_row(
         iced::border::Border {
             color: ink,
             width: 2.0,
-            radius: 8.0.into(),
+            radius: 10.0.into(),
         }
     } else {
-        iced::border::rounded(8.0)
+        iced::border::rounded(10.0)
     };
-    let bubble = container(rich_text(styled_spans(content, query, Some(ink), highlight, size)))
-        .width(Length::Fill)
+    let bold = Font {
+        weight: font::Weight::Bold,
+        ..Font::default()
+    };
+    let mut body = column![].spacing(2);
+    if !speaker.is_empty() || !stamp.is_empty() {
+        let mut meta = row![].spacing(6).align_y(iced::Alignment::Center);
+        if !speaker.is_empty() {
+            meta = meta.push(
+                text(speaker.to_string())
+                    .size(size * 0.72)
+                    .font(bold)
+                    .color(ink),
+            );
+        }
+        if !stamp.is_empty() {
+            meta = meta.push(
+                text(stamp.to_string())
+                    .size(size * 0.72)
+                    .color(Color { a: 0.70, ..ink }),
+            );
+        }
+        body = body.push(meta);
+    }
+    body = body.push(rich_text(styled_spans(
+        content,
+        query,
+        Some(ink),
+        highlight,
+        size,
+    )));
+    let bubble = container(body)
+        .width(Length::Shrink)
+        .max_width(Pixels((size * 28.0).clamp(240.0, 620.0)))
         .align_x(iced::Alignment::Start)
-        .padding(6)
+        .padding([6, 9])
         .style(move |_theme| container::Style {
             background: Some(background.into()),
             border,
@@ -4579,13 +5746,14 @@ fn sms_row(
     }
 }
 
-/// A transcript line with an optional timestamp gutter, a clickable speaker
-/// label (rename) and a clickable body (select for merge/split).
+/// A transcript line with a speaker-coloured accent stripe, an optional
+/// timestamp, a bold speaker label, and clickable select/edit behaviour.
 #[allow(clippy::too_many_arguments)]
 fn line_element(
     line: &DocLine,
     idx: usize,
-    tint: Option<Color>,
+    accent: Color,
+    search_tint: Option<Color>,
     query: &str,
     highlight: Color,
     scheme: &Scheme,
@@ -4621,48 +5789,59 @@ fn line_element(
         .width(Length::Fill);
 
     if !stamp.is_empty() {
-        content = content.push(
-            text(stamp)
-                .size(size * 0.82)
-                .style(move |_theme| text::Style { color: Some(ink) }),
-        );
+        content = content.push(text(stamp).size(size * 0.78).color(scheme.muted));
     }
 
     if !speaker.is_empty() {
         content = content.push(text(speaker).size(size).font(bold).color(ink));
     }
 
-    content = content.push(rich_text(styled_spans(&rest, query, Some(ink), highlight, size)));
+    content = content.push(rich_text(styled_spans(
+        &rest,
+        query,
+        Some(ink),
+        highlight,
+        size,
+    )));
     content = content.push(horizontal_space());
 
+    let background = search_tint.unwrap_or(Color {
+        a: if active { 0.20 } else { 0.09 },
+        ..accent
+    });
     let border = if active {
         iced::border::Border {
             color: ink,
             width: 2.0,
-            radius: 4.0.into(),
+            radius: 6.0.into(),
         }
     } else {
-        iced::border::rounded(4.0)
+        iced::border::Border {
+            color: Color { a: 0.50, ..accent },
+            width: 1.0,
+            radius: 6.0.into(),
+        }
     };
+
     stack![
         container(content)
-        .width(Length::Fill)
-        .padding([2, 4])
-        .style(move |_theme| container::Style {
-            background: tint.map(Into::into),
-            border,
-            ..container::Style::default()
-        }),
+            .width(Length::Fill)
+            .padding([3, 6])
+            .style(move |_theme| container::Style {
+                background: Some(background.into()),
+                border,
+                ..container::Style::default()
+            }),
         mouse_area(
             container(horizontal_space())
-            .width(Length::Fill)
-            .height(Length::Fill),
+                .width(Length::Fill)
+                .height(Length::Fill),
         )
         .interaction(mouse::Interaction::Pointer)
         .on_press(Message::SelectLine(idx))
         .on_right_press(Message::EditLine(idx)),
     ]
-        .into()
+    .into()
 }
 
 const PILL: f32 = 1000.0;
@@ -4709,6 +5888,50 @@ fn pill_button_secondary(theme: &iced::Theme, status: button::Status) -> button:
     style
 }
 
+/// A secondary button tinted with the accent colour to show a toggled-on state.
+fn pill_button_active(theme: &iced::Theme, status: button::Status) -> button::Style {
+    let primary = theme.palette().primary;
+    let alpha = match status {
+        button::Status::Hovered => 0.30,
+        button::Status::Pressed => 0.38,
+        button::Status::Disabled => 0.12,
+        button::Status::Active => 0.22,
+    };
+    button::Style {
+        background: Some(
+            Color {
+                a: alpha,
+                ..primary
+            }
+            .into(),
+        ),
+        text_color: theme.palette().text,
+        border: iced::border::Border {
+            color: Color { a: 0.55, ..primary },
+            width: 1.0,
+            radius: PILL.into(),
+        },
+        shadow: soft_shadow(),
+    }
+}
+
+/// A quiet, borderless icon button for row-level actions.
+fn subtle_icon_button(theme: &iced::Theme, status: button::Status) -> button::Style {
+    let text = theme.palette().text;
+    let (background, text_color) = match status {
+        button::Status::Hovered => (Color { a: 0.10, ..text }, text),
+        button::Status::Pressed => (Color { a: 0.16, ..text }, text),
+        button::Status::Disabled => (Color::TRANSPARENT, Color { a: 0.30, ..text }),
+        button::Status::Active => (Color::TRANSPARENT, Color { a: 0.65, ..text }),
+    };
+    button::Style {
+        background: Some(background.into()),
+        text_color,
+        border: iced::border::rounded(6.0),
+        shadow: Shadow::default(),
+    }
+}
+
 fn pill_input(theme: &iced::Theme, status: text_input::Status) -> text_input::Style {
     let mut style = text_input::default(theme, status);
     style.border.radius = PILL.into();
@@ -4732,9 +5955,7 @@ fn speed_pick(theme: &iced::Theme, status: pick_list::Status) -> pick_list::Styl
         text_color: base.text_color,
         placeholder_color: base.text_color,
         handle_color: base.text_color,
-        background: base
-            .background
-            .unwrap_or_else(|| Color::TRANSPARENT.into()),
+        background: base.background.unwrap_or_else(|| Color::TRANSPARENT.into()),
         border: iced::border::Border {
             color: Color::TRANSPARENT,
             width: 0.0,
@@ -4743,40 +5964,50 @@ fn speed_pick(theme: &iced::Theme, status: pick_list::Status) -> pick_list::Styl
     }
 }
 
-/// Muted colour used for controls that are visible but unavailable.
-const MUTED: Color = Color {
-    r: 0.6,
-    g: 0.6,
-    b: 0.64,
-    a: 1.0,
-};
-
-fn greyed_pick(theme: &iced::Theme, status: pick_list::Status) -> pick_list::Style {
-    let mut style = pick_list::default(theme, status);
-    style.text_color = MUTED;
-    style.handle_color = MUTED;
-    style.background = Color::from_rgb(0.88, 0.88, 0.93).into();
-    style.border = iced::border::Border {
-        color: Color::TRANSPARENT,
-        width: 0.0,
-        radius: PILL.into(),
-    };
-    style
+fn greyed_pick(scheme: Scheme) -> impl Fn(&iced::Theme, pick_list::Status) -> pick_list::Style {
+    move |theme, status| {
+        let mut style = pick_list::default(theme, status);
+        style.text_color = scheme.muted;
+        style.handle_color = scheme.muted;
+        style.background = scheme.track.into();
+        style.border = iced::border::Border {
+            color: Color::TRANSPARENT,
+            width: 0.0,
+            radius: PILL.into(),
+        };
+        style
+    }
 }
 
-fn greyed_button(theme: &iced::Theme, status: button::Status) -> button::Style {
-    let mut style = button::secondary(theme, status);
-    style.background = Some(Color::from_rgba(0.6, 0.6, 0.64, 0.12).into());
-    style.text_color = MUTED;
-    style.border.radius = PILL.into();
-    style
+fn greyed_button(scheme: Scheme) -> impl Fn(&iced::Theme, button::Status) -> button::Style {
+    move |theme, status| {
+        let mut style = button::secondary(theme, status);
+        style.background = Some(
+            Color {
+                a: 0.12,
+                ..scheme.muted
+            }
+            .into(),
+        );
+        style.text_color = scheme.muted;
+        style.border.radius = PILL.into();
+        style
+    }
 }
 
 fn color_button(bg: Color, ink: Color) -> impl Fn(&iced::Theme, button::Status) -> button::Style {
-    move |_theme, status| {
+    move |theme, status| {
         let (bg, text) = match status {
             button::Status::Hovered => (Color { a: 0.85, ..bg }, ink),
-            button::Status::Disabled => (Color { a: 0.35, ..bg }, Color { a: 0.6, ..ink }),
+            // Filled buttons keep their hue when disabled, but the label must
+            // follow the active theme rather than the (possibly dark) accent ink.
+            button::Status::Disabled => (
+                Color { a: 0.30, ..bg },
+                Color {
+                    a: 0.72,
+                    ..theme.palette().text
+                },
+            ),
             _ => (bg, ink),
         };
         button::Style {
@@ -4869,10 +6100,8 @@ mod tests {
     }
 
     fn temp_dir(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "transiel-app-test-{tag}-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("transiel-app-test-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
@@ -4966,6 +6195,63 @@ mod tests {
     }
 
     #[test]
+    fn line_text_drops_the_prefix_once() {
+        let lines = parse_lines("[00:00] SPEAKER 1: hello there\n[00:05] plain text\n");
+        assert_eq!(line_text(&lines[0]), "hello there");
+        assert_eq!(line_text(&lines[1]), "plain text");
+    }
+
+    #[test]
+    fn transcript_renders_line_and_bubble_modes_with_search() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let config = temp_dir("render-config");
+        let media = temp_dir("render-media");
+        let old = std::env::var("XDG_CONFIG_HOME").ok();
+        std::env::set_var("XDG_CONFIG_HOME", &config);
+
+        let audio = media.join("talk.mp3");
+        std::fs::write(&audio, b"audio").unwrap();
+        let transcript = media.join("talk.txt");
+        std::fs::write(
+            &transcript,
+            "[00:00] SPEAKER 1: hello there\n[00:05] SPEAKER 2: hi\n[00:07] SPEAKER 1: hello again\n",
+        )
+        .unwrap();
+
+        let mut app = App::new();
+        app.queue.push(QueueItem {
+            path: audio.clone(),
+            audio: Some(audio),
+            status: ItemStatus::Done,
+            duration: Some(10.0),
+            transcript: Some(transcript),
+            stats: None,
+            turns: Vec::new(),
+            peaks: Arc::new(vec![0.2; 16]),
+        });
+        let _ = app.view_item(0);
+        assert!(app.transcript_header(&app.scheme()).is_some());
+
+        app.search_query = "hello".to_string();
+        app.font_scale = 1.3;
+        let _ = app.view();
+        assert_eq!(app.matching_lines().len(), 2);
+
+        app.sms_mode = true;
+        let _ = app.view();
+        app.theme_mode = AppTheme::Dark;
+        let _ = app.view();
+
+        if let Some(old) = old {
+            std::env::set_var("XDG_CONFIG_HOME", old);
+        } else {
+            std::env::remove_var("XDG_CONFIG_HOME");
+        }
+        let _ = std::fs::remove_dir_all(&config);
+        let _ = std::fs::remove_dir_all(&media);
+    }
+
+    #[test]
     fn viewing_and_renaming_a_completed_item() {
         let _guard = env_lock();
         let config = ConfigEnv::new("view");
@@ -4996,9 +6282,7 @@ mod tests {
         let _ = app.view_item(0);
         assert_eq!(app.selected, Some(0));
         assert_eq!(app.shown_lines().len(), 2);
-        assert!(app
-            .shown_transcript()
-            .contains("SPEAKER 1: hello"));
+        assert!(app.shown_transcript().contains("SPEAKER 1: hello"));
 
         // The view renders without panicking.
         let _ = app.view();
@@ -5093,8 +6377,7 @@ mod tests {
 
         // Enter saves the form from the line editor.
         let _ = app.update(Message::EditLine(1));
-        app.line_edit.as_mut().unwrap().content =
-            text_editor::Content::with_text("hi there");
+        app.line_edit.as_mut().unwrap().content = text_editor::Content::with_text("hi there");
         let _ = app.update(Message::EnterSubmit);
         assert!(app.line_edit.is_none());
         let saved = std::fs::read_to_string(&transcript).unwrap();
@@ -5199,44 +6482,235 @@ mod tests {
     }
 
     #[test]
-    fn preflight_error_keeps_pending_items_retryable() {
-        let _guard = env_lock();
-        let _config = ConfigEnv::new("preflight-config");
+    fn theme_toggle_round_trips_through_settings() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let dir = temp_dir("theme");
+        let old = std::env::var("XDG_CONFIG_HOME").ok();
+        std::env::set_var("XDG_CONFIG_HOME", &dir);
 
         let mut app = App::new();
-        let audio = PathBuf::from("/tmp/audio.mp3");
-        app.queue.push(QueueItem {
-            path: audio.clone(),
-            audio: Some(audio),
-            status: ItemStatus::Pending,
-            duration: None,
-            transcript: None,
-            stats: None,
-            turns: Vec::new(),
-            peaks: Arc::new(Vec::new()),
-        });
-        app.batch = true;
-        app.status = Status::Running;
-        app.events.lock().unwrap().push_back(Event::Error {
-            message: "Accuracy model unavailable — run: transiel --cli models download"
-                .to_string(),
-        });
+        assert_eq!(app.theme_mode, AppTheme::Light);
 
-        let _ = app.drain_events();
-        assert!(matches!(app.queue[0].status, ItemStatus::Pending));
-        assert!(matches!(app.status, Status::Error(_)));
-        assert!(!app.batch);
+        let _ = app.update(Message::ToggleTheme);
+        assert_eq!(app.theme_mode, AppTheme::Dark);
+
+        let reloaded = App::new();
+        assert_eq!(reloaded.theme_mode, AppTheme::Dark);
+
+        if let Some(old) = old {
+            std::env::set_var("XDG_CONFIG_HOME", old);
+        } else {
+            std::env::remove_var("XDG_CONFIG_HOME");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn settings_modal_changes_defaults_and_persists() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let dir = temp_dir("settings-modal");
+        let old = std::env::var("XDG_CONFIG_HOME").ok();
+        std::env::set_var("XDG_CONFIG_HOME", &dir);
+
+        let mut app = App::new();
+        assert!(!app.settings_open);
+
+        let _ = app.update(Message::OpenSettings);
+        assert!(app.settings_open);
+        let _ = app.view();
+
+        // Escape closes the settings dialog before anything else.
+        let _ = app.update(Message::Escape);
+        assert!(!app.settings_open);
+
+        let _ = app.update(Message::OpenSettings);
+        let _ = app.update(Message::SetTheme(AppTheme::Dark));
+        let _ = app.update(Message::PresetChanged(Preset::Accuracy));
+        let _ = app.update(Message::ZoomIn);
+        let _ = app.update(Message::ToggleFollowPlayhead);
+        let _ = app.update(Message::CloseSettings);
+        assert!(!app.settings_open);
+
+        let reloaded = App::new();
+        assert_eq!(reloaded.theme_mode, AppTheme::Dark);
+        assert_eq!(reloaded.preset, Preset::Accuracy);
+        assert!((reloaded.font_scale - 1.1).abs() < 0.001);
+        assert!(!reloaded.follow_playhead);
+
+        if let Some(old) = old {
+            std::env::set_var("XDG_CONFIG_HOME", old);
+        } else {
+            std::env::remove_var("XDG_CONFIG_HOME");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn dropping_a_folder_queues_only_audio_files() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let config = temp_dir("drop-config");
+        let media = temp_dir("drop-media");
+        let old = std::env::var("XDG_CONFIG_HOME").ok();
+        std::env::set_var("XDG_CONFIG_HOME", &config);
+
+        let first = media.join("one.mp3");
+        std::fs::write(&first, b"audio").unwrap();
+        std::fs::write(media.join("two.wav"), b"audio").unwrap();
+        let notes = media.join("notes.txt");
+        std::fs::write(&notes, b"text").unwrap();
+
+        let mut app = App::new();
+        let _ = app.update(Message::WindowEvent(iced::window::Event::FileHovered(
+            first.clone(),
+        )));
+        assert!(app.drag_hover);
+
+        let _ = app.update(Message::WindowEvent(iced::window::Event::FileDropped(
+            media.clone(),
+        )));
+        assert!(!app.drag_hover);
+        assert_eq!(app.queue.len(), 2);
+        assert!(app
+            .queue
+            .iter()
+            .all(|item| matches!(item.status, ItemStatus::Pending)));
+
+        // Dropping the same file again, or a non-audio file, is a no-op.
+        let _ = app.update(Message::WindowEvent(iced::window::Event::FileDropped(
+            first,
+        )));
+        let _ = app.update(Message::WindowEvent(iced::window::Event::FileDropped(
+            notes,
+        )));
+        assert_eq!(app.queue.len(), 2);
+
+        if let Some(old) = old {
+            std::env::set_var("XDG_CONFIG_HOME", old);
+        } else {
+            std::env::remove_var("XDG_CONFIG_HOME");
+        }
+        let _ = std::fs::remove_dir_all(&config);
+        let _ = std::fs::remove_dir_all(&media);
+    }
+
+    #[test]
+    fn missing_models_show_a_download_notice_with_progress() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let config = temp_dir("model-config");
+        let models = temp_dir("model-empty");
+        let old_config = std::env::var("XDG_CONFIG_HOME").ok();
+        let old_models = std::env::var("TRANSIEL_MODELS_DIR").ok();
+        std::env::set_var("XDG_CONFIG_HOME", &config);
+        std::env::set_var("TRANSIEL_MODELS_DIR", &models);
+
+        let mut app = App::new();
+        assert!(!app.models_ready());
+        assert!(app.model_notice(&app.scheme()).is_some());
+        let _ = app.view();
+
+        app.model_download = Some(ModelDownload {
+            label: "starting".to_string(),
+            done: 0,
+            total: None,
+        });
+        {
+            let mut events = app.model_events.lock().unwrap();
+            events.push_back(DownloadEvent::Started {
+                label: "segmentation",
+            });
+            events.push_back(DownloadEvent::Progress {
+                label: "segmentation",
+                done: 5,
+                total: Some(10),
+            });
+        }
+        let _ = app.update(Message::Tick);
+        let state = app.model_download.as_ref().unwrap();
+        assert_eq!(state.done, 5);
+        assert_eq!(state.total, Some(10));
+        let _ = app.view();
+
+        if let Some(old) = old_config {
+            std::env::set_var("XDG_CONFIG_HOME", old);
+        } else {
+            std::env::remove_var("XDG_CONFIG_HOME");
+        }
+        if let Some(old) = old_models {
+            std::env::set_var("TRANSIEL_MODELS_DIR", old);
+        } else {
+            std::env::remove_var("TRANSIEL_MODELS_DIR");
+        }
+        let _ = std::fs::remove_dir_all(&config);
+        let _ = std::fs::remove_dir_all(&models);
     }
 
     #[test]
     fn palette_has_distinct_colors_for_many_speakers() {
-        let scheme = Scheme::light();
-        let colors: Vec<Color> = (0..10).map(|index| speaker_palette(index, &scheme)).collect();
-        for i in 0..colors.len() {
-            for j in (i + 1)..colors.len() {
-                assert_ne!(colors[i], colors[j], "speakers {i} and {j} share a color");
+        for scheme in [Scheme::light(), Scheme::dark()] {
+            let colors: Vec<Color> = (0..10)
+                .map(|index| speaker_palette(index, &scheme))
+                .collect();
+            for i in 0..colors.len() {
+                for j in (i + 1)..colors.len() {
+                    assert_ne!(colors[i], colors[j], "speakers {i} and {j} share a color");
+                }
             }
         }
+    }
+
+    #[test]
+    fn ellipsize_keeps_names_readable() {
+        assert_eq!(ellipsize_middle("talk.mp3", 20), "talk.mp3");
+        let long = "an-interview-recording-with-a-very-long-name.mp3";
+        let shortened = ellipsize_middle(long, 24);
+        assert!(shortened.chars().count() <= 24);
+        assert!(shortened.ends_with(".mp3"));
+        assert!(shortened.contains('\u{2026}'));
+
+        let unicode = "日本語のインタビュー録音ファイル";
+        assert!(ellipsize(unicode, 8).chars().count() <= 8);
+        assert!(ellipsize(unicode, 8).ends_with('\u{2026}'));
+    }
+
+    #[test]
+    fn queue_summary_and_import_failure_feedback() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let dir = temp_dir("queue-summary");
+        let old = std::env::var("XDG_CONFIG_HOME").ok();
+        std::env::set_var("XDG_CONFIG_HOME", &dir);
+
+        let mut app = App::new();
+        assert_eq!(app.queue_summary_text(), "No files yet");
+
+        for (name, duration) in [("one.mp3", Some(60.0)), ("two.mp3", Some(30.0))] {
+            let path = dir.join(name);
+            app.queue.push(QueueItem {
+                path: path.clone(),
+                audio: Some(path),
+                status: ItemStatus::Pending,
+                duration,
+                transcript: None,
+                stats: None,
+                turns: Vec::new(),
+                peaks: Arc::new(Vec::new()),
+            });
+        }
+        assert_eq!(app.queue_summary_text(), "2 files \u{00b7} 1:30");
+        app.queue[1].duration = None;
+        assert_eq!(app.queue_summary_text(), "2 files \u{00b7} 1:00 known");
+
+        let _ = app.update(Message::ImportLoaded(None));
+        assert_eq!(
+            app.toast.as_ref().map(|(message, _)| message.as_str()),
+            Some("Could not read that transcript")
+        );
+
+        if let Some(old) = old {
+            std::env::set_var("XDG_CONFIG_HOME", old);
+        } else {
+            std::env::remove_var("XDG_CONFIG_HOME");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -5254,7 +6728,14 @@ mod tests {
             "Completed (100%)"
         );
         assert_eq!(
-            progress_label(&Status::Done, "transcribing 3/4", 0.75, true, 1, Some("talk.mp3")),
+            progress_label(
+                &Status::Done,
+                "transcribing 3/4",
+                0.75,
+                true,
+                1,
+                Some("talk.mp3")
+            ),
             "talk.mp3 \u{2014} Transcribing 3/4 (75%)"
         );
     }

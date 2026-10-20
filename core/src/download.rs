@@ -1,8 +1,8 @@
 //! Model downloads (all non-gated, direct files).
 //!
-//! This is the only code path that touches the network. The GUI/pipeline never
-//! download at runtime; `transiel --cli models download` (also used by
-//! `deploy.bat`) fetches everything once.
+//! This is the only code path that touches the network. The same implementation
+//! backs `transiel --cli models download` (also used by `deploy.bat`) and the
+//! GUI's first-run download card.
 
 use std::fs::{self, File};
 use std::io::{Read, Write};
@@ -16,6 +16,45 @@ struct ModelFile {
     url: &'static str,
     /// Exact byte length of the upstream file.
     size: u64,
+}
+
+/// Presence and on-disk size of one model file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelStatus {
+    pub label: &'static str,
+    pub path: PathBuf,
+    pub bytes: u64,
+}
+
+impl ModelStatus {
+    pub fn present(&self) -> bool {
+        self.bytes > 0
+    }
+}
+
+/// Progress emitted by [`download_with`]. The GUI consumes these off the UI
+/// thread; the CLI prints them.
+#[derive(Debug, Clone)]
+pub enum DownloadEvent {
+    Started {
+        label: &'static str,
+    },
+    Progress {
+        label: &'static str,
+        done: u64,
+        total: Option<u64>,
+    },
+    Completed {
+        label: &'static str,
+        path: PathBuf,
+    },
+    Failed {
+        label: &'static str,
+        message: String,
+    },
+    Finished {
+        ok: bool,
+    },
 }
 
 fn files() -> Vec<ModelFile> {
@@ -49,36 +88,90 @@ fn files() -> Vec<ModelFile> {
 }
 
 fn size(path: &std::path::Path) -> Option<u64> {
-    fs::metadata(path).ok().filter(|m| m.is_file()).map(|m| m.len())
+    fs::metadata(path)
+        .ok()
+        .filter(|m| m.is_file())
+        .map(|m| m.len())
 }
 
-/// Download every model. Existing files are skipped only when their size
-/// matches the upstream file; `force` re-downloads regardless.
+/// Presence and size of every model file, without touching the network.
+pub fn status() -> Vec<ModelStatus> {
+    files()
+        .into_iter()
+        .map(|model| ModelStatus {
+            label: model.label,
+            bytes: size(&model.path).unwrap_or(0),
+            path: model.path,
+        })
+        .collect()
+}
+
+/// Download every model. Existing non-empty files are skipped unless `force`
+/// is set; `verify` checks the resulting files afterwards.
 pub fn download(force: bool, verify: bool) -> i32 {
+    let mut downloading = false;
+    download_with(force, verify, &mut |event| match event {
+        DownloadEvent::Started { label } => {
+            downloading = true;
+            println!("Downloading {label} ...");
+        }
+        DownloadEvent::Progress { label, done, total } => progress(label, done, total),
+        DownloadEvent::Completed { label, path } => {
+            if downloading {
+                eprintln!();
+                downloading = false;
+            }
+            println!("[ok] {label:16} {}", path.display());
+        }
+        DownloadEvent::Failed { label, message } => {
+            if downloading {
+                eprintln!();
+                downloading = false;
+            }
+            eprintln!("[!] {label}: {message}");
+        }
+        DownloadEvent::Finished { .. } => {}
+    })
+}
+
+/// Download every model, reporting progress through `notify`.
+///
+/// This is safe to call from a background thread; no iced types are involved.
+pub fn download_with<F>(force: bool, verify: bool, notify: &mut F) -> i32
+where
+    F: FnMut(DownloadEvent),
+{
     for model in files() {
-        if !force && size(&model.path) == Some(model.size) {
-            println!("[ok] {:16} {}", model.label, model.path.display());
+        if !force && size(&model.path).is_some_and(|n| n > 0) {
+            notify(DownloadEvent::Completed {
+                label: model.label,
+                path: model.path,
+            });
             continue;
         }
-        if let Some(actual) = size(&model.path) {
-            if actual != model.size {
-                println!(
-                    "[!] {:16} wrong size ({actual} bytes, expected {}); downloading again",
-                    model.label, model.size
-                );
-            }
-        }
-        if let Err(error) = fetch(&model) {
-            eprintln!("[!] {}: {error}", model.label);
+        notify(DownloadEvent::Started { label: model.label });
+        if let Err(error) = fetch(&model, &mut |done, total| {
+            notify(DownloadEvent::Progress {
+                label: model.label,
+                done,
+                total,
+            })
+        }) {
+            notify(DownloadEvent::Failed {
+                label: model.label,
+                message: error,
+            });
+            notify(DownloadEvent::Finished { ok: false });
             return 1;
         }
-        println!("[ok] {:16} {}", model.label, model.path.display());
+        notify(DownloadEvent::Completed {
+            label: model.label,
+            path: model.path,
+        });
     }
-    if verify {
-        verify_all()
-    } else {
-        0
-    }
+    let code = if verify { verify_all() } else { 0 };
+    notify(DownloadEvent::Finished { ok: code == 0 });
+    code
 }
 
 /// Report which models are present and complete (exit 1 if anything is
@@ -121,7 +214,7 @@ pub fn verify_all() -> i32 {
     }
 }
 
-fn fetch(model: &ModelFile) -> Result<(), String> {
+fn fetch(model: &ModelFile, on_progress: &mut dyn FnMut(u64, Option<u64>)) -> Result<(), String> {
     if let Some(parent) = model.path.parent() {
         fs::create_dir_all(parent).map_err(|e| format!("create {}: {e}", parent.display()))?;
     }
@@ -133,7 +226,6 @@ fn fetch(model: &ModelFile) -> Result<(), String> {
         .unwrap_or("model");
     let part = model.path.with_file_name(format!("{name}.part"));
 
-    println!("Downloading {} ...", model.label);
     let response = ureq::get(model.url)
         .call()
         .map_err(|e| format!("request: {e}"))?;
@@ -153,11 +245,10 @@ fn fetch(model: &ModelFile) -> Result<(), String> {
         file.write_all(&buffer[..read])
             .map_err(|e| format!("write: {e}"))?;
         done += read as u64;
-        progress(model.label, done, total);
+        on_progress(done, total);
     }
     file.flush().map_err(|e| format!("flush: {e}"))?;
     drop(file);
-    eprintln!();
 
     if done != model.size {
         let _ = fs::remove_file(&part);
