@@ -77,7 +77,7 @@ function Invoke-Native {
         $tail = @(Get-Content -Path $log -Tail 60 -ErrorAction SilentlyContinue)
         if ($tail.Count -gt 0) {
             Write-Host ""
-            Write-Host "Last lines of $log:" -ForegroundColor Yellow
+            Write-Host "Last lines of ${log}:" -ForegroundColor Yellow
             foreach ($line in $tail) {
                 Write-Host "    $line"
             }
