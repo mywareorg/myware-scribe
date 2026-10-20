@@ -5,7 +5,7 @@ edition = "2021"
 
 [dependencies]
 transiel-core = { path = "../core" }
-iced = { version = "0.13", features = ["tokio", "advanced", "canvas"] }
+iced = { version = "0.13", features = ["tokio", "advanced", "canvas", "image-without-codecs"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
 rfd = "0.15"
 serde = { version = "1", features = ["derive"] }
