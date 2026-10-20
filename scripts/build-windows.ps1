@@ -14,6 +14,9 @@ The app loads sherpa-onnx and ONNX Runtime from the shipped DLLs at runtime, so
 only whisper.cpp is compiled locally. Tests run in release mode because the
 debug profile links msvcrtd on Windows.
 
+Every cargo command is teed to build-windows.log in the repository root. If a
+build fails, the failing command line and the tail of that log are printed.
+
 Requires:
   - Visual Studio 2022 Build Tools with "Desktop development with C++"
   - Rust stable MSVC (rustup default stable-x86_64-pc-windows-msvc)
@@ -41,6 +44,12 @@ param(
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
+# PowerShell 7.3+ can turn native stderr into a terminating error. We check
+# $LASTEXITCODE ourselves, so keep that behavior off when the switch exists.
+if (Test-Path variable:PSNativeCommandUseErrorActionPreference) {
+    $PSNativeCommandUseErrorActionPreference = $false
+}
+
 . (Join-Path $PSScriptRoot "windows-env.ps1")
 
 function Invoke-Native {
@@ -48,9 +57,33 @@ function Invoke-Native {
         [Parameter(Mandatory = $true)][string]$FilePath,
         [string[]]$Arguments = @()
     )
-    & $FilePath @Arguments
-    if ($LASTEXITCODE -ne 0) {
-        throw "$FilePath failed with exit code $LASTEXITCODE"
+
+    $commandLine = (@($FilePath) + $Arguments) -join " "
+    Write-Host "    $commandLine" -ForegroundColor DarkGray
+
+    # Every native command is teed to one log so a failure leaves the real
+    # cargo/rustc error behind instead of only the rethrown exit code.
+    $log = Join-Path $root "build-windows.log"
+    $savedPreference = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        & $FilePath @Arguments 2>&1 | Tee-Object -FilePath $log -Append
+        $exitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $savedPreference
+    }
+
+    if ($exitCode -ne 0) {
+        $tail = @(Get-Content -Path $log -Tail 60 -ErrorAction SilentlyContinue)
+        if ($tail.Count -gt 0) {
+            Write-Host ""
+            Write-Host "Last lines of $log:" -ForegroundColor Yellow
+            foreach ($line in $tail) {
+                Write-Host "    $line"
+            }
+            Write-Host ""
+        }
+        throw "$commandLine failed with exit code $exitCode (full output in $log)"
     }
 }
 
@@ -69,6 +102,8 @@ $root = Split-Path -Parent $scriptDir
 
 Push-Location $root
 try {
+    Remove-Item (Join-Path $root "build-windows.log") -Force -ErrorAction SilentlyContinue
+
     if (-not (Get-Command cl.exe -ErrorAction SilentlyContinue)) {
         Enter-DevEnvironment
     }
@@ -135,11 +170,12 @@ try {
     if ($Diagnose) {
         Write-Step "Building with verbose output (diagnose)"
         $log = Join-Path $root "build-windows.log"
-        & cargo build --release --locked -vv 2>&1 | Tee-Object -FilePath $log
-        if ($LASTEXITCODE -ne 0) {
-            Select-String -Path $log -Pattern 'LNK2005|LNK2019|LNK1169|LNK2038|LNK1104' |
+        try {
+            Invoke-Native cargo @("build", "--release", "--locked", "-vv")
+        } catch {
+            Select-String -Path $log -Pattern 'LNK2005|LNK2019|LNK1169|LNK2038|LNK1104' -ErrorAction SilentlyContinue |
                 ForEach-Object { Write-Host $_.Line -ForegroundColor Yellow }
-            throw "cargo build failed; full log at $log"
+            throw
         }
     } else {
         Write-Step "Building release binary"
