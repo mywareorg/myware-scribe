@@ -31,7 +31,11 @@ pub struct Stats {
 #[serde(tag = "event")]
 pub enum Event {
     #[serde(rename = "stage")]
-    Stage { stage: String, label: String, progress: f32 },
+    Stage {
+        stage: String,
+        label: String,
+        progress: f32,
+    },
     #[serde(rename = "file")]
     File { audio: String },
     #[serde(rename = "meta")]
@@ -41,7 +45,12 @@ pub enum Event {
     #[serde(rename = "waveform")]
     Waveform { audio: String, peaks: Vec<f32> },
     #[serde(rename = "line")]
-    Line { start: f32, speaker: String, text: String, confidence: f32 },
+    Line {
+        start: f32,
+        speaker: String,
+        text: String,
+        confidence: f32,
+    },
     #[serde(rename = "done")]
     Done { txt: String, stats: Stats },
     #[serde(rename = "log")]

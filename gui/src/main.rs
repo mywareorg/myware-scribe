@@ -2,6 +2,10 @@
 
 mod app;
 mod backend;
+mod documents;
+mod files;
+mod format;
+mod options;
 mod theme;
 
 use app::App;
@@ -17,7 +21,10 @@ fn set_app_user_model_id() {
         fn SetCurrentProcessExplicitAppUserModelID(app_id: *const u16) -> i32;
     }
 
-    let id: Vec<u16> = OsStr::new("transiel").encode_wide().chain(Some(0)).collect();
+    let id: Vec<u16> = OsStr::new("transiel")
+        .encode_wide()
+        .chain(Some(0))
+        .collect();
     unsafe {
         SetCurrentProcessExplicitAppUserModelID(id.as_ptr());
     }
@@ -32,10 +39,18 @@ fn attach_console() {
         CreateFileW, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
     };
     use windows_sys::Win32::System::Console::{
-        AttachConsole, SetStdHandle, ATTACH_PARENT_PROCESS, STD_ERROR_HANDLE, STD_OUTPUT_HANDLE,
+        AttachConsole, GetStdHandle, SetStdHandle, ATTACH_PARENT_PROCESS, STD_ERROR_HANDLE,
+        STD_OUTPUT_HANDLE,
     };
 
     unsafe {
+        // The GUI re-invokes itself with `--cli` and pipes stdout/stderr when
+        // running a batch. Those handles must stay attached to the pipes, not
+        // be redirected to the parent console.
+        let stdout = GetStdHandle(STD_OUTPUT_HANDLE);
+        if !stdout.is_null() && stdout != INVALID_HANDLE_VALUE {
+            return;
+        }
         if AttachConsole(ATTACH_PARENT_PROCESS) == 0 {
             return;
         }

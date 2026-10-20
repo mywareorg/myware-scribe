@@ -1,7 +1,10 @@
 target/
 .cache/
 dist/
+build-windows.log
 models/
 .venv/
 *-transcript.txt
 *-transcription.txt
+
+*.transiel.bak

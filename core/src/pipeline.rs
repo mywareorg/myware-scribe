@@ -27,6 +27,8 @@ pub struct PipelineOptions {
     pub num_speakers: Option<i32>,
     pub timestamps: bool,
     pub cache: bool,
+    /// BCP-47-ish Whisper language code, or `None` for auto-detection.
+    pub language: Option<String>,
     pub cancel: Option<Arc<AtomicBool>>,
 }
 
@@ -335,8 +337,11 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
                             break;
                         }
                         let (turn_index, clip_start, from, to) = clips_ref[index];
-                        let result = transcriber
-                            .transcribe_with_threads(&samples_ref[from..to], per_call_threads);
+                        let result = transcriber.transcribe_with_threads_and_language(
+                            &samples_ref[from..to],
+                            per_call_threads,
+                            opts.language.as_deref(),
+                        );
                         if tx.send((index, turn_index, clip_start, result)).is_err() {
                             break;
                         }

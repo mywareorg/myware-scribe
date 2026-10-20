@@ -1,5 +1,5 @@
+use std::cell::RefCell;
 use std::collections::{HashSet, VecDeque};
-use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -19,7 +19,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::backend::{self, Event};
 use crate::theme::{self, AppTheme, Scheme};
+use crate::{documents::*, files::*, format::*, options::*};
 use transiel_core::download::{self, DownloadEvent, ModelStatus};
+use transiel_core::export::{self, ExportFormat};
+use transiel_core::models;
 
 const AUDIO_EXTS: &[&str] = &[
     "mp3", "wav", "m4a", "aac", "flac", "ogg", "opus", "wma", "mp4", "mkv", "mov", "webm", "avi",
@@ -80,6 +83,9 @@ struct QueueItem {
 struct QueueState {
     #[serde(default)]
     items: Vec<QueueRecord>,
+    /// Paths included in the most recent transcription batch.
+    #[serde(default)]
+    last_batch: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -132,221 +138,20 @@ fn audio_files_in(dir: &Path) -> Vec<PathBuf> {
     files
 }
 
-/// A single rendered transcript line.
-#[derive(Debug, Clone)]
-struct DocLine {
-    raw: String,
-    speaker: String,
-    start: Option<f32>,
-}
-
-/// Right-click line editor: the line index plus its editable fields.
-struct LineEdit {
-    index: usize,
-    speaker: String,
-    content: text_editor::Content,
-}
-
 /// Cadence at which streamed utterances are revealed in the textbox.
 const REVEAL_INTERVAL_S: f32 = 0.15;
 /// Faster cadence used to catch up when the reveal backlog grows.
 const REVEAL_CATCHUP_S: f32 = 0.04;
 const REVEAL_BACKLOG: usize = 8;
 
-/// Speaker-count picker options (a fixed 1..=5).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SpeakerOpt {
-    One,
-    Two,
-    Three,
-    Four,
-    Five,
-}
-
-impl SpeakerOpt {
-    const ALL: [SpeakerOpt; 5] = [
-        SpeakerOpt::One,
-        SpeakerOpt::Two,
-        SpeakerOpt::Three,
-        SpeakerOpt::Four,
-        SpeakerOpt::Five,
-    ];
-
-    fn value(self) -> i32 {
-        match self {
-            SpeakerOpt::One => 1,
-            SpeakerOpt::Two => 2,
-            SpeakerOpt::Three => 3,
-            SpeakerOpt::Four => 4,
-            SpeakerOpt::Five => 5,
-        }
-    }
-
-    fn from_value(value: Option<i32>) -> Self {
-        match value {
-            Some(1) => SpeakerOpt::One,
-            Some(3) => SpeakerOpt::Three,
-            Some(4) => SpeakerOpt::Four,
-            Some(5) => SpeakerOpt::Five,
-            _ => SpeakerOpt::Two,
-        }
-    }
-
-    fn label(self) -> &'static str {
-        match self {
-            SpeakerOpt::One => "1",
-            SpeakerOpt::Two => "2",
-            SpeakerOpt::Three => "3",
-            SpeakerOpt::Four => "4",
-            SpeakerOpt::Five => "5",
-        }
-    }
-}
-
-impl fmt::Display for SpeakerOpt {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.label())
-    }
-}
-
-/// Playback speed multiplier options.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Speed {
-    Half,
-    One,
-    OneHalf,
-    Two,
-}
-
-impl Speed {
-    const ALL: [Speed; 4] = [Speed::Half, Speed::One, Speed::OneHalf, Speed::Two];
-
-    fn factor(self) -> f32 {
-        match self {
-            Speed::Half => 0.5,
-            Speed::One => 1.0,
-            Speed::OneHalf => 1.5,
-            Speed::Two => 2.0,
-        }
-    }
-
-    fn from_factor(factor: f32) -> Self {
-        if (factor - 0.5).abs() < 0.01 {
-            Speed::Half
-        } else if (factor - 1.5).abs() < 0.01 {
-            Speed::OneHalf
-        } else if (factor - 2.0).abs() < 0.01 {
-            Speed::Two
-        } else {
-            Speed::One
-        }
-    }
-
-    fn label(self) -> &'static str {
-        match self {
-            Speed::Half => ".5x",
-            Speed::One => "1x",
-            Speed::OneHalf => "1.5x",
-            Speed::Two => "2x",
-        }
-    }
-}
-
-impl fmt::Display for Speed {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.label())
-    }
-}
-
-/// Options in the "Import…" dropdown.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ImportKind {
-    Transcription,
-    Audio,
-}
-
-impl ImportKind {
-    const ALL: [ImportKind; 2] = [ImportKind::Transcription, ImportKind::Audio];
-
-    fn label(self) -> &'static str {
-        match self {
-            ImportKind::Transcription => "Transcript",
-            ImportKind::Audio => "Audio",
-        }
-    }
-}
-
-impl fmt::Display for ImportKind {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.label())
-    }
-}
-
-/// Options in the "Help…" dropdown.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum HelpKind {
-    About,
-    Shortcuts,
-    Console,
-}
-
-impl HelpKind {
-    const ALL: [HelpKind; 3] = [HelpKind::About, HelpKind::Shortcuts, HelpKind::Console];
-
-    fn label(self) -> &'static str {
-        match self {
-            HelpKind::About => "About",
-            HelpKind::Shortcuts => "Shortcuts",
-            HelpKind::Console => "Console",
-        }
-    }
-}
-
-impl fmt::Display for HelpKind {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.label())
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum Preset {
-    #[default]
-    Speed,
-    Accuracy,
-}
-
-impl Preset {
-    pub const ALL: [Preset; 2] = [Preset::Speed, Preset::Accuracy];
-
-    fn label(self) -> &'static str {
-        match self {
-            Preset::Speed => "Speed",
-            Preset::Accuracy => "Accuracy",
-        }
-    }
-
-    fn arg(self) -> &'static str {
-        match self {
-            Preset::Speed => "speed",
-            Preset::Accuracy => "accuracy",
-        }
-    }
-
-    fn from_arg(value: &str) -> Option<Preset> {
-        match value {
-            "speed" => Some(Preset::Speed),
-            // Legacy saved setting: the old "balanced" now maps to accuracy.
-            "balanced" | "accuracy" => Some(Preset::Accuracy),
-            _ => None,
-        }
-    }
-}
-
-#[derive(Default, Serialize, Deserialize)]
+#[derive(Serialize, Deserialize)]
 struct Settings {
     preset: Option<String>,
     sms_mode: Option<bool>,
     num_speakers: Option<i32>,
+    language: Option<String>,
+    #[serde(default = "notifications_default")]
+    notifications: bool,
     font_scale: Option<f32>,
     playback_speed: Option<f32>,
     waveform_zoom: Option<f32>,
@@ -359,9 +164,29 @@ struct Settings {
     theme: Option<String>,
 }
 
-impl fmt::Display for Preset {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.label())
+fn notifications_default() -> bool {
+    true
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            preset: None,
+            sms_mode: None,
+            num_speakers: None,
+            language: None,
+            notifications: true,
+            font_scale: None,
+            playback_speed: None,
+            waveform_zoom: None,
+            follow_playhead: None,
+            window_width: None,
+            window_height: None,
+            window_x: None,
+            window_y: None,
+            output_dir: None,
+            theme: None,
+        }
     }
 }
 
@@ -404,6 +229,9 @@ pub enum Message {
     EnterSubmit,
     ShiftEnterSubmit,
     SelectLine(usize),
+    SelectRelative(i32),
+    SelectRelativeChecked(i32, bool),
+    EditActiveLine,
     ZoomIn,
     ZoomOut,
     ZoomReset,
@@ -413,6 +241,8 @@ pub enum Message {
     OpenSettings,
     CloseSettings,
     DownloadModels,
+    CancelModelDownload,
+    ClearPartialModels,
     DismissToast,
     WaveZoom(f32),
     HelpChoice(HelpKind),
@@ -420,19 +250,28 @@ pub enum Message {
     Noop,
     OpenSummary,
     SmsToggled(bool),
+    NotificationsToggled(bool),
     SpeakerCountChanged(SpeakerOpt),
+    LanguageChanged(LanguageOpt),
+    ExportChoice(ExportFormat),
+    ExportPicked(ExportFormat, Option<PathBuf>),
     TranscriptScrolled(scrollable::Viewport),
     WindowEvent(iced::window::Event),
     Seek(f32),
     PlayerToggle,
     FocusFind,
     SearchChanged(String),
+    SpeakerFilterChanged(String),
+    ToggleSearchCase,
+    ToggleSearchWholeWord,
     FindPrev,
     FindNext,
     SpeedChanged(Speed),
     Escape,
     ShortcutPlay,
+    ShortcutPlayChecked(bool),
     SeekBy(f32),
+    SeekByChecked(f32, bool),
     ImportPicked(Option<PathBuf>),
     ImportLoaded(Option<(PathBuf, String)>),
     ImportChoice(ImportKind),
@@ -446,7 +285,12 @@ pub enum Message {
     LineEditAction(text_editor::Action),
     SaveLineEdit,
     CancelLineEdit,
+    CopyLineEdit,
+    MergeNextLine,
+    SplitLineAtPlayhead,
     DeleteLineEdit,
+    ConfirmDeleteLine,
+    CancelDeleteLine,
     CloseSummary,
     AddFiles,
     FilesPicked(Option<Vec<PathBuf>>),
@@ -464,6 +308,11 @@ pub enum Message {
     ),
     QueueWaveformLoaded(PathBuf, Option<(f64, Vec<f32>)>),
     RequeueItem(usize),
+    RetryItem(usize),
+    MoveItemUp(usize),
+    MoveItemDown(usize),
+    ResetOutputDir,
+    OpenModelsFolder,
 }
 
 pub struct App {
@@ -495,7 +344,12 @@ pub struct App {
     rename_fields: Vec<(String, String)>,
     rename_focus: usize,
     sms_mode: bool,
+    notifications: bool,
     num_speakers: Option<i32>,
+    language: Option<String>,
+    /// Derived orders, invalidated whenever the shown lines change.
+    display_order_cache: RefCell<Option<Vec<usize>>>,
+    speaker_order_cache: RefCell<Option<Vec<String>>>,
     transcript_viewport: f32,
     transcript_content: f32,
     transcript_at_bottom: bool,
@@ -515,6 +369,9 @@ pub struct App {
     help_open: Option<HelpKind>,
     settings_open: bool,
     search_query: String,
+    speaker_filter: Option<String>,
+    search_case_sensitive: bool,
+    search_whole_word: bool,
     search_index: usize,
     playback_speed: f32,
     last_tick: Option<Instant>,
@@ -529,6 +386,9 @@ pub struct App {
     cancelled: Arc<AtomicBool>,
     queue: Vec<QueueItem>,
     batch: bool,
+    /// Queue paths belonging to the current (or most recent) transcription
+    /// batch, including follow-up passes for files added during a run.
+    batch_paths: Vec<PathBuf>,
     current: Option<usize>,
     current_index: Option<usize>,
     /// Index of the completed queue item currently shown, if any.
@@ -538,6 +398,8 @@ pub struct App {
     view_error: Option<String>,
     /// Right-clicked line currently being edited.
     line_edit: Option<LineEdit>,
+    /// The line editor asked to delete; confirmation is required before saving.
+    delete_confirm: bool,
     /// Background waveform backfill for completed items without cached peaks.
     backfill_active: bool,
     waveform_tried: HashSet<PathBuf>,
@@ -546,6 +408,7 @@ pub struct App {
     model_download: Option<ModelDownload>,
     model_error: Option<String>,
     model_events: Arc<Mutex<VecDeque<DownloadEvent>>>,
+    model_cancel: Arc<AtomicBool>,
     last_model_check: Option<Instant>,
     /// A file is hovering over the window.
     drag_hover: bool,
@@ -589,6 +452,7 @@ fn aspect_clamp(requested: Size, last: Size) -> Size {
 impl App {
     pub fn new() -> Self {
         let settings = Self::load_settings();
+        let (queue, batch_paths) = Self::load_queue_and_batch();
         Self {
             output_dir: settings.output_dir.as_ref().map(PathBuf::from),
             preset: settings
@@ -626,11 +490,20 @@ impl App {
             rename_fields: Vec::new(),
             rename_focus: 0,
             sms_mode: settings.sms_mode.unwrap_or(false),
+            notifications: settings.notifications,
             num_speakers: match settings.num_speakers {
                 None => Some(2),
                 Some(0) => None,
                 Some(count) => Some(count),
             },
+            language: Some(
+                settings
+                    .language
+                    .clone()
+                    .unwrap_or_else(|| "en".to_string()),
+            ),
+            display_order_cache: RefCell::new(None),
+            speaker_order_cache: RefCell::new(None),
             transcript_viewport: 0.0,
             transcript_content: 0.0,
             transcript_at_bottom: true,
@@ -647,6 +520,9 @@ impl App {
             settings_open: false,
             waveform_zoom: settings.waveform_zoom.unwrap_or(1.0),
             search_query: String::new(),
+            speaker_filter: None,
+            search_case_sensitive: false,
+            search_whole_word: false,
             search_index: 0,
             playback_speed: settings.playback_speed.unwrap_or(1.0),
             last_tick: None,
@@ -661,20 +537,23 @@ impl App {
             events: Arc::new(Mutex::new(VecDeque::new())),
             pid: Arc::new(AtomicU32::new(0)),
             cancelled: Arc::new(AtomicBool::new(false)),
-            queue: Self::load_queue(),
+            queue,
             batch: false,
+            batch_paths,
             current: None,
             current_index: None,
             selected: None,
             selected_view: None,
             view_error: None,
             line_edit: None,
+            delete_confirm: false,
             backfill_active: false,
             waveform_tried: HashSet::new(),
             models: download::status(),
             model_download: None,
             model_error: None,
             model_events: Arc::new(Mutex::new(VecDeque::new())),
+            model_cancel: Arc::new(AtomicBool::new(false)),
             last_model_check: Some(Instant::now()),
             drag_hover: false,
         }
@@ -713,6 +592,8 @@ impl App {
             preset: Some(self.preset.arg().to_string()),
             sms_mode: Some(self.sms_mode),
             num_speakers: Some(self.num_speakers.unwrap_or(0)),
+            language: self.language.clone(),
+            notifications: self.notifications,
             font_scale: Some(self.font_scale),
             playback_speed: Some(self.playback_speed),
             waveform_zoom: Some(self.waveform_zoom),
@@ -737,17 +618,19 @@ impl App {
         Self::settings_path().map(|path| path.with_file_name("queue.json"))
     }
 
-    fn load_queue() -> Vec<QueueItem> {
+    /// Load the queue plus the paths from the most recent batch.
+    fn load_queue_and_batch() -> (Vec<QueueItem>, Vec<PathBuf>) {
         let Some(path) = Self::queue_path() else {
-            return Vec::new();
+            return (Vec::new(), Vec::new());
         };
         let Ok(text) = std::fs::read_to_string(path) else {
-            return Vec::new();
+            return (Vec::new(), Vec::new());
         };
         let Ok(state) = serde_json::from_str::<QueueState>(&text) else {
-            return Vec::new();
+            return (Vec::new(), Vec::new());
         };
-        state
+        let batch_paths = state.last_batch.into_iter().map(PathBuf::from).collect();
+        let items = state
             .items
             .into_iter()
             .filter_map(|record| {
@@ -777,7 +660,8 @@ impl App {
                     peaks: Arc::new(record.peaks),
                 })
             })
-            .collect()
+            .collect();
+        (items, batch_paths)
     }
 
     fn save_queue(&self) {
@@ -813,6 +697,11 @@ impl App {
                     peaks: item.peaks.as_ref().clone(),
                 })
                 .collect(),
+            last_batch: self
+                .batch_paths
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect(),
         };
         if let Ok(text) = serde_json::to_string_pretty(&state) {
             let _ = std::fs::write(path, text);
@@ -820,6 +709,12 @@ impl App {
     }
 
     // ---- displayed view (live run vs. a selected completed item) ----
+
+    /// Drop the cached display/speaker orders after lines or speakers change.
+    fn invalidate_derived(&mut self) {
+        self.display_order_cache.replace(None);
+        self.speaker_order_cache.replace(None);
+    }
 
     fn shown_lines(&self) -> &[DocLine] {
         match &self.selected_view {
@@ -959,11 +854,13 @@ impl App {
         let Some(source) = item.transcript.clone() else {
             return Task::none();
         };
+        self.speaker_filter = None;
         let audio = item.audio.clone();
         let duration = item.duration.map(|seconds| seconds as f32);
         let turns = item.turns.clone();
         let peaks = item.peaks.clone();
 
+        self.invalidate_derived();
         self.player = None;
         self.playhead = 0.0;
         self.last_tick = None;
@@ -977,8 +874,8 @@ impl App {
 
         let loaded = match preloaded {
             Some((text, output)) => Some((text, output)),
-            None => match std::fs::read_to_string(&source) {
-                Ok(text) => {
+            None => match backend::read_transcript(&source) {
+                Some(text) => {
                     // JSON imports are displayed read-only; only plain .txt
                     // transcripts are safe to edit in place.
                     let editable = source
@@ -988,7 +885,7 @@ impl App {
                         .unwrap_or(false);
                     Some((text, editable.then(|| source.clone())))
                 }
-                Err(error) => {
+                None => {
                     self.selected = Some(index);
                     self.selected_view = Some(ItemView {
                         index,
@@ -1001,7 +898,7 @@ impl App {
                         audio,
                         output: None,
                     });
-                    self.view_error = Some(format!("Could not read {}: {error}", source.display()));
+                    self.view_error = Some(format!("Could not read {}", source.display()));
                     return scrollable::snap_to(
                         transcript_id(),
                         scrollable::RelativeOffset { x: 0.0, y: 0.0 },
@@ -1068,6 +965,7 @@ impl App {
 
     /// Drop a pinned completed-item view and show the live run again.
     fn return_to_live(&mut self) {
+        self.invalidate_derived();
         self.selected = None;
         self.selected_view = None;
         self.view_error = None;
@@ -1147,9 +1045,9 @@ impl App {
         self.theme_mode.scheme()
     }
 
-    /// True when every model file needed by the pipeline is present.
+    /// True when the selected preset has every model file it needs.
     fn models_ready(&self) -> bool {
-        !self.models.is_empty() && self.models.iter().all(ModelStatus::present)
+        download::ready_for(self.preset.arg())
     }
 
     fn refresh_models(&mut self) {
@@ -1167,19 +1065,21 @@ impl App {
             return;
         }
         self.model_error = None;
+        self.model_cancel.store(false, Ordering::SeqCst);
         self.model_download = Some(ModelDownload {
             label: "starting".to_string(),
             done: 0,
             total: None,
         });
         let events = self.model_events.clone();
+        let cancel = self.model_cancel.clone();
         if let Ok(mut queue) = events.lock() {
             queue.clear();
         }
         let spawned = std::thread::Builder::new()
             .name("model-download".to_string())
             .spawn(move || {
-                download::download_with(false, true, &mut |event| {
+                download::download_with_cancel(false, true, cancel, &mut |event| {
                     if let Ok(mut queue) = events.lock() {
                         queue.push_back(event);
                     }
@@ -1229,6 +1129,7 @@ impl App {
                 }
                 DownloadEvent::Finished { ok } => {
                     self.model_download = None;
+                    self.model_cancel.store(false, Ordering::SeqCst);
                     self.refresh_models();
                     if ok {
                         self.toast = Some(("Models downloaded".to_string(), Instant::now()));
@@ -1256,11 +1157,14 @@ impl App {
         use keyboard::key::Named;
         match key {
             Key::Named(Named::Tab) => Some(Message::RenameMove(true)),
+            Key::Named(Named::Enter) if modifiers.alt() => Some(Message::EditActiveLine),
             Key::Named(Named::Enter) if modifiers.command() => Some(Message::Start),
             Key::Named(Named::Enter) if modifiers.shift() => Some(Message::ShiftEnterSubmit),
             Key::Named(Named::Enter) => Some(Message::EnterSubmit),
             Key::Named(Named::Escape) => Some(Message::Escape),
             Key::Named(Named::Space) => Some(Message::ShortcutPlay),
+            Key::Named(Named::ArrowUp) => Some(Message::SelectRelative(-1)),
+            Key::Named(Named::ArrowDown) => Some(Message::SelectRelative(1)),
             Key::Named(Named::ArrowRight) => Some(Message::SeekBy(5.0)),
             Key::Named(Named::ArrowLeft) => Some(Message::SeekBy(-5.0)),
             Key::Character(character) if modifiers.command() => match character.as_str() {
@@ -1276,6 +1180,12 @@ impl App {
         }
     }
 
+    /// Ask the widget tree whether a focusable input currently owns focus.
+    fn focus_probe() -> Task<bool> {
+        iced::advanced::widget::operate(iced::advanced::widget::operation::focusable::count())
+            .map(|count| count.focused.is_some())
+    }
+
     pub fn update(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::SmsToggled(value) => {
@@ -1283,14 +1193,63 @@ impl App {
                 self.save_settings();
                 Task::none()
             }
+            Message::NotificationsToggled(value) => {
+                self.notifications = value;
+                self.save_settings();
+                Task::none()
+            }
             Message::SpeakerCountChanged(option) => {
                 if matches!(self.status, Status::Running) {
                     return Task::none();
                 }
-                self.num_speakers = Some(option.value());
+                self.num_speakers = option.value();
                 self.save_settings();
                 Task::none()
             }
+            Message::LanguageChanged(option) => {
+                if matches!(self.status, Status::Running) {
+                    return Task::none();
+                }
+                self.language = Some(option.code().to_string());
+                self.save_settings();
+                Task::none()
+            }
+            Message::ExportChoice(format) => {
+                if self.shown_transcript().is_empty() {
+                    return Task::none();
+                }
+                let stem = self
+                    .shown_audio()
+                    .or_else(|| self.shown_output())
+                    .and_then(|path| path.file_stem())
+                    .and_then(|stem| stem.to_str())
+                    .unwrap_or("transcript")
+                    .to_string();
+                let name = format!("{stem}.{}", format.extension());
+                Task::perform(
+                    async move {
+                        rfd::FileDialog::new()
+                            .add_filter(format.label(), &[format.extension()])
+                            .set_file_name(name)
+                            .save_file()
+                    },
+                    move |path| Message::ExportPicked(format, path),
+                )
+            }
+            Message::ExportPicked(format, Some(path)) => {
+                let transcript = self.shown_transcript().to_string();
+                let turns = self.turns.clone();
+                match export::write(&path, format, &transcript, &turns, self.timeline_duration) {
+                    Ok(()) => {
+                        self.toast = Some((format!("Exported {}", path.display()), Instant::now()));
+                    }
+                    Err(error) => {
+                        self.toast = Some((format!("Could not export: {error}"), Instant::now()));
+                    }
+                }
+                Task::none()
+            }
+            Message::ExportPicked(_, None) => Task::none(),
             Message::TranscriptScrolled(viewport) => {
                 self.transcript_viewport = viewport.bounds().height;
                 self.transcript_content = viewport.content_bounds().height;
@@ -1407,6 +1366,7 @@ impl App {
                             item.duration = view.duration.map(|seconds| seconds as f64);
                         }
                     }
+                    self.invalidate_derived();
                     self.save_queue();
                 }
                 Task::none()
@@ -1445,6 +1405,7 @@ impl App {
                 item.stats = None;
                 item.turns.clear();
                 item.peaks = Arc::new(Vec::new());
+                self.invalidate_derived();
                 self.selected = None;
                 self.selected_view = None;
                 self.view_error = None;
@@ -1453,6 +1414,49 @@ impl App {
                 if !matches!(self.status, Status::Running) {
                     self.begin_batch(false);
                 }
+                Task::none()
+            }
+            Message::RetryItem(index) => {
+                if matches!(self.status, Status::Running) {
+                    return Task::none();
+                }
+                let retried = self.queue.get_mut(index).is_some_and(|item| {
+                    if matches!(item.status, ItemStatus::Failed(_)) {
+                        item.status = ItemStatus::Pending;
+                        true
+                    } else {
+                        false
+                    }
+                });
+                if retried {
+                    self.invalidate_derived();
+                    self.save_queue();
+                }
+                Task::none()
+            }
+            Message::MoveItemUp(index) => {
+                if !matches!(self.status, Status::Running) {
+                    self.move_queue_item(index, index.saturating_sub(1));
+                }
+                Task::none()
+            }
+            Message::MoveItemDown(index) => {
+                if !matches!(self.status, Status::Running) {
+                    self.move_queue_item(index, index.saturating_add(1));
+                }
+                Task::none()
+            }
+            Message::ResetOutputDir => {
+                if !matches!(self.status, Status::Running) {
+                    self.output_dir = None;
+                    self.save_settings();
+                }
+                Task::none()
+            }
+            Message::OpenModelsFolder => {
+                let dir = models::models_dir();
+                let _ = std::fs::create_dir_all(&dir);
+                open_path(&dir);
                 Task::none()
             }
             Message::Seek(seconds) => {
@@ -1471,6 +1475,35 @@ impl App {
             Message::FocusFind => text_input::focus(find_id()),
             Message::SearchChanged(query) => {
                 self.search_query = query;
+                self.search_index = 0;
+                Task::none()
+            }
+            Message::SpeakerFilterChanged(choice) => {
+                let next = if choice == "All speakers" {
+                    None
+                } else {
+                    Some(choice)
+                };
+                if next != self.speaker_filter {
+                    self.speaker_filter = next;
+                    self.search_index = 0;
+                    self.invalidate_derived();
+                    let first = self.display_order().first().copied();
+                    match first {
+                        Some(index) => self.scroll_to_line(index),
+                        None => Task::none(),
+                    }
+                } else {
+                    Task::none()
+                }
+            }
+            Message::ToggleSearchCase => {
+                self.search_case_sensitive = !self.search_case_sensitive;
+                self.search_index = 0;
+                Task::none()
+            }
+            Message::ToggleSearchWholeWord => {
+                self.search_whole_word = !self.search_whole_word;
                 self.search_index = 0;
                 Task::none()
             }
@@ -1511,6 +1544,47 @@ impl App {
                 }
                 Task::none()
             }
+            Message::SelectRelative(delta) => {
+                if self.rename_open || self.line_edit.is_some() || self.settings_open {
+                    return Task::none();
+                }
+                Self::focus_probe()
+                    .map(move |focused| Message::SelectRelativeChecked(delta, focused))
+            }
+            Message::SelectRelativeChecked(delta, focused) => {
+                if focused
+                    || self.rename_open
+                    || self.line_edit.is_some()
+                    || self.settings_open
+                    || self.delete_confirm
+                {
+                    return Task::none();
+                }
+                let order = self.display_order();
+                if order.is_empty() {
+                    return Task::none();
+                }
+                let current = self
+                    .active_line_index()
+                    .and_then(|index| order.iter().position(|item| *item == index))
+                    .unwrap_or(0);
+                let next = (current as i32 + delta).clamp(0, order.len() as i32 - 1) as usize;
+                let index = order[next];
+                let scroll = self.scroll_to_line(index);
+                Task::batch([scroll, Task::done(Message::SelectLine(index))])
+            }
+            Message::EditActiveLine => {
+                if self.rename_open || self.settings_open || self.delete_confirm {
+                    return Task::none();
+                }
+                let index = self
+                    .active_line_index()
+                    .or_else(|| self.display_order().first().copied());
+                match index {
+                    Some(index) => Task::done(Message::EditLine(index)),
+                    None => Task::none(),
+                }
+            }
             Message::RenameName(index, value) => {
                 if let Some(field) = self.rename_fields.get_mut(index) {
                     field.1 = value;
@@ -1535,7 +1609,7 @@ impl App {
                 }
             }
             Message::EnterSubmit => {
-                if self.settings_open {
+                if self.settings_open || self.delete_confirm {
                     return Task::none();
                 }
                 if self.line_edit.is_some() {
@@ -1555,7 +1629,7 @@ impl App {
                 }
             }
             Message::ShiftEnterSubmit => {
-                if self.settings_open {
+                if self.settings_open || self.delete_confirm {
                     return Task::none();
                 }
                 if self.line_edit.is_some() {
@@ -1632,6 +1706,23 @@ impl App {
                 self.start_model_download();
                 Task::none()
             }
+            Message::CancelModelDownload => {
+                self.model_cancel.store(true, Ordering::SeqCst);
+                self.toast = Some(("Stopping model download".to_string(), Instant::now()));
+                Task::none()
+            }
+            Message::ClearPartialModels => {
+                let cleared = download::clear_partial();
+                self.toast = Some((
+                    if cleared.is_empty() {
+                        "No partial downloads to clear".to_string()
+                    } else {
+                        format!("Cleared {} partial file(s)", cleared.len())
+                    },
+                    Instant::now(),
+                ));
+                Task::none()
+            }
             Message::DismissToast => {
                 self.toast = None;
                 Task::none()
@@ -1656,7 +1747,9 @@ impl App {
             }
             Message::Noop => Task::none(),
             Message::Escape => {
-                if self.line_edit.is_some() {
+                if self.delete_confirm {
+                    self.delete_confirm = false;
+                } else if self.line_edit.is_some() {
                     self.line_edit = None;
                 } else if self.rename_open {
                     self.rename_open = false;
@@ -1682,11 +1775,23 @@ impl App {
                 if self.rename_open || self.line_edit.is_some() || self.settings_open {
                     return Task::none();
                 }
-                self.toggle_playback();
+                Self::focus_probe().map(Message::ShortcutPlayChecked)
+            }
+            Message::ShortcutPlayChecked(focused) => {
+                if !focused && !self.rename_open && self.line_edit.is_none() && !self.settings_open
+                {
+                    self.toggle_playback();
+                }
                 Task::none()
             }
             Message::SeekBy(delta) => {
                 if self.rename_open || self.line_edit.is_some() || self.settings_open {
+                    return Task::none();
+                }
+                Self::focus_probe().map(move |focused| Message::SeekByChecked(delta, focused))
+            }
+            Message::SeekByChecked(delta, focused) => {
+                if focused || self.rename_open || self.line_edit.is_some() || self.settings_open {
                     return Task::none();
                 }
                 if self.shown_duration().is_some() {
@@ -1883,6 +1988,7 @@ impl App {
                             view.index -= 1;
                         }
                     }
+                    self.invalidate_derived();
                     self.save_queue();
                 }
                 Task::none()
@@ -1891,6 +1997,7 @@ impl App {
                 if !matches!(self.status, Status::Running) {
                     // "Clear" is a full reset: queue, transcript and run state.
                     self.queue.clear();
+                    self.batch_paths.clear();
                     self.current = None;
                     self.current_index = None;
                     self.transcript.clear();
@@ -1929,6 +2036,7 @@ impl App {
                     self.overall_shown = 0.0;
                     self.stage = "idle".to_string();
                     self.status = Status::Idle;
+                    self.invalidate_derived();
                     self.save_queue();
                 }
                 Task::none()
@@ -1994,12 +2102,45 @@ impl App {
                 self.apply_line_edit();
                 Task::none()
             }
+            Message::CopyLineEdit => {
+                let Some(edit) = &self.line_edit else {
+                    return Task::none();
+                };
+                let text = edit.content.text();
+                let text = text.trim_end().replace(['\n', '\r'], " ");
+                let line = if edit.speaker.trim().is_empty() {
+                    text
+                } else {
+                    format!("{}: {text}", edit.speaker.trim())
+                };
+                self.toast = Some(("Copied line".to_string(), Instant::now()));
+                iced::clipboard::write(line)
+            }
+            Message::MergeNextLine => {
+                self.merge_next_line();
+                Task::none()
+            }
+            Message::SplitLineAtPlayhead => {
+                self.split_line_at_playhead();
+                Task::none()
+            }
             Message::CancelLineEdit => {
                 self.line_edit = None;
                 Task::none()
             }
             Message::DeleteLineEdit => {
+                if self.line_edit.is_some() {
+                    self.delete_confirm = true;
+                }
+                Task::none()
+            }
+            Message::ConfirmDeleteLine => {
+                self.delete_confirm = false;
                 self.delete_edit_line();
+                Task::none()
+            }
+            Message::CancelDeleteLine => {
+                self.delete_confirm = false;
                 Task::none()
             }
             Message::CopyTranscript => {
@@ -2016,7 +2157,7 @@ impl App {
             Message::SaveTranscript => {
                 match (self.shown_output(), self.shown_transcript()) {
                     (Some(path), text) => {
-                        if std::fs::write(path, text).is_ok() {
+                        if write_transcript_file(path, text).is_ok() {
                             self.toast =
                                 Some((format!("Saved {}", path.display()), Instant::now()));
                         }
@@ -2301,7 +2442,7 @@ impl App {
             self.transcript.push('\n');
         }
         if let Some(path) = &self.output_txt {
-            let _ = std::fs::write(path, &self.transcript);
+            let _ = write_transcript_file(path, &self.transcript);
         }
     }
 
@@ -2313,18 +2454,32 @@ impl App {
             .map(|path| path.to_path_buf())
             .or_else(|| self.output_dir.clone());
         let Some(dir) = dir else { return };
-        #[cfg(target_os = "linux")]
-        {
-            let _ = std::process::Command::new("xdg-open").arg(&dir).spawn();
+        open_path(&dir);
+    }
+
+    /// Swap one queue entry with another, keeping selection indices in sync.
+    fn move_queue_item(&mut self, from: usize, to: usize) {
+        if from == to || to >= self.queue.len() || from >= self.queue.len() {
+            return;
         }
-        #[cfg(target_os = "macos")]
-        {
-            let _ = std::process::Command::new("open").arg(&dir).spawn();
+        self.queue.swap(from, to);
+        let remap = |index: &mut Option<usize>| match *index {
+            Some(value) if value == from => *index = Some(to),
+            Some(value) if value == to => *index = Some(from),
+            _ => {}
+        };
+        remap(&mut self.current);
+        remap(&mut self.current_index);
+        remap(&mut self.selected);
+        if let Some(view) = self.selected_view.as_mut() {
+            if view.index == from {
+                view.index = to;
+            } else if view.index == to {
+                view.index = from;
+            }
         }
-        #[cfg(target_os = "windows")]
-        {
-            let _ = std::process::Command::new("explorer").arg(&dir).spawn();
-        }
+        self.invalidate_derived();
+        self.save_queue();
     }
 
     fn add_paths(&mut self, paths: Vec<PathBuf>) -> Vec<PathBuf> {
@@ -2379,7 +2534,9 @@ impl App {
         self.summary_open = true;
         self.pending_rename = generated == 1 && self.completed_count() == 1;
         self.toast = None;
-        notify("transiel", "Transcription complete");
+        if self.notifications {
+            notify("transiel", "Transcription complete");
+        }
         true
     }
 
@@ -2392,6 +2549,7 @@ impl App {
         self.transcript.push('\n');
         self.lines.push(line);
         self.transcript_dirty = true;
+        self.invalidate_derived();
     }
 
     /// Probe one completed item's waveform in the background. Results are
@@ -2488,6 +2646,18 @@ impl App {
             return;
         }
 
+        if preserve_view {
+            // A follow-up pass is part of the same user-visible batch.
+            for path in &inputs {
+                if !self.batch_paths.contains(path) {
+                    self.batch_paths.push(path.clone());
+                }
+            }
+        } else {
+            self.batch_paths = inputs.clone();
+        }
+        self.save_queue();
+
         self.batch = true;
         self.current = None;
         self.current_index = None;
@@ -2515,6 +2685,7 @@ impl App {
         self.timeline_duration = None;
         self.output_txt = None;
         self.rename_open = false;
+        self.invalidate_derived();
         if !preserve {
             self.playhead = 0.0;
             self.player = None;
@@ -2529,6 +2700,11 @@ impl App {
             self.output_dir.clone(),
             self.preset.arg(),
             self.num_speakers,
+            if self.preset == Preset::Speed {
+                Some("en".to_string())
+            } else {
+                self.language.clone()
+            },
             true, // diarization cache is always on
             self.events.clone(),
             self.pid.clone(),
@@ -2612,7 +2788,7 @@ impl App {
                 view.transcript.push('\n');
             }
             if let Some(path) = &view.output {
-                let _ = std::fs::write(path, &view.transcript);
+                let _ = write_transcript_file(path, &view.transcript);
             }
             let index = view.index;
             let turns = view.turns.clone();
@@ -2624,6 +2800,7 @@ impl App {
             Self::rename_turns(&mut self.turns, &mapping);
             self.refresh_transcript();
         }
+        self.invalidate_derived();
         self.rename_open = false;
     }
 
@@ -2655,12 +2832,164 @@ impl App {
                 view.transcript.push('\n');
             }
             if let Some(path) = &view.output {
-                let _ = std::fs::write(path, &view.transcript);
+                let _ = write_transcript_file(path, &view.transcript);
             }
         } else if let Some(line) = self.lines.get_mut(index) {
             rewrite_line(line, &speaker, &text);
             self.refresh_transcript();
         }
+        self.invalidate_derived();
+    }
+
+    /// Append the next line to the one open in the editor.
+    fn merge_next_line(&mut self) {
+        let Some(edit) = self.line_edit.take() else {
+            return;
+        };
+        let index = edit.index;
+        let speaker = edit.speaker.trim().to_string();
+        let text = edit.content.text().trim_end().replace(['\n', '\r'], " ");
+        let mut merged = false;
+
+        if let Some(view) = self.selected_view.as_mut() {
+            if index < view.lines.len() {
+                rewrite_line(&mut view.lines[index], &speaker, &text);
+                if index + 1 < view.lines.len() {
+                    let next = line_text(&view.lines[index + 1]);
+                    let joined = join_line_text(&text, &next);
+                    rewrite_line(&mut view.lines[index], &speaker, &joined);
+                    view.lines.remove(index + 1);
+                    merged = true;
+                }
+                view.transcript = view
+                    .lines
+                    .iter()
+                    .map(|line| line.raw.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                if !view.transcript.is_empty() {
+                    view.transcript.push('\n');
+                }
+                if let Some(path) = &view.output {
+                    let _ = write_transcript_file(path, &view.transcript);
+                }
+            }
+        } else if index < self.lines.len() {
+            rewrite_line(&mut self.lines[index], &speaker, &text);
+            if index + 1 < self.lines.len() {
+                let next = line_text(&self.lines[index + 1]);
+                let joined = join_line_text(&text, &next);
+                rewrite_line(&mut self.lines[index], &speaker, &joined);
+                self.lines.remove(index + 1);
+                merged = true;
+            }
+            self.refresh_transcript();
+        }
+
+        self.invalidate_derived();
+        self.toast = Some((
+            if merged {
+                "Merged with next line".to_string()
+            } else {
+                "No next line to merge".to_string()
+            },
+            Instant::now(),
+        ));
+    }
+
+    /// Split the edited line at the current playhead position.
+    fn split_line_at_playhead(&mut self) {
+        let Some(edit) = self.line_edit.as_ref() else {
+            return;
+        };
+        let index = edit.index;
+        let speaker = edit.speaker.trim().to_string();
+        let text = edit.content.text().trim_end().replace(['\n', '\r'], " ");
+        let (line_start, next_start) = if let Some(view) = self.selected_view.as_ref() {
+            (
+                view.lines.get(index).and_then(|line| line.start),
+                view.lines.get(index + 1).and_then(|line| line.start),
+            )
+        } else {
+            (
+                self.lines.get(index).and_then(|line| line.start),
+                self.lines.get(index + 1).and_then(|line| line.start),
+            )
+        };
+        let start = line_start.unwrap_or(0.0);
+        let end = next_start
+            .or(self.timeline_duration)
+            .unwrap_or(start + 5.0)
+            .max(start + 0.1);
+        let ratio = ((self.playhead - start) / (end - start)).clamp(0.15, 0.85);
+        let chars: Vec<(usize, char)> = text.char_indices().collect();
+        if chars.len() < 2 {
+            self.toast = Some(("Line is too short to split".to_string(), Instant::now()));
+            return;
+        }
+        let target = ((chars.len() as f32) * ratio).round() as usize;
+        let mut split_at = None;
+        let mut best = usize::MAX;
+        for (count, (byte, ch)) in chars.iter().enumerate() {
+            if ch.is_whitespace() {
+                let distance = count.abs_diff(target);
+                if distance < best {
+                    best = distance;
+                    split_at = Some(*byte);
+                }
+            }
+        }
+        let split_at = split_at
+            .filter(|byte| *byte > 0 && *byte < text.len())
+            .or_else(|| chars.get(target).map(|(byte, _)| *byte))
+            .unwrap_or(text.len());
+        let left = text[..split_at].trim_end();
+        let right = text[split_at..].trim_start();
+        if left.is_empty() || right.is_empty() {
+            self.toast = Some(("Cannot split here".to_string(), Instant::now()));
+            return;
+        }
+        self.line_edit = None;
+        let prefix = if line_start.is_some() {
+            format!("[{}] ", format_timestamp(self.playhead as f64))
+        } else {
+            String::new()
+        };
+        let new_raw = if speaker.is_empty() {
+            format!("{prefix}{right}")
+        } else {
+            format!("{prefix}{speaker}: {right}")
+        };
+        let new_line = DocLine {
+            raw: new_raw,
+            speaker: speaker.clone(),
+            start: line_start.map(|_| self.playhead.max(start)),
+        };
+
+        if let Some(view) = self.selected_view.as_mut() {
+            if index < view.lines.len() {
+                rewrite_line(&mut view.lines[index], &speaker, left);
+                view.lines.insert(index + 1, new_line);
+                view.transcript = view
+                    .lines
+                    .iter()
+                    .map(|line| line.raw.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                if !view.transcript.is_empty() {
+                    view.transcript.push('\n');
+                }
+                if let Some(path) = &view.output {
+                    let _ = write_transcript_file(path, &view.transcript);
+                }
+            }
+        } else if index < self.lines.len() {
+            rewrite_line(&mut self.lines[index], &speaker, left);
+            self.lines.insert(index + 1, new_line);
+            self.refresh_transcript();
+        }
+        self.invalidate_derived();
+        self.toast = Some(("Split line at playhead".to_string(), Instant::now()));
     }
 
     /// Delete the line currently open in the right-click editor.
@@ -2683,7 +3012,7 @@ impl App {
                     view.transcript.push('\n');
                 }
                 if let Some(path) = &view.output {
-                    let _ = std::fs::write(path, &view.transcript);
+                    let _ = write_transcript_file(path, &view.transcript);
                 }
                 removed = true;
             }
@@ -2693,6 +3022,7 @@ impl App {
             removed = true;
         }
         if removed {
+            self.invalidate_derived();
             self.toast = Some(("Line deleted".to_string(), Instant::now()));
         }
     }
@@ -2763,6 +3093,7 @@ impl App {
                     self.peaks = Arc::new(Vec::new());
                     self.peaks_for = None;
                     self.timeline_duration = None;
+                    self.invalidate_derived();
                     if !keep_view {
                         self.playhead = 0.0;
                         self.player = None;
@@ -2785,6 +3116,7 @@ impl App {
                 }
                 Event::Turns { turns } => {
                     self.turns = turns;
+                    self.invalidate_derived();
                 }
                 Event::Waveform { audio, peaks } => {
                     // Emitted once diarization has identified the speakers.
@@ -2821,6 +3153,7 @@ impl App {
                     if self.lines.is_empty() {
                         self.lines = parse_lines(&self.transcript);
                     }
+                    self.invalidate_derived();
                     self.output_txt = Some(PathBuf::from(&txt));
                     let transcript = PathBuf::from(&txt);
                     let turns = self.turns.clone();
@@ -2850,10 +3183,8 @@ impl App {
                         // queue pending so it can be retried after fixing it.
                         if had_current {
                             for item in self.queue.iter_mut() {
-                                if matches!(
-                                    item.status,
-                                    ItemStatus::Pending | ItemStatus::Running
-                                ) {
+                                if matches!(item.status, ItemStatus::Pending | ItemStatus::Running)
+                                {
                                     item.status = ItemStatus::Failed(message.clone());
                                 }
                             }
@@ -2899,6 +3230,11 @@ impl App {
         let mut lines: Vec<SummaryLine> = Vec::new();
         for item in &self.queue {
             if !matches!(item.status, ItemStatus::Done) {
+                continue;
+            }
+            // Restrict the automatic summary to the files this run processed,
+            // not every completed item left in the queue from earlier runs.
+            if !self.batch_paths.is_empty() && !self.batch_paths.contains(&item.path) {
                 continue;
             }
             let name = item
@@ -3007,54 +3343,65 @@ impl App {
 
     /// Line indices (into the displayed transcript) containing the query.
     fn matching_lines(&self) -> Vec<usize> {
-        let query = self.search_query.trim().to_lowercase();
-        if query.is_empty() {
+        if self.search_query.trim().is_empty() {
             return Vec::new();
         }
-        self.shown_lines()
-            .iter()
-            .enumerate()
-            .filter(|(_, line)| line.raw.to_lowercase().contains(&query))
-            .map(|(index, _)| index)
+        let lines = self.shown_lines();
+        self.display_order()
+            .into_iter()
+            .filter(|index| {
+                lines.get(*index).is_some_and(|line| {
+                    !search_match_ranges(
+                        &line.raw,
+                        &self.search_query,
+                        self.search_case_sensitive,
+                        self.search_whole_word,
+                    )
+                    .is_empty()
+                })
+            })
             .collect()
     }
 
     /// Distinct speakers in transcript order (matches the SMS bubble ordering).
     fn speaker_order(&self) -> Vec<String> {
-        let mut order: Vec<String> = Vec::new();
-        for line in self.shown_lines() {
-            if !line.speaker.is_empty() && !order.contains(&line.speaker) {
-                order.push(line.speaker.clone());
-            }
+        if let Some(order) = self.speaker_order_cache.borrow().as_ref() {
+            return order.clone();
         }
+        let order = distinct_speaker_order(self.shown_lines());
+        *self.speaker_order_cache.borrow_mut() = Some(order.clone());
         order
     }
 
     /// Line indices sorted by start time (untimed lines last), stable.
     fn display_order(&self) -> Vec<usize> {
+        if let Some(order) = self.display_order_cache.borrow().as_ref() {
+            return order.clone();
+        }
         let lines = self.shown_lines();
-        let mut indices: Vec<usize> = (0..lines.len()).collect();
-        indices.sort_by(|a, b| {
-            let ta = lines[*a].start.unwrap_or(f32::INFINITY);
-            let tb = lines[*b].start.unwrap_or(f32::INFINITY);
-            ta.partial_cmp(&tb).unwrap_or(std::cmp::Ordering::Equal)
-        });
-        indices
+        let mut order = sorted_display_order(lines);
+        if let Some(speaker) = &self.speaker_filter {
+            order.retain(|index| {
+                lines
+                    .get(*index)
+                    .is_some_and(|line| line.speaker == *speaker)
+            });
+        }
+        *self.display_order_cache.borrow_mut() = Some(order.clone());
+        order
     }
 
     /// Scroll the transcript so the given line (by index) is roughly centred.
     /// Pixel scroll offset that centres the given line in the transcript.
     fn follow_target(&self, line: usize) -> Option<f32> {
-        let total = self.shown_lines().len().max(1) as f32;
+        let order = self.display_order();
+        let total = order.len().max(1) as f32;
         let content = self.transcript_content;
         let viewport = self.transcript_viewport;
         if content <= 0.0 || viewport <= 0.0 {
             return None;
         }
-        let rank = self
-            .display_order()
-            .iter()
-            .position(|index| *index == line)?;
+        let rank = order.iter().position(|index| *index == line)?;
         let line_height = content / total;
         Some(
             ((rank as f32 + 0.5) * line_height - viewport / 2.0)
@@ -3076,7 +3423,8 @@ impl App {
     /// scroll. Reaches the first line at the top and the last line at the
     /// bottom instead of always centring.
     fn seek_from_scroll(&mut self, offset: f32, viewport: f32) {
-        let total = self.shown_lines().len();
+        let order = self.display_order();
+        let total = order.len();
         if total == 0 || viewport <= 0.0 {
             return;
         }
@@ -3090,10 +3438,6 @@ impl App {
         } else {
             0.0
         };
-        let order = self.display_order();
-        if order.is_empty() {
-            return;
-        }
         let rank = rank.floor().clamp(0.0, (order.len() - 1) as f32) as usize;
         let start = order
             .iter()
@@ -3543,6 +3887,44 @@ impl App {
             );
         }
 
+        if matches!(item.status, ItemStatus::Pending) {
+            content = content.push(
+                self.tip(
+                    action(icon(ICON_ARROW_UP, 11.0))
+                        .on_press_maybe(
+                            (!running && index > 0).then_some(Message::MoveItemUp(index)),
+                        )
+                        .style(subtle_icon_button),
+                    "Move up",
+                    &scheme,
+                ),
+            );
+            content = content.push(
+                self.tip(
+                    action(icon(ICON_ARROW_DOWN, 11.0))
+                        .on_press_maybe(
+                            (!running && index + 1 < self.queue.len())
+                                .then_some(Message::MoveItemDown(index)),
+                        )
+                        .style(subtle_icon_button),
+                    "Move down",
+                    &scheme,
+                ),
+            );
+        }
+
+        if matches!(item.status, ItemStatus::Failed(_)) {
+            content = content.push(
+                self.tip(
+                    action(icon(ICON_RETRY, 12.0))
+                        .on_press_maybe((!running).then_some(Message::RetryItem(index)))
+                        .style(subtle_icon_button),
+                    "Retry",
+                    &scheme,
+                ),
+            );
+        }
+
         content = content.push(
             self.tip(
                 action(icon(ICON_X, 11.0))
@@ -3674,6 +4056,8 @@ impl App {
                         scheme.ink,
                         tint,
                         &query,
+                        self.search_case_sensitive,
+                        self.search_whole_word,
                         scheme.search_hl,
                         size,
                         active,
@@ -3704,6 +4088,8 @@ impl App {
                     accent,
                     search_tint,
                     &query,
+                    self.search_case_sensitive,
+                    self.search_whole_word,
                     scheme.search_hl,
                     &scheme,
                     size,
@@ -3893,10 +4279,13 @@ impl App {
     /// Index of the last line whose start time is at or before `t`.
     fn line_for_playhead(&self, t: f32) -> Option<usize> {
         let mut best: Option<(usize, f32)> = None;
-        for (index, line) in self.shown_lines().iter().enumerate() {
-            if let Some(start) = line.start {
-                if start <= t && best.map_or(true, |(_, best_start)| start >= best_start) {
-                    best = Some((index, start));
+        let lines = self.shown_lines();
+        for index in self.display_order() {
+            if let Some(line) = lines.get(index) {
+                if let Some(start) = line.start {
+                    if start <= t && best.map_or(true, |(_, best_start)| start >= best_start) {
+                        best = Some((index, start));
+                    }
                 }
             }
         }
@@ -4106,11 +4495,38 @@ impl App {
         let next = action(icon(ICON_ARROW_DOWN, 14.0))
             .on_press(Message::FindNext)
             .style(pill_button_secondary);
+        let match_case = action(text("Aa").size(12))
+            .on_press(Message::ToggleSearchCase)
+            .style(if self.search_case_sensitive {
+                pill_button_active
+            } else {
+                pill_button_secondary
+            });
+        let whole_word = action(text("W").size(12))
+            .on_press(Message::ToggleSearchWholeWord)
+            .style(if self.search_whole_word {
+                pill_button_active
+            } else {
+                pill_button_secondary
+            });
+        let mut speakers = vec!["All speakers".to_string()];
+        speakers.extend(self.speaker_order());
+        let selected = self
+            .speaker_filter
+            .clone()
+            .unwrap_or_else(|| "All speakers".to_string());
+        let speaker_filter = pick_list(speakers, Some(selected), Message::SpeakerFilterChanged)
+            .style(pill_pick)
+            .width(Length::Fixed(132.0));
         row![
             query_input,
             text(status).size(12).color(status_color),
             prev,
-            next
+            next,
+            self.tip(match_case, "Match case", scheme),
+            self.tip(whole_word, "Whole word", scheme),
+            horizontal_space(),
+            speaker_filter,
         ]
         .spacing(8)
         .align_y(iced::Alignment::Center)
@@ -4154,13 +4570,11 @@ impl App {
             return None;
         }
 
-        let missing: Vec<&str> = self
-            .models
+        let missing = download::missing_for(self.preset.arg())
             .iter()
-            .filter(|model| !model.present())
             .map(|model| friendly_model(model.label))
-            .collect();
-        let missing = missing.join(", ");
+            .collect::<Vec<_>>()
+            .join(", ");
         let downloading = self.model_download.is_some();
 
         let (title, body) = if let Some(error) = &self.model_error {
@@ -4235,7 +4649,11 @@ impl App {
                 .filter(|total| *total > 0)
                 .map(|total| format!("{:.0}%", state.done as f32 / total as f32 * 100.0))
                 .unwrap_or_default();
-            header = header.push(text(percent).size(13));
+            header = header.push(text(percent).size(13)).push(
+                action("Cancel")
+                    .on_press(Message::CancelModelDownload)
+                    .style(pill_button_secondary),
+            );
         } else {
             let label = if self.model_error.is_some() {
                 "Retry download"
@@ -4346,6 +4764,28 @@ impl App {
             .into()
         };
 
+        let language: Element<Message> = if running {
+            text("Locked while transcribing")
+                .size(theme::TEXT_XS)
+                .color(scheme.muted)
+                .into()
+        } else if self.preset == Preset::Speed {
+            text("English only for the speed preset")
+                .size(theme::TEXT_XS)
+                .color(scheme.muted)
+                .into()
+        } else {
+            pick_list(
+                LanguageOpt::ALL,
+                Some(LanguageOpt::from_code(self.language.as_deref())),
+                Message::LanguageChanged,
+            )
+            .style(pill_pick)
+            .handle(caret_handle(false))
+            .width(Length::Fixed(150.0))
+            .into()
+        };
+
         let speed = settings_control(
             pick_list(
                 Speed::ALL,
@@ -4371,15 +4811,37 @@ impl App {
                 .width(Length::Fixed(64.0)),
         );
 
+        let notifications_on = self.notifications;
+        let notifications = settings_control(
+            action(text(if notifications_on { "On" } else { "Off" }).size(theme::TEXT_XS))
+                .on_press(Message::NotificationsToggled(!notifications_on))
+                .style(move |theme, status| {
+                    if notifications_on {
+                        pill_button_active(theme, status)
+                    } else {
+                        pill_button_secondary(theme, status)
+                    }
+                })
+                .width(Length::Fixed(64.0)),
+        );
+
         let location = self
             .output_dir
             .as_ref()
             .map(|path| path.display().to_string())
             .unwrap_or_else(|| "Next to each audio file".to_string());
-        let change = settings_control(
-            action("Change")
-                .on_press_maybe((!running).then_some(Message::PickOutput))
-                .style(pill_button_secondary),
+        let change = action("Change")
+            .on_press_maybe((!running).then_some(Message::PickOutput))
+            .style(pill_button_secondary);
+        let use_audio_folder = action("Use audio folder")
+            .on_press_maybe(
+                (!running && self.output_dir.is_some()).then_some(Message::ResetOutputDir),
+            )
+            .style(pill_button_secondary);
+        let save_controls = settings_control(
+            row![change, use_audio_folder]
+                .spacing(6)
+                .align_y(iced::Alignment::Center),
         );
         let save_row = row![
             column![
@@ -4392,10 +4854,67 @@ impl App {
             ]
             .spacing(1)
             .width(Length::Fill),
-            change,
+            save_controls,
         ]
         .spacing(theme::SPACE_LG)
         .align_y(iced::Alignment::Center)
+        .width(Length::Fill);
+
+        let models_dir = models::models_dir();
+        let models_location = ellipsize_middle(&models_dir.display().to_string(), 40);
+        let present_models = self.models.iter().filter(|model| model.present()).count();
+        let model_bytes: u64 = self
+            .models
+            .iter()
+            .filter(|model| model.present())
+            .map(|model| model.bytes)
+            .sum();
+        let models_status = if self.model_download.is_some() {
+            "Downloading missing files".to_string()
+        } else if self.models_ready() {
+            format!(
+                "All {} files \u{00b7} {}",
+                self.models.len(),
+                format_bytes(model_bytes)
+            )
+        } else {
+            format!(
+                "{present_models} of {} files \u{00b7} {} downloaded",
+                self.models.len(),
+                format_bytes(model_bytes)
+            )
+        };
+        let open_models = action(
+            row![icon(ICON_FOLDER_OPEN, 12.0), text("Open folder").size(11),]
+                .spacing(4)
+                .align_y(iced::Alignment::Center),
+        )
+        .on_press(Message::OpenModelsFolder)
+        .style(pill_button_secondary);
+        let download_models = action("Download missing")
+            .on_press_maybe(
+                (!self.models_ready() && self.model_download.is_none())
+                    .then_some(Message::DownloadModels),
+            )
+            .style(pill_button_secondary);
+        let clear_partial = action("Clear partial")
+            .on_press_maybe((self.model_download.is_none()).then_some(Message::ClearPartialModels))
+            .style(pill_button_secondary);
+        let models_row = column![
+            column![
+                text("Model storage")
+                    .size(theme::TEXT_SM)
+                    .color(scheme.text),
+                text(models_location).size(11).color(scheme.muted),
+                text(models_status).size(11).color(scheme.muted),
+            ]
+            .spacing(1)
+            .width(Length::Fill),
+            row![open_models, download_models, clear_partial]
+                .spacing(6)
+                .align_y(iced::Alignment::Center),
+        ]
+        .spacing(theme::SPACE_SM)
         .width(Length::Fill);
 
         let mut body = column![].spacing(theme::SPACE_SM).width(Length::Fill);
@@ -4406,13 +4925,22 @@ impl App {
         body = body.push(settings_section_label("Transcription", scheme));
         body = body.push(settings_row("Preset", preset, scheme));
         body = body.push(settings_row("Speakers", speakers, scheme));
+        body = body.push(settings_row("Language", language, scheme));
         body = body.push(settings_divider(scheme));
         body = body.push(settings_section_label("Playback", scheme));
         body = body.push(settings_row("Speed", speed, scheme));
         body = body.push(settings_row("Follow playhead", follow, scheme));
+        body = body.push(settings_row(
+            "Completion notifications",
+            notifications,
+            scheme,
+        ));
         body = body.push(settings_divider(scheme));
         body = body.push(settings_section_label("Storage", scheme));
         body = body.push(save_row);
+        body = body.push(settings_divider(scheme));
+        body = body.push(settings_section_label("Models", scheme));
+        body = body.push(models_row);
 
         let height = (self.window_size.height * 0.46).clamp(300.0, 360.0);
         let scroll = scrollable(body)
@@ -4603,6 +5131,14 @@ impl App {
                         .then_some(Message::RevealOutput)
                     )
                     .style(pill_button_secondary),
+                pick_list(
+                    ExportFormat::ALL,
+                    None::<ExportFormat>,
+                    Message::ExportChoice,
+                )
+                .placeholder("Export\u{2026}")
+                .style(ink_pick(scheme.ink))
+                .handle(caret_handle(true)),
                 pick_list(HelpKind::ALL, None::<HelpKind>, Message::HelpChoice)
                     .placeholder("Help\u{2026}")
                     .style(ink_pick(scheme.ink))
@@ -4643,10 +5179,10 @@ impl App {
         }
         let right_panel: Element<Message> = right.into();
 
-        let (theme_icon, theme_tip) = if self.theme_mode == AppTheme::Dark {
-            (ICON_SUN, "Switch to light theme")
-        } else {
-            (ICON_MOON, "Switch to dark theme")
+        let (theme_icon, theme_tip) = match self.theme_mode {
+            AppTheme::Light => (ICON_MOON, "Switch to dark theme"),
+            AppTheme::Dark => (ICON_DISPLAY, "Switch to system theme"),
+            AppTheme::System => (ICON_SUN, "Switch to light theme"),
         };
 
         let header = row![
@@ -4707,6 +5243,54 @@ impl App {
             base = drop_overlay(base, scheme);
         }
 
+        if self.delete_confirm {
+            if let Some(edit) = &self.line_edit {
+                let preview = edit.content.text().trim_end().replace(['\n', '\r'], " ");
+                let preview = ellipsize(preview.trim(), 72);
+                let speaker = edit.speaker.trim();
+                let preview = if speaker.is_empty() {
+                    preview
+                } else {
+                    format!("{speaker}: {preview}")
+                };
+                let body = column![
+                    text("Delete line?").size(20),
+                    text(
+                        "This removes the line from the transcript and saves the file. \
+                         A backup is kept next to it."
+                    )
+                    .size(theme::TEXT_SM)
+                    .color(scheme.muted),
+                    container(
+                        text(preview)
+                            .size(theme::TEXT_SM)
+                            .color(scheme.text)
+                            .width(Length::Fill),
+                    )
+                    .width(Length::Fill)
+                    .padding(10)
+                    .style(move |_theme| container::Style {
+                        background: Some(scheme.track.into()),
+                        border: iced::border::rounded(8.0),
+                        ..container::Style::default()
+                    }),
+                    row![
+                        horizontal_space(),
+                        action("Cancel")
+                            .on_press(Message::CancelDeleteLine)
+                            .style(pill_button_secondary),
+                        action("Delete")
+                            .on_press(Message::ConfirmDeleteLine)
+                            .style(color_button(scheme.danger, scheme.on_accent)),
+                    ]
+                    .spacing(8),
+                ]
+                .spacing(10);
+                let dialog = modal_card(body, 440.0, scheme);
+                return self.with_toast(modal_overlay(base, dialog, scheme), scheme);
+            }
+        }
+
         if let Some(edit) = &self.line_edit {
             let mut col = column![
                 text("Edit line").size(20),
@@ -4728,11 +5312,25 @@ impl App {
             ]
             .spacing(10);
             col = col.push(
+                row![
+                    action("Merge next")
+                        .on_press(Message::MergeNextLine)
+                        .style(pill_button_secondary),
+                    action("Split at playhead")
+                        .on_press(Message::SplitLineAtPlayhead)
+                        .style(pill_button_secondary),
+                ]
+                .spacing(8),
+            );
+            col = col.push(
                 container(
                     row![
                         action("Delete")
                             .on_press(Message::DeleteLineEdit)
                             .style(color_button(scheme.danger, scheme.on_accent)),
+                        action("Copy line")
+                            .on_press(Message::CopyLineEdit)
+                            .style(pill_button_secondary),
                         horizontal_space(),
                         action("Save")
                             .on_press(Message::SaveLineEdit)
@@ -4831,6 +5429,8 @@ impl App {
                         ("Ctrl + / - / 0", "Transcript font zoom"),
                         ("Space", "Play / pause"),
                         ("Left / Right", "Seek \u{00b1}5s"),
+                        ("Up / Down", "Move through transcript"),
+                        ("Alt+Enter", "Edit active line"),
                         ("Esc", "Dismiss"),
                     ] {
                         col = col.push(
@@ -5279,7 +5879,10 @@ const ICON_FILE_TEXT: char = '\u{f38b}';
 const ICON_DOWNLOAD: char = '\u{f30a}';
 const ICON_PLUS: char = '\u{f4fe}';
 const ICON_FOLDER_PLUS: char = '\u{f3d3}';
+const ICON_FOLDER_OPEN: char = '\u{f3d8}';
 const ICON_TRASH: char = '\u{f5de}';
+const ICON_RETRY: char = '\u{f116}';
+const ICON_DISPLAY: char = '\u{f302}';
 
 /// Full-window drop target shown while a file hovers over the app.
 fn drop_overlay<'a>(base: impl Into<Element<'a, Message>>, scheme: Scheme) -> Element<'a, Message> {
@@ -5418,87 +6021,6 @@ fn modal_overlay<'a>(
     stack![base, backdrop, centered].into()
 }
 
-/// Parse "[time] Speaker: text" transcript lines into the render model.
-/// The spoken text of a rendered line, without its timestamp/speaker prefix.
-fn line_text(line: &DocLine) -> String {
-    let mut rest = line.raw.as_str();
-    if let Some(stripped) = rest.strip_prefix('[') {
-        if let Some(end) = stripped.find(']') {
-            rest = stripped[end + 1..].trim_start();
-        }
-    }
-    if !line.speaker.is_empty() {
-        if let Some(after) = rest.strip_prefix(&format!("{}: ", line.speaker)) {
-            return after.to_string();
-        }
-        if let Some(after) = rest.strip_prefix(&format!("{}:", line.speaker)) {
-            return after.trim_start().to_string();
-        }
-    }
-    rest.to_string()
-}
-
-/// The `[timestamp] ` prefix of a rendered line, if present.
-fn line_prefix(raw: &str) -> &str {
-    if !raw.starts_with('[') {
-        return "";
-    }
-    match raw.find(']') {
-        Some(end) => &raw[..(end + 2).min(raw.len())],
-        None => "",
-    }
-}
-
-/// Rewrite one line in place, preserving its timestamp and changing only the
-/// speaker and text.
-fn rewrite_line(line: &mut DocLine, speaker: &str, text: &str) {
-    let prefix = line_prefix(&line.raw).to_string();
-    line.raw = if speaker.is_empty() {
-        format!("{prefix}{text}")
-    } else {
-        format!("{prefix}{speaker}: {text}")
-    };
-    line.speaker = speaker.to_string();
-}
-
-fn parse_lines(text: &str) -> Vec<DocLine> {
-    text.lines()
-        .map(|line| DocLine {
-            raw: line.to_string(),
-            speaker: speaker_of(line),
-            start: parse_time_prefix(line),
-        })
-        .collect()
-}
-
-/// Parse a leading "[mm:ss]" / "[h:mm:ss]" timestamp into seconds.
-fn parse_time_prefix(raw: &str) -> Option<f32> {
-    let inner = raw.strip_prefix('[')?;
-    let end = inner.find(']')?;
-    let stamp = &inner[..end];
-    let mut seconds = 0.0f32;
-    let mut seen = false;
-    for part in stamp.split(':') {
-        let value: f32 = part.trim().parse().ok()?;
-        seconds = seconds * 60.0 + value;
-        seen = true;
-    }
-    seen.then_some(seconds)
-}
-
-/// Extract the speaker label from a rendered transcript line.
-fn speaker_of(raw: &str) -> String {
-    let rest = match raw.find(']') {
-        Some(index) if raw.starts_with('[') => &raw[index + 1..],
-        _ => raw,
-    };
-    let rest = rest.strip_prefix(' ').unwrap_or(rest);
-    match rest.split_once(": ") {
-        Some((head, _)) => head.trim().to_string(),
-        None => String::new(),
-    }
-}
-
 /// Progress-bar text: phase (with detail) plus overall percentage.
 fn progress_label(
     status: &Status,
@@ -5537,91 +6059,6 @@ fn progress_label(
         label = format!("{file} \u{2014} {label}");
     }
     label
-}
-
-fn capitalize_first(text: &str) -> String {
-    match text.chars().next() {
-        Some(first) => first.to_uppercase().collect::<String>() + &text[first.len_utf8()..],
-        None => String::new(),
-    }
-}
-
-/// Human-readable name for a model file's internal label.
-fn friendly_model(label: &str) -> &'static str {
-    match label {
-        "segmentation" => "speaker segmentation",
-        "embedding" => "speaker embedding",
-        "whisper-speed" => "Whisper speed model",
-        "whisper-accuracy" => "Whisper accuracy model",
-        _ => "model",
-    }
-}
-
-fn format_bytes(bytes: u64) -> String {
-    const MB: f64 = 1024.0 * 1024.0;
-    if bytes as f64 >= MB {
-        format!("{:.0} MB", bytes as f64 / MB)
-    } else if bytes >= 1024 {
-        format!("{:.0} KB", bytes as f64 / 1024.0)
-    } else {
-        format!("{bytes} B")
-    }
-}
-
-/// Truncate the end of `text`, keeping it within `max` characters.
-fn ellipsize(text: &str, max: usize) -> String {
-    let count = text.chars().count();
-    if count <= max {
-        return text.to_string();
-    }
-    if max <= 1 {
-        return "\u{2026}".to_string();
-    }
-    let mut out: String = text.chars().take(max - 1).collect();
-    out.push('\u{2026}');
-    out
-}
-
-/// Truncate the middle of `text`, so a file extension or path tail survives.
-fn ellipsize_middle(text: &str, max: usize) -> String {
-    let count = text.chars().count();
-    if count <= max {
-        return text.to_string();
-    }
-    if max <= 1 {
-        return "\u{2026}".to_string();
-    }
-    let tail = (max / 3).min(count - 1);
-    let head = max.saturating_sub(tail + 1);
-    let mut out: String = text.chars().take(head).collect();
-    out.push('\u{2026}');
-    out.extend(text.chars().skip(count - tail));
-    out
-}
-
-fn format_secs(secs: f64) -> String {
-    let total = secs.max(0.0).round() as u64;
-    let hours = total / 3600;
-    let minutes = (total % 3600) / 60;
-    let seconds = total % 60;
-    if hours > 0 {
-        format!("{hours}:{minutes:02}:{seconds:02}")
-    } else {
-        format!("{minutes}:{seconds:02}")
-    }
-}
-
-/// Bracketed absolute timestamp matching the backend output, e.g. "[03:07]".
-fn format_timestamp(secs: f64) -> String {
-    let total = secs.max(0.0) as u64;
-    let hours = total / 3600;
-    let minutes = (total % 3600) / 60;
-    let seconds = total % 60;
-    if hours > 0 {
-        format!("[{hours:02}:{minutes:02}:{seconds:02}]")
-    } else {
-        format!("[{minutes:02}:{seconds:02}]")
-    }
 }
 
 fn find_id() -> text_input::Id {
@@ -5684,6 +6121,8 @@ fn sms_row(
     ink: Color,
     tint: Option<Color>,
     query: &str,
+    case_sensitive: bool,
+    whole_word: bool,
     highlight: Color,
     size: f32,
     active: bool,
@@ -5725,6 +6164,8 @@ fn sms_row(
     body = body.push(rich_text(styled_spans(
         content,
         query,
+        case_sensitive,
+        whole_word,
         Some(ink),
         highlight,
         size,
@@ -5755,6 +6196,8 @@ fn line_element(
     accent: Color,
     search_tint: Option<Color>,
     query: &str,
+    case_sensitive: bool,
+    whole_word: bool,
     highlight: Color,
     scheme: &Scheme,
     size: f32,
@@ -5799,6 +6242,8 @@ fn line_element(
     content = content.push(rich_text(styled_spans(
         &rest,
         query,
+        case_sensitive,
+        whole_word,
         Some(ink),
         highlight,
         size,
@@ -5823,6 +6268,21 @@ fn line_element(
         }
     };
 
+    let keyboard_hit = button(
+        container(horizontal_space())
+            .width(Length::Fill)
+            .height(Length::Fill),
+    )
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .padding(0)
+    .style(|_theme, _status| button::Style {
+        background: None,
+        border: iced::border::Border::default(),
+        ..button::Style::default()
+    })
+    .on_press(Message::SelectLine(idx));
+
     stack![
         container(content)
             .width(Length::Fill)
@@ -5838,8 +6298,8 @@ fn line_element(
                 .height(Length::Fill),
         )
         .interaction(mouse::Interaction::Pointer)
-        .on_press(Message::SelectLine(idx))
         .on_right_press(Message::EditLine(idx)),
+        keyboard_hit,
     ]
     .into()
 }
@@ -5849,18 +6309,6 @@ const PILL: f32 = 1000.0;
 /// A button (content-sized / minimum width).
 fn action<'a>(content: impl Into<Element<'a, Message>>) -> iced::widget::Button<'a, Message> {
     button(content)
-}
-
-/// Fire a best-effort desktop notification (non-blocking).
-fn notify(title: &str, body: &str) {
-    let title = title.to_string();
-    let body = body.to_string();
-    std::thread::spawn(move || {
-        let _ = notify_rust::Notification::new()
-            .summary(&title)
-            .body(&body)
-            .show();
-    });
 }
 
 /// A subtle drop shadow that gives surfaces a soft, raised look.
@@ -6020,9 +6468,77 @@ fn color_button(bg: Color, ink: Color) -> impl Fn(&iced::Theme, button::Status) 
     }
 }
 
+/// Byte ranges in `raw` matching `query`, honouring case and word options.
+fn search_match_ranges(
+    raw: &str,
+    query: &str,
+    case_sensitive: bool,
+    whole_word: bool,
+) -> Vec<(usize, usize)> {
+    let query = query.trim();
+    if query.is_empty() {
+        return Vec::new();
+    }
+    let needle = if case_sensitive {
+        query.to_string()
+    } else {
+        query.to_lowercase()
+    };
+
+    // Match against a folded copy, but map every match back to original byte
+    // offsets. Lowercasing can change a character's byte length, so raw offsets
+    // into the folded string are not safe to slice with.
+    let mut folded = String::with_capacity(raw.len());
+    let mut folded_to_original: Vec<(usize, usize)> = Vec::with_capacity(raw.len() + 1);
+    for (index, ch) in raw.char_indices() {
+        folded_to_original.push((folded.len(), index));
+        if case_sensitive {
+            folded.push(ch);
+        } else {
+            folded.extend(ch.to_lowercase());
+        }
+    }
+    folded_to_original.push((folded.len(), raw.len()));
+
+    let mut matches: Vec<(usize, usize)> = Vec::new();
+    let mut from = 0usize;
+    while from <= folded.len() {
+        let Some(position) = folded[from..].find(needle.as_str()) else {
+            break;
+        };
+        let start = from + position;
+        let end = start + needle.len();
+        let original_start = folded_to_original
+            .iter()
+            .rev()
+            .find(|(folded_index, _)| *folded_index <= start)
+            .map(|(_, original)| *original)
+            .unwrap_or(0);
+        let original_end = folded_to_original
+            .iter()
+            .find(|(folded_index, _)| *folded_index >= end)
+            .map(|(_, original)| *original)
+            .unwrap_or(raw.len());
+        let is_word = |ch: Option<char>| ch.is_some_and(|ch| ch.is_alphanumeric() || ch == '_');
+        let boundary_ok = !whole_word
+            || (!is_word(raw[..original_start].chars().next_back())
+                && !is_word(raw[original_end..].chars().next()));
+        if original_start < original_end && boundary_ok {
+            matches.push((original_start, original_end));
+        }
+        from = end.max(start + 1);
+        if from >= folded.len() {
+            break;
+        }
+    }
+    matches
+}
+
 fn styled_spans(
     raw: &str,
     query: &str,
+    case_sensitive: bool,
+    whole_word: bool,
     color: Option<Color>,
     highlight: Color,
     size: f32,
@@ -6032,22 +6548,7 @@ fn styled_spans(
         ..Font::default()
     };
     let head_len = raw.find(": ").map(|index| index + 2).unwrap_or(0);
-    let needle = query.to_lowercase();
-
-    let mut matches: Vec<(usize, usize)> = Vec::new();
-    if !needle.is_empty() {
-        let lower = raw.to_lowercase();
-        let mut from = 0usize;
-        while let Some(pos) = lower[from..].find(needle.as_str()) {
-            let start = from + pos;
-            let end = start + needle.len();
-            matches.push((start, end));
-            from = end.max(start + 1);
-            if from >= raw.len() {
-                break;
-            }
-        }
-    }
+    let matches = search_match_ranges(raw, query, case_sensitive, whole_word);
 
     let mut bounds = vec![0usize, raw.len()];
     if head_len <= raw.len() {
@@ -6166,10 +6667,12 @@ mod tests {
             turns: Vec::new(),
             peaks: Arc::new(vec![0.1, 0.2, 0.3]),
         });
+        app.batch_paths = vec![audio.clone()];
         app.save_queue();
 
-        let loaded = App::load_queue();
+        let (loaded, batch) = App::load_queue_and_batch();
         assert_eq!(loaded.len(), 1);
+        assert_eq!(batch, vec![audio.clone()]);
         assert_eq!(loaded[0].audio.as_deref(), Some(audio.as_path()));
         assert_eq!(loaded[0].transcript.as_deref(), Some(transcript.as_path()));
         assert!(matches!(loaded[0].status, ItemStatus::Done));
@@ -6248,6 +6751,239 @@ mod tests {
             std::env::remove_var("XDG_CONFIG_HOME");
         }
         let _ = std::fs::remove_dir_all(&config);
+        let _ = std::fs::remove_dir_all(&media);
+    }
+
+    #[test]
+    fn search_options_honour_case_and_word_boundaries() {
+        let raw = "[00:00] SPEAKER 1: Hello hello hellos";
+        assert_eq!(search_match_ranges(raw, "hello", false, false).len(), 3);
+        assert_eq!(search_match_ranges(raw, "hello", false, true).len(), 2);
+        assert_eq!(search_match_ranges(raw, "Hello", true, false).len(), 1);
+        assert_eq!(search_match_ranges(raw, "hello", true, false).len(), 2);
+        assert!(search_match_ranges(raw, "world", false, false).is_empty());
+    }
+
+    #[test]
+    fn lines_can_be_merged_and_split_from_the_editor() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let config = temp_dir("merge-config");
+        let media = temp_dir("merge-media");
+        let old = std::env::var("XDG_CONFIG_HOME").ok();
+        std::env::set_var("XDG_CONFIG_HOME", &config);
+
+        let audio = media.join("talk.mp3");
+        std::fs::write(&audio, b"audio").unwrap();
+        let transcript = media.join("talk.txt");
+        std::fs::write(
+            &transcript,
+            "[00:00] SPEAKER 1: hello world\n[00:05] SPEAKER 1: again\n",
+        )
+        .unwrap();
+
+        let mut app = App::new();
+        app.queue.push(QueueItem {
+            path: audio.clone(),
+            audio: Some(audio),
+            status: ItemStatus::Done,
+            duration: Some(10.0),
+            transcript: Some(transcript),
+            stats: None,
+            turns: Vec::new(),
+            peaks: Arc::new(vec![0.2; 16]),
+        });
+        let _ = app.view_item(0);
+        app.line_edit = Some(LineEdit {
+            index: 0,
+            speaker: "SPEAKER 1".to_string(),
+            content: text_editor::Content::with_text("hello world"),
+        });
+        let _ = app.update(Message::MergeNextLine);
+        assert_eq!(app.selected_view.as_ref().unwrap().lines.len(), 1);
+        assert!(app.shown_transcript().contains("hello world again"));
+
+        app.timeline_duration = Some(10.0);
+        app.playhead = 5.0;
+        app.line_edit = Some(LineEdit {
+            index: 0,
+            speaker: "SPEAKER 1".to_string(),
+            content: text_editor::Content::with_text("hello world again"),
+        });
+        let _ = app.update(Message::SplitLineAtPlayhead);
+        assert_eq!(app.selected_view.as_ref().unwrap().lines.len(), 2);
+
+        if let Some(old) = old {
+            std::env::set_var("XDG_CONFIG_HOME", old);
+        } else {
+            std::env::remove_var("XDG_CONFIG_HOME");
+        }
+        let _ = std::fs::remove_dir_all(&config);
+        let _ = std::fs::remove_dir_all(&media);
+    }
+
+    #[test]
+    fn speaker_filter_limits_the_transcript() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let config = temp_dir("filter-config");
+        let media = temp_dir("filter-media");
+        let old = std::env::var("XDG_CONFIG_HOME").ok();
+        std::env::set_var("XDG_CONFIG_HOME", &config);
+
+        let audio = media.join("talk.mp3");
+        std::fs::write(&audio, b"audio").unwrap();
+        let transcript = media.join("talk.txt");
+        std::fs::write(
+            &transcript,
+            "[00:00] SPEAKER 1: hello there\n[00:05] SPEAKER 2: hi\n[00:07] SPEAKER 1: hello again\n",
+        )
+        .unwrap();
+
+        let mut app = App::new();
+        app.queue.push(QueueItem {
+            path: audio.clone(),
+            audio: Some(audio),
+            status: ItemStatus::Done,
+            duration: Some(10.0),
+            transcript: Some(transcript),
+            stats: None,
+            turns: Vec::new(),
+            peaks: Arc::new(vec![0.2; 16]),
+        });
+        let _ = app.view_item(0);
+        app.speaker_filter = Some("SPEAKER 1".to_string());
+        app.invalidate_derived();
+
+        let order = app.display_order();
+        assert_eq!(order.len(), 2);
+        assert!(order
+            .iter()
+            .all(|index| app.shown_lines()[*index].speaker == "SPEAKER 1"));
+
+        app.search_query = "hello".to_string();
+        assert_eq!(app.matching_lines().len(), 2);
+        let _ = app.view();
+
+        if let Some(old) = old {
+            std::env::set_var("XDG_CONFIG_HOME", old);
+        } else {
+            std::env::remove_var("XDG_CONFIG_HOME");
+        }
+        let _ = std::fs::remove_dir_all(&config);
+        let _ = std::fs::remove_dir_all(&media);
+    }
+
+    #[test]
+    fn line_prefix_handles_multibyte_after_timestamp() {
+        assert_eq!(line_prefix("[00:00]日本語"), "[00:00]");
+        assert_eq!(line_prefix("[01:02:03] SPEAKER 1: hi"), "[01:02:03] ");
+        assert_eq!(line_prefix("plain text"), "");
+    }
+
+    #[test]
+    fn styled_spans_preserves_multibyte_text() {
+        let raw = "İstanbul and İstanbul";
+        let spans = styled_spans(raw, "İstanbul", false, false, None, Color::BLACK, 14.0);
+        let rebuilt: String = spans.iter().map(|span| span.text.as_ref()).collect();
+        assert_eq!(rebuilt, raw);
+        assert!(spans.iter().any(|span| span.highlight.is_some()));
+    }
+
+    #[test]
+    fn checked_shortcuts_respect_focus() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("focus-config");
+        let mut app = App::new();
+        app.selected_view = Some(ItemView {
+            index: 0,
+            source: PathBuf::from("talk.txt"),
+            transcript: String::new(),
+            lines: Vec::new(),
+            turns: Vec::new(),
+            peaks: Arc::new(Vec::new()),
+            duration: Some(20.0),
+            audio: None,
+            output: None,
+        });
+        app.playhead = 1.0;
+
+        let _ = app.update(Message::SeekByChecked(5.0, true));
+        assert_eq!(app.playhead, 1.0);
+        let _ = app.update(Message::SeekByChecked(5.0, false));
+        assert_eq!(app.playhead, 6.0);
+    }
+
+    #[test]
+    fn reopening_json_transcript_parses_lines() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("json-view-config");
+        let media = temp_dir("json-view-media");
+
+        let audio = media.join("talk.mp3");
+        std::fs::write(&audio, b"audio").unwrap();
+        let transcript = media.join("talk.json");
+        std::fs::write(
+            &transcript,
+            r#"{"lines":[{"time":"00:01","speaker":"SPEAKER 1","text":"hello"}]}"#,
+        )
+        .unwrap();
+
+        let mut app = App::new();
+        app.queue.push(QueueItem {
+            path: audio.clone(),
+            audio: Some(audio),
+            status: ItemStatus::Done,
+            duration: Some(2.0),
+            transcript: Some(transcript),
+            stats: None,
+            turns: Vec::new(),
+            peaks: Arc::new(Vec::new()),
+        });
+
+        let _ = app.view_item(0);
+        assert!(app.shown_transcript().contains("[00:01] SPEAKER 1: hello"));
+        assert!(!app.shown_transcript().contains("\"lines\""));
+        assert!(app.selected_view.as_ref().unwrap().output.is_none());
+
+        let _ = std::fs::remove_dir_all(&media);
+    }
+
+    #[test]
+    fn summary_is_limited_to_the_current_batch() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("batch-summary-config");
+        let media = temp_dir("batch-summary-media");
+
+        let make_item = |name: &str| {
+            let path = media.join(name);
+            std::fs::write(&path, b"audio").unwrap();
+            QueueItem {
+                path: path.clone(),
+                audio: Some(path),
+                status: ItemStatus::Done,
+                duration: Some(6.0),
+                transcript: None,
+                stats: None,
+                turns: Vec::new(),
+                peaks: Arc::new(Vec::new()),
+            }
+        };
+
+        let mut app = App::new();
+        app.queue.push(make_item("old.mp3"));
+        app.queue.push(make_item("first.mp3"));
+        app.queue.push(make_item("second.mp3"));
+        app.batch_paths = vec![media.join("first.mp3"), media.join("second.mp3")];
+
+        let files: Vec<String> = app
+            .stats_lines()
+            .into_iter()
+            .filter_map(|line| match line {
+                SummaryLine::File(name) => Some(name),
+                SummaryLine::Body(_) => None,
+            })
+            .collect();
+        assert_eq!(files, vec!["first.mp3", "second.mp3"]);
+
         let _ = std::fs::remove_dir_all(&media);
     }
 
@@ -6383,13 +7119,38 @@ mod tests {
         let saved = std::fs::read_to_string(&transcript).unwrap();
         assert!(saved.contains("[00:05] SPEAKER 2: hi there"));
 
-        // Delete removes the edited row.
+        // Delete asks for confirmation before removing the row.
         let _ = app.update(Message::EditLine(0));
         let _ = app.update(Message::DeleteLineEdit);
+        assert!(app.delete_confirm);
+        assert!(app.line_edit.is_some());
+        let saved = std::fs::read_to_string(&transcript).unwrap();
+        assert!(saved.contains("ALICE: hello there"));
+
+        // Enter must not save the editor behind the confirmation dialog.
+        let _ = app.update(Message::EnterSubmit);
+        assert!(app.line_edit.is_some());
+        assert_eq!(std::fs::read_to_string(&transcript).unwrap(), saved);
+
+        let _ = app.update(Message::CancelDeleteLine);
+        assert!(!app.delete_confirm);
+        assert!(app.line_edit.is_some());
+        assert_eq!(
+            std::fs::read_to_string(&transcript).unwrap(),
+            "[00:00] ALICE: hello there\n[00:05] SPEAKER 2: hi there\n"
+        );
+
+        let _ = app.update(Message::DeleteLineEdit);
+        let _ = app.update(Message::ConfirmDeleteLine);
+        assert!(!app.delete_confirm);
         assert!(app.line_edit.is_none());
         let saved = std::fs::read_to_string(&transcript).unwrap();
         assert!(!saved.contains("ALICE: hello there"));
         assert!(saved.contains("SPEAKER 2: hi there"));
+
+        let backup = transcript_backup_path(&transcript);
+        let saved_backup = std::fs::read_to_string(backup).unwrap();
+        assert!(saved_backup.contains("ALICE: hello there"));
 
         let _ = std::fs::remove_dir_all(&media);
     }
@@ -6528,6 +7289,7 @@ mod tests {
         let _ = app.update(Message::PresetChanged(Preset::Accuracy));
         let _ = app.update(Message::ZoomIn);
         let _ = app.update(Message::ToggleFollowPlayhead);
+        let _ = app.update(Message::NotificationsToggled(false));
         let _ = app.update(Message::CloseSettings);
         assert!(!app.settings_open);
 
@@ -6536,6 +7298,7 @@ mod tests {
         assert_eq!(reloaded.preset, Preset::Accuracy);
         assert!((reloaded.font_scale - 1.1).abs() < 0.001);
         assert!(!reloaded.follow_playhead);
+        assert!(!reloaded.notifications);
 
         if let Some(old) = old {
             std::env::set_var("XDG_CONFIG_HOME", old);
@@ -6738,5 +7501,185 @@ mod tests {
             ),
             "talk.mp3 \u{2014} Transcribing 3/4 (75%)"
         );
+    }
+
+    #[test]
+    fn speaker_options_include_automatic_detection() {
+        assert_eq!(SpeakerOpt::ALL.len(), 6);
+        assert_eq!(SpeakerOpt::from_value(None), SpeakerOpt::Auto);
+        assert_eq!(SpeakerOpt::from_value(Some(0)), SpeakerOpt::Auto);
+        assert_eq!(SpeakerOpt::from_value(Some(2)), SpeakerOpt::Two);
+        assert_eq!(SpeakerOpt::Auto.value(), None);
+        assert_eq!(SpeakerOpt::Two.value(), Some(2));
+    }
+
+    #[test]
+    fn failed_items_can_be_retried_when_idle() {
+        let _guard = env_lock();
+        let config = ConfigEnv::new("retry-config");
+        let dir = config.dir.clone();
+        let audio = dir.join("talk.mp3");
+        std::fs::write(&audio, b"audio").unwrap();
+
+        let mut app = App::new();
+        app.queue.push(QueueItem {
+            path: audio.clone(),
+            audio: Some(audio),
+            status: ItemStatus::Failed("boom".to_string()),
+            duration: None,
+            transcript: None,
+            stats: None,
+            turns: Vec::new(),
+            peaks: Arc::new(Vec::new()),
+        });
+
+        // A running batch cannot be mutated.
+        app.status = Status::Running;
+        let _ = app.update(Message::RetryItem(0));
+        assert!(matches!(app.queue[0].status, ItemStatus::Failed(_)));
+
+        app.status = Status::Idle;
+        let _ = app.update(Message::RetryItem(0));
+        assert!(matches!(app.queue[0].status, ItemStatus::Pending));
+
+        // The pending state is persisted.
+        let (loaded, _) = App::load_queue_and_batch();
+        assert!(matches!(loaded[0].status, ItemStatus::Pending));
+    }
+
+    #[test]
+    fn queue_items_can_be_reordered_when_idle() {
+        let _guard = env_lock();
+        let config = ConfigEnv::new("reorder-config");
+        let dir = config.dir.clone();
+
+        let mut app = App::new();
+        for name in ["a.mp3", "b.mp3", "c.mp3"] {
+            let path = dir.join(name);
+            std::fs::write(&path, b"audio").unwrap();
+            app.queue.push(QueueItem {
+                path: path.clone(),
+                audio: Some(path),
+                status: ItemStatus::Pending,
+                duration: None,
+                transcript: None,
+                stats: None,
+                turns: Vec::new(),
+                peaks: Arc::new(Vec::new()),
+            });
+        }
+        app.selected = Some(0);
+        app.selected_view = Some(ItemView {
+            index: 0,
+            source: dir.join("a.txt"),
+            transcript: String::new(),
+            lines: Vec::new(),
+            turns: Vec::new(),
+            peaks: Arc::new(Vec::new()),
+            duration: None,
+            audio: None,
+            output: None,
+        });
+
+        let names = |app: &App| -> Vec<String> {
+            app.queue
+                .iter()
+                .map(|item| {
+                    item.path
+                        .file_name()
+                        .unwrap()
+                        .to_string_lossy()
+                        .into_owned()
+                })
+                .collect()
+        };
+
+        let _ = app.update(Message::MoveItemUp(1));
+        assert_eq!(names(&app), vec!["b.mp3", "a.mp3", "c.mp3"]);
+        // Selection follows the moved entry.
+        assert_eq!(app.selected, Some(1));
+        assert_eq!(app.selected_view.as_ref().unwrap().index, 1);
+
+        let _ = app.update(Message::MoveItemDown(0));
+        assert_eq!(names(&app), vec!["a.mp3", "b.mp3", "c.mp3"]);
+
+        // Reordering is locked while transcribing.
+        app.status = Status::Running;
+        let _ = app.update(Message::MoveItemUp(2));
+        assert_eq!(names(&app), vec!["a.mp3", "b.mp3", "c.mp3"]);
+
+        // The order is persisted.
+        let (loaded, _) = App::load_queue_and_batch();
+        let loaded_names: Vec<String> = loaded
+            .iter()
+            .map(|item| {
+                item.path
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        assert_eq!(loaded_names, vec!["a.mp3", "b.mp3", "c.mp3"]);
+    }
+
+    #[test]
+    fn cached_orders_match_direct_derivation_after_edit() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("cache-order-config");
+        let media = temp_dir("cache-order-media");
+
+        let audio = media.join("talk.mp3");
+        std::fs::write(&audio, b"audio").unwrap();
+        let transcript = media.join("talk.txt");
+        std::fs::write(
+            &transcript,
+            "[00:05] SPEAKER 1: second\n[00:00] SPEAKER 2: first\n[00:03] SPEAKER 1: third\n",
+        )
+        .unwrap();
+
+        let mut app = App::new();
+        app.queue.push(QueueItem {
+            path: audio.clone(),
+            audio: Some(audio),
+            status: ItemStatus::Done,
+            duration: Some(6.0),
+            transcript: Some(transcript),
+            stats: None,
+            turns: Vec::new(),
+            peaks: Arc::new(Vec::new()),
+        });
+        let _ = app.view_item(0);
+
+        // Populate both caches before mutating a line.
+        assert_eq!(app.display_order(), sorted_display_order(app.shown_lines()));
+        assert_eq!(
+            app.speaker_order(),
+            distinct_speaker_order(app.shown_lines())
+        );
+
+        let _ = app.update(Message::EditLine(0));
+        {
+            let edit = app.line_edit.as_mut().unwrap();
+            edit.speaker = "ZED".to_string();
+            edit.content = text_editor::Content::with_text("changed");
+        }
+        let _ = app.update(Message::SaveLineEdit);
+
+        assert_eq!(app.display_order(), sorted_display_order(app.shown_lines()));
+        assert_eq!(
+            app.speaker_order(),
+            distinct_speaker_order(app.shown_lines())
+        );
+        assert_eq!(
+            app.speaker_order(),
+            vec![
+                "ZED".to_string(),
+                "SPEAKER 2".to_string(),
+                "SPEAKER 1".to_string()
+            ]
+        );
+
+        let _ = std::fs::remove_dir_all(&media);
     }
 }

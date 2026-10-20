@@ -37,15 +37,17 @@ pub enum AppTheme {
     #[default]
     Light,
     Dark,
+    System,
 }
 
 impl AppTheme {
-    pub const ALL: [AppTheme; 2] = [AppTheme::Light, AppTheme::Dark];
+    pub const ALL: [AppTheme; 3] = [AppTheme::Light, AppTheme::Dark, AppTheme::System];
 
     pub fn label(self) -> &'static str {
         match self {
             AppTheme::Light => "Light",
             AppTheme::Dark => "Dark",
+            AppTheme::System => "System",
         }
     }
 
@@ -54,6 +56,7 @@ impl AppTheme {
         match self {
             AppTheme::Light => "light",
             AppTheme::Dark => "dark",
+            AppTheme::System => "system",
         }
     }
 
@@ -61,33 +64,54 @@ impl AppTheme {
         match value {
             "light" => Some(AppTheme::Light),
             "dark" => Some(AppTheme::Dark),
+            "system" => Some(AppTheme::System),
             _ => None,
         }
     }
 
+    /// Cycle Light -> Dark -> System -> Light.
     pub fn toggled(self) -> Self {
         match self {
             AppTheme::Light => AppTheme::Dark,
-            AppTheme::Dark => AppTheme::Light,
+            AppTheme::Dark => AppTheme::System,
+            AppTheme::System => AppTheme::Light,
         }
+    }
+
+    fn system_is_dark() -> bool {
+        matches!(Theme::default(), Theme::Dark)
     }
 
     pub fn scheme(self) -> Scheme {
         match self {
             AppTheme::Light => Scheme::light(),
             AppTheme::Dark => Scheme::dark(),
+            AppTheme::System => {
+                if Self::system_is_dark() {
+                    Scheme::dark()
+                } else {
+                    Scheme::light()
+                }
+            }
         }
     }
 
     /// The iced theme handed to widgets that still use built-in styling.
     pub fn iced(self) -> Theme {
         let scheme = self.scheme();
-        Theme::custom(
-            match self {
-                AppTheme::Light => "Transiel Light",
-                AppTheme::Dark => "Transiel Dark",
+        let name = match self {
+            AppTheme::Light => "Transiel Light",
+            AppTheme::Dark => "Transiel Dark",
+            AppTheme::System => {
+                if Self::system_is_dark() {
+                    "Transiel Dark"
+                } else {
+                    "Transiel Light"
+                }
             }
-            .to_string(),
+        };
+        Theme::custom(
+            name.to_string(),
             Palette {
                 background: scheme.bg,
                 text: scheme.text,
@@ -232,5 +256,22 @@ impl Scheme {
             toast_text: Color::from_rgb(0.910, 0.922, 0.961),
             scrim: Color::from_rgba(0.0, 0.0, 0.0, 0.62),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn system_theme_is_selectable_and_cycles() {
+        assert_eq!(AppTheme::ALL.len(), 3);
+        assert_eq!(AppTheme::from_arg("system"), Some(AppTheme::System));
+        assert_eq!(AppTheme::System.label(), "System");
+        assert_eq!(AppTheme::System.arg(), "system");
+
+        assert_eq!(AppTheme::Light.toggled(), AppTheme::Dark);
+        assert_eq!(AppTheme::Dark.toggled(), AppTheme::System);
+        assert_eq!(AppTheme::System.toggled(), AppTheme::Light);
     }
 }

@@ -40,14 +40,38 @@ impl Transcriber {
         self.transcribe_with_threads(samples, self.threads)
     }
 
+    /// Transcribe with the default thread count and an explicit language.
+    ///
+    /// `None` leaves Whisper's language auto-detection enabled.
+    pub fn transcribe_with_language(
+        &self,
+        samples: &[f32],
+        language: Option<&str>,
+    ) -> Result<Vec<Segment>, String> {
+        self.transcribe_with_threads_and_language(samples, self.threads, language)
+    }
+
     /// Transcribe 16 kHz mono samples, returning one entry per Whisper segment.
     ///
-    /// Each call creates its own decode state, so one `Transcriber` (and model)
-    /// can be shared across threads.
+    /// Keeps the historical English default for callers that do not specify a
+    /// language.
     pub fn transcribe_with_threads(
         &self,
         samples: &[f32],
         threads: i32,
+    ) -> Result<Vec<Segment>, String> {
+        self.transcribe_with_threads_and_language(samples, threads, Some("en"))
+    }
+
+    /// Transcribe 16 kHz mono samples with a specific thread count and language.
+    ///
+    /// Each call creates its own decode state, so one `Transcriber` (and model)
+    /// can be shared across threads.
+    pub fn transcribe_with_threads_and_language(
+        &self,
+        samples: &[f32],
+        threads: i32,
+        language: Option<&str>,
     ) -> Result<Vec<Segment>, String> {
         let mut state = self
             .ctx
@@ -55,7 +79,7 @@ impl Transcriber {
             .map_err(|e| format!("whisper state: {e}"))?;
 
         let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
-        params.set_language(Some("en"));
+        params.set_language(language);
         params.set_translate(false);
         params.set_no_context(true);
         params.set_print_special(false);

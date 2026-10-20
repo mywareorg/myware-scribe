@@ -26,6 +26,14 @@ jobs:
         shell: pwsh
         run: ./scripts/build-windows.ps1 -SkipTests
 
+      - name: Upload build log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-windows-log
+          path: build-windows.log
+          if-no-files-found: ignore
+
       - uses: actions/upload-artifact@v4
         with:
           name: transiel-windows

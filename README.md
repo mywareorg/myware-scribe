@@ -93,7 +93,10 @@ transiel --cli models download --verify
 ```
 
 If models are missing on first launch, the GUI shows a **Download models** card
-and fetches the same files in the background with progress.
+and fetches the same files in the background with progress. Downloads resume
+from a `.part` file, verify SHA-256 checksums, and can be cancelled from the
+card. Readiness is checked against the selected preset, so the English-only
+speed preset does not require the multilingual accuracy model.
 
 - `ggml-large-v3-turbo-q5_0.bin` (accuracy), `ggml-base.en-q5_1.bin` (speed)
 - `sherpa-onnx-pyannote-segmentation-3-0/model.onnx`
@@ -117,15 +120,17 @@ transiel --cli audio.mp3                         # default preset (speed)
 transiel --cli audio.mp3 --preset accuracy
 transiel --cli a.mp3 b.mp3 --output-dir out/     # batch
 transiel --cli audio.mp3 --no-timestamps
+transiel --cli audio.mp3 --language es           # or auto
 transiel --cli audio.mp3 --progress-json         # line-delimited JSON events
 transiel --cli probe audio.mp3 120               # duration + RMS waveform
 ```
 
 Presets: `speed` (whisper `base.en`) and `accuracy` (whisper `large-v3-turbo`).
 
-Options: `--preset speed|accuracy`, `--num-speakers N`, `--auto-speakers`,
-`--output-dir`, `--no-timestamps`, `--no-cache`,
-`--progress-json`.
+Options: `--preset speed|accuracy`, `--language <code>|auto`,
+`--num-speakers N`, `--auto-speakers`, `--output-dir`, `--no-timestamps`,
+`--no-cache`, `--progress-json`. The speed preset is English-only; the
+accuracy preset supports multilingual models.
 
 Output: `<audio-stem>-<preset>-transcription.txt` (`[hh:mm:ss] SPEAKER N: text`),
 written next to the audio or into `--output-dir`.
@@ -134,11 +139,24 @@ written next to the audio or into `--output-dir`.
 
 Run `transiel` with no arguments. Add files/folders to the queue, or drag audio
 files and folders anywhere into the window, then choose a preset and speaker
-count and press Transcribe. The moon/sun button in the header switches between
-light and dark themes. Files added (or imported) while a run is active join the
-queue and are processed in a follow-up pass automatically. The gear button
-(or `Ctrl+,`) opens Settings for the theme, transcript text size, preset,
-speaker count, playback speed, follow mode, and save location.
+count and press Transcribe. The header theme button cycles light, dark and
+system themes. Files added (or imported) while a run is active join the queue
+and are processed in a follow-up pass automatically. The gear button (or
+`Ctrl+,`) opens Settings for theme, transcript text size, preset, speaker count
+(including auto-detect), language, playback speed, follow mode, notifications,
+save location, and model storage.
+
+The Export picker writes the current transcript as plain text, SRT, WebVTT, or
+JSON. Failed queue items can be retried, and pending items can be reordered.
+Keyboard: Up/Down moves through the transcript, Alt+Enter edits the active line,
+Space toggles playback, and Left/Right seek ±5 seconds while no text field has
+focus.
+
+Transcript search supports a speaker filter, match case (`Aa`) and whole-word
+(`W`) matching. Right-click a line to edit it; the editor can copy the line,
+merge it with the next line, or split it at the playhead. Line deletion asks for
+confirmation. Saves are written atomically and keep a
+`<transcript>.transiel.bak` backup beside the source file.
 
 Completed rows stay in the queue: click one to revisit that file's transcript,
 speaker timeline, waveform and playback. Renaming speakers or saving writes back

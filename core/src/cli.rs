@@ -20,6 +20,9 @@ pub fn run(args: &[String]) -> i32 {
     let mut timestamps = true;
     let mut progress_json = false;
     let mut cache = true;
+    // Preserve the historical English default; `--language ""` or `auto`
+    // enables Whisper's language detection.
+    let mut language: Option<String> = Some("en".to_string());
 
     let mut i = 0;
     while i < args.len() {
@@ -46,6 +49,22 @@ pub fn run(args: &[String]) -> i32 {
             "--no-timestamps" => timestamps = false,
             "--progress-json" => progress_json = true,
             "--no-cache" => cache = false,
+            "--language" => {
+                i += 1;
+                let value = args.get(i).map(|value| value.trim()).unwrap_or("");
+                if value.is_empty() || value.eq_ignore_ascii_case("auto") {
+                    language = None;
+                } else if value.len() <= 16
+                    && value
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+                {
+                    language = Some(value.to_string());
+                } else {
+                    eprintln!("invalid language code: {value}");
+                    return 2;
+                }
+            }
             other if other.starts_with('-') => {
                 eprintln!("unknown option: {other}");
                 return 2;
@@ -60,7 +79,7 @@ pub fn run(args: &[String]) -> i32 {
     }
 
     if inputs.is_empty() {
-        eprintln!("usage: transiel --cli <audio>... [--preset speed|accuracy] [--progress-json]");
+        eprintln!("usage: transiel --cli <audio>... [--preset speed|accuracy] [--language <code>] [--progress-json]");
         return 2;
     }
 
@@ -71,6 +90,7 @@ pub fn run(args: &[String]) -> i32 {
         num_speakers,
         timestamps,
         cache,
+        language,
         cancel: None,
     };
 
@@ -147,9 +167,9 @@ fn run_probe(args: &[String]) -> i32 {
             println!(
                 "{}",
                 rms.iter()
-                .map(|v| v.to_string())
-                .collect::<Vec<_>>()
-                .join(",")
+                    .map(|v| v.to_string())
+                    .collect::<Vec<_>>()
+                    .join(",")
             );
             0
         }
