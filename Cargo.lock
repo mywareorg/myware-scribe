@@ -1666,6 +1666,38 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dfa686283ad6dd069f105e5ab091b04c62850d3e4cf5d67debad1933f55023df"
 
 [[package]]
+name = "hippo-transcribe-core"
+version = "0.1.0"
+dependencies = [
+ "libloading 0.8.9",
+ "num_cpus",
+ "rubato",
+ "serde",
+ "serde_json",
+ "sha2",
+ "sherpa-rs-sys",
+ "symphonia",
+ "ureq",
+ "whisper-rs",
+]
+
+[[package]]
+name = "hippo-transcribe-gui"
+version = "0.1.0"
+dependencies = [
+ "hippo-transcribe-core",
+ "iced",
+ "image 0.25.10",
+ "notify-rust",
+ "rfd",
+ "rodio",
+ "serde",
+ "serde_json",
+ "windows-sys 0.59.0",
+ "winresource",
+]
+
+[[package]]
 name = "home"
 version = "0.5.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4606,38 +4638,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "db97caf9d906fbde555dd62fa95ddba9eecfd14cb388e4f491a66d74cd5fb79a"
 dependencies = [
  "once_cell",
-]
-
-[[package]]
-name = "transiel-core"
-version = "0.1.0"
-dependencies = [
- "libloading 0.8.9",
- "num_cpus",
- "rubato",
- "serde",
- "serde_json",
- "sha2",
- "sherpa-rs-sys",
- "symphonia",
- "ureq",
- "whisper-rs",
-]
-
-[[package]]
-name = "transiel-gui"
-version = "0.1.0"
-dependencies = [
- "iced",
- "image 0.25.10",
- "notify-rust",
- "rfd",
- "rodio",
- "serde",
- "serde_json",
- "transiel-core",
- "windows-sys 0.59.0",
- "winresource",
 ]
 
 [[package]]

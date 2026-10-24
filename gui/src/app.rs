@@ -20,9 +20,8 @@ use serde::{Deserialize, Serialize};
 use crate::backend::{self, Event};
 use crate::theme::{self, AppTheme, Scheme};
 use crate::{documents::*, files::*, format::*, options::*};
-use transiel_core::download::{self, DownloadEvent, ModelStatus};
-use transiel_core::export::{self, ExportFormat};
-use transiel_core::models;
+use hippo_transcribe_core::download::{self, DownloadEvent, ModelStatus};
+use hippo_transcribe_core::models;
 
 const AUDIO_EXTS: &[&str] = &[
     "mp3", "wav", "m4a", "aac", "flac", "ogg", "opus", "wma", "mp4", "mkv", "mov", "webm", "avi",
@@ -42,10 +41,12 @@ const ASPECT_SNAP_PX: f32 = 4.0;
 const ASPECT: f32 = 4.0 / 3.0; // w/h
 const ASPECT_INV: f32 = 3.0 / 4.0; // h/w
 
-/// Golden-ratio split for the body row. The transcripts side gets the
-/// longer portion: phi ~= 1.618, so left = 1/phi (~38.2%), right = 1 (~61.8%).
-const LEFT_PORTION: u16 = 382; // 1000 * (1 - 1/phi)
-const RIGHT_PORTION: u16 = 618;
+const PANEL_GAP: f32 = 12.0;
+const OUTER_PADDING: f32 = 12.0;
+const LEFT_PANEL_WIDTH: f32 = 340.0;
+
+/// UI chrome never wraps; labels are shortened or ellipsized instead.
+const NO_WRAP: iced::widget::text::Wrapping = iced::widget::text::Wrapping::None;
 
 /// Number of RMS buckets requested when probing an audio file for the timeline.
 const TIMELINE_BUCKETS: usize = 2000;
@@ -150,6 +151,8 @@ struct Settings {
     sms_mode: Option<bool>,
     num_speakers: Option<i32>,
     language: Option<String>,
+    #[serde(default = "timestamps_default")]
+    show_timestamps: bool,
     #[serde(default = "notifications_default")]
     notifications: bool,
     font_scale: Option<f32>,
@@ -168,6 +171,10 @@ fn notifications_default() -> bool {
     true
 }
 
+fn timestamps_default() -> bool {
+    true
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Self {
@@ -175,6 +182,7 @@ impl Default for Settings {
             sms_mode: None,
             num_speakers: None,
             language: None,
+            show_timestamps: true,
             notifications: true,
             font_scale: None,
             playback_speed: None,
@@ -251,10 +259,9 @@ pub enum Message {
     OpenSummary,
     SmsToggled(bool),
     NotificationsToggled(bool),
+    TimestampsToggled(bool),
     SpeakerCountChanged(SpeakerOpt),
     LanguageChanged(LanguageOpt),
-    ExportChoice(ExportFormat),
-    ExportPicked(ExportFormat, Option<PathBuf>),
     TranscriptScrolled(scrollable::Viewport),
     WindowEvent(iced::window::Event),
     Seek(f32),
@@ -262,8 +269,6 @@ pub enum Message {
     FocusFind,
     SearchChanged(String),
     SpeakerFilterChanged(String),
-    ToggleSearchCase,
-    ToggleSearchWholeWord,
     FindPrev,
     FindNext,
     SpeedChanged(Speed),
@@ -325,6 +330,9 @@ pub struct App {
     overall_shown: f32,
     run_start: Option<Instant>,
     elapsed_final: Option<f64>,
+    eta_shown: Option<f32>,
+    eta_rate: Option<f32>,
+    eta_sample: Option<(Instant, f32)>,
     status: Status,
     transcript: String,
     lines: Vec<DocLine>,
@@ -345,6 +353,7 @@ pub struct App {
     rename_focus: usize,
     sms_mode: bool,
     notifications: bool,
+    show_timestamps: bool,
     num_speakers: Option<i32>,
     language: Option<String>,
     /// Derived orders, invalidated whenever the shown lines change.
@@ -370,8 +379,6 @@ pub struct App {
     settings_open: bool,
     search_query: String,
     speaker_filter: Option<String>,
-    search_case_sensitive: bool,
-    search_whole_word: bool,
     search_index: usize,
     playback_speed: f32,
     last_tick: Option<Instant>,
@@ -471,6 +478,9 @@ impl App {
             overall_shown: 0.0,
             run_start: None,
             elapsed_final: None,
+            eta_shown: None,
+            eta_rate: None,
+            eta_sample: None,
             status: Status::Idle,
             transcript: String::new(),
             lines: Vec::new(),
@@ -491,6 +501,7 @@ impl App {
             rename_focus: 0,
             sms_mode: settings.sms_mode.unwrap_or(false),
             notifications: settings.notifications,
+            show_timestamps: settings.show_timestamps,
             num_speakers: match settings.num_speakers {
                 None => Some(2),
                 Some(0) => None,
@@ -521,8 +532,6 @@ impl App {
             waveform_zoom: settings.waveform_zoom.unwrap_or(1.0),
             search_query: String::new(),
             speaker_filter: None,
-            search_case_sensitive: false,
-            search_whole_word: false,
             search_index: 0,
             playback_speed: settings.playback_speed.unwrap_or(1.0),
             last_tick: None,
@@ -559,24 +568,52 @@ impl App {
         }
     }
 
-    fn settings_path() -> Option<PathBuf> {
+    /// Current configuration directory (`.../hippo-transcribe`).
+    fn config_dir() -> Option<PathBuf> {
         if cfg!(windows) {
             std::env::var("APPDATA")
                 .ok()
-                .map(|base| PathBuf::from(base).join("transiel").join("settings.json"))
+                .map(|base| PathBuf::from(base).join("hippo-transcribe"))
         } else {
             let base = std::env::var("XDG_CONFIG_HOME").ok().or_else(|| {
                 std::env::var("HOME")
                     .ok()
                     .map(|home| format!("{home}/.config"))
             })?;
-            Some(PathBuf::from(base).join("transiel").join("settings.json"))
+            Some(PathBuf::from(base).join("hippo-transcribe"))
         }
+    }
+
+    /// Configuration directory used before the rename; read-only fallback.
+    fn legacy_config_dir() -> Option<PathBuf> {
+        if cfg!(windows) {
+            std::env::var("APPDATA")
+                .ok()
+                .map(|base| PathBuf::from(base).join("transiel"))
+        } else {
+            let base = std::env::var("XDG_CONFIG_HOME").ok().or_else(|| {
+                std::env::var("HOME")
+                    .ok()
+                    .map(|home| format!("{home}/.config"))
+            })?;
+            Some(PathBuf::from(base).join("transiel"))
+        }
+    }
+
+    fn settings_path() -> Option<PathBuf> {
+        Self::config_dir().map(|dir| dir.join("settings.json"))
+    }
+
+    fn legacy_settings_path() -> Option<PathBuf> {
+        Self::legacy_config_dir().map(|dir| dir.join("settings.json"))
     }
 
     fn load_settings() -> Settings {
         Self::settings_path()
             .and_then(|path| std::fs::read_to_string(path).ok())
+            .or_else(|| {
+                Self::legacy_settings_path().and_then(|path| std::fs::read_to_string(path).ok())
+            })
             .and_then(|text| serde_json::from_str(&text).ok())
             .unwrap_or_default()
     }
@@ -594,6 +631,7 @@ impl App {
             num_speakers: Some(self.num_speakers.unwrap_or(0)),
             language: self.language.clone(),
             notifications: self.notifications,
+            show_timestamps: self.show_timestamps,
             font_scale: Some(self.font_scale),
             playback_speed: Some(self.playback_speed),
             waveform_zoom: Some(self.waveform_zoom),
@@ -618,12 +656,18 @@ impl App {
         Self::settings_path().map(|path| path.with_file_name("queue.json"))
     }
 
+    fn legacy_queue_path() -> Option<PathBuf> {
+        Self::legacy_settings_path().map(|path| path.with_file_name("queue.json"))
+    }
+
     /// Load the queue plus the paths from the most recent batch.
     fn load_queue_and_batch() -> (Vec<QueueItem>, Vec<PathBuf>) {
-        let Some(path) = Self::queue_path() else {
-            return (Vec::new(), Vec::new());
-        };
-        let Ok(text) = std::fs::read_to_string(path) else {
+        let text = Self::queue_path()
+            .and_then(|path| std::fs::read_to_string(path).ok())
+            .or_else(|| {
+                Self::legacy_queue_path().and_then(|path| std::fs::read_to_string(path).ok())
+            });
+        let Some(text) = text else {
             return (Vec::new(), Vec::new());
         };
         let Ok(state) = serde_json::from_str::<QueueState>(&text) else {
@@ -846,6 +890,29 @@ impl App {
         };
         if matches!(item.status, ItemStatus::Running) {
             self.return_to_live();
+            return Task::none();
+        }
+        if matches!(item.status, ItemStatus::Pending) {
+            self.speaker_filter = None;
+            self.player = None;
+            self.playhead = 0.0;
+            self.last_tick = None;
+            self.search_query.clear();
+            self.search_index = 0;
+            self.view_error = None;
+            self.selected = Some(index);
+            self.selected_view = Some(ItemView {
+                index,
+                source: item.path.clone(),
+                transcript: String::new(),
+                lines: Vec::new(),
+                turns: item.turns.clone(),
+                peaks: item.peaks.clone(),
+                duration: item.duration.map(|seconds| seconds as f32),
+                audio: item.audio.clone(),
+                output: None,
+            });
+            self.invalidate_derived();
             return Task::none();
         }
         if !matches!(item.status, ItemStatus::Done) {
@@ -1198,6 +1265,11 @@ impl App {
                 self.save_settings();
                 Task::none()
             }
+            Message::TimestampsToggled(value) => {
+                self.show_timestamps = value;
+                self.save_settings();
+                Task::none()
+            }
             Message::SpeakerCountChanged(option) => {
                 if matches!(self.status, Status::Running) {
                     return Task::none();
@@ -1214,42 +1286,6 @@ impl App {
                 self.save_settings();
                 Task::none()
             }
-            Message::ExportChoice(format) => {
-                if self.shown_transcript().is_empty() {
-                    return Task::none();
-                }
-                let stem = self
-                    .shown_audio()
-                    .or_else(|| self.shown_output())
-                    .and_then(|path| path.file_stem())
-                    .and_then(|stem| stem.to_str())
-                    .unwrap_or("transcript")
-                    .to_string();
-                let name = format!("{stem}.{}", format.extension());
-                Task::perform(
-                    async move {
-                        rfd::FileDialog::new()
-                            .add_filter(format.label(), &[format.extension()])
-                            .set_file_name(name)
-                            .save_file()
-                    },
-                    move |path| Message::ExportPicked(format, path),
-                )
-            }
-            Message::ExportPicked(format, Some(path)) => {
-                let transcript = self.shown_transcript().to_string();
-                let turns = self.turns.clone();
-                match export::write(&path, format, &transcript, &turns, self.timeline_duration) {
-                    Ok(()) => {
-                        self.toast = Some((format!("Exported {}", path.display()), Instant::now()));
-                    }
-                    Err(error) => {
-                        self.toast = Some((format!("Could not export: {error}"), Instant::now()));
-                    }
-                }
-                Task::none()
-            }
-            Message::ExportPicked(_, None) => Task::none(),
             Message::TranscriptScrolled(viewport) => {
                 self.transcript_viewport = viewport.bounds().height;
                 self.transcript_content = viewport.content_bounds().height;
@@ -1496,16 +1532,6 @@ impl App {
                 } else {
                     Task::none()
                 }
-            }
-            Message::ToggleSearchCase => {
-                self.search_case_sensitive = !self.search_case_sensitive;
-                self.search_index = 0;
-                Task::none()
-            }
-            Message::ToggleSearchWholeWord => {
-                self.search_whole_word = !self.search_whole_word;
-                self.search_index = 0;
-                Task::none()
             }
             Message::FindNext => {
                 let matches = self.matching_lines();
@@ -2031,6 +2057,7 @@ impl App {
                     self.view_error = None;
                     self.run_start = None;
                     self.elapsed_final = None;
+                    self.eta_shown = None;
                     self.progress = 0.0;
                     self.progress_shown = 0.0;
                     self.overall_shown = 0.0;
@@ -2303,23 +2330,53 @@ impl App {
                 self.progress_shown += (self.progress - self.progress_shown) * 0.25;
                 self.progress_shown = self.progress_shown.clamp(0.0, 1.0);
 
-                // Ease an overall bar that continues smoothly across queued files.
-                let total_items = self.queue.len().max(1) as f32;
-                let animating = matches!(self.status, Status::Running) || self.completion_pending;
-                let target_overall = if animating {
-                    (self.current_index.unwrap_or(0) as f32 + self.progress) / total_items
-                } else {
-                    let done = self
-                        .queue
-                        .iter()
-                        .filter(|item| {
-                            matches!(item.status, ItemStatus::Done | ItemStatus::Failed(_))
-                        })
-                        .count() as f32;
-                    done / total_items
-                };
+                // Ease an overall bar weighted by audio duration, so long files
+                // move it proportionally further than short ones.
+                let target_overall = self.overall_progress_target();
                 self.overall_shown += (target_overall - self.overall_shown) * 0.25;
                 self.overall_shown = self.overall_shown.clamp(0.0, 1.0);
+
+                // Estimate remaining wall-clock time from the observed work
+                // rate, not from elapsed / fraction. Chunked progress gives
+                // frequent samples, and a short EMA rejects outliers.
+                if matches!(self.status, Status::Running) {
+                    if let Some(start) = self.run_start {
+                        let fraction = self.overall_progress_target();
+                        let now = Instant::now();
+                        if let Some((last, previous)) = self.eta_sample {
+                            let dt = (now - last).as_secs_f32();
+                            let df = fraction - previous;
+                            if dt >= 0.4 && df > 0.0002 {
+                                let sample = df / dt;
+                                self.eta_rate = Some(match self.eta_rate {
+                                    Some(rate) => rate * 0.75 + sample * 0.25,
+                                    None => sample,
+                                });
+                            }
+                        }
+                        self.eta_sample = Some((now, fraction));
+                        if fraction > 0.01 && fraction < 0.995 {
+                            let raw = self
+                                .eta_rate
+                                .filter(|rate| *rate > 0.0001)
+                                .map(|rate| ((1.0 - fraction) / rate).max(0.0))
+                                .unwrap_or_else(|| {
+                                    let elapsed = start.elapsed().as_secs_f32();
+                                    (elapsed * (1.0 - fraction) / fraction).max(0.0)
+                                });
+                            self.eta_shown = Some(match self.eta_shown {
+                                Some(previous) => previous + (raw - previous) * 0.15,
+                                None => raw,
+                            });
+                        } else if fraction >= 0.995 {
+                            self.eta_shown = None;
+                        }
+                    }
+                } else {
+                    self.eta_shown = None;
+                    self.eta_rate = None;
+                    self.eta_sample = None;
+                }
 
                 // Once the bar has eased to 100%, present the completion dialogs.
                 if self.completion_pending && self.overall_shown >= 0.995 {
@@ -2535,7 +2592,7 @@ impl App {
         self.pending_rename = generated == 1 && self.completed_count() == 1;
         self.toast = None;
         if self.notifications {
-            notify("transiel", "Transcription complete");
+            notify("Hippo Transcribe", "Transcription complete");
         }
         true
     }
@@ -2610,15 +2667,30 @@ impl App {
     }
 
     fn start(&mut self) {
-        if self
+        if self.queue.is_empty() {
+            self.status = Status::Error("add at least one file".to_string());
+            return;
+        }
+        let has_pending = self
             .queue
             .iter()
-            .any(|item| matches!(item.status, ItemStatus::Pending))
-        {
-            self.begin_batch(false);
-        } else {
-            self.status = Status::Error("add at least one file".to_string());
+            .any(|item| matches!(item.status, ItemStatus::Pending));
+        if !has_pending {
+            // Re-run the queue, including files transcribed with a previous
+            // preset or files that failed.
+            for item in &mut self.queue {
+                if matches!(item.status, ItemStatus::Done | ItemStatus::Failed(_)) {
+                    item.status = ItemStatus::Pending;
+                    item.transcript = None;
+                    item.stats = None;
+                    item.turns.clear();
+                    item.peaks = Arc::new(Vec::new());
+                }
+            }
+            self.invalidate_derived();
+            self.save_queue();
         }
+        self.begin_batch(false);
     }
 
     /// Spawn a single pipeline process for all pending queue items, so the
@@ -2668,6 +2740,9 @@ impl App {
         self.overall_shown = 0.0;
         self.run_start = Some(Instant::now());
         self.elapsed_final = None;
+        self.eta_shown = None;
+        self.eta_rate = None;
+        self.eta_sample = None;
         self.transcript.clear();
         self.lines.clear();
         self.pending_lines.clear();
@@ -2700,7 +2775,7 @@ impl App {
             self.output_dir.clone(),
             self.preset.arg(),
             self.num_speakers,
-            if self.preset == Preset::Speed {
+            if matches!(self.preset, Preset::Speed | Preset::Balanced) {
                 Some("en".to_string())
             } else {
                 self.language.clone()
@@ -2739,6 +2814,9 @@ impl App {
         self.overall_shown = 0.0;
         self.run_start = None;
         self.elapsed_final = None;
+        self.eta_shown = None;
+        self.eta_rate = None;
+        self.eta_sample = None;
         self.pending_lines.clear();
         self.reveal_accum = 0.0;
         self.completion_pending = false;
@@ -3077,7 +3155,7 @@ impl App {
                     self.stage = "loading".to_string();
                     self.progress = 0.0;
                     self.progress_shown = 0.0;
-                    self.run_start = Some(Instant::now());
+                    self.eta_shown = None;
                     self.elapsed_final = None;
                     self.transcript.clear();
                     self.lines.clear();
@@ -3200,6 +3278,7 @@ impl App {
                     self.stage = "done".to_string();
                     self.progress = 1.0;
                     self.elapsed_final = self.run_start.map(|s| s.elapsed().as_secs_f64());
+                    self.eta_shown = None;
                     self.toast = None;
                     self.save_queue();
                     // Files added while a run was active are picked up as a
@@ -3316,6 +3395,74 @@ impl App {
         None
     }
 
+    /// Overall progress weighted by audio duration. Only the items captured
+    /// when the run began contribute; queue edits during a run are ignored.
+    /// Outside a run the bar is frozen, so adding/removing queue items cannot
+    /// move it.
+    fn overall_progress_target(&self) -> f32 {
+        if !matches!(self.status, Status::Running) && !self.completion_pending {
+            return self.overall_shown;
+        }
+        if self.batch_paths.is_empty() {
+            return 0.0;
+        }
+
+        let batch: Vec<&QueueItem> = self
+            .queue
+            .iter()
+            .filter(|item| self.batch_paths.contains(&item.path))
+            .collect();
+        if batch.is_empty() {
+            return 0.0;
+        }
+        let known: Vec<f32> = batch
+            .iter()
+            .filter_map(|item| item.duration.map(|duration| duration as f32))
+            .filter(|duration| *duration > 0.0)
+            .collect();
+        let fallback = if known.is_empty() {
+            1.0
+        } else {
+            known.iter().sum::<f32>() / known.len() as f32
+        };
+        let total: f32 = batch.iter().map(|item| queue_weight(item, fallback)).sum();
+        if total <= 0.0 {
+            return 0.0;
+        }
+
+        let mut completed = 0.0;
+        for item in &batch {
+            let finished = matches!(item.status, ItemStatus::Done | ItemStatus::Failed(_));
+            let current = self
+                .current_index
+                .and_then(|index| self.queue.get(index))
+                .is_some_and(|current| current.path == item.path);
+            if finished && !current {
+                completed += queue_weight(item, fallback);
+            } else if current {
+                let fraction = if finished || self.stage.eq_ignore_ascii_case("done") {
+                    1.0
+                } else {
+                    self.progress.clamp(0.0, 1.0)
+                };
+                completed += queue_weight(item, fallback) * fraction;
+            }
+        }
+        (completed / total).clamp(0.0, 1.0)
+    }
+
+    fn timer_text(&self) -> String {
+        let elapsed = self.elapsed().unwrap_or_else(|| "00:00".to_string());
+        if matches!(self.status, Status::Running) {
+            if let Some(eta) = self.eta_shown {
+                if eta >= 1.0 && eta.is_finite() {
+                    return format!("{elapsed} \u{00b7} ~{} left", format_secs(eta as f64));
+                }
+            }
+        }
+        elapsed
+    }
+
     /// Collapsible console showing backend log output.
     fn console_panel(&self, scheme: &Scheme) -> Element<'static, Message> {
         let background = scheme.track;
@@ -3351,13 +3498,7 @@ impl App {
             .into_iter()
             .filter(|index| {
                 lines.get(*index).is_some_and(|line| {
-                    !search_match_ranges(
-                        &line.raw,
-                        &self.search_query,
-                        self.search_case_sensitive,
-                        self.search_whole_word,
-                    )
-                    .is_empty()
+                    !search_match_ranges(&line.raw, &self.search_query, false, false).is_empty()
                 })
             })
             .collect()
@@ -3479,6 +3620,17 @@ impl App {
                 "Listening for speech",
                 format!("{detail}. Lines will appear here as they are transcribed."),
             )
+        } else if self
+            .selected
+            .and_then(|index| self.queue.get(index))
+            .is_some_and(|item| matches!(item.status, ItemStatus::Pending))
+        {
+            (
+                ICON_PLAY,
+                scheme.track,
+                "Not transcribed yet",
+                "Run the queue to create a transcript for this file.".to_string(),
+            )
         } else if selected {
             (
                 ICON_FILE_TEXT,
@@ -3520,23 +3672,23 @@ impl App {
         let mut actions = row![].spacing(8).align_y(iced::Alignment::Center);
         if !has_queue {
             actions = actions.push(
-                action("Add File(s)")
+                action_text("Add File(s)")
                     .on_press(Message::AddFiles)
                     .style(color_button(scheme.blue, scheme.on_accent)),
             );
             actions = actions.push(
-                action("Add Folder")
+                action_text("Add Folder")
                     .on_press(Message::AddFolder)
                     .style(pill_button_secondary),
             );
         } else if pending && !has_done {
             actions = actions.push(
-                action("Transcribe")
+                action_text("Transcribe")
                     .on_press_maybe(self.models_ready().then_some(Message::Start))
                     .style(color_button(scheme.green, scheme.on_accent)),
             );
             actions = actions.push(
-                action("Add File(s)")
+                action_text("Add File(s)")
                     .on_press(Message::AddFiles)
                     .style(pill_button_secondary),
             );
@@ -3602,24 +3754,23 @@ impl App {
 
     /// The queue card in the left panel: header, add/import toolbar, list and
     /// run controls.
-    fn queue_panel(&self, scheme: &Scheme) -> Element<'_, Message> {
+    fn queue_panel(&self, scheme: &Scheme, width: f32) -> Element<'_, Message> {
         let scheme = *scheme;
         let running = matches!(self.status, Status::Running);
         let has_queue = !self.queue.is_empty();
-        let can_start = !running
-            && self
-                .queue
-                .iter()
-                .any(|item| matches!(item.status, ItemStatus::Pending))
-            && self.models_ready();
+        let can_start = !running && has_queue && self.models_ready();
 
         let header = row![
-            text("Queue").size(theme::TEXT_MD).font(Font {
-                weight: font::Weight::Bold,
-                ..Font::DEFAULT
-            }),
-            text(self.queue_summary_text())
+            text("Queue")
+                .size(theme::TEXT_MD)
+                .wrapping(NO_WRAP)
+                .font(Font {
+                    weight: font::Weight::Bold,
+                    ..Font::DEFAULT
+                }),
+            text(ellipsize(&self.queue_summary_text(), 26))
                 .size(theme::TEXT_XS)
+                .wrapping(NO_WRAP)
                 .color(scheme.muted),
         ]
         .spacing(8)
@@ -3629,7 +3780,7 @@ impl App {
             action(
                 row![
                     icon_colored(ICON_PLUS, 14.0, scheme.on_accent),
-                    text("Add").size(12),
+                    text("Add").size(12).wrapping(NO_WRAP),
                 ]
                 .spacing(4)
                 .align_y(iced::Alignment::Center),
@@ -3653,6 +3804,7 @@ impl App {
                 .placeholder("Import")
                 .style(ink_pick(scheme.ink))
                 .handle(caret_handle(false))
+                .width(Length::Fixed(126.0))
                 .into();
 
         let clear_button = self.tip(
@@ -3706,13 +3858,14 @@ impl App {
             .as_ref()
             .map(|p| p.display().to_string())
             .unwrap_or_else(|| "Audio source directory".to_string());
-        let output_short = ellipsize_middle(&output, 30);
+        let output_short = ellipsize_middle(&output, 20);
         let output_row = row![
-            action("Save Location")
+            action_text("Save Location")
                 .on_press_maybe((!running && has_queue).then_some(Message::PickOutput))
                 .style(pill_button_secondary),
             text(output_short)
                 .size(theme::TEXT_XS)
+                .wrapping(NO_WRAP)
                 .color(scheme.muted)
                 .width(Length::Fill),
         ]
@@ -3763,7 +3916,8 @@ impl App {
             speaker_pick.style(pill_pick).width(Length::Fill).into()
         };
 
-        let option_label = |label: &'static str| text(label).size(11).color(scheme.muted);
+        let option_label =
+            |label: &'static str| text(label).size(11).wrapping(NO_WRAP).color(scheme.muted);
         let options = row![
             column![option_label("Preset"), preset]
                 .spacing(2)
@@ -3778,12 +3932,12 @@ impl App {
             output_row,
             options,
             row![
-                action("Transcribe")
+                action_text("Transcribe")
                     .on_press_maybe(can_start.then_some(Message::Start))
                     .style(color_button(scheme.green, scheme.on_accent)),
-                action("Cancel")
+                action_text("Cancel")
                     .on_press_maybe(running.then_some(Message::Cancel))
-                    .style(color_button(scheme.pink, scheme.on_accent)),
+                    .style(color_button(scheme.danger, scheme.on_accent)),
             ]
             .spacing(8)
             .align_y(iced::Alignment::Center),
@@ -3796,7 +3950,7 @@ impl App {
 
         container(content)
             .padding(12)
-            .width(Length::FillPortion(LEFT_PORTION))
+            .width(Length::Fixed(width))
             .height(Length::Fill)
             .style(move |_theme| container::Style {
                 background: Some(scheme.panel_bg.into()),
@@ -3815,6 +3969,7 @@ impl App {
         let can_remove = !running;
         let viewing = self.selected == Some(index) && self.selected_view.is_some();
         let selectable = matches!(item.status, ItemStatus::Running)
+            || (!running && matches!(item.status, ItemStatus::Pending))
             || (matches!(item.status, ItemStatus::Done) && item.transcript.is_some());
 
         let name = item
@@ -3822,7 +3977,7 @@ impl App {
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_else(|| item.path.display().to_string());
-        let name = ellipsize_middle(&name, 34);
+        let name = ellipsize_middle(&name, 16);
         let duration = item
             .duration
             .map(format_secs)
@@ -3839,7 +3994,7 @@ impl App {
             ),
             ItemStatus::Done => (format!("{duration} \u{00b7} Done"), scheme.muted),
             ItemStatus::Failed(message) => (
-                format!("{duration} \u{00b7} {}", ellipsize(message, 38)),
+                format!("{duration} \u{00b7} {}", ellipsize(message, 22)),
                 scheme.danger,
             ),
         };
@@ -3860,12 +4015,13 @@ impl App {
         let label = column![
             text(name)
                 .size(theme::TEXT_SM)
+                .wrapping(NO_WRAP)
                 .color(scheme.text)
                 .font(Font {
                     weight: font::Weight::Medium,
                     ..Font::DEFAULT
                 }),
-            text(meta).size(11).color(meta_color),
+            text(meta).size(11).wrapping(NO_WRAP).color(meta_color),
         ]
         .spacing(1)
         .width(Length::Fill);
@@ -3881,7 +4037,7 @@ impl App {
                     .height(Length::Fixed(6.0))
                     .style(move |_theme| progress_bar::Style {
                         background: scheme.bar_track.into(),
-                        bar: scheme.blue.into(),
+                        bar: scheme.progress.into(),
                         border: iced::border::rounded(3.0),
                     }),
             );
@@ -3979,6 +4135,9 @@ impl App {
     /// Transcript view: per-line (search tinted) or SMS bubbles.
     fn transcript_element(&self) -> Element<'_, Message> {
         let scheme = self.scheme();
+        if self.queue.is_empty() {
+            return self.empty_transcript_state(&scheme);
+        }
         if let Some(error) = &self.view_error {
             let mut col = column![
                 text("Transcript unavailable").size(20),
@@ -3994,7 +4153,7 @@ impl App {
                     .is_some();
                 if has_audio {
                     col = col.push(
-                        action("Transcribe again")
+                        action_text("Transcribe again")
                             .on_press(Message::RequeueItem(index))
                             .style(color_button(scheme.green, scheme.on_accent)),
                     );
@@ -4015,6 +4174,7 @@ impl App {
         let size = 16.0 * self.font_scale;
         let mut col = column![].spacing(2).padding(8).width(Length::Fill);
         let speaker_order = self.speaker_order();
+        let single_speaker = speaker_order.len() <= 1;
         let display: Vec<usize> = self.display_order();
         let playhead_line = self.active_line_index();
         let lines = self.shown_lines();
@@ -4030,7 +4190,7 @@ impl App {
                 let index = speaker_order
                     .iter()
                     .position(|name| *name == line.speaker)
-                    .unwrap_or(0);
+                    .unwrap_or(if single_speaker { 1 } else { 0 });
                 let left = index.is_multiple_of(2);
                 let tint = if matched {
                     Some(if Some(idx) == active_line {
@@ -4041,10 +4201,13 @@ impl App {
                 } else {
                     None
                 };
-                let stamp = line
-                    .start
-                    .map(|seconds| format_timestamp(seconds as f64))
-                    .unwrap_or_default();
+                let stamp = if self.show_timestamps {
+                    line.start
+                        .map(|seconds| format_timestamp(seconds as f64))
+                        .unwrap_or_default()
+                } else {
+                    String::new()
+                };
                 let content = line_text(line);
                 col = col.push(stack![
                     sms_row(
@@ -4052,12 +4215,13 @@ impl App {
                         &line.speaker,
                         &stamp,
                         left,
+                        single_speaker,
                         speaker_palette(index, &scheme),
                         scheme.ink,
                         tint,
                         &query,
-                        self.search_case_sensitive,
-                        self.search_whole_word,
+                        false,
+                        false,
                         scheme.search_hl,
                         size,
                         active,
@@ -4076,7 +4240,9 @@ impl App {
                     .iter()
                     .position(|name| *name == line.speaker)
                     .map(|index| speaker_palette(index, &scheme))
-                    .unwrap_or(scheme.muted);
+                    .unwrap_or_else(|| {
+                        speaker_palette(if single_speaker { 1 } else { 0 }, &scheme)
+                    });
                 let search_tint = matched.then_some(if Some(idx) == active_line {
                     scheme.search_active
                 } else {
@@ -4088,12 +4254,13 @@ impl App {
                     accent,
                     search_tint,
                     &query,
-                    self.search_case_sensitive,
-                    self.search_whole_word,
+                    false,
+                    false,
                     scheme.search_hl,
                     &scheme,
                     size,
                     active,
+                    self.show_timestamps,
                 ));
             }
         }
@@ -4110,6 +4277,9 @@ impl App {
     /// Header above the transcript: what is on screen plus reading controls.
     fn transcript_header(&self, scheme: &Scheme) -> Option<Element<'_, Message>> {
         let scheme = *scheme;
+        if self.queue.is_empty() {
+            return None;
+        }
         let has_lines = !self.shown_lines().is_empty();
         let viewing = self.selected_view.is_some();
         let running = matches!(self.status, Status::Running);
@@ -4129,13 +4299,19 @@ impl App {
             if let Some(duration) = view.duration.filter(|duration| *duration > 0.0) {
                 meta.push(format_secs(duration as f64));
             }
-            if view.output.is_none() && self.view_error.is_none() {
+            if view.output.is_none()
+                && self.view_error.is_none()
+                && self
+                    .selected
+                    .and_then(|index| self.queue.get(index))
+                    .is_some_and(|item| matches!(item.status, ItemStatus::Done))
+            {
                 meta.push("read-only".to_string());
             }
             (
                 ICON_FILE_TEXT,
                 scheme.blue,
-                ellipsize_middle(name, 48),
+                ellipsize_middle(name, 28),
                 meta.join(" \u{00b7} "),
             )
         } else if running {
@@ -4165,13 +4341,13 @@ impl App {
                 border: iced::border::rounded(13.0),
                 ..container::Style::default()
             });
-        let mut label = column![text(title).size(13).font(Font {
+        let mut label = column![text(title).size(13).wrapping(NO_WRAP).font(Font {
             weight: font::Weight::Medium,
             ..Font::DEFAULT
         })]
         .spacing(1);
         if !meta.is_empty() {
-            label = label.push(text(meta).size(11).color(scheme.muted));
+            label = label.push(text(meta).size(11).wrapping(NO_WRAP).color(scheme.muted));
         }
 
         let controls: Element<Message> = if has_lines {
@@ -4205,20 +4381,28 @@ impl App {
     /// Zoom / Follow / SMS controls in the transcript header.
     fn transcript_controls(&self, scheme: &Scheme) -> Element<'_, Message> {
         let follow: Element<Message> = if self.follow_playhead {
-            row![icon(ICON_CHECK, 12.0), text("Follow")]
+            row![icon(ICON_CHECK, 12.0), text("Follow").wrapping(NO_WRAP)]
                 .spacing(4)
                 .align_y(iced::Alignment::Center)
                 .into()
         } else {
-            text("Follow").into()
+            text("Follow").wrapping(NO_WRAP).into()
         };
         let sms: Element<Message> = if self.sms_mode {
-            row![icon(ICON_CHECK, 12.0), text("SMS")]
+            row![icon(ICON_CHECK, 12.0), text("SMS").wrapping(NO_WRAP)]
                 .spacing(4)
                 .align_y(iced::Alignment::Center)
                 .into()
         } else {
-            text("SMS").into()
+            text("SMS").wrapping(NO_WRAP).into()
+        };
+        let timestamps: Element<Message> = if self.show_timestamps {
+            row![icon(ICON_CHECK, 12.0), text("Time").wrapping(NO_WRAP)]
+                .spacing(4)
+                .align_y(iced::Alignment::Center)
+                .into()
+        } else {
+            text("Time").wrapping(NO_WRAP).into()
         };
         let follow_style: fn(&iced::Theme, button::Status) -> button::Style =
             if self.follow_playhead {
@@ -4227,6 +4411,12 @@ impl App {
                 pill_button_secondary
             };
         let sms_style: fn(&iced::Theme, button::Status) -> button::Style = if self.sms_mode {
+            pill_button_active
+        } else {
+            pill_button_secondary
+        };
+        let time_style: fn(&iced::Theme, button::Status) -> button::Style = if self.show_timestamps
+        {
             pill_button_active
         } else {
             pill_button_secondary
@@ -4268,6 +4458,17 @@ impl App {
                     .on_press(Message::SmsToggled(!self.sms_mode))
                     .style(sms_style),
                 sms_tip,
+                scheme,
+            ),
+            self.tip(
+                action(timestamps)
+                    .on_press(Message::TimestampsToggled(!self.show_timestamps))
+                    .style(time_style),
+                if self.show_timestamps {
+                    "Hide timestamps"
+                } else {
+                    "Show timestamps"
+                },
                 scheme,
             ),
         ]
@@ -4361,7 +4562,7 @@ impl App {
                                 border: iced::border::rounded(3.0),
                                 ..container::Style::default()
                             }),
-                        text(label).size(12),
+                        text(label).size(12).wrapping(NO_WRAP),
                     ]
                     .spacing(4)
                     .align_y(iced::Alignment::Center),
@@ -4487,50 +4688,39 @@ impl App {
         let query_input = text_input("Find", &self.search_query)
             .id(find_id())
             .on_input(Message::SearchChanged)
-            .width(Length::Fixed(120.0))
+            .width(Length::Fixed(90.0))
             .style(pill_input);
         let prev = action(icon(ICON_ARROW_UP, 14.0))
             .on_press(Message::FindPrev)
+            .padding([4, 6])
             .style(pill_button_secondary);
         let next = action(icon(ICON_ARROW_DOWN, 14.0))
             .on_press(Message::FindNext)
+            .padding([4, 6])
             .style(pill_button_secondary);
-        let match_case = action(text("Aa").size(12))
-            .on_press(Message::ToggleSearchCase)
-            .style(if self.search_case_sensitive {
-                pill_button_active
-            } else {
-                pill_button_secondary
-            });
-        let whole_word = action(text("W").size(12))
-            .on_press(Message::ToggleSearchWholeWord)
-            .style(if self.search_whole_word {
-                pill_button_active
-            } else {
-                pill_button_secondary
-            });
-        let mut speakers = vec!["All speakers".to_string()];
-        speakers.extend(self.speaker_order());
-        let selected = self
-            .speaker_filter
-            .clone()
-            .unwrap_or_else(|| "All speakers".to_string());
-        let speaker_filter = pick_list(speakers, Some(selected), Message::SpeakerFilterChanged)
-            .style(pill_pick)
-            .width(Length::Fixed(132.0));
-        row![
+        let mut controls = row![
             query_input,
-            text(status).size(12).color(status_color),
+            text(status).size(11).wrapping(NO_WRAP).color(status_color),
             prev,
             next,
-            self.tip(match_case, "Match case", scheme),
-            self.tip(whole_word, "Whole word", scheme),
-            horizontal_space(),
-            speaker_filter,
         ]
-        .spacing(8)
-        .align_y(iced::Alignment::Center)
-        .into()
+        .spacing(6)
+        .align_y(iced::Alignment::Center);
+        let speaker_order = self.speaker_order();
+        if speaker_order.len() > 1 {
+            let mut speakers = vec!["All speakers".to_string()];
+            speakers.extend(speaker_order);
+            let selected = self
+                .speaker_filter
+                .clone()
+                .unwrap_or_else(|| "All speakers".to_string());
+            controls = controls.push(
+                pick_list(speakers, Some(selected), Message::SpeakerFilterChanged)
+                    .style(pill_pick)
+                    .width(Length::Fixed(110.0)),
+            );
+        }
+        controls.into()
     }
 
     /// Wrap `content` with a tooltip.
@@ -4650,7 +4840,7 @@ impl App {
                 .map(|total| format!("{:.0}%", state.done as f32 / total as f32 * 100.0))
                 .unwrap_or_default();
             header = header.push(text(percent).size(13)).push(
-                action("Cancel")
+                action_text("Cancel")
                     .on_press(Message::CancelModelDownload)
                     .style(pill_button_secondary),
             );
@@ -4680,7 +4870,7 @@ impl App {
                     .height(Length::Fixed(8.0))
                     .style(move |_theme| progress_bar::Style {
                         background: scheme.bar_track.into(),
-                        bar: scheme.blue.into(),
+                        bar: scheme.progress.into(),
                         border: iced::border::rounded(4.0),
                     }),
             );
@@ -4712,7 +4902,7 @@ impl App {
             pick_list(AppTheme::ALL, Some(self.theme_mode), Message::SetTheme)
                 .style(ink_pick(scheme.ink))
                 .handle(caret_handle(false))
-                .width(Length::Fixed(150.0)),
+                .width(Length::Fixed(180.0)),
         );
 
         let font_on = self.font_scale;
@@ -4727,7 +4917,7 @@ impl App {
                 action(icon(ICON_ZOOM_IN, 14.0))
                     .on_press_maybe((font_on < 2.5).then_some(Message::ZoomIn))
                     .style(pill_button_secondary),
-                action("Reset")
+                action_text("Reset")
                     .on_press(Message::ZoomReset)
                     .style(pill_button_secondary),
             ]
@@ -4737,6 +4927,7 @@ impl App {
 
         let preset: Element<Message> = if running {
             text("Locked while transcribing")
+                .wrapping(NO_WRAP)
                 .size(theme::TEXT_XS)
                 .color(scheme.muted)
                 .into()
@@ -4744,11 +4935,12 @@ impl App {
             pick_list(Preset::ALL, Some(self.preset), Message::PresetChanged)
                 .style(pill_pick)
                 .handle(caret_handle(false))
-                .width(Length::Fixed(150.0))
+                .width(Length::Fixed(180.0))
                 .into()
         };
         let speakers: Element<Message> = if running {
             text("Locked while transcribing")
+                .wrapping(NO_WRAP)
                 .size(theme::TEXT_XS)
                 .color(scheme.muted)
                 .into()
@@ -4760,17 +4952,18 @@ impl App {
             )
             .style(pill_pick)
             .handle(caret_handle(false))
-            .width(Length::Fixed(150.0))
+            .width(Length::Fixed(180.0))
             .into()
         };
 
         let language: Element<Message> = if running {
             text("Locked while transcribing")
+                .wrapping(NO_WRAP)
                 .size(theme::TEXT_XS)
                 .color(scheme.muted)
                 .into()
-        } else if self.preset == Preset::Speed {
-            text("English only for the speed preset")
+        } else if matches!(self.preset, Preset::Speed | Preset::Balanced) {
+            text("English only for the speed and balanced presets")
                 .size(theme::TEXT_XS)
                 .color(scheme.muted)
                 .into()
@@ -4782,7 +4975,7 @@ impl App {
             )
             .style(pill_pick)
             .handle(caret_handle(false))
-            .width(Length::Fixed(150.0))
+            .width(Length::Fixed(180.0))
             .into()
         };
 
@@ -4794,7 +4987,7 @@ impl App {
             )
             .style(speed_pick)
             .handle(caret_handle(false))
-            .width(Length::Fixed(150.0)),
+            .width(Length::Fixed(180.0)),
         );
 
         let follow_on = self.follow_playhead;
@@ -4811,6 +5004,19 @@ impl App {
                 .width(Length::Fixed(64.0)),
         );
 
+        let timestamps_on = self.show_timestamps;
+        let timestamps = settings_control(
+            action(text(if timestamps_on { "On" } else { "Off" }).size(theme::TEXT_XS))
+                .on_press(Message::TimestampsToggled(!timestamps_on))
+                .style(move |theme, status| {
+                    if timestamps_on {
+                        pill_button_active(theme, status)
+                    } else {
+                        pill_button_secondary(theme, status)
+                    }
+                })
+                .width(Length::Fixed(64.0)),
+        );
         let notifications_on = self.notifications;
         let notifications = settings_control(
             action(text(if notifications_on { "On" } else { "Off" }).size(theme::TEXT_XS))
@@ -4829,11 +5035,11 @@ impl App {
             .output_dir
             .as_ref()
             .map(|path| path.display().to_string())
-            .unwrap_or_else(|| "Next to each audio file".to_string());
-        let change = action("Change")
+            .unwrap_or_else(|| "Audio source directory".to_string());
+        let change = action_text("Change")
             .on_press_maybe((!running).then_some(Message::PickOutput))
             .style(pill_button_secondary);
-        let use_audio_folder = action("Use audio folder")
+        let use_audio_folder = action_text("Use audio folder")
             .on_press_maybe(
                 (!running && self.output_dir.is_some()).then_some(Message::ResetOutputDir),
             )
@@ -4847,9 +5053,11 @@ impl App {
             column![
                 text("Save location")
                     .size(theme::TEXT_SM)
+                    .wrapping(NO_WRAP)
                     .color(scheme.text),
                 text(ellipsize_middle(&location, 46))
                     .size(11)
+                    .wrapping(NO_WRAP)
                     .color(scheme.muted),
             ]
             .spacing(1)
@@ -4891,13 +5099,13 @@ impl App {
         )
         .on_press(Message::OpenModelsFolder)
         .style(pill_button_secondary);
-        let download_models = action("Download missing")
+        let download_models = action_text("Download missing")
             .on_press_maybe(
                 (!self.models_ready() && self.model_download.is_none())
                     .then_some(Message::DownloadModels),
             )
             .style(pill_button_secondary);
-        let clear_partial = action("Clear partial")
+        let clear_partial = action_text("Clear partial")
             .on_press_maybe((self.model_download.is_none()).then_some(Message::ClearPartialModels))
             .style(pill_button_secondary);
         let models_row = column![
@@ -4926,6 +5134,7 @@ impl App {
         body = body.push(settings_row("Preset", preset, scheme));
         body = body.push(settings_row("Speakers", speakers, scheme));
         body = body.push(settings_row("Language", language, scheme));
+        body = body.push(settings_row("Show timestamps", timestamps, scheme));
         body = body.push(settings_divider(scheme));
         body = body.push(settings_section_label("Playback", scheme));
         body = body.push(settings_row("Speed", speed, scheme));
@@ -4967,7 +5176,7 @@ impl App {
                 .size(11)
                 .color(scheme.muted),
             horizontal_space(),
-            action("Done")
+            action_text("Done")
                 .on_press(Message::CloseSettings)
                 .style(color_button(scheme.blue, scheme.on_accent)),
         ]
@@ -5015,7 +5224,12 @@ impl App {
 
         let clock = row![
             icon_colored(ICON_CLOCK, 14.0, scheme.text),
-            text(self.elapsed().unwrap_or_default()).width(Length::Fixed(60.0)),
+            text(self.timer_text())
+                .size(12)
+                .width(Length::Shrink)
+                .style(move |_theme| text::Style {
+                    color: Some(scheme.text),
+                }),
         ]
         .spacing(4)
         .align_y(iced::Alignment::Center);
@@ -5049,38 +5263,64 @@ impl App {
             text(label).into()
         };
 
-        let status_row = row![
-            clock,
-            stack![
-                progress_bar(0.0..=1.0, global_progress)
-                    .width(Length::Fill)
-                    .height(Length::Fixed(28.0))
-                    .style(move |_theme| progress_bar::Style {
-                        background: scheme.bar_track.into(),
-                        bar: scheme.blue.into(),
-                        border: iced::border::rounded(14.0),
-                    }),
-                container(label_el)
-                    .center_x(Length::Fill)
-                    .center_y(Length::Fill),
-            ]
-            .width(Length::Fill),
+        let bar_style = move |_theme: &Theme| progress_bar::Style {
+            background: linear_gradient(
+                theme::darken(scheme.bar_track, 0.12),
+                theme::lighten(scheme.bar_track, 0.05),
+            ),
+            bar: linear_gradient(
+                theme::lighten(scheme.progress, 0.28),
+                theme::darken(scheme.progress, 0.06),
+            ),
+            border: iced::border::Border {
+                color: theme::darken(scheme.bar_track, 0.20),
+                width: 1.0,
+                radius: 15.0.into(),
+            },
+        };
+        let progress_stack = stack![
+            progress_bar(0.0..=1.0, global_progress)
+                .width(Length::Fill)
+                .height(Length::Fixed(30.0))
+                .style(bar_style),
+            container(label_el)
+                .center_x(Length::Fill)
+                .center_y(Length::Fill),
         ]
-        .spacing(2)
-        .align_y(iced::Alignment::Center);
+        .width(Length::Fill);
+        let progress_shell = container(progress_stack)
+            .width(Length::Fill)
+            .style(move |_theme| container::Style {
+                border: iced::border::Border {
+                    color: Color::TRANSPARENT,
+                    width: 0.0,
+                    radius: 15.0.into(),
+                },
+                shadow: Shadow {
+                    color: Color::from_rgba(0.0, 0.0, 0.0, 0.20),
+                    offset: Vector::new(0.0, 3.0),
+                    blur_radius: 10.0,
+                },
+                ..container::Style::default()
+            });
+
+        let status_row = row![clock, progress_shell]
+            .spacing(4)
+            .align_y(iced::Alignment::Center);
 
         let mut middle = column![status_row].spacing(8).width(Length::Fill);
         middle = middle.push(self.timeline_element(&scheme));
         middle = middle.push(
             row![
                 self.player_element(&scheme),
-                action("Summary")
+                horizontal_space(),
+                action_text("Summary")
                     .on_press_maybe(
                         (!running && self.has_results()).then_some(Message::OpenSummary)
                     )
                     .style(pill_button_secondary),
                 self.tip(
-                    action("Rename Speakers")
+                    action_text("Rename")
                         .on_press_maybe(
                             (!running
                                 && self.shown_output().is_some()
@@ -5092,10 +5332,20 @@ impl App {
                     &scheme,
                 ),
             ]
-            .spacing(8)
+            .spacing(4)
             .align_y(iced::Alignment::Center)
             .width(Length::Fill),
         );
+
+        let middle = container(middle)
+            .width(Length::Fill)
+            .padding(12)
+            .style(move |_theme| container::Style {
+                background: Some(scheme.panel_bg.into()),
+                border: iced::border::rounded(16.0),
+                shadow: soft_shadow(),
+                ..container::Style::default()
+            });
 
         let mut transcript_box = column![]
             .spacing(6)
@@ -5106,53 +5356,45 @@ impl App {
         }
         transcript_box = transcript_box.push(self.transcript_element());
 
-        let left_panel: Element<Message> = self.queue_panel(&scheme);
+        let left_panel: Element<Message> = self.queue_panel(&scheme, LEFT_PANEL_WIDTH);
 
-        let search_actions_row: Element<Message> = container(
-            row![
-                self.search_element(&scheme),
-                horizontal_space(),
-                action("Copy")
-                    .on_press_maybe(
-                        (!self.shown_transcript().is_empty()).then_some(Message::CopyTranscript)
-                    )
-                    .style(pill_button_secondary),
-                action("Save")
-                    .on_press_maybe(
-                        (self.shown_output().is_some() && !self.shown_transcript().is_empty())
-                            .then_some(Message::SaveTranscript)
-                    )
-                    .style(pill_button_secondary),
-                action("Reveal")
-                    .on_press_maybe(
-                        (self.shown_output().is_some()
-                            || self.shown_audio().is_some()
-                            || self.output_dir.is_some())
-                        .then_some(Message::RevealOutput)
-                    )
-                    .style(pill_button_secondary),
-                pick_list(
-                    ExportFormat::ALL,
-                    None::<ExportFormat>,
-                    Message::ExportChoice,
+        let actions_row = row![
+            action_text("Copy")
+                .on_press_maybe(
+                    (!self.shown_transcript().is_empty()).then_some(Message::CopyTranscript)
                 )
-                .placeholder("Export\u{2026}")
-                .style(ink_pick(scheme.ink))
-                .handle(caret_handle(true)),
-                pick_list(HelpKind::ALL, None::<HelpKind>, Message::HelpChoice)
-                    .placeholder("Help\u{2026}")
-                    .style(ink_pick(scheme.ink))
-                    .handle(caret_handle(true)),
-            ]
-            .spacing(8)
-            .align_y(iced::Alignment::Center),
-        )
+                .style(pill_button_secondary),
+            action_text("Save")
+                .on_press_maybe(
+                    (self.shown_output().is_some() && !self.shown_transcript().is_empty())
+                        .then_some(Message::SaveTranscript)
+                )
+                .style(pill_button_secondary),
+            action_text("Reveal")
+                .on_press_maybe(
+                    (self.shown_output().is_some()
+                        || self.shown_audio().is_some()
+                        || self.output_dir.is_some())
+                    .then_some(Message::RevealOutput)
+                )
+                .style(pill_button_secondary),
+        ]
+        .spacing(6)
+        .align_y(iced::Alignment::Center);
+
+        let search_actions_row: Element<Message> = row![
+            self.search_element(&scheme),
+            horizontal_space(),
+            actions_row
+        ]
+        .spacing(6)
+        .align_y(iced::Alignment::Center)
         .width(Length::Fill)
         .into();
 
         let mut right = column![]
             .spacing(12)
-            .width(Length::FillPortion(RIGHT_PORTION))
+            .width(Length::Fill)
             .height(Length::Fill);
         if let Some(notice) = self.model_notice(&scheme) {
             right = right.push(notice);
@@ -5190,7 +5432,7 @@ impl App {
                 .width(Length::Fixed(32.0))
                 .height(Length::Fixed(32.0)),
             column![
-                text("Transiel").size(theme::TEXT_XL).font(Font {
+                text("Hippo Transcribe").size(theme::TEXT_XL).font(Font {
                     weight: font::Weight::Bold,
                     ..Font::DEFAULT
                 }),
@@ -5214,13 +5456,11 @@ impl App {
                 "Settings (Ctrl+,)",
                 &scheme,
             ),
-            self.tip(
-                action(icon(ICON_HELP, 16.0))
-                    .on_press(Message::HelpChoice(HelpKind::About))
-                    .style(pill_button_secondary),
-                "Help",
-                &scheme,
-            ),
+            pick_list(HelpKind::ALL, None::<HelpKind>, Message::HelpChoice)
+                .placeholder("Help")
+                .style(pill_pick)
+                .handle(caret_handle(true))
+                .width(Length::Fixed(92.0)),
         ]
         .spacing(theme::SPACE_SM)
         .align_y(iced::Alignment::Center);
@@ -5228,11 +5468,11 @@ impl App {
         let mut base = column![
             header,
             row![left_panel, right_panel]
-                .spacing(12)
+                .spacing(PANEL_GAP)
                 .height(Length::Fill),
         ]
         .spacing(8)
-        .padding(12);
+        .padding(OUTER_PADDING);
 
         if self.console_open {
             base = base.push(self.console_panel(&scheme));
@@ -5276,10 +5516,10 @@ impl App {
                     }),
                     row![
                         horizontal_space(),
-                        action("Cancel")
+                        action_text("Cancel")
                             .on_press(Message::CancelDeleteLine)
                             .style(pill_button_secondary),
-                        action("Delete")
+                        action_text("Delete")
                             .on_press(Message::ConfirmDeleteLine)
                             .style(color_button(scheme.danger, scheme.on_accent)),
                     ]
@@ -5313,10 +5553,10 @@ impl App {
             .spacing(10);
             col = col.push(
                 row![
-                    action("Merge next")
+                    action_text("Merge next")
                         .on_press(Message::MergeNextLine)
                         .style(pill_button_secondary),
-                    action("Split at playhead")
+                    action_text("Split at playhead")
                         .on_press(Message::SplitLineAtPlayhead)
                         .style(pill_button_secondary),
                 ]
@@ -5325,17 +5565,17 @@ impl App {
             col = col.push(
                 container(
                     row![
-                        action("Delete")
+                        action_text("Delete")
                             .on_press(Message::DeleteLineEdit)
                             .style(color_button(scheme.danger, scheme.on_accent)),
-                        action("Copy line")
+                        action_text("Copy line")
                             .on_press(Message::CopyLineEdit)
                             .style(pill_button_secondary),
                         horizontal_space(),
-                        action("Save")
+                        action_text("Save")
                             .on_press(Message::SaveLineEdit)
                             .style(color_button(scheme.blue, scheme.on_accent)),
-                        action("Cancel")
+                        action_text("Cancel")
                             .on_press(Message::CancelLineEdit)
                             .style(pill_button_secondary),
                     ]
@@ -5396,7 +5636,7 @@ impl App {
             let col = column![
                 container(scroll).width(Length::Fill),
                 container(
-                    row![action("Close")
+                    row![action_text("Close")
                         .on_press(Message::CloseSummary)
                         .style(color_button(scheme.blue, scheme.on_accent))]
                     .spacing(8),
@@ -5440,21 +5680,54 @@ impl App {
                     }
                 }
                 HelpKind::About => {
-                    for line in [
-                        format!("transiel {}", env!("CARGO_PKG_VERSION")),
-                        "Local speaker diarization + transcription.".to_string(),
-                        "Diarization: pyannote segmentation + wespeaker (sherpa-onnx).".to_string(),
-                        "Transcription: whisper.cpp.".to_string(),
-                        "Runs fully offline once models are downloaded.".to_string(),
-                    ] {
-                        col = col.push(text(line));
-                    }
+                    col = col.push(
+                        column![
+                            text(format!("Hippo Transcribe {}", env!("CARGO_PKG_VERSION")))
+                                .size(theme::TEXT_MD)
+                                .font(Font {
+                                    weight: font::Weight::Medium,
+                                    ..Font::DEFAULT
+                                }),
+                            text("Local speaker diarization + transcription.")
+                                .size(theme::TEXT_SM)
+                                .color(scheme.muted),
+                            text("Diarization: pyannote segmentation + wespeaker (sherpa-onnx).")
+                                .size(theme::TEXT_SM)
+                                .color(scheme.muted),
+                            text("Transcription: whisper.cpp.")
+                                .size(theme::TEXT_SM)
+                                .color(scheme.muted),
+                            text("Runs fully offline once models are downloaded.")
+                                .size(theme::TEXT_SM)
+                                .color(scheme.muted),
+                        ]
+                        .spacing(4),
+                    );
+                    col = col.push(settings_divider(scheme));
+                    col = col.push(
+                        column![
+                            settings_section_label("License", scheme),
+                            text("Free software, licensed under GPLv3.").size(theme::TEXT_MD),
+                            text("Copyright (C) 2026 Sean Wu.")
+                                .size(theme::TEXT_SM)
+                                .color(scheme.muted),
+                            // TODO: add "Source: <repository URL>" once published.
+                            text("Provided without warranty; see the license for details.")
+                                .size(theme::TEXT_SM)
+                                .color(scheme.muted),
+                            settings_section_label("Models", scheme),
+                            text("pyannote (MIT), wespeaker (CC BY 4.0), Whisper (MIT).")
+                                .size(theme::TEXT_SM)
+                                .color(scheme.muted),
+                        ]
+                        .spacing(4),
+                    );
                 }
                 HelpKind::Console => {}
             }
             col = col.push(
                 container(
-                    row![action("Close")
+                    row![action_text("Close")
                         .on_press(Message::CloseHelp)
                         .style(color_button(scheme.blue, scheme.on_accent))]
                     .spacing(8),
@@ -5477,7 +5750,9 @@ impl App {
         for (index, (original, value)) in self.rename_fields.iter().enumerate() {
             col = col.push(
                 row![
-                    text(original.clone()).width(Length::Fixed(120.0)),
+                    text(original.clone())
+                        .wrapping(NO_WRAP)
+                        .width(Length::Fixed(120.0)),
                     text_input(original.as_str(), value)
                         .id(rename_id(index))
                         .on_input(move |text| Message::RenameName(index, text))
@@ -5492,10 +5767,10 @@ impl App {
         col = col.push(
             container(
                 row![
-                    action("Save")
+                    action_text("Save")
                         .on_press(Message::RenameSave)
                         .style(color_button(scheme.blue, scheme.on_accent)),
-                    action("Cancel")
+                    action_text("Cancel")
                         .on_press(Message::RenameCancel)
                         .style(pill_button_secondary),
                 ]
@@ -5628,7 +5903,8 @@ impl canvas::Program<Message> for Timeline {
         let width = bounds.width;
         let height = bounds.height;
 
-        frame.fill_rectangle(Point::ORIGIN, bounds.size(), self.track);
+        // Flat inset track.
+        frame.fill_rectangle(Point::ORIGIN, Size::new(width, height), self.track);
 
         let band_height = (height * 0.16).clamp(6.0, 12.0);
         let wave_area = height - band_height - 4.0;
@@ -5653,15 +5929,32 @@ impl canvas::Program<Message> for Timeline {
                 if amplitude <= 0.0 {
                     continue;
                 }
-                frame.fill_rectangle(
-                    Point::new(x, mid - amplitude),
-                    Size::new(bar, amplitude * 2.0),
-                    self.wave,
-                );
+                let top = mid - amplitude;
+                let bar_height = amplitude * 2.0;
+                frame.fill_rectangle(Point::new(x, top), Size::new(bar, bar_height), self.wave);
             }
         }
 
+        // A faint zero line gives the mirrored bars a shared axis.
+        frame.fill_rectangle(
+            Point::new(0.0, mid - 0.5),
+            Size::new(width, 1.0),
+            Color {
+                a: 0.25,
+                ..theme::lighten(self.wave, 0.65)
+            },
+        );
+
         if self.duration > 0.0 {
+            let band_y = height - band_height;
+            frame.fill_rectangle(
+                Point::new(0.0, (band_y - 1.0).max(0.0)),
+                Size::new(width, 1.0),
+                Color {
+                    a: 0.35,
+                    ..theme::darken(self.track, 0.40)
+                },
+            );
             for turn in self.turns.iter() {
                 let x0 = self.x_of(turn.start / self.duration, width);
                 let x1 = self.x_of(turn.end / self.duration, width);
@@ -5670,9 +5963,10 @@ impl canvas::Program<Message> for Timeline {
                 }
                 let left = x0.max(0.0);
                 let right = x1.min(width);
+                let turn_width = (right - left).max(1.0);
                 frame.fill_rectangle(
-                    Point::new(left, height - band_height),
-                    Size::new((right - left).max(1.0), band_height),
+                    Point::new(left, band_y),
+                    Size::new(turn_width, band_height),
                     turn.color,
                 );
             }
@@ -5680,6 +5974,11 @@ impl canvas::Program<Message> for Timeline {
             frame.fill_rectangle(
                 Point::new((x - 1.0).max(0.0), 0.0),
                 Size::new(2.0, height),
+                self.playhead_color,
+            );
+            frame.fill_rectangle(
+                Point::new((x - 5.0).max(0.0), 1.0),
+                Size::new(10.0, 3.0),
                 self.playhead_color,
             );
         }
@@ -5767,9 +6066,10 @@ impl Player {
 fn logo_handle() -> iced::widget::image::Handle {
     static LOGO: OnceLock<iced::widget::image::Handle> = OnceLock::new();
     LOGO.get_or_init(|| {
-        let image = image::load_from_memory(include_bytes!("../../icons/transiel-logo-256.png"))
-            .expect("bundled transiel logo")
-            .into_rgba8();
+        let image =
+            image::load_from_memory(include_bytes!("../../icons/hippo-transcribe-logo-256.png"))
+                .expect("bundled Hippo Transcribe logo")
+                .into_rgba8();
         let (width, height) = image.dimensions();
         iced::widget::image::Handle::from_rgba(width, height, image.into_raw())
     })
@@ -5872,7 +6172,6 @@ const ICON_ZOOM_OUT: char = '\u{f62d}';
 const ICON_CLOCK: char = '\u{f293}';
 const ICON_MOON: char = '\u{f494}';
 const ICON_SUN: char = '\u{f5a1}';
-const ICON_HELP: char = '\u{f505}';
 const ICON_GEAR: char = '\u{f3e2}';
 const ICON_MIC: char = '\u{f490}';
 const ICON_FILE_TEXT: char = '\u{f38b}';
@@ -5951,6 +6250,7 @@ fn settings_row<'a>(
     row![
         text(label)
             .size(theme::TEXT_SM)
+            .wrapping(NO_WRAP)
             .color(scheme.text)
             .width(Length::Fill),
         control.into(),
@@ -5971,6 +6271,7 @@ fn settings_control<'a>(control: impl Into<Element<'a, Message>>) -> Element<'a,
 fn settings_section_label<'a>(label: &'a str, scheme: Scheme) -> Element<'a, Message> {
     text(label)
         .size(11)
+        .wrapping(NO_WRAP)
         .font(Font {
             weight: font::Weight::Bold,
             ..Font::DEFAULT
@@ -6019,6 +6320,13 @@ fn modal_overlay<'a>(
         .width(Length::Fill)
         .height(Length::Fill);
     stack![base, backdrop, centered].into()
+}
+
+fn queue_weight(item: &QueueItem, fallback: f32) -> f32 {
+    item.duration
+        .map(|duration| duration as f32)
+        .filter(|duration| *duration > 0.0)
+        .unwrap_or(fallback)
 }
 
 /// Progress-bar text: phase (with detail) plus overall percentage.
@@ -6112,11 +6420,33 @@ fn queue_scrollbar_style(theme: &iced::Theme, status: scrollable::Status) -> scr
     style
 }
 
+/// A speaker label filled with the same colour as its timeline swatch.
+fn speaker_chip(label: &str, accent: Color, ink: Color, size: f32) -> Element<'static, Message> {
+    container(
+        text(label.to_string())
+            .size(size)
+            .font(Font {
+                weight: font::Weight::Bold,
+                ..Font::default()
+            })
+            .color(ink)
+            .wrapping(NO_WRAP),
+    )
+    .padding([1, 5])
+    .style(move |_theme| container::Style {
+        background: Some(accent.into()),
+        border: iced::border::rounded(4.0),
+        ..container::Style::default()
+    })
+    .into()
+}
+
 fn sms_row(
     content: &str,
     speaker: &str,
     stamp: &str,
     left: bool,
+    single_speaker: bool,
     color: Color,
     ink: Color,
     tint: Option<Color>,
@@ -6135,22 +6465,17 @@ fn sms_row(
             radius: 10.0.into(),
         }
     } else {
-        iced::border::rounded(10.0)
-    };
-    let bold = Font {
-        weight: font::Weight::Bold,
-        ..Font::default()
+        iced::border::Border {
+            color: Color { a: 0.45, ..color },
+            width: 1.0,
+            radius: 10.0.into(),
+        }
     };
     let mut body = column![].spacing(2);
     if !speaker.is_empty() || !stamp.is_empty() {
         let mut meta = row![].spacing(6).align_y(iced::Alignment::Center);
         if !speaker.is_empty() {
-            meta = meta.push(
-                text(speaker.to_string())
-                    .size(size * 0.72)
-                    .font(bold)
-                    .color(ink),
-            );
+            meta = meta.push(speaker_chip(speaker, color, ink, size * 0.72));
         }
         if !stamp.is_empty() {
             meta = meta.push(
@@ -6180,7 +6505,9 @@ fn sms_row(
             border,
             ..container::Style::default()
         });
-    if left {
+    if single_speaker {
+        bubble.into()
+    } else if left {
         row![bubble, horizontal_space()].spacing(8).into()
     } else {
         row![horizontal_space(), bubble].spacing(8).into()
@@ -6202,29 +6529,19 @@ fn line_element(
     scheme: &Scheme,
     size: f32,
     active: bool,
+    show_timestamps: bool,
 ) -> Element<'static, Message> {
-    let bold = Font {
-        weight: font::Weight::Bold,
-        ..Font::default()
-    };
     let ink = scheme.ink;
 
     let speaker = line.speaker.clone();
-    let pos = if speaker.is_empty() {
-        0
+    let rest = line_text(line);
+    let stamp = if show_timestamps {
+        line.start
+            .map(|s| format_timestamp(s as f64))
+            .unwrap_or_default()
     } else {
-        line.raw.find(&speaker).unwrap_or(0)
+        String::new()
     };
-    let rest = if speaker.is_empty() {
-        line.raw.clone()
-    } else {
-        let after = &line.raw[pos + speaker.len()..];
-        after.strip_prefix(": ").unwrap_or(after).to_string()
-    };
-    let stamp = line
-        .start
-        .map(|s| format_timestamp(s as f64))
-        .unwrap_or_default();
 
     let mut content = row![]
         .spacing(6)
@@ -6236,7 +6553,7 @@ fn line_element(
     }
 
     if !speaker.is_empty() {
-        content = content.push(text(speaker).size(size).font(bold).color(ink));
+        content = content.push(speaker_chip(&speaker, accent, ink, size));
     }
 
     content = content.push(rich_text(styled_spans(
@@ -6250,10 +6567,7 @@ fn line_element(
     )));
     content = content.push(horizontal_space());
 
-    let background = search_tint.unwrap_or(Color {
-        a: if active { 0.20 } else { 0.09 },
-        ..accent
-    });
+    let background = search_tint.unwrap_or(accent);
     let border = if active {
         iced::border::Border {
             color: ink,
@@ -6262,7 +6576,7 @@ fn line_element(
         }
     } else {
         iced::border::Border {
-            color: Color { a: 0.50, ..accent },
+            color: Color { a: 0.45, ..accent },
             width: 1.0,
             radius: 6.0.into(),
         }
@@ -6283,7 +6597,7 @@ fn line_element(
     })
     .on_press(Message::SelectLine(idx));
 
-    stack![
+    let line: Element<'static, Message> = stack![
         container(content)
             .width(Length::Fill)
             .padding([3, 6])
@@ -6301,6 +6615,27 @@ fn line_element(
         .on_right_press(Message::EditLine(idx)),
         keyboard_hit,
     ]
+    .into();
+    let tip_bg = scheme.tip_bg;
+    let tip_text = scheme.tip_text;
+    let tip_border = scheme.border;
+    tooltip(
+        line,
+        container(text("Right-click to edit").size(12))
+            .padding(6)
+            .style(move |_theme| container::Style {
+                background: Some(tip_bg.into()),
+                text_color: Some(tip_text),
+                border: iced::border::Border {
+                    color: tip_border,
+                    width: 1.0,
+                    radius: 6.0.into(),
+                },
+                shadow: soft_shadow(),
+                ..container::Style::default()
+            }),
+        tooltip::Position::Top,
+    )
     .into()
 }
 
@@ -6311,12 +6646,33 @@ fn action<'a>(content: impl Into<Element<'a, Message>>) -> iced::widget::Button<
     button(content)
 }
 
+/// A button with a single-line text label.
+fn action_text<'a>(label: &'a str) -> iced::widget::Button<'a, Message> {
+    action(text(label).wrapping(NO_WRAP))
+}
+
 /// A subtle drop shadow that gives surfaces a soft, raised look.
 fn soft_shadow() -> Shadow {
     Shadow {
-        color: Color::from_rgba(0.0, 0.0, 0.0, 0.20),
-        offset: Vector::new(0.0, 2.0),
-        blur_radius: 8.0,
+        color: Color::from_rgba(0.0, 0.0, 0.0, 0.22),
+        offset: Vector::new(0.0, 3.0),
+        blur_radius: 9.0,
+    }
+}
+
+/// A top-to-bottom gradient background.
+fn linear_gradient(top: Color, bottom: Color) -> iced::Background {
+    iced::Background::Gradient(iced::Gradient::Linear(
+        iced::gradient::Linear::new(iced::Degrees(180.0))
+            .add_stop(0.0, top)
+            .add_stop(1.0, bottom),
+    ))
+}
+
+fn style_background_color(style: &button::Style) -> Option<Color> {
+    match &style.background {
+        Some(iced::Background::Color(color)) => Some(*color),
+        _ => None,
     }
 }
 
@@ -6330,36 +6686,68 @@ fn dialog_shadow() -> Shadow {
 }
 
 fn pill_button_secondary(theme: &iced::Theme, status: button::Status) -> button::Style {
-    let mut style = button::secondary(theme, status);
-    style.border.radius = PILL.into();
-    style.shadow = soft_shadow();
-    style
+    let base = button::secondary(theme, status);
+    let color = style_background_color(&base).unwrap_or(theme.palette().background);
+    let (top, bottom, shadow) = match status {
+        button::Status::Hovered => (
+            theme::lighten(color, 0.16),
+            theme::lighten(color, 0.02),
+            soft_shadow(),
+        ),
+        button::Status::Pressed => (
+            theme::darken(color, 0.12),
+            theme::darken(color, 0.02),
+            Shadow::default(),
+        ),
+        button::Status::Disabled => (color, color, Shadow::default()),
+        button::Status::Active => (
+            theme::lighten(color, 0.07),
+            theme::darken(color, 0.05),
+            soft_shadow(),
+        ),
+    };
+    button::Style {
+        background: Some(linear_gradient(top, bottom)),
+        text_color: base.text_color,
+        border: iced::border::Border {
+            color: theme::lighten(color, 0.28),
+            width: 1.0,
+            radius: PILL.into(),
+        },
+        shadow,
+    }
 }
 
 /// A secondary button tinted with the accent colour to show a toggled-on state.
 fn pill_button_active(theme: &iced::Theme, status: button::Status) -> button::Style {
     let primary = theme.palette().primary;
-    let alpha = match status {
-        button::Status::Hovered => 0.30,
-        button::Status::Pressed => 0.38,
-        button::Status::Disabled => 0.12,
-        button::Status::Active => 0.22,
+    let (alpha, border_alpha, shadow): (f32, f32, Shadow) = match status {
+        button::Status::Hovered => (0.30, 0.65, soft_shadow()),
+        button::Status::Pressed => (0.38, 0.70, Shadow::default()),
+        button::Status::Disabled => (0.12, 0.30, Shadow::default()),
+        button::Status::Active => (0.22, 0.55, soft_shadow()),
     };
     button::Style {
-        background: Some(
+        background: Some(linear_gradient(
+            Color {
+                a: (alpha + 0.10).min(0.95),
+                ..primary
+            },
             Color {
                 a: alpha,
                 ..primary
-            }
-            .into(),
-        ),
+            },
+        )),
         text_color: theme.palette().text,
         border: iced::border::Border {
-            color: Color { a: 0.55, ..primary },
+            color: Color {
+                a: border_alpha,
+                ..primary
+            },
             width: 1.0,
             radius: PILL.into(),
         },
-        shadow: soft_shadow(),
+        shadow,
     }
 }
 
@@ -6445,25 +6833,52 @@ fn greyed_button(scheme: Scheme) -> impl Fn(&iced::Theme, button::Status) -> but
 
 fn color_button(bg: Color, ink: Color) -> impl Fn(&iced::Theme, button::Status) -> button::Style {
     move |theme, status| {
-        let (bg, text) = match status {
-            button::Status::Hovered => (Color { a: 0.85, ..bg }, ink),
+        let (top, bottom, text, shadow) = match status {
+            button::Status::Hovered => (
+                theme::lighten(bg, 0.18),
+                theme::lighten(bg, 0.02),
+                ink,
+                soft_shadow(),
+            ),
+            button::Status::Pressed => (
+                theme::darken(bg, 0.16),
+                theme::darken(bg, 0.04),
+                ink,
+                Shadow::default(),
+            ),
             // Filled buttons keep their hue when disabled, but the label must
             // follow the active theme rather than the (possibly dark) accent ink.
-            button::Status::Disabled => (
-                Color { a: 0.30, ..bg },
-                Color {
-                    a: 0.72,
-                    ..theme.palette().text
-                },
+            button::Status::Disabled => {
+                let faded = Color { a: 0.45, ..bg };
+                (
+                    faded,
+                    faded,
+                    Color {
+                        a: 0.85,
+                        ..theme.palette().text
+                    },
+                    Shadow::default(),
+                )
+            }
+            _ => (
+                theme::lighten(bg, 0.12),
+                theme::darken(bg, 0.04),
+                ink,
+                soft_shadow(),
             ),
-            _ => (bg, ink),
         };
         button::Style {
-            background: Some(bg.into()),
+            background: Some(linear_gradient(top, bottom)),
             text_color: text,
-            border: iced::border::rounded(PILL),
-            shadow: soft_shadow(),
-            ..button::Style::default()
+            border: iced::border::Border {
+                color: Color {
+                    a: 0.45,
+                    ..theme::lighten(bg, 0.55)
+                },
+                width: 1.0,
+                radius: PILL.into(),
+            },
+            shadow,
         }
     }
 }
@@ -6601,8 +7016,10 @@ mod tests {
     }
 
     fn temp_dir(tag: &str) -> PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("transiel-app-test-{tag}-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!(
+            "hippo-transcribe-app-test-{tag}-{}",
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
@@ -7311,8 +7728,8 @@ mod tests {
         let _guard = env_lock();
         let _config = ConfigEnv::new("model-config");
         let models = temp_dir("model-empty");
-        let old_models = std::env::var("TRANSIEL_MODELS_DIR").ok();
-        std::env::set_var("TRANSIEL_MODELS_DIR", &models);
+        let old_models = std::env::var("HIPPO_TRANSCRIBE_MODELS_DIR").ok();
+        std::env::set_var("HIPPO_TRANSCRIBE_MODELS_DIR", &models);
 
         let mut app = App::new();
         assert!(!app.models_ready());
@@ -7342,9 +7759,9 @@ mod tests {
         let _ = app.view();
 
         if let Some(old) = old_models {
-            std::env::set_var("TRANSIEL_MODELS_DIR", old);
+            std::env::set_var("HIPPO_TRANSCRIBE_MODELS_DIR", old);
         } else {
-            std::env::remove_var("TRANSIEL_MODELS_DIR");
+            std::env::remove_var("HIPPO_TRANSCRIBE_MODELS_DIR");
         }
         let _ = std::fs::remove_dir_all(&models);
     }

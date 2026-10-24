@@ -48,7 +48,7 @@ impl Transcriber {
         samples: &[f32],
         language: Option<&str>,
     ) -> Result<Vec<Segment>, String> {
-        self.transcribe_with_threads_and_language(samples, self.threads, language)
+        self.transcribe_with_threads_and_language(samples, self.threads, language, false)
     }
 
     /// Transcribe 16 kHz mono samples, returning one entry per Whisper segment.
@@ -60,18 +60,20 @@ impl Transcriber {
         samples: &[f32],
         threads: i32,
     ) -> Result<Vec<Segment>, String> {
-        self.transcribe_with_threads_and_language(samples, threads, Some("en"))
+        self.transcribe_with_threads_and_language(samples, threads, Some("en"), false)
     }
 
     /// Transcribe 16 kHz mono samples with a specific thread count and language.
     ///
     /// Each call creates its own decode state, so one `Transcriber` (and model)
-    /// can be shared across threads.
+    /// can be shared across threads. `fast` disables the temperature fallback
+    /// and suppresses non-speech tokens for the speed preset.
     pub fn transcribe_with_threads_and_language(
         &self,
         samples: &[f32],
         threads: i32,
         language: Option<&str>,
+        fast: bool,
     ) -> Result<Vec<Segment>, String> {
         let mut state = self
             .ctx
@@ -87,6 +89,11 @@ impl Transcriber {
         params.set_print_realtime(false);
         params.set_print_timestamps(false);
         params.set_n_threads(threads);
+        if fast {
+            // The speed preset trades the temperature fallback for latency.
+            params.set_temperature_inc(0.0);
+            params.set_suppress_nst(true);
+        }
 
         state
             .full(params, samples)

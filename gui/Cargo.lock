@@ -4107,7 +4107,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "transiel-gui"
+name = "hippo-transcribe-gui"
 version = "0.1.0"
 dependencies = [
  "iced",

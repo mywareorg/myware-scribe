@@ -1,5 +1,5 @@
 [package]
-name = "transiel-core"
+name = "hippo-transcribe-core"
 version = "0.1.0"
 edition = "2021"
 

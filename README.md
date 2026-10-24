@@ -1,4 +1,4 @@
-# transiel
+# Hippo Transcribe
 
 Local, offline speaker diarization and transcription. A single native Rust
 executable provides both the desktop GUI (iced) and a command-line mode
@@ -19,9 +19,9 @@ speakers is fixed with `--num-speakers N` (default 2) or auto-detected with
 
 ## Workspace
 
-- `core/` — `transiel-core` library: audio, diarization, ASR, model/cache paths,
+- `core/` — `hippo-transcribe-core` library: audio, diarization, ASR, model/cache paths,
   pipeline, CLI.
-- `gui/` — `transiel-gui` binary: the iced GUI and the `--cli` entry point.
+- `gui/` — `hippo-transcribe-gui` binary: the iced GUI and the `--cli` entry point.
 
 ## Build
 
@@ -30,7 +30,7 @@ MSVC on Windows). `whisper.cpp` is built from source; on Linux `sherpa-onnx` is
 too, while Windows loads prebuilt sherpa-onnx DLLs at runtime.
 
 ```bash
-cargo build --release            # target/release/transiel
+cargo build --release            # target/release/hippo-transcribe
 ```
 
 - On Linux x86_64 the non-PIC relocation flag needed for the static sherpa
@@ -50,17 +50,17 @@ tests, builds, checks the executable's dependencies, and writes a release folder
 and zip under `dist\`.
 
 The app loads `sherpa-onnx-c-api.dll` and `onnxruntime.dll` from beside
-`transiel.exe` at runtime; no native library is linked into the executable. Only
+`hippo-transcribe.exe` at runtime; no native library is linked into the executable. Only
 `whisper.cpp` is compiled locally. The release folder contains the executable,
 both DLLs, the deploy scripts, README, LICENSE, and the sample. Set
-`TRANSIEL_SHERPA_DLL` to an explicit path to override the DLL location.
+`HIPPO_TRANSCRIBE_SHERPA_DLL` to an explicit path to override the DLL location.
 
 The sherpa-onnx release is a `.tar.bz2`. Windows' built-in tar has no bzip2
 support, so the script uses installed 7-Zip or Git for Windows' `bzip2` when
 available. If neither is present, it downloads a small standalone 7-Zip
-extractor into `%LOCALAPPDATA%\transiel\cache` automatically. Alternatively,
+extractor into `%LOCALAPPDATA%\hippo-transcribe\cache` automatically. Alternatively,
 extract the archive manually into
-`%LOCALAPPDATA%\transiel\cache\sherpa-onnx-v1.12.9-win-x64-shared`.
+`%LOCALAPPDATA%\hippo-transcribe\cache\sherpa-onnx-v1.12.9-win-x64-shared`.
 
 For the edit/run loop, use the fast iteration profile:
 
@@ -82,62 +82,67 @@ forces that). Pass `-SkipTests`, `-SkipBindgen`, `-Diagnose`, `-Clean`, `-NoZip`
 
 ## Models
 
-Models are non-gated and installed into `%LOCALAPPDATA%\transiel\models`
-(Windows) or `~/.cache/transiel/models` (Linux/macOS). Downloading is the only
+Models are non-gated and installed into `%LOCALAPPDATA%\hippo-transcribe\models`
+(Windows) or `~/.cache/hippo-transcribe/models` (Linux/macOS). Downloading is the only
 time the app needs the network; the pipeline itself is fully offline.
 
 Download everything at once (also what `deploy.bat` runs on Windows):
 
 ```bash
-transiel --cli models download --verify
+hippo-transcribe --cli models download --verify
 ```
 
 If models are missing on first launch, the GUI shows a **Download models** card
 and fetches the same files in the background with progress. Downloads resume
 from a `.part` file, verify SHA-256 checksums, and can be cancelled from the
 card. Readiness is checked against the selected preset, so the English-only
-speed preset does not require the multilingual accuracy model.
+speed and balanced presets do not require the multilingual accuracy model.
 
-- `ggml-large-v3-turbo-q5_0.bin` (accuracy), `ggml-base.en-q5_1.bin` (speed)
+- `ggml-large-v3-turbo-q5_0.bin` (accuracy), `ggml-base.en-q5_1.bin` (balanced),
+  `ggml-tiny.en-q5_1.bin` (speed)
 - `sherpa-onnx-pyannote-segmentation-3-0/model.onnx`
 - `wespeaker_en_voxceleb_resnet34_LM.onnx`
 
-Overrides: `TRANSIEL_MODELS_DIR` (root), `TRANSIEL_SEGMENTATION_MODEL`,
-`TRANSIEL_EMBEDDING_MODEL`, `TRANSIEL_WHISPER_MODEL`. Diarization is cached
-under `TRANSIEL_CACHE_DIR` (or the platform cache dir) and reused on re-runs.
+Overrides: `HIPPO_TRANSCRIBE_MODELS_DIR` (root), `HIPPO_TRANSCRIBE_SEGMENTATION_MODEL`,
+`HIPPO_TRANSCRIBE_EMBEDDING_MODEL`, `HIPPO_TRANSCRIBE_WHISPER_MODEL`. Diarization is cached
+under `HIPPO_TRANSCRIBE_CACHE_DIR` (or the platform cache dir) and reused on re-runs.
+The legacy `TRANSIEL_*` names are still read as a fallback, and data under the old
+`transiel` directories is adopted on first launch.
 
 Report what is present (exit non-zero if anything is missing or has the wrong
 size):
 
 ```bash
-transiel --cli models
+hippo-transcribe --cli models
 ```
 
 ## CLI
 
 ```bash
-transiel --cli audio.mp3                         # default preset (speed)
-transiel --cli audio.mp3 --preset accuracy
-transiel --cli a.mp3 b.mp3 --output-dir out/     # batch
-transiel --cli audio.mp3 --no-timestamps
-transiel --cli audio.mp3 --language es           # or auto
-transiel --cli audio.mp3 --progress-json         # line-delimited JSON events
-transiel --cli probe audio.mp3 120               # duration + RMS waveform
+hippo-transcribe --cli audio.mp3                         # default preset (speed)
+hippo-transcribe --cli audio.mp3 --preset balanced
+hippo-transcribe --cli audio.mp3 --preset accuracy
+hippo-transcribe --cli a.mp3 b.mp3 --output-dir out/     # batch
+hippo-transcribe --cli audio.mp3 --no-timestamps
+hippo-transcribe --cli audio.mp3 --language es           # or auto
+hippo-transcribe --cli audio.mp3 --progress-json         # line-delimited JSON events
+hippo-transcribe --cli probe audio.mp3 120               # duration + RMS waveform
 ```
 
-Presets: `speed` (whisper `base.en`) and `accuracy` (whisper `large-v3-turbo`).
+Presets: `speed` (whisper `tiny.en`), `balanced` (whisper `base.en`), and
+`accuracy` (whisper `large-v3-turbo`).
 
-Options: `--preset speed|accuracy`, `--language <code>|auto`,
+Options: `--preset speed|balanced|accuracy`, `--language <code>|auto`,
 `--num-speakers N`, `--auto-speakers`, `--output-dir`, `--no-timestamps`,
-`--no-cache`, `--progress-json`. The speed preset is English-only; the
-accuracy preset supports multilingual models.
+`--no-cache`, `--progress-json`. The speed and balanced presets are
+English-only; the accuracy preset supports multilingual models.
 
 Output: `<audio-stem>-<preset>-transcription.txt` (`[hh:mm:ss] SPEAKER N: text`),
 written next to the audio or into `--output-dir`.
 
 ## GUI
 
-Run `transiel` with no arguments. Add files/folders to the queue, or drag audio
+Run `hippo-transcribe` with no arguments. Add files/folders to the queue, or drag audio
 files and folders anywhere into the window, then choose a preset and speaker
 count and press Transcribe. The header theme button cycles light, dark and
 system themes. Files added (or imported) while a run is active join the queue
@@ -156,7 +161,7 @@ Transcript search supports a speaker filter, match case (`Aa`) and whole-word
 (`W`) matching. Right-click a line to edit it; the editor can copy the line,
 merge it with the next line, or split it at the playhead. Line deletion asks for
 confirmation. Saves are written atomically and keep a
-`<transcript>.transiel.bak` backup beside the source file.
+`<transcript>.hippo-transcribe.bak` backup beside the source file.
 
 Completed rows stay in the queue: click one to revisit that file's transcript,
 speaker timeline, waveform and playback. Renaming speakers or saving writes back
@@ -170,14 +175,18 @@ diarization cache.
 
 ## Deploy (Windows)
 
-`deploy.bat` (shipped beside `transiel.exe`) installs the exe to
-`%LOCALAPPDATA%\Programs\transiel`, creates a Start Menu shortcut named
-`transiel`, adds it to the user `PATH`, and downloads the models with the
+`deploy.bat` (shipped beside `hippo-transcribe.exe`) installs the exe to
+`%LOCALAPPDATA%\Programs\hippo-transcribe`, creates a Start Menu shortcut named
+`Hippo Transcribe`, adds it to the user `PATH`, and downloads the models with the
 built-in `curl.exe` (progress shows in the console). Then open a new terminal and
-run `transiel`. `undeploy.bat` removes the install and shortcut
+run `hippo-transcribe`. `undeploy.bat` removes the install and shortcut
 (`/keepmodels` keeps the models).
 
 ## Licenses
+
+Hippo Transcribe itself is free software, licensed under the GNU General Public
+License v3.0. Copyright (C) 2026 Sean Wu. It is provided without warranty;
+see LICENSE for details.
 
 - `pyannote/segmentation-3.0` weights: MIT (via the sherpa-onnx ONNX conversion).
 - `wespeaker` speaker-embedding weights: CC BY 4.0 (attribution required).

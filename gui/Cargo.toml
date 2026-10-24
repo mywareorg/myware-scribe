@@ -1,10 +1,10 @@
 [package]
-name = "transiel-gui"
+name = "hippo-transcribe-gui"
 version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-transiel-core = { path = "../core" }
+hippo-transcribe-core = { path = "../core" }
 iced = { version = "0.13", features = ["tokio", "advanced", "canvas", "image-without-codecs"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
 rfd = "0.15"
@@ -25,5 +25,5 @@ windows-sys = { version = "0.59", features = [
 winresource = "0.1"
 
 [[bin]]
-name = "transiel"
+name = "hippo-transcribe"
 path = "src/main.rs"

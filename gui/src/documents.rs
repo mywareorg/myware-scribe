@@ -31,7 +31,10 @@ pub(crate) fn line_text(line: &DocLine) -> String {
             return after.trim_start().to_string();
         }
     }
-    rest.to_string()
+    rest.strip_prefix(": ")
+        .unwrap_or(rest)
+        .trim_start()
+        .to_string()
 }
 
 /// The `[timestamp] ` prefix of a rendered line, if present.

@@ -21,7 +21,7 @@ fn set_app_user_model_id() {
         fn SetCurrentProcessExplicitAppUserModelID(app_id: *const u16) -> i32;
     }
 
-    let id: Vec<u16> = OsStr::new("transiel")
+    let id: Vec<u16> = OsStr::new("HippoTranscribe")
         .encode_wide()
         .chain(Some(0))
         .collect();
@@ -79,10 +79,10 @@ fn main() -> iced::Result {
     if args.get(1).map(String::as_str) == Some("--cli") {
         #[cfg(windows)]
         attach_console();
-        std::process::exit(transiel_core::cli::run(&args[2..]));
+        std::process::exit(hippo_transcribe_core::cli::run(&args[2..]));
     }
 
-    iced::application("Transiel", App::update, App::view)
+    iced::application("Hippo Transcribe", App::update, App::view)
         .theme(App::theme)
         .subscription(App::subscription)
         .font(include_bytes!("../assets/bootstrap-icons.ttf").as_slice())

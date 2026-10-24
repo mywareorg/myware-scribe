@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-pub use transiel_core::event::{Event, SpeakerStat, Stats, Turn};
+pub use hippo_transcribe_core::event::{Event, SpeakerStat, Stats, Turn};
 
 /// Load a transcript from a .txt or .json file as "[time] speaker: text" lines.
 pub fn read_transcript(path: &Path) -> Option<String> {
@@ -37,7 +37,7 @@ pub fn read_transcript(path: &Path) -> Option<String> {
 
 /// Probe the duration (seconds) of an audio file.
 pub fn probe_duration(path: &Path) -> Option<f64> {
-    transiel_core::audio::duration(path).ok()
+    hippo_transcribe_core::audio::duration(path).ok()
 }
 
 /// Re-derived diarization turns and waveform for a completed item.
@@ -45,9 +45,9 @@ pub type CompletedDetails = (Option<Vec<Turn>>, Option<(f64, Vec<f32>)>);
 
 /// Read a completed item's diarization turns back out of the cache.
 pub fn load_turns(path: &Path, num_speakers: Option<i32>) -> Option<Vec<Turn>> {
-    let diarizer = transiel_core::models::diarizer_id();
-    transiel_core::cache::key(path, &diarizer, num_speakers)
-        .and_then(|key| transiel_core::cache::read(&key))
+    let diarizer = hippo_transcribe_core::models::diarizer_id();
+    hippo_transcribe_core::cache::key(path, &diarizer, num_speakers)
+        .and_then(|key| hippo_transcribe_core::cache::read(&key))
 }
 
 /// Re-derive a completed item's diarization turns (from the cache) and
@@ -58,13 +58,13 @@ pub fn load_completed(
     buckets: usize,
 ) -> CompletedDetails {
     let turns = load_turns(&path, num_speakers);
-    let probe = transiel_core::audio::waveform(&path, buckets).ok();
+    let probe = hippo_transcribe_core::audio::waveform(&path, buckets).ok();
     (turns, probe)
 }
 
 /// Fast waveform-only probe for backfilling restored queue items.
 pub fn probe_waveform(path: &Path, buckets: usize) -> Option<(f64, Vec<f32>)> {
-    transiel_core::audio::waveform(path, buckets).ok()
+    hippo_transcribe_core::audio::waveform(path, buckets).ok()
 }
 
 pub fn kill(pid: u32) {
@@ -112,7 +112,9 @@ pub fn spawn(
                 push(
                     &events,
                     Event::Error {
-                        message: format!("could not locate the transiel executable: {error}"),
+                        message: format!(
+                            "could not locate the Hippo Transcribe executable: {error}"
+                        ),
                     },
                 );
                 push(&events, Event::AllDone);

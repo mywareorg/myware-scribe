@@ -1,4 +1,4 @@
-//! Design tokens and colour palettes for the Transiel GUI.
+//! Design tokens and colour palettes for the Hippo Transcribe GUI.
 //!
 //! Every widget style resolves through [`Scheme`], so switching between the
 //! light and dark palettes does not require touching individual widgets.
@@ -30,6 +30,39 @@ pub const TEXT_SM: f32 = 13.0;
 pub const TEXT_MD: f32 = 14.0;
 pub const TEXT_LG: f32 = 20.0;
 pub const TEXT_XL: f32 = 24.0;
+
+/// Blend a colour toward white.
+pub fn lighten(color: Color, amount: f32) -> Color {
+    let t = amount.clamp(0.0, 1.0);
+    Color {
+        r: color.r + (1.0 - color.r) * t,
+        g: color.g + (1.0 - color.g) * t,
+        b: color.b + (1.0 - color.b) * t,
+        a: color.a,
+    }
+}
+
+/// Blend a colour toward black.
+pub fn darken(color: Color, amount: f32) -> Color {
+    let t = amount.clamp(0.0, 1.0);
+    Color {
+        r: color.r * (1.0 - t),
+        g: color.g * (1.0 - t),
+        b: color.b * (1.0 - t),
+        a: color.a,
+    }
+}
+
+/// Linear blend between two colours.
+pub fn mix(from: Color, to: Color, t: f32) -> Color {
+    let t = t.clamp(0.0, 1.0);
+    Color {
+        r: from.r + (to.r - from.r) * t,
+        g: from.g + (to.g - from.g) * t,
+        b: from.b + (to.b - from.b) * t,
+        a: from.a + (to.a - from.a) * t,
+    }
+}
 
 /// The user-selectable appearance mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -100,13 +133,13 @@ impl AppTheme {
     pub fn iced(self) -> Theme {
         let scheme = self.scheme();
         let name = match self {
-            AppTheme::Light => "Transiel Light",
-            AppTheme::Dark => "Transiel Dark",
+            AppTheme::Light => "Hippo Transcribe Light",
+            AppTheme::Dark => "Hippo Transcribe Dark",
             AppTheme::System => {
                 if Self::system_is_dark() {
-                    "Transiel Dark"
+                    "Hippo Transcribe Dark"
                 } else {
-                    "Transiel Light"
+                    "Hippo Transcribe Light"
                 }
             }
         };
@@ -141,6 +174,8 @@ pub struct Scheme {
     /// Inactive tracks (progress bars, dividers).
     pub track: Color,
     pub bar_track: Color,
+    /// Filled portion of progress bars.
+    pub progress: Color,
     pub timeline_bg: Color,
     /// Hairline borders and separators.
     pub border: Color,
@@ -181,6 +216,7 @@ impl Scheme {
             dialog_bg: Color::from_rgb(0.99, 0.99, 1.0),
             track: Color::from_rgb(0.88, 0.88, 0.93),
             bar_track: Color::from_rgb(0.88, 0.88, 0.93),
+            progress: Color::from_rgb(0.357, 0.808, 0.980),
             timeline_bg: Color::from_rgb(0.88, 0.88, 0.93),
             border: Color::from_rgb(0.84, 0.85, 0.91),
             blue: Color::from_rgb(0.357, 0.808, 0.980),
@@ -218,43 +254,44 @@ impl Scheme {
 
     pub fn dark() -> Scheme {
         Scheme {
-            bg: Color::from_rgb(0.055, 0.063, 0.086),
-            panel_bg: Color::from_rgb(0.090, 0.101, 0.141),
-            dialog_bg: Color::from_rgb(0.114, 0.129, 0.180),
-            track: Color::from_rgb(0.169, 0.188, 0.247),
-            bar_track: Color::from_rgb(0.169, 0.188, 0.247),
-            timeline_bg: Color::from_rgb(0.141, 0.161, 0.212),
-            border: Color::from_rgb(0.220, 0.243, 0.310),
-            blue: Color::from_rgb(0.357, 0.808, 0.980),
-            pink: Color::from_rgb(0.961, 0.663, 0.722),
-            green: Color::from_rgb(0.361, 0.780, 0.471),
-            danger: Color::from_rgb(1.0, 0.451, 0.522),
-            ink: Color::from_rgb(0.910, 0.922, 0.961),
-            text: Color::from_rgb(0.910, 0.922, 0.961),
-            muted: Color::from_rgb(0.600, 0.620, 0.700),
-            on_accent: Color::from_rgb(0.078, 0.086, 0.118),
+            bg: Color::from_rgb(0.043, 0.047, 0.055),
+            panel_bg: Color::from_rgb(0.082, 0.090, 0.106),
+            dialog_bg: Color::from_rgb(0.114, 0.124, 0.145),
+            track: Color::from_rgb(0.165, 0.176, 0.200),
+            bar_track: Color::from_rgb(0.165, 0.176, 0.200),
+            progress: Color::from_rgb(0.286, 0.416, 0.529),
+            timeline_bg: Color::from_rgb(0.106, 0.114, 0.129),
+            border: Color::from_rgb(0.243, 0.255, 0.282),
+            blue: Color::from_rgb(0.431, 0.686, 0.855),
+            pink: Color::from_rgb(0.784, 0.573, 0.651),
+            green: Color::from_rgb(0.302, 0.741, 0.475),
+            danger: Color::from_rgb(0.898, 0.353, 0.396),
+            ink: Color::from_rgb(0.890, 0.902, 0.925),
+            text: Color::from_rgb(0.890, 0.902, 0.925),
+            muted: Color::from_rgb(0.576, 0.600, 0.647),
+            on_accent: Color::from_rgb(0.059, 0.071, 0.090),
             speaker_colors: [
-                Color::from_rgb(0.184, 0.435, 0.525), // blue
-                Color::from_rgb(0.478, 0.267, 0.341), // pink
-                Color::from_rgb(0.357, 0.310, 0.620), // violet
-                Color::from_rgb(0.247, 0.478, 0.333), // green
-                Color::from_rgb(0.541, 0.416, 0.184), // amber
-                Color::from_rgb(0.184, 0.447, 0.478), // teal
-                Color::from_rgb(0.541, 0.290, 0.200), // coral
-                Color::from_rgb(0.290, 0.353, 0.620), // periwinkle
-                Color::from_rgb(0.384, 0.459, 0.184), // lime
-                Color::from_rgb(0.455, 0.290, 0.541), // lavender
+                Color::from_rgb(0.184, 0.392, 0.478), // blue
+                Color::from_rgb(0.463, 0.286, 0.357), // pink
+                Color::from_rgb(0.345, 0.318, 0.541), // violet
+                Color::from_rgb(0.263, 0.431, 0.333), // green
+                Color::from_rgb(0.494, 0.412, 0.239), // amber
+                Color::from_rgb(0.208, 0.416, 0.424), // teal
+                Color::from_rgb(0.490, 0.322, 0.243), // coral
+                Color::from_rgb(0.306, 0.365, 0.541), // periwinkle
+                Color::from_rgb(0.384, 0.439, 0.251), // lime
+                Color::from_rgb(0.427, 0.318, 0.478), // lavender
             ],
-            sms0: Color::from_rgb(0.184, 0.435, 0.525),
-            sms1: Color::from_rgb(0.478, 0.267, 0.341),
-            warn_tint: Color::from_rgba(0.357, 0.808, 0.980, 0.22),
-            search_hl: Color::from_rgba(1.0, 0.78, 0.25, 0.35),
-            search_active: Color::from_rgba(1.0, 0.72, 0.20, 0.65),
-            tip_bg: Color::from_rgb(0.114, 0.129, 0.180),
-            tip_text: Color::from_rgb(0.910, 0.922, 0.961),
-            toast_bg: Color::from_rgb(0.125, 0.196, 0.239),
-            toast_text: Color::from_rgb(0.910, 0.922, 0.961),
-            scrim: Color::from_rgba(0.0, 0.0, 0.0, 0.62),
+            sms0: Color::from_rgb(0.184, 0.392, 0.478),
+            sms1: Color::from_rgb(0.463, 0.286, 0.357),
+            warn_tint: Color::from_rgba(0.431, 0.686, 0.855, 0.18),
+            search_hl: Color::from_rgba(0.890, 0.710, 0.353, 0.38),
+            search_active: Color::from_rgba(0.890, 0.710, 0.353, 0.70),
+            tip_bg: Color::from_rgb(0.114, 0.124, 0.145),
+            tip_text: Color::from_rgb(0.890, 0.902, 0.925),
+            toast_bg: Color::from_rgb(0.125, 0.216, 0.275),
+            toast_text: Color::from_rgb(0.910, 0.922, 0.941),
+            scrim: Color::from_rgba(0.0, 0.0, 0.0, 0.64),
         }
     }
 }

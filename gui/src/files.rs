@@ -7,7 +7,7 @@ pub(crate) fn transcript_backup_path(path: &Path) -> PathBuf {
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_else(|| "transcript".to_string());
-    path.with_file_name(format!("{name}.transiel.bak"))
+    path.with_file_name(format!("{name}.hippo-transcribe.bak"))
 }
 
 /// Write through a temporary file in the same directory, then rename over the

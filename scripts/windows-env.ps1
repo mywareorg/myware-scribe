@@ -196,7 +196,7 @@ function Ensure-SherpaDlls {
     )
 
     if (-not $CacheRoot) {
-        $CacheRoot = Join-Path $env:LOCALAPPDATA "transiel\cache"
+        $CacheRoot = Join-Path $env:LOCALAPPDATA "hippo-transcribe\cache"
     }
 
     $version = "v1.12.9"

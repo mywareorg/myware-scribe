@@ -1,7 +1,7 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-Run transiel on Windows with the fast iteration profile.
+Run Hippo Transcribe on Windows with the fast iteration profile.
 
 .DESCRIPTION
 Enters the Visual Studio developer environment if needed, points bindgen at

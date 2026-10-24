@@ -1,7 +1,7 @@
 //! Model downloads (all non-gated, direct files).
 //!
 //! This is the only code path that touches the network. The same implementation
-//! backs `transiel --cli models download` (also used by `deploy.bat`) and the
+//! backs `hippo-transcribe --cli models download` (also used by `deploy.bat`) and the
 //! GUI's first-run download card.
 
 use std::fs::{self, File, OpenOptions};
@@ -82,6 +82,13 @@ fn files() -> Vec<ModelFile> {
         },
         ModelFile {
             label: "whisper-speed",
+            path: dir.join("ggml-tiny.en-q5_1.bin"),
+            url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.en-q5_1.bin",
+            size: 32_166_155,
+            sha256: "c77c5766f1cef09b6b7d47f21b546cbddd4157886b3b5d6d4f709e91e66c7c2b",
+        },
+        ModelFile {
+            label: "whisper-balanced",
             path: dir.join("ggml-base.en-q5_1.bin"),
             url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en-q5_1.bin",
             size: 59_721_011,
@@ -275,7 +282,7 @@ pub fn verify_all() -> i32 {
             "\n{missing} model file(s) missing, {wrong} with the wrong size or checksum under {}",
             models::models_dir().display()
         );
-        eprintln!("Run: transiel --cli models download");
+        eprintln!("Run: hippo-transcribe --cli models download");
         1
     } else {
         0
@@ -285,6 +292,8 @@ pub fn verify_all() -> i32 {
 fn whisper_label(preset: &str) -> &'static str {
     if preset.eq_ignore_ascii_case("speed") {
         "whisper-speed"
+    } else if preset.eq_ignore_ascii_case("balanced") {
+        "whisper-balanced"
     } else {
         "whisper-accuracy"
     }
@@ -507,17 +516,22 @@ mod tests {
             ["segmentation", "embedding", "whisper-speed"]
         );
         assert_eq!(
+            required_for("balanced"),
+            ["segmentation", "embedding", "whisper-balanced"]
+        );
+        assert_eq!(
             required_for("accuracy"),
             ["segmentation", "embedding", "whisper-accuracy"]
         );
         // Unknown presets fall back to the accuracy model, matching
         // `models::whisper_model`.
-        assert_eq!(whisper_label("balanced"), "whisper-accuracy");
+        assert_eq!(whisper_label("unknown"), "whisper-accuracy");
     }
 
     #[test]
     fn sha256_of_known_content() {
-        let path = std::env::temp_dir().join(format!("transiel-sha-{}", std::process::id()));
+        let path =
+            std::env::temp_dir().join(format!("hippo-transcribe-sha-{}", std::process::id()));
         fs::write(&path, b"abc").unwrap();
         let hash = sha256_file(&path).unwrap();
         let _ = fs::remove_file(&path);

@@ -7,4 +7,5 @@ models/
 *-transcript.txt
 *-transcription.txt
 
+*.hippo-transcribe.bak
 *.transiel.bak

@@ -1,7 +1,7 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-Build transiel for Windows, stage a release folder, and optionally zip it.
+Build Hippo Transcribe for Windows, stage a release folder, and optionally zip it.
 
 .DESCRIPTION
 Enters the Visual Studio developer environment (so cl.exe, rc.exe, the Windows
@@ -183,7 +183,7 @@ try {
     }
 
     $metadata = Get-CargoMetadata
-    $package = $metadata.packages | Where-Object { $_.name -eq "transiel-gui" } | Select-Object -First 1
+    $package = $metadata.packages | Where-Object { $_.name -eq "hippo-transcribe-gui" } | Select-Object -First 1
     if ($Version) {
         $releaseVersion = $Version
     } elseif ($package) {
@@ -192,9 +192,9 @@ try {
         $releaseVersion = "dev"
     }
 
-    $binary = Join-Path $metadata.target_directory "release\transiel.exe"
+    $binary = Join-Path $metadata.target_directory "release\hippo-transcribe.exe"
     if (-not (Test-Path $binary)) {
-        $fallback = Join-Path $metadata.target_directory "release\transiel-gui.exe"
+        $fallback = Join-Path $metadata.target_directory "release\hippo-transcribe-gui.exe"
         if (Test-Path $fallback) {
             $binary = $fallback
         } else {
@@ -217,12 +217,12 @@ try {
     }
     New-Item -ItemType Directory -Path $outRoot -Force | Out-Null
 
-    $name = "transiel-$releaseVersion-windows-x64"
+    $name = "hippo-transcribe-$releaseVersion-windows-x64"
     $stage = Join-Path $outRoot $name
     if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }
     New-Item -ItemType Directory -Path $stage -Force | Out-Null
 
-    Copy-Item $binary (Join-Path $stage "transiel.exe")
+    Copy-Item $binary (Join-Path $stage "hippo-transcribe.exe")
     $sherpaLib = Ensure-SherpaDlls
     foreach ($dll in @("sherpa-onnx-c-api.dll", "onnxruntime.dll")) {
         $source = Join-Path $sherpaLib $dll

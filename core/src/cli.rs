@@ -1,4 +1,4 @@
-//! Headless CLI (`transiel --cli ...`).
+//! Headless CLI (`hippo-transcribe --cli ...`).
 
 use std::path::{Path, PathBuf};
 
@@ -34,9 +34,8 @@ pub fn run(args: &[String]) -> i32 {
                 }
             }
             "--speed" => preset = "speed".to_string(),
+            "--balanced" => preset = "balanced".to_string(),
             "--accuracy" => preset = "accuracy".to_string(),
-            // Legacy alias.
-            "--balanced" => preset = "accuracy".to_string(),
             "--num-speakers" => {
                 i += 1;
                 num_speakers = args.get(i).and_then(|v| v.parse().ok());
@@ -74,12 +73,8 @@ pub fn run(args: &[String]) -> i32 {
         i += 1;
     }
 
-    if preset == "balanced" {
-        preset = "accuracy".to_string();
-    }
-
     if inputs.is_empty() {
-        eprintln!("usage: transiel --cli <audio>... [--preset speed|accuracy] [--language <code>] [--progress-json]");
+        eprintln!("usage: hippo-transcribe --cli <audio>... [--preset speed|balanced|accuracy] [--language <code>] [--progress-json]");
         return 2;
     }
 
@@ -124,7 +119,7 @@ pub fn run(args: &[String]) -> i32 {
     code
 }
 
-/// `transiel --cli models [download] [--force] [--verify]`
+/// `hippo-transcribe --cli models [download] [--force] [--verify]`
 ///
 /// Without `download` this reports which models are present.
 fn run_models(args: &[String]) -> i32 {
@@ -151,12 +146,12 @@ fn run_models(args: &[String]) -> i32 {
     }
 }
 
-/// `transiel --cli probe <audio> <buckets>`: duration + RMS waveform.
+/// `hippo-transcribe --cli probe <audio> <buckets>`: duration + RMS waveform.
 fn run_probe(args: &[String]) -> i32 {
     let path = match args.first() {
         Some(path) => Path::new(path),
         None => {
-            eprintln!("usage: transiel --cli probe <audio> <buckets>");
+            eprintln!("usage: hippo-transcribe --cli probe <audio> <buckets>");
             return 2;
         }
     };

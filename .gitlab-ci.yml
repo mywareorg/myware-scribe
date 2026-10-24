@@ -1,0 +1,17 @@
+stages: [build]
+
+windows-build:
+  stage: build
+  tags: [windows]
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == "main" || $CI_COMMIT_BRANCH == "dev"
+  script:
+    - powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/build-windows.ps1 -SkipTests
+  artifacts:
+    when: always
+    expire_in: 1 week
+    paths:
+      - dist/*.zip
+      - dist/*.sha256
+      - build-windows.log

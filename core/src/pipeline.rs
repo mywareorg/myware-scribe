@@ -80,16 +80,36 @@ fn format_timestamp(seconds: f32, use_hours: bool) -> String {
     }
 }
 
-fn output_path(input: &Path, output_dir: &Option<PathBuf>, preset: &str) -> PathBuf {
+fn output_path_with_suffix(
+    input: &Path,
+    output_dir: &Option<PathBuf>,
+    preset: &str,
+    speakers: usize,
+    suffix: &str,
+) -> PathBuf {
     let stem = input
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("transcript");
-    let name = format!("{stem}-{preset}-transcription.txt");
+    let speaker_label = if speakers == 1 {
+        "1speaker".to_string()
+    } else {
+        format!("{speakers}speakers")
+    };
+    let name = format!("{stem}-{preset}-transcription-{speaker_label}{suffix}.txt");
     match output_dir {
         Some(dir) => dir.join(name),
         None => input.with_file_name(name),
     }
+}
+
+fn output_path(
+    input: &Path,
+    output_dir: &Option<PathBuf>,
+    preset: &str,
+    speakers: usize,
+) -> PathBuf {
+    output_path_with_suffix(input, output_dir, preset, speakers, "")
 }
 
 /// Run the pipeline over all inputs, emitting progress events.
@@ -123,12 +143,14 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
             // Fail before diarization/processing: never write an empty
             // transcript just because the ASR model is unavailable.
             let hint = if whisper.is_file() {
-                "run: transiel --cli models download --force"
+                "run: hippo-transcribe --cli models download --force"
             } else {
-                "run: transiel --cli models download"
+                "run: hippo-transcribe --cli models download"
             };
-            let name = if opts.preset == "speed" {
+            let name = if opts.preset.eq_ignore_ascii_case("speed") {
                 "Speed"
+            } else if opts.preset.eq_ignore_ascii_case("balanced") {
+                "Balanced"
             } else {
                 "Accuracy"
             };
@@ -145,15 +167,13 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
     // Parallel ASR: a small pool of workers sharing one model (each call creates
     // its own decode state). Per-call threads split the physical cores.
     let physical = num_cpus::get_physical().max(1);
-    let env_int = |name: &str| {
-        std::env::var(name)
-            .ok()
-            .and_then(|v| v.parse::<usize>().ok())
+    let env_int = |current: &str, legacy: &str| {
+        crate::env_compat(current, legacy).and_then(|v| v.parse::<usize>().ok())
     };
-    let workers = env_int("TRANSIEL_ASR_WORKERS")
+    let workers = env_int("HIPPO_TRANSCRIBE_ASR_WORKERS", "TRANSIEL_ASR_WORKERS")
         .unwrap_or(physical.min(4))
         .max(1);
-    let per_call_threads = env_int("TRANSIEL_ASR_THREADS")
+    let per_call_threads = env_int("HIPPO_TRANSCRIBE_ASR_THREADS", "TRANSIEL_ASR_THREADS")
         .map(|v| v as i32)
         .unwrap_or((physical / workers).max(1) as i32)
         .max(1);
@@ -186,90 +206,105 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
             duration: duration as f32,
         });
 
-        let cache_key = if opts.cache {
+        let cache_key = if opts.cache && opts.num_speakers != Some(1) {
             cache::key(input, &diarizer, opts.num_speakers)
         } else {
             None
         };
-        let raw = match cache_key.as_deref().and_then(cache::read) {
-            Some(turns) => {
-                emit(Event::Log {
-                    message: "Using cached diarization.".to_string(),
-                });
-                emit(Event::Stage {
-                    stage: "diarization".to_string(),
-                    label: "Running Diarization 100%".to_string(),
-                    progress: 0.0,
-                });
-                turns
-            }
-            None => {
-                let progress = Arc::new(AtomicU32::new(0));
-                let progress_for_thread = progress.clone();
-                let segmentation = segmentation.clone();
-                let embedding = embedding.clone();
-                let audio = samples.clone();
-                let num_speakers = opts.num_speakers;
-                let handle = std::thread::spawn(move || {
-                    diarize::diarize_with_progress(
-                        audio.as_slice(),
-                        &segmentation,
-                        &embedding,
-                        num_speakers,
-                        CLUSTER_THRESHOLD,
-                        progress_for_thread,
-                    )
-                });
-
-                emit(Event::Stage {
-                    stage: "diarization".to_string(),
-                    label: "Running Diarization 0%".to_string(),
-                    progress: 0.0,
-                });
-                while !handle.is_finished() {
-                    if is_cancelled() {
-                        break;
-                    }
-                    let fraction = progress.load(Ordering::Relaxed) as f32 / 1_000_000.0;
+        let raw = if opts.num_speakers == Some(1) {
+            // One speaker: skip diarization entirely and transcribe the file as
+            // a single turn.
+            vec![Turn {
+                start: 0.0,
+                end: duration as f32,
+                speaker: "SPEAKER 1".to_string(),
+            }]
+        } else {
+            match cache_key.as_deref().and_then(cache::read) {
+                Some(turns) => {
+                    emit(Event::Log {
+                        message: "Using cached diarization.".to_string(),
+                    });
                     emit(Event::Stage {
                         stage: "diarization".to_string(),
-                        label: format!(
-                            "Running Diarization {:.0}%",
-                            (fraction * 100.0).clamp(0.0, 100.0)
-                        ),
+                        label: "Running Diarization 100%".to_string(),
+                        progress: 1.0,
+                    });
+                    turns
+                }
+                None => {
+                    let progress = Arc::new(AtomicU32::new(0));
+                    let progress_for_thread = progress.clone();
+                    let segmentation = segmentation.clone();
+                    let embedding = embedding.clone();
+                    let audio = samples.clone();
+                    let num_speakers = opts.num_speakers;
+                    let handle = std::thread::spawn(move || {
+                        diarize::diarize_with_progress(
+                            audio.as_slice(),
+                            &segmentation,
+                            &embedding,
+                            num_speakers,
+                            CLUSTER_THRESHOLD,
+                            progress_for_thread,
+                        )
+                    });
+
+                    emit(Event::Stage {
+                        stage: "diarization".to_string(),
+                        label: "Running Diarization 0%".to_string(),
                         progress: 0.0,
                     });
-                    std::thread::sleep(Duration::from_millis(100));
-                }
-
-                let joined = handle.join();
-                emit(Event::Stage {
-                    stage: "diarization".to_string(),
-                    label: "Running Diarization 100%".to_string(),
-                    progress: 0.0,
-                });
-                match joined {
-                    Ok(Ok(turns)) => {
-                        if let Some(key) = &cache_key {
-                            cache::write(key, &turns);
+                    while !handle.is_finished() {
+                        if is_cancelled() {
+                            break;
                         }
-                        turns
-                    }
-                    Ok(Err(message)) => {
-                        emit(Event::Error { message });
-                        continue;
-                    }
-                    Err(_) => {
-                        emit(Event::Error {
-                            message: "diarization thread panicked".to_string(),
+                        let fraction = progress.load(Ordering::Relaxed) as f32 / 1_000_000.0;
+                        emit(Event::Stage {
+                            stage: "diarization".to_string(),
+                            label: format!(
+                                "Running Diarization {:.0}%",
+                                (fraction * 100.0).clamp(0.0, 100.0)
+                            ),
+                            progress: fraction.clamp(0.0, 1.0),
                         });
-                        continue;
+                        std::thread::sleep(Duration::from_millis(100));
+                    }
+
+                    let joined = handle.join();
+                    emit(Event::Stage {
+                        stage: "diarization".to_string(),
+                        label: "Running Diarization 100%".to_string(),
+                        progress: 1.0,
+                    });
+                    match joined {
+                        Ok(Ok(turns)) => {
+                            if let Some(key) = &cache_key {
+                                cache::write(key, &turns);
+                            }
+                            turns
+                        }
+                        Ok(Err(message)) => {
+                            emit(Event::Error { message });
+                            continue;
+                        }
+                        Err(_) => {
+                            emit(Event::Error {
+                                message: "diarization thread panicked".to_string(),
+                            });
+                            continue;
+                        }
                     }
                 }
             }
         };
         let cleaned = clean_turns(raw);
-        let map = build_speaker_map(&cleaned);
+        let mut map = build_speaker_map(&cleaned);
+        if map.len() <= 1 {
+            for label in map.values_mut() {
+                label.clear();
+            }
+        }
         let turns: Vec<Turn> = cleaned
             .iter()
             .map(|turn| Turn {
@@ -292,19 +327,25 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
 
         let mut lines: Vec<Line> = Vec::new();
         if let Some(transcriber) = &transcriber {
-            // (turn_index, clip_start, from, to) for each transcribable turn.
-            let clips: Vec<(usize, f32, usize, usize)> = turns
-                .iter()
-                .enumerate()
-                .filter_map(|(turn_index, turn)| {
-                    let clip_start = (turn.start - CLIP_PAD_S).max(0.0);
-                    let clip_end = (turn.end + CLIP_PAD_S).min(duration as f32);
-                    let from = (clip_start * rate as f32) as usize;
-                    let to = ((clip_end * rate as f32) as usize).min(samples.len());
-                    (to > from && (to - from) >= (0.15 * rate as f32) as usize)
-                        .then_some((turn_index, clip_start, from, to))
-                })
-                .collect();
+            // (turn_index, clip_start, from, to) for each transcribable clip.
+            // Long turns are chunked so progress and ETA advance during a
+            // single-speaker file instead of waiting for the whole turn.
+            const MAX_CLIP_S: f32 = 45.0;
+            let mut clips: Vec<(usize, f32, usize, usize)> = Vec::new();
+            for (turn_index, turn) in turns.iter().enumerate() {
+                let clip_start = (turn.start - CLIP_PAD_S).max(0.0);
+                let clip_end = (turn.end + CLIP_PAD_S).min(duration as f32);
+                let mut chunk_start = clip_start;
+                while chunk_start < clip_end {
+                    let chunk_end = (chunk_start + MAX_CLIP_S).min(clip_end);
+                    let from = (chunk_start * rate as f32) as usize;
+                    let to = ((chunk_end * rate as f32) as usize).min(samples.len());
+                    if to > from && (to - from) >= (0.15 * rate as f32) as usize {
+                        clips.push((turn_index, chunk_start, from, to));
+                    }
+                    chunk_start = chunk_end;
+                }
+            }
 
             let total_turns = clips.len();
             let total_seconds: f64 = clips
@@ -313,6 +354,16 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
                 .sum();
             let mut done_seconds = 0.0f64;
             let mut done_turns = 0usize;
+
+            // English-only presets ignore the requested language.
+            let english_only = opts.preset.eq_ignore_ascii_case("speed")
+                || opts.preset.eq_ignore_ascii_case("balanced");
+            let decode_language = if english_only {
+                Some("en")
+            } else {
+                opts.language.as_deref()
+            };
+            let fast_decode = opts.preset.eq_ignore_ascii_case("speed");
 
             emit(Event::Stage {
                 stage: "transcription".to_string(),
@@ -340,7 +391,8 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
                         let result = transcriber.transcribe_with_threads_and_language(
                             &samples_ref[from..to],
                             per_call_threads,
-                            opts.language.as_deref(),
+                            decode_language,
+                            fast_decode,
                         );
                         if tx.send((index, turn_index, clip_start, result)).is_err() {
                             break;
@@ -447,30 +499,38 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
         });
 
         let use_hours = duration >= 3600.0;
-        let txt = lines
-            .iter()
-            .map(|line| {
-                if opts.timestamps {
-                    format!(
-                        "[{}] {}: {}",
-                        format_timestamp(line.start, use_hours),
-                        line.speaker,
-                        line.text
-                    )
-                } else {
-                    format!("{}: {}", line.speaker, line.text)
-                }
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
+        let render = |with_timestamps: bool| {
+            lines
+                .iter()
+                .map(|line| {
+                    let stamp = format_timestamp(line.start, use_hours);
+                    match (with_timestamps, line.speaker.is_empty()) {
+                        (true, true) => format!("[{stamp}] {}", line.text),
+                        (true, false) => format!("[{stamp}] {}: {}", line.speaker, line.text),
+                        (false, true) => line.text.clone(),
+                        (false, false) => format!("{}: {}", line.speaker, line.text),
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let txt = render(false);
+        let txt_ts = render(true);
 
-        let path = output_path(input, &opts.output_dir, &opts.preset);
+        let path = output_path(input, &opts.output_dir, &opts.preset, map.len());
+        let ts_path =
+            output_path_with_suffix(input, &opts.output_dir, &opts.preset, map.len(), "-ts");
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
         if let Err(error) = std::fs::write(&path, format!("{txt}\n")) {
             emit(Event::Log {
                 message: format!("could not write {}: {error}", path.display()),
+            });
+        }
+        if let Err(error) = std::fs::write(&ts_path, format!("{txt_ts}\n")) {
+            emit(Event::Log {
+                message: format!("could not write {}: {error}", ts_path.display()),
             });
         }
 
@@ -491,7 +551,7 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
             progress: (index + 1) as f32 / total as f32,
         });
         emit(Event::Done {
-            txt: path.display().to_string(),
+            txt: ts_path.display().to_string(),
             stats: Stats {
                 audio_seconds: duration,
                 run_seconds: file_start.elapsed().as_secs_f64(),
@@ -512,17 +572,17 @@ mod tests {
 
     #[test]
     fn output_name_includes_the_preset() {
-        let path = output_path(Path::new("/tmp/my-audio.mp3"), &None, "speed");
+        let path = output_path(Path::new("/tmp/my-audio.mp3"), &None, "speed", 2);
         assert_eq!(
             path.file_name().and_then(|name| name.to_str()),
-            Some("my-audio-speed-transcription.txt")
+            Some("my-audio-speed-transcription-2speakers.txt")
         );
 
         let out = PathBuf::from("/out");
-        let path = output_path(Path::new("/tmp/my-audio.mp3"), &Some(out), "accuracy");
+        let path = output_path(Path::new("/tmp/my-audio.mp3"), &Some(out), "accuracy", 1);
         assert_eq!(
             path,
-            PathBuf::from("/out/my-audio-accuracy-transcription.txt")
+            PathBuf::from("/out/my-audio-accuracy-transcription-1speaker.txt")
         );
     }
 }

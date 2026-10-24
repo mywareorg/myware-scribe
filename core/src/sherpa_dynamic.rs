@@ -100,7 +100,9 @@ static API: OnceLock<Result<Api, String>> = OnceLock::new();
 
 fn candidates() -> Vec<PathBuf> {
     let mut paths = Vec::new();
-    if let Some(path) = std::env::var_os("TRANSIEL_SHERPA_DLL") {
+    if let Some(path) = crate::env_compat("HIPPO_TRANSCRIBE_SHERPA_DLL", "TRANSIEL_SHERPA_DLL")
+        .map(std::ffi::OsString::from)
+    {
         paths.push(PathBuf::from(path));
     }
     if let Ok(exe) = std::env::current_exe() {
@@ -125,7 +127,7 @@ fn load() -> Result<Api, String> {
         .into_iter()
         .find(|path| path.is_file())
         .ok_or_else(|| {
-            "sherpa-onnx-c-api.dll was not found next to the executable; reinstall transiel"
+            "sherpa-onnx-c-api.dll was not found next to the executable; reinstall Hippo Transcribe"
                 .to_string()
         })?;
     let path = path.canonicalize().unwrap_or(path);
