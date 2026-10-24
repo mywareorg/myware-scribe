@@ -12,9 +12,63 @@ pub struct Segment {
     pub confidence: f32,
 }
 
+/// Compute backend whisper.cpp was built with, or is using at runtime.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Backend {
+    Cpu,
+    Metal,
+    CoreMl,
+    Vulkan,
+}
+
+impl Backend {
+    pub fn label(self) -> &'static str {
+        match self {
+            Backend::Cpu => "cpu",
+            Backend::Metal => "metal",
+            Backend::CoreMl => "coreml",
+            Backend::Vulkan => "vulkan",
+        }
+    }
+}
+
+/// Backend compiled into this build. Metal is enabled for every macOS build;
+/// Vulkan only when the `gpu` feature is on (Windows/Linux release builds).
+pub fn preferred_backend() -> Backend {
+    if cfg!(target_os = "macos") {
+        if cfg!(feature = "coreml") {
+            Backend::CoreMl
+        } else {
+            Backend::Metal
+        }
+    } else if cfg!(feature = "gpu") {
+        Backend::Vulkan
+    } else {
+        Backend::Cpu
+    }
+}
+
+/// `HIPPO_TRANSCRIBE_ACCEL=cpu` forces the CPU path for troubleshooting.
+fn force_cpu() -> bool {
+    crate::env_compat("HIPPO_TRANSCRIBE_ACCEL", "TRANSIEL_ACCEL")
+        .is_some_and(|value| value.eq_ignore_ascii_case("cpu"))
+}
+
+fn context_params(use_gpu: bool) -> WhisperContextParameters<'static> {
+    WhisperContextParameters {
+        use_gpu,
+        // Flash attention pairs with the GPU backends; keep the CPU path on
+        // the conservative default.
+        flash_attn: use_gpu,
+        ..WhisperContextParameters::default()
+    }
+}
+
 pub struct Transcriber {
     ctx: WhisperContext,
     threads: i32,
+    backend: Backend,
+    fallback: Option<String>,
 }
 
 impl Transcriber {
@@ -25,14 +79,45 @@ impl Transcriber {
         // Route whisper.cpp's logging through the (no-op by default) hook so it
         // stops dumping token traces to stderr.
         whisper_rs::install_logging_hooks();
-        let mut params = WhisperContextParameters::default();
-        params.use_gpu(false);
-        let ctx = WhisperContext::new_with_params(model, params)
-            .map_err(|e| format!("load whisper {}: {e}", model.display()))?;
+        let preferred = preferred_backend();
+        let try_gpu = preferred != Backend::Cpu && !force_cpu();
+        let (ctx, backend, fallback) =
+            match WhisperContext::new_with_params(model, context_params(try_gpu)) {
+                Ok(ctx) => (ctx, if try_gpu { preferred } else { Backend::Cpu }, None),
+                Err(first) if try_gpu => {
+                    // A GPU/driver failure must never stop a transcription: retry
+                    // on the CPU and report why in the console.
+                    let ctx = WhisperContext::new_with_params(model, context_params(false))
+                        .map_err(|error| {
+                            format!(
+                                "load whisper {}: {error} ({} attempt: {first})",
+                                model.display(),
+                                preferred.label()
+                            )
+                        })?;
+                    (ctx, Backend::Cpu, Some(first.to_string()))
+                }
+                Err(error) => return Err(format!("load whisper {}: {error}", model.display())),
+            };
         let threads = std::thread::available_parallelism()
             .map(|n| n.get() as i32)
             .unwrap_or(4);
-        Ok(Self { ctx, threads })
+        Ok(Self {
+            ctx,
+            threads,
+            backend,
+            fallback,
+        })
+    }
+
+    /// Backend actually in use for this context.
+    pub fn backend(&self) -> Backend {
+        self.backend
+    }
+
+    /// Why the GPU path failed, when it did.
+    pub fn fallback_reason(&self) -> Option<&str> {
+        self.fallback.as_deref()
     }
 
     /// Transcribe 16 kHz mono samples using the default thread count.

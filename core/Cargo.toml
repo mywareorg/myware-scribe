@@ -5,6 +5,15 @@ edition = "2021"
 description = "Private, offline speaker diarization and transcription."
 repository = "https://gitlab.com/librewarelive/hippo-transcribe"
 
+[features]
+default = []
+# Vulkan + OpenMP acceleration for Windows/Linux. The Vulkan backend needs the
+# Vulkan SDK at build time, so it is opt-in (Windows release builds enable it).
+gpu = ["whisper-rs/vulkan", "whisper-rs/openmp"]
+# Core ML encoder offload on macOS. Requires a converted `*-encoder.mlmodelc`
+# beside each model; without one whisper falls back to Metal.
+coreml = ["whisper-rs/coreml"]
+
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -18,6 +27,11 @@ ureq = "2"
 # Windows loads the sherpa-onnx C API from a DLL shipped beside the executable,
 # so no native library is linked into the binary. Other platforms keep the
 # static source build.
+# Metal is always on for macOS builds: it needs only the Xcode command line
+# tools, and it is the main Apple Silicon speedup.
+[target.'cfg(target_os = "macos")'.dependencies]
+whisper-rs = { version = "0.16", features = ["metal"] }
+
 [target.'cfg(windows)'.dependencies]
 libloading = "0.8"
 

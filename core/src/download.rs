@@ -186,6 +186,21 @@ where
     download_with_cancel(force, verify, cancel, notify)
 }
 
+/// Download only the models with the given ids (used to fetch just the files a
+/// tier and preset actually need).
+pub fn download_ids<F>(
+    ids: &[&str],
+    force: bool,
+    verify: bool,
+    cancel: Arc<AtomicBool>,
+    notify: &mut F,
+) -> i32
+where
+    F: FnMut(DownloadEvent),
+{
+    download_selected(Some(ids), force, verify, cancel, notify)
+}
+
 /// Download every model, stopping promptly when `cancel` becomes true.
 ///
 /// A partially downloaded file is left behind as `<name>.part` so a later
@@ -199,8 +214,26 @@ pub fn download_with_cancel<F>(
 where
     F: FnMut(DownloadEvent),
 {
+    download_selected(None, force, verify, cancel, notify)
+}
+
+fn download_selected<F>(
+    ids: Option<&[&str]>,
+    force: bool,
+    verify: bool,
+    cancel: Arc<AtomicBool>,
+    notify: &mut F,
+) -> i32
+where
+    F: FnMut(DownloadEvent),
+{
     let base = mirror_base();
     for model in files() {
+        if let Some(ids) = ids {
+            if !ids.contains(&model.spec.id.as_str()) {
+                continue;
+            }
+        }
         if cancel.load(Ordering::SeqCst) {
             notify(DownloadEvent::Finished { ok: false });
             return 1;
@@ -247,7 +280,7 @@ where
         notify(DownloadEvent::Finished { ok: false });
         return 1;
     }
-    let code = if verify { verify_all() } else { 0 };
+    let code = if verify { verify_selected(ids) } else { 0 };
     notify(DownloadEvent::Finished { ok: code == 0 });
     code
 }
@@ -256,6 +289,10 @@ where
 /// whether the bundled set is installed (exit 1 if anything is missing, the
 /// wrong size, or has the wrong checksum).
 pub fn verify_all() -> i32 {
+    verify_selected(None)
+}
+
+fn verify_selected(ids: Option<&[&str]>) -> i32 {
     let mut missing = 0;
     let mut wrong = 0;
     println!(
@@ -266,6 +303,11 @@ pub fn verify_all() -> i32 {
         println!("bundled models: {}", dir.display());
     }
     for model in files() {
+        if let Some(ids) = ids {
+            if !ids.contains(&model.spec.id.as_str()) {
+                continue;
+            }
+        }
         let path = model.resolved();
         let label = model.spec.id.as_str();
         match size(&path) {
@@ -338,18 +380,25 @@ pub fn notice() -> String {
     out
 }
 
-fn required_for(preset: &str) -> [&'static str; 3] {
-    ["segmentation", "embedding", models::whisper_id(preset)]
+/// Model ids required to run `preset` in the given pipeline mode.
+pub fn required_for(preset: &str, diarized: bool) -> Vec<&'static str> {
+    let mut ids = Vec::with_capacity(3);
+    if diarized {
+        ids.push("segmentation");
+        ids.push("embedding");
+    }
+    ids.push(models::whisper_id(preset));
+    ids
 }
 
 /// True when every file needed to run `preset` exists at the expected size.
-pub fn ready_for(preset: &str) -> bool {
-    missing_for(preset).is_empty()
+pub fn ready_for(preset: &str, diarized: bool) -> bool {
+    missing_for(preset, diarized).is_empty()
 }
 
 /// Every file needed by `preset` that is absent or the wrong size.
-pub fn missing_for(preset: &str) -> Vec<ModelStatus> {
-    let required = required_for(preset);
+pub fn missing_for(preset: &str, diarized: bool) -> Vec<ModelStatus> {
+    let required = required_for(preset, diarized);
     files()
         .into_iter()
         .filter(|model| required.contains(&model.spec.id.as_str()))
@@ -592,17 +641,20 @@ mod tests {
     #[test]
     fn required_files_match_the_preset() {
         assert_eq!(
-            required_for("speed"),
+            required_for("speed", true),
             ["segmentation", "embedding", "whisper-speed"]
         );
         assert_eq!(
-            required_for("balanced"),
+            required_for("balanced", true),
             ["segmentation", "embedding", "whisper-balanced"]
         );
         assert_eq!(
-            required_for("accuracy"),
+            required_for("accuracy", true),
             ["segmentation", "embedding", "whisper-accuracy"]
         );
+        // ASR-only needs no diarization models.
+        assert_eq!(required_for("speed", false), ["whisper-speed"]);
+        assert_eq!(required_for("balanced", false), ["whisper-balanced"]);
         // Unknown presets fall back to the accuracy model, matching
         // `models::whisper_model`.
         assert_eq!(models::whisper_id("unknown"), "whisper-accuracy");

@@ -95,6 +95,8 @@ pub fn spawn(
     num_speakers: Option<i32>,
     language: Option<String>,
     cache: bool,
+    // False runs ASR only: no diarization, no speaker labels.
+    diarized: bool,
     events: Arc<Mutex<VecDeque<Event>>>,
     pid: Arc<AtomicU32>,
     cancelled: Arc<AtomicBool>,
@@ -129,13 +131,12 @@ pub fn spawn(
             command.arg(input);
         }
         command.arg("--preset").arg(preset);
-        match num_speakers {
-            Some(count) => {
-                command.arg("--num-speakers").arg(count.to_string());
-            }
-            None => {
-                command.arg("--auto-speakers");
-            }
+        // Users always pick a speaker count; the CLI default applies otherwise.
+        if let Some(count) = num_speakers {
+            command.arg("--num-speakers").arg(count.to_string());
+        }
+        if !diarized {
+            command.arg("--asr-only");
         }
         if let Some(language) = &language {
             command.arg("--language").arg(language);

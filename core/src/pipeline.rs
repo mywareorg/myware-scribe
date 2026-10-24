@@ -24,6 +24,33 @@ const TIMELINE_BUCKETS: usize = 2000;
 const DECODE_DONE: f32 = 0.03;
 const DIARIZATION_DONE: f32 = 0.45;
 
+/// Whether the pipeline runs the speaker-diarization stage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PipelineMode {
+    /// Diarize first, then transcribe each speaker turn.
+    #[default]
+    Diarized,
+    /// Transcribe the whole file as one turn with no speaker labels. Skips the
+    /// sherpa/ONNX models entirely.
+    AsrOnly,
+}
+
+impl PipelineMode {
+    pub fn diarizes(self) -> bool {
+        matches!(self, PipelineMode::Diarized)
+    }
+}
+
+/// Pick the internal pipeline for a run. A single speaker never needs the
+/// diarization stage, so it takes the fastest path regardless of preset.
+pub fn route(num_speakers: Option<i32>) -> PipelineMode {
+    if num_speakers == Some(1) {
+        PipelineMode::AsrOnly
+    } else {
+        PipelineMode::Diarized
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct PipelineOptions {
     pub inputs: Vec<PathBuf>,
@@ -34,6 +61,7 @@ pub struct PipelineOptions {
     pub cache: bool,
     /// BCP-47-ish Whisper language code, or `None` for auto-detection.
     pub language: Option<String>,
+    pub mode: PipelineMode,
     pub cancel: Option<Arc<AtomicBool>>,
 }
 
@@ -130,6 +158,7 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
     let embedding = models::embedding_model();
     let whisper = models::whisper_model(&opts.preset);
     let diarizer = models::diarizer_id();
+    let diarized = opts.mode.diarizes();
 
     emit(Event::Stage {
         stage: "loading".to_string(),
@@ -137,9 +166,11 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
         progress: 0.0,
     });
 
-    if let Err(message) = diarize::ensure_available() {
-        emit(Event::Error { message });
-        return;
+    if diarized {
+        if let Err(message) = diarize::ensure_available() {
+            emit(Event::Error { message });
+            return;
+        }
     }
 
     let transcriber = match Transcriber::load(&whisper) {
@@ -168,6 +199,20 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
             return;
         }
     };
+
+    if let Some(transcriber) = &transcriber {
+        emit(Event::Log {
+            message: format!("ASR backend: {}", transcriber.backend().label()),
+        });
+        if let Some(reason) = transcriber.fallback_reason() {
+            emit(Event::Log {
+                message: format!(
+                    "GPU unavailable, using CPU ({} failed: {reason})",
+                    transcriber.backend().label()
+                ),
+            });
+        }
+    }
 
     // Parallel ASR: a small pool of workers sharing one model (each call creates
     // its own decode state). Per-call threads split the physical cores.
@@ -216,13 +261,20 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
             progress: DECODE_DONE,
         });
 
-        let cache_key = if opts.cache && opts.num_speakers != Some(1) {
+        let cache_key = if diarized && opts.cache && opts.num_speakers != Some(1) {
             cache::key(input, &diarizer, opts.num_speakers)
         } else {
             None
         };
         let mut did_diarize = false;
-        let raw = if opts.num_speakers == Some(1) {
+        let raw = if !diarized {
+            // ASR-only mode: no speaker turns, no sherpa models, no cache.
+            vec![Turn {
+                start: 0.0,
+                end: duration as f32,
+                speaker: String::new(),
+            }]
+        } else if opts.num_speakers == Some(1) {
             // One speaker: skip diarization entirely and transcribe the file as
             // a single turn.
             vec![Turn {
@@ -324,6 +376,9 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
                 label.clear();
             }
         }
+        // ASR-only transcripts have no speaker labels, but the filename still
+        // describes a single undifferentiated stream.
+        let speaker_count = if diarized { map.len() } else { 1 };
         let turns: Vec<Turn> = cleaned
             .iter()
             .map(|turn| Turn {
@@ -537,9 +592,9 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
         let txt = render(false);
         let txt_ts = render(true);
 
-        let path = output_path(input, &opts.output_dir, &opts.preset, map.len());
+        let path = output_path(input, &opts.output_dir, &opts.preset, speaker_count);
         let ts_path =
-            output_path_with_suffix(input, &opts.output_dir, &opts.preset, map.len(), "-ts");
+            output_path_with_suffix(input, &opts.output_dir, &opts.preset, speaker_count, "-ts");
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
@@ -575,7 +630,7 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
             stats: Stats {
                 audio_seconds: duration,
                 run_seconds: file_start.elapsed().as_secs_f64(),
-                speakers: map.len(),
+                speakers: speaker_count,
                 num_speakers: opts.num_speakers,
                 preset: opts.preset.clone(),
                 speaker_stats,

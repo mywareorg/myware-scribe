@@ -39,10 +39,15 @@ param(
     [switch]$Diagnose,
     [switch]$Clean,
     [switch]$NoZip,
-    [switch]$SkipModels
+    [switch]$SkipModels,
+    # Vulkan + OpenMP acceleration. Needs the Vulkan SDK installed; pass
+    # -Gpu:$false for a CPU-only build.
+    [bool]$Gpu = $true
 )
 
 $ErrorActionPreference = "Stop"
+
+$featureArgs = if ($Gpu) { @("--features", "gpu") } else { @() }
 Set-StrictMode -Version Latest
 
 # PowerShell 7.3+ can turn native stderr into a terminating error. We check
@@ -165,14 +170,14 @@ try {
 
     if (-not $SkipTests) {
         Write-Step "Running tests (release)"
-        Invoke-Native cargo @("test", "--workspace", "--release")
+        Invoke-Native cargo (@("test", "--workspace", "--release") + $featureArgs)
     }
 
     if ($Diagnose) {
         Write-Step "Building with verbose output (diagnose)"
         $log = Join-Path $root "build-windows.log"
         try {
-            Invoke-Native cargo @("build", "--release", "--locked", "-vv")
+            Invoke-Native cargo (@("build", "--release", "--locked", "-vv") + $featureArgs)
         } catch {
             Select-String -Path $log -Pattern 'LNK2005|LNK2019|LNK1169|LNK2038|LNK1104' -ErrorAction SilentlyContinue |
                 ForEach-Object { Write-Host $_.Line -ForegroundColor Yellow }
@@ -180,7 +185,7 @@ try {
         }
     } else {
         Write-Step "Building release binary"
-        Invoke-Native cargo @("build", "--release", "--locked")
+        Invoke-Native cargo (@("build", "--release", "--locked") + $featureArgs)
     }
 
     $metadata = Get-CargoMetadata

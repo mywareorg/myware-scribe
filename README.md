@@ -20,9 +20,8 @@ No cloud · No accounts · No telemetry · Audio and transcripts stay on this de
 
 The pipeline diarizes the audio, cleans up the speaker turns, then transcribes
 each speaker turn independently; the speaker label comes from the diarization
-turn, so transcription timing never affects speaker assignment. The number of
-speakers is fixed with `--num-speakers N` (default 2) or auto-detected with
-`--auto-speakers`.
+turn, so transcription timing never affects speaker assignment. The user picks
+the speaker count with `--num-speakers N` (default 2); there is no auto-detect.
 
 ## Workspace
 
@@ -177,12 +176,46 @@ Presets: `speed` (whisper `tiny`, multilingual), `balanced` (whisper `base`,
 multilingual), and `accuracy` (whisper `large-v3-turbo`).
 
 Options: `--preset speed|balanced|accuracy`, `--language <code>|auto`,
-`--num-speakers N`, `--auto-speakers`, `--output-dir`, `--no-timestamps`,
+`--num-speakers N`, `--output-dir`, `--no-timestamps`,
 `--no-cache`, `--progress-json`. Every preset accepts any supported language;
 the language auto-detects by default and `--language <code>` pins one.
 
 Output: `<audio-stem>-<preset>-transcription.txt` (`[hh:mm:ss] SPEAKER N: text`),
 written next to the audio or into `--output-dir`.
+
+## Acceleration
+
+whisper.cpp uses the fastest backend the build provides:
+
+- **macOS** — Metal on every build. `--features coreml` additionally offloads
+  the encoder to Core ML, which requires a converted `*-encoder.mlmodelc` beside
+  the model; without one Metal is used.
+- **Windows/Linux** — Vulkan + OpenMP when built with `--features gpu`. The
+  Windows release script enables it by default (`-Gpu:$false` for a CPU-only
+  build) and needs the Vulkan SDK installed.
+- **CPU fallback** — if GPU context creation fails, the run continues on the CPU
+  and the console reports why. `HIPPO_TRANSCRIBE_ACCEL=cpu` forces CPU.
+
+The `Speed` preset routes internally: a single speaker skips diarization
+entirely and transcribes in one pass; two or more speakers run diarization and
+then transcribe each turn.
+
+## Free and Pro
+
+The free tier transcribes with the speed model, shows the transcript window,
+and lets you edit, copy and save; playback and search stay available. Pro adds
+the balanced and accuracy models, speaker diarization (speaker labels), batch
+transcription, and SRT/WebVTT/JSON export.
+
+Pro is a one-time purchase on both stores. A 7-day trial is available once per
+install. Entitlement state lives in `license.json` beside the settings and is
+never used to delete transcripts or queue items; a lapsed license simply falls
+back to the free tier. Store receipt checks survive 30 days offline, then
+re-verify.
+
+`HIPPO_TRANSCRIBE_TIER=pro` (or `free`) forces the tier for development. The
+store clients are not built yet, so packaged builds report no store and rely on
+the trial.
 
 ## GUI
 

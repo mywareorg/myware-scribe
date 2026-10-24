@@ -7,6 +7,7 @@ pub mod cli;
 pub mod diarize;
 pub mod download;
 pub mod event;
+pub mod license;
 pub mod export;
 pub mod models;
 pub mod pipeline;

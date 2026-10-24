@@ -3,7 +3,7 @@ use std::collections::{HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use iced::keyboard::{self, Key, Modifiers};
 use iced::widget::{
@@ -18,6 +18,7 @@ use rodio::{Decoder, OutputStream, Sink};
 use serde::{Deserialize, Serialize};
 
 use crate::backend::{self, Event};
+use hippo_transcribe_core::license;
 use crate::theme::{self, AppTheme, Scheme};
 use crate::{documents::*, files::*, format::*, options::*};
 use hippo_transcribe_core::download::{self, DownloadEvent, ModelStatus};
@@ -248,6 +249,11 @@ pub enum Message {
     SetTheme(AppTheme),
     OpenSettings,
     CloseSettings,
+    OpenPaywall,
+    ClosePaywall,
+    PurchasePro,
+    RestorePro,
+    StartTrial,
     DownloadModels,
     CancelModelDownload,
     ClearPartialModels,
@@ -324,6 +330,9 @@ pub struct App {
     output_dir: Option<PathBuf>,
     preset: Preset,
     theme_mode: AppTheme,
+    license: license::State,
+    provider: Box<dyn license::Provider>,
+    paywall_open: bool,
     stage: String,
     progress: f32,
     progress_shown: f32,
@@ -460,18 +469,39 @@ impl App {
     pub fn new() -> Self {
         let settings = Self::load_settings();
         let (queue, batch_paths) = Self::load_queue_and_batch();
+        let now = SystemTime::now();
+        let provider = license::provider();
+        let pro_override = provider.override_tier();
+        let mut license_state = license::State::load(
+            &Self::license_path().unwrap_or_else(|| PathBuf::from("license.json")),
+            now,
+        );
+        license_state.refresh(pro_override, now);
+        // A downgrade must never leave a Pro-only preset selected.
+        let mut preset = settings
+            .preset
+            .as_deref()
+            .and_then(Preset::from_arg)
+            .unwrap_or_default();
+        if preset != Preset::Speed
+            && !license::tier_allows(
+                license_state.access.tier,
+                license::Feature::BalancedPreset,
+            )
+        {
+            preset = Preset::Speed;
+        }
         Self {
             output_dir: settings.output_dir.as_ref().map(PathBuf::from),
-            preset: settings
-                .preset
-                .as_deref()
-                .and_then(Preset::from_arg)
-                .unwrap_or_default(),
+            preset,
             theme_mode: settings
                 .theme
                 .as_deref()
                 .and_then(AppTheme::from_arg)
                 .unwrap_or_default(),
+            license: license_state,
+            provider,
+            paywall_open: false,
             stage: "idle".to_string(),
             progress: 0.0,
             progress_shown: 0.0,
@@ -596,6 +626,10 @@ impl App {
 
     fn settings_path() -> Option<PathBuf> {
         Self::config_dir().map(|dir| dir.join("settings.json"))
+    }
+
+    fn license_path() -> Option<PathBuf> {
+        license::license_path()
     }
 
     fn legacy_settings_path() -> Option<PathBuf> {
@@ -1106,9 +1140,154 @@ impl App {
         self.theme_mode.scheme()
     }
 
+    /// True when the effective tier unlocks `feature`.
+    fn can(&self, feature: license::Feature) -> bool {
+        license::tier_allows(self.license.access.tier, feature)
+    }
+
+    /// Free runs ASR only; Pro adds diarization and speaker labels.
+    fn diarized(&self) -> bool {
+        self.can(license::Feature::Diarization)
+    }
+
+    /// Whether this run actually executes the diarization stage. One speaker
+    /// takes the fastest path even on Pro, matching `pipeline::route`.
+    fn pipelines_diarize(&self) -> bool {
+        self.diarized() && self.num_speakers != Some(1)
+    }
+
+    fn save_license(&self) {
+        if let Some(path) = Self::license_path() {
+            self.license.save(&path);
+        }
+    }
+
+    /// Drop back to the free preset after a trial/downgrade.
+    fn clamp_preset(&mut self) {
+        if self.preset != Preset::Speed && !self.can(license::Feature::BalancedPreset) {
+            self.preset = Preset::Speed;
+            self.save_settings();
+        }
+    }
+
+    /// Header control showing the current tier and opening the paywall.
+    fn license_button<'a>(&'a self, scheme: &Scheme) -> Element<'a, Message> {
+        let label = match self.license.access.tier {
+            license::Tier::Pro if self.license.access.source == license::Source::Trial => "Pro trial",
+            license::Tier::Pro => "Pro",
+            license::Tier::Free => "Get Pro",
+        };
+        let button: Element<Message> = if self.license.access.tier == license::Tier::Pro {
+            action_text(label)
+                .on_press(Message::OpenPaywall)
+                .style(pill_button_secondary)
+                .into()
+        } else {
+            action_text(label)
+                .on_press(Message::OpenPaywall)
+                .style(color_button(scheme.blue, scheme.on_accent))
+                .into()
+        };
+        self.tip(
+            button,
+            "Speaker labels, batch transcription and larger models",
+            scheme,
+        )
+    }
+
+    /// The Pro paywall / license dialog.
+    fn paywall_dialog<'a>(&'a self, scheme: &Scheme) -> Element<'a, Message> {
+        let scheme = *scheme;
+        let price = self
+            .provider
+            .price()
+            .unwrap_or_else(|| license::FALLBACK_PRICE.to_string());
+        let mut body = column![
+            text("Hippo Transcribe Pro").size(20),
+            text(format!("{price} once \u{00b7} lifetime license"))
+                .size(theme::TEXT_SM)
+                .color(scheme.muted),
+        ]
+        .spacing(10);
+
+        for feature in license::Feature::ALL {
+            body = body.push(
+                row![
+                    text("\u{2713}").size(theme::TEXT_SM).color(scheme.green),
+                    text(feature.label()).size(theme::TEXT_SM),
+                ]
+                .spacing(6),
+            );
+        }
+
+        body = body.push(
+            text(
+                "Free keeps transcription with the speed model, editing, copy, \
+                 save, playback and search.",
+            )
+            .size(theme::TEXT_XS)
+            .color(scheme.muted),
+        );
+
+        let mut actions = row![].spacing(8).align_y(iced::Alignment::Center);
+        if self.license.access.tier == license::Tier::Pro {
+            actions = actions.push(
+                text(format!(
+                    "Pro is active ({}).",
+                    self.license.access.source.label()
+                ))
+                .size(theme::TEXT_SM)
+                .color(scheme.green),
+            );
+        } else {
+            if !self.license.trial_used() {
+                actions = actions.push(
+                    action_text("Start 7-day trial")
+                        .on_press(Message::StartTrial)
+                        .style(pill_button_secondary),
+                );
+            }
+            if self.provider.name() == "none" {
+                actions = actions.push(
+                    text("Purchasing is not available in this build yet.")
+                        .size(theme::TEXT_XS)
+                        .color(scheme.muted),
+                );
+            } else {
+                actions = actions.push(
+                    action_text("Buy Pro")
+                        .on_press(Message::PurchasePro)
+                        .style(color_button(scheme.blue, scheme.on_accent)),
+                );
+            }
+            actions = actions.push(
+                action_text("Restore purchase")
+                    .on_press(Message::RestorePro)
+                    .style(pill_button_secondary),
+            );
+        }
+
+        body = body.push(
+            container(actions)
+                .width(Length::Fill)
+                .align_x(iced::Alignment::End),
+        );
+        body = body.push(
+            container(
+                row![horizontal_space(),
+                    action_text("Close").on_press(Message::ClosePaywall).style(pill_button_secondary)]
+                .spacing(8),
+            )
+            .width(Length::Fill)
+            .align_x(iced::Alignment::End),
+        );
+
+        modal_card(body.spacing(10), 460.0, scheme)
+    }
+
     /// True when the selected preset has every model file it needs.
     fn models_ready(&self) -> bool {
-        download::ready_for(self.preset.arg())
+        download::ready_for(self.preset.arg(), self.pipelines_diarize())
     }
 
     fn refresh_models(&mut self) {
@@ -1137,10 +1316,11 @@ impl App {
         if let Ok(mut queue) = events.lock() {
             queue.clear();
         }
+        let ids = download::required_for(self.preset.arg(), self.pipelines_diarize());
         let spawned = std::thread::Builder::new()
             .name("model-download".to_string())
             .spawn(move || {
-                download::download_with_cancel(false, true, cancel, &mut |event| {
+                download::download_ids(&ids, false, false, cancel, &mut |event| {
                     if let Ok(mut queue) = events.lock() {
                         queue.push_back(event);
                     }
@@ -1722,6 +1902,77 @@ impl App {
                 self.toast = None;
                 Task::none()
             }
+            Message::OpenPaywall => {
+                self.paywall_open = true;
+                Task::none()
+            }
+            Message::ClosePaywall => {
+                self.paywall_open = false;
+                Task::none()
+            }
+            Message::StartTrial => {
+                let now = SystemTime::now();
+                if self.license.start_trial(now) {
+                    self.save_license();
+                    self.clamp_preset();
+                    self.toast = Some(("Pro trial started".to_string(), Instant::now()));
+                } else {
+                    self.toast = Some((
+                        "The Pro trial has already been used".to_string(),
+                        Instant::now(),
+                    ));
+                }
+                Task::none()
+            }
+            Message::PurchasePro => {
+                let now = SystemTime::now();
+                let state = self.provider.purchase();
+                self.license.purchase = state;
+                match state {
+                    license::PurchaseState::Active => {
+                        self.license.grant_pro(now);
+                        self.save_license();
+                        self.clamp_preset();
+                        self.paywall_open = false;
+                        self.toast = Some(("Pro unlocked".to_string(), Instant::now()));
+                    }
+                    license::PurchaseState::Unavailable => {
+                        self.toast = Some((
+                            "Purchasing is not available in this build yet".to_string(),
+                            Instant::now(),
+                        ));
+                    }
+                    license::PurchaseState::Cancelled => {
+                        self.toast = Some(("Purchase cancelled".to_string(), Instant::now()));
+                    }
+                    license::PurchaseState::Failed => {
+                        self.toast = Some(("Purchase failed".to_string(), Instant::now()));
+                    }
+                    license::PurchaseState::Pending | license::PurchaseState::Idle => {
+                        self.toast =
+                            Some((state.label().to_string(), Instant::now()));
+                    }
+                }
+                Task::none()
+            }
+            Message::RestorePro => {
+                let now = SystemTime::now();
+                let state = self.provider.restore();
+                self.license.purchase = state;
+                if state == license::PurchaseState::Active {
+                    self.license.grant_pro(now);
+                    self.save_license();
+                    self.clamp_preset();
+                    self.paywall_open = false;
+                    self.toast = Some(("Purchase restored".to_string(), Instant::now()));
+                } else {
+                    self.toast = Some((
+                        format!("No purchase to restore ({})", state.label()),
+                        Instant::now(),
+                    ));
+                }
+                Task::none()
+            }
             Message::CloseSettings => {
                 self.settings_open = false;
                 Task::none()
@@ -2264,6 +2515,21 @@ impl App {
                 if matches!(self.status, Status::Running) {
                     return Task::none();
                 }
+                let feature = match preset {
+                    Preset::Speed => None,
+                    Preset::Balanced => Some(license::Feature::BalancedPreset),
+                    Preset::Accuracy => Some(license::Feature::AccuracyPreset),
+                };
+                if let Some(feature) = feature {
+                    if !self.can(feature) {
+                        self.paywall_open = true;
+                        self.toast = Some((
+                            format!("{} is a Pro feature", feature.label()),
+                            Instant::now(),
+                        ));
+                        return Task::none();
+                    }
+                }
                 self.preset = preset;
                 self.save_settings();
                 Task::none()
@@ -2566,6 +2832,29 @@ impl App {
     }
 
     fn add_paths(&mut self, paths: Vec<PathBuf>) -> Vec<PathBuf> {
+        let mut paths = paths;
+        if !self.can(license::Feature::Batch) {
+            let has_work = self
+                .queue
+                .iter()
+                .any(|item| matches!(item.status, ItemStatus::Pending | ItemStatus::Running));
+            if has_work {
+                self.paywall_open = true;
+                self.toast = Some((
+                    "Batch transcription is a Pro feature".to_string(),
+                    Instant::now(),
+                ));
+                return Vec::new();
+            }
+            if paths.len() > 1 {
+                self.paywall_open = true;
+                self.toast = Some((
+                    "Free transcribes one file per run".to_string(),
+                    Instant::now(),
+                ));
+                paths.truncate(1);
+            }
+        }
         let mut added = Vec::new();
         for path in paths {
             if self
@@ -2733,12 +3022,20 @@ impl App {
             return;
         }
         let preserve = preserve_view && self.keep_pinned_view();
-        let inputs: Vec<PathBuf> = self
+        let mut inputs: Vec<PathBuf> = self
             .queue
             .iter()
             .filter(|item| matches!(item.status, ItemStatus::Pending))
             .map(|item| item.path.clone())
             .collect();
+        // A downgrade must not grant a batch that was queued while Pro.
+        if !self.can(license::Feature::Batch) && inputs.len() > 1 {
+            inputs.truncate(1);
+            self.toast = Some((
+                "Free transcribes one file per run; the rest stay queued".to_string(),
+                Instant::now(),
+            ));
+        }
         if inputs.is_empty() {
             self.status = Status::Error("add at least one file".to_string());
             return;
@@ -2807,12 +3104,9 @@ impl App {
             self.output_dir.clone(),
             self.preset.arg(),
             self.num_speakers,
-            if matches!(self.preset, Preset::Speed | Preset::Balanced) {
-                Some("en".to_string())
-            } else {
-                self.language.clone()
-            },
+            self.language.clone(),
             true, // diarization cache is always on
+            self.pipelines_diarize(),
             self.events.clone(),
             self.pid.clone(),
             self.cancelled.clone(),
@@ -3944,6 +4238,19 @@ impl App {
                 .on_press(Message::Tick),
             ]
             .into()
+        } else if !self.can(license::Feature::Diarization) {
+            // Free runs ASR only, so the speaker count has no effect.
+            stack![
+                speaker_pick.style(greyed_pick(scheme)).width(Length::Fill),
+                mouse_area(
+                    container(horizontal_space())
+                        .width(Length::Fill)
+                        .height(Length::Fill),
+                )
+                .interaction(mouse::Interaction::Pointer)
+                .on_press(Message::OpenPaywall),
+            ]
+            .into()
         } else {
             speaker_pick.style(pill_pick).width(Length::Fill).into()
         };
@@ -4784,7 +5091,7 @@ impl App {
             return None;
         }
 
-        let missing = download::missing_for(self.preset.arg())
+        let missing = download::missing_for(self.preset.arg(), self.pipelines_diarize())
             .iter()
             .map(|model| friendly_model(model.label))
             .collect::<Vec<_>>()
@@ -4971,6 +5278,25 @@ impl App {
                 .size(theme::TEXT_XS)
                 .color(scheme.muted)
                 .into()
+        } else if !self.can(license::Feature::Diarization) {
+            stack![
+                pick_list(
+                    SpeakerOpt::ALL,
+                    Some(SpeakerOpt::from_value(self.num_speakers)),
+                    Message::SpeakerCountChanged,
+                )
+                .style(greyed_pick(scheme))
+                .handle(caret_handle(false))
+                .width(Length::Fixed(180.0)),
+                mouse_area(
+                    container(horizontal_space())
+                        .width(Length::Fill)
+                        .height(Length::Fill),
+                )
+                .interaction(mouse::Interaction::Pointer)
+                .on_press(Message::OpenPaywall),
+            ]
+            .into()
         } else {
             pick_list(
                 SpeakerOpt::ALL,
@@ -5505,6 +5831,7 @@ impl App {
             .spacing(theme::SPACE_2XS),
             privacy_badge,
             horizontal_space(),
+            self.license_button(&scheme),
             self.tip(
                 action(icon(theme_icon, 16.0))
                     .on_press(Message::ToggleTheme)
@@ -5713,6 +6040,11 @@ impl App {
             .spacing(8);
 
             let dialog = modal_card(col, 380.0, scheme);
+            return self.with_toast(modal_overlay(base, dialog, scheme), scheme);
+        }
+
+        if self.paywall_open {
+            let dialog = self.paywall_dialog(&scheme);
             return self.with_toast(modal_overlay(base, dialog, scheme), scheme);
         }
 
