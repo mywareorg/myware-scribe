@@ -1,8 +1,15 @@
 # Hippo Transcribe
 
+**Private by design. Offline by default.**
+
 Local, offline speaker diarization and transcription. A single native Rust
 executable provides both the desktop GUI (iced) and a command-line mode
-(`--cli`). No Python, no runtime network access.
+(`--cli`). No Python. Network access is limited to downloading models.
+
+**The name comes from HIPAA.** Hippo Transcribe was built for HIPAA-sensitive
+work: audio is processed on your machine, and transcripts never leave it.
+
+No cloud · No accounts · No telemetry · Audio and transcripts stay on this device.
 
 - **Diarization** — [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx):
   `pyannote/segmentation-3.0` ONNX + a `wespeaker` speaker-embedding ONNX, with
@@ -19,6 +26,8 @@ speakers is fixed with `--num-speakers N` (default 2) or auto-detected with
 
 ## Workspace
 
+- `PRIVACY.md` — data flows, storage locations, network use and retention.
+- `docs/brand.md` — approved privacy messaging and banned claims.
 - `core/` — `hippo-transcribe-core` library: audio, diarization, ASR, model/cache paths,
   pipeline, CLI.
 - `gui/` — `hippo-transcribe-gui` binary: the iced GUI and the `--cli` entry point.
@@ -46,8 +55,9 @@ powershell -ExecutionPolicy Bypass -File .\scripts\build-windows.ps1
 
 It enters the Visual Studio developer environment, configures the static CRT
 for the executable, downloads the sherpa-onnx shared DLLs, runs the release
-tests, builds, checks the executable's dependencies, and writes a release folder
-and zip under `dist\`.
+tests, builds, checks the executable's dependencies, stages the bundled model
+set from `models.lock.json`, and writes a release folder and zip under `dist\`. Use
+`-SkipModels` to stage only the executable and DLLs.
 
 The app loads `sherpa-onnx-c-api.dll` and `onnxruntime.dll` from beside
 `hippo-transcribe.exe` at runtime; no native library is linked into the executable. Only
@@ -95,25 +105,59 @@ hippo-transcribe --cli models download --verify
 If models are missing on first launch, the GUI shows a **Download models** card
 and fetches the same files in the background with progress. Downloads resume
 from a `.part` file, verify SHA-256 checksums, and can be cancelled from the
-card. Readiness is checked against the selected preset, so the English-only
-speed and balanced presets do not require the multilingual accuracy model.
+card. Readiness is checked against the selected preset, so a preset never needs
+a model it does not use.
 
-- `ggml-large-v3-turbo-q5_0.bin` (accuracy), `ggml-base.en-q5_1.bin` (balanced),
-  `ggml-tiny.en-q5_1.bin` (speed)
+Every preset uses a multilingual model:
+
+- `ggml-tiny-q5_1.bin` (speed), `ggml-base-q5_1.bin` (balanced) — bundled with
+  release packages
+- `ggml-large-v3-turbo-q5_0.bin` (accuracy) — downloaded on demand
 - `sherpa-onnx-pyannote-segmentation-3-0/model.onnx`
 - `wespeaker_en_voxceleb_resnet34_LM.onnx`
 
-Overrides: `HIPPO_TRANSCRIBE_MODELS_DIR` (root), `HIPPO_TRANSCRIBE_SEGMENTATION_MODEL`,
-`HIPPO_TRANSCRIBE_EMBEDDING_MODEL`, `HIPPO_TRANSCRIBE_WHISPER_MODEL`. Diarization is cached
-under `HIPPO_TRANSCRIBE_CACHE_DIR` (or the platform cache dir) and reused on re-runs.
-The legacy `TRANSIEL_*` names are still read as a fallback, and data under the old
-`transiel` directories is adopted on first launch.
+`models.lock.json` is the single source of truth for file names, sizes,
+SHA-256 hashes, licenses and mirrors. The application compiles it in, and
+`scripts/fetch-models.sh` / `.ps1` stage the same pinned files, so packaging and
+runtime downloads cannot disagree.
+
+Downloads try, in order: `HIPPO_TRANSCRIBE_MODEL_MIRROR` (an extra base URL that
+serves `<file>`), the public GitLab package mirror
+(`librewarelive/hippo-transcribe-models`), then the pinned upstream Hugging Face
+/ k2-fsa URLs as fallbacks.
+
+Release packages ship a `models/` directory beside the executable. It is
+read-only and used as-is; downloads always go to the writable models directory.
+
+Overrides: `HIPPO_TRANSCRIBE_MODELS_DIR` (root),
+`HIPPO_TRANSCRIBE_MODEL_MIRROR` (extra download mirror),
+`HIPPO_TRANSCRIBE_SEGMENTATION_MODEL`, `HIPPO_TRANSCRIBE_EMBEDDING_MODEL`,
+`HIPPO_TRANSCRIBE_WHISPER_MODEL`. Diarization is cached under
+`HIPPO_TRANSCRIBE_CACHE_DIR` (or the platform cache dir) and reused on re-runs;
+the cache key includes the model set version. The legacy `TRANSIEL_*` names are
+still read as a fallback, and data under the old `transiel` directories is
+adopted on first launch.
 
 Report what is present (exit non-zero if anything is missing or has the wrong
 size):
 
 ```bash
 hippo-transcribe --cli models
+```
+
+Print model attribution (names, hashes, licenses, sources):
+
+```bash
+hippo-transcribe --cli models notice
+```
+
+Stage the bundled model set for packaging (verified, cached under
+`vendor/models/`, git-ignored):
+
+```bash
+scripts/fetch-models.sh            # bundled set only
+scripts/fetch-models.sh --all      # include the on-demand accuracy model
+scripts/fetch-models.sh --verify-only
 ```
 
 ## CLI
@@ -129,13 +173,13 @@ hippo-transcribe --cli audio.mp3 --progress-json         # line-delimited JSON e
 hippo-transcribe --cli probe audio.mp3 120               # duration + RMS waveform
 ```
 
-Presets: `speed` (whisper `tiny.en`), `balanced` (whisper `base.en`), and
-`accuracy` (whisper `large-v3-turbo`).
+Presets: `speed` (whisper `tiny`, multilingual), `balanced` (whisper `base`,
+multilingual), and `accuracy` (whisper `large-v3-turbo`).
 
 Options: `--preset speed|balanced|accuracy`, `--language <code>|auto`,
 `--num-speakers N`, `--auto-speakers`, `--output-dir`, `--no-timestamps`,
-`--no-cache`, `--progress-json`. The speed and balanced presets are
-English-only; the accuracy preset supports multilingual models.
+`--no-cache`, `--progress-json`. Every preset accepts any supported language;
+the language auto-detects by default and `--language <code>` pins one.
 
 Output: `<audio-stem>-<preset>-transcription.txt` (`[hh:mm:ss] SPEAKER N: text`),
 written next to the audio or into `--output-dir`.
@@ -181,6 +225,15 @@ diarization cache.
 built-in `curl.exe` (progress shows in the console). Then open a new terminal and
 run `hippo-transcribe`. `undeploy.bat` removes the install and shortcut
 (`/keepmodels` keeps the models).
+
+## Privacy
+
+Audio, transcripts, diarization caches, models and settings stay on the machine
+that runs Hippo Transcribe. There is no cloud service, no account, no telemetry
+and no analytics. The only network access is the one-time model download (and
+optional checksum-verified mirror overrides).
+
+See [`PRIVACY.md`](PRIVACY.md) for the full data-flow and retention details.
 
 ## Licenses
 

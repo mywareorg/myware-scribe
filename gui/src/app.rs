@@ -503,16 +503,10 @@ impl App {
             notifications: settings.notifications,
             show_timestamps: settings.show_timestamps,
             num_speakers: match settings.num_speakers {
-                None => Some(2),
-                Some(0) => None,
-                Some(count) => Some(count),
+                Some(count) if count > 0 => Some(count),
+                _ => Some(2),
             },
-            language: Some(
-                settings
-                    .language
-                    .clone()
-                    .unwrap_or_else(|| "en".to_string()),
-            ),
+            language: settings.language.clone(),
             display_order_cache: RefCell::new(None),
             speaker_order_cache: RefCell::new(None),
             transcript_viewport: 0.0,
@@ -628,7 +622,7 @@ impl App {
         let settings = Settings {
             preset: Some(self.preset.arg().to_string()),
             sms_mode: Some(self.sms_mode),
-            num_speakers: Some(self.num_speakers.unwrap_or(0)),
+            num_speakers: Some(self.num_speakers.unwrap_or(2)),
             language: self.language.clone(),
             notifications: self.notifications,
             show_timestamps: self.show_timestamps,
@@ -1282,7 +1276,7 @@ impl App {
                 if matches!(self.status, Status::Running) {
                     return Task::none();
                 }
-                self.language = Some(option.code().to_string());
+                self.language = (option != LanguageOpt::Auto).then(|| option.code().to_string());
                 self.save_settings();
                 Task::none()
             }
@@ -1295,24 +1289,28 @@ impl App {
                 self.transcript_at_bottom = offset + viewport_h >= content_h - 8.0;
 
                 let following = self.follow_playhead;
-                let follows = following
-                    && self
-                        .follow_offset
-                        .is_some_and(|expected| (offset - expected).abs() <= 6.0);
                 let programmatic = self
                     .scroll_target
                     .take()
                     .is_some_and(|target| (offset - target).abs() <= 6.0);
 
-                // A scroll that doesn't match follow/programmatic targets is a
-                // user scroll: stop auto-following and move the playhead to the
-                // line now in view.
-                if following && !follows {
-                    self.follow_playhead = false;
-                    self.follow_offset = None;
-                    self.save_settings();
-                }
-                if !follows && !programmatic {
+                // Scrolling never disables follow; only the toggle does. With
+                // follow on, snap back to the followed line immediately. With
+                // it off, treat the scroll as a seek to the visible line.
+                if following {
+                    if let Some(expected) = self.follow_offset {
+                        if !programmatic && (offset - expected).abs() > 6.0 {
+                            self.scroll_target = Some(expected);
+                            return scrollable::scroll_to(
+                                transcript_id(),
+                                scrollable::AbsoluteOffset {
+                                    x: 0.0,
+                                    y: expected,
+                                },
+                            );
+                        }
+                    }
+                } else if !programmatic {
                     self.seek_from_scroll(offset, viewport_h);
                 }
                 Task::none()
@@ -2341,34 +2339,62 @@ impl App {
                 // frequent samples, and a short EMA rejects outliers.
                 if matches!(self.status, Status::Running) {
                     if let Some(start) = self.run_start {
-                        let fraction = self.overall_progress_target();
+                        // Keep the estimate monotonic: a phase change or a
+                        // newly probed duration can move the weighted target
+                        // backwards, which would otherwise spike the ETA.
+                        let target = self.overall_progress_target();
+                        let fraction = self
+                            .eta_sample
+                            .map_or(target, |(_, previous)| target.max(previous));
                         let now = Instant::now();
-                        if let Some((last, previous)) = self.eta_sample {
-                            let dt = (now - last).as_secs_f32();
-                            let df = fraction - previous;
-                            if dt >= 0.4 && df > 0.0002 {
-                                let sample = df / dt;
-                                self.eta_rate = Some(match self.eta_rate {
-                                    Some(rate) => rate * 0.75 + sample * 0.25,
-                                    None => sample,
-                                });
+                        // Only advance the sampling window when there is a
+                        // usable amount of progress; overwriting it every
+                        // 100ms tick would make `dt` too small to ever
+                        // produce a rate sample.
+                        match self.eta_sample {
+                            Some((last, previous)) => {
+                                let dt = (now - last).as_secs_f32();
+                                let df = fraction - previous;
+                                if dt >= 0.5 && df > 0.0005 {
+                                    let sample = df / dt;
+                                    self.eta_rate = Some(match self.eta_rate {
+                                        Some(rate) => rate * 0.75 + sample * 0.25,
+                                        None => sample,
+                                    });
+                                    self.eta_sample = Some((now, fraction));
+                                } else if dt >= 5.0 {
+                                    // Stalled (decoding, phase change): drop
+                                    // the stale window instead of averaging
+                                    // the pause into the next sample.
+                                    self.eta_sample = Some((now, fraction));
+                                }
                             }
+                            None => self.eta_sample = Some((now, fraction)),
                         }
-                        self.eta_sample = Some((now, fraction));
                         if fraction > 0.01 && fraction < 0.995 {
+                            // Prefer the measured rate. Before one exists,
+                            // only extrapolate once enough of the run has
+                            // completed that `elapsed / fraction` is sane.
                             let raw = self
                                 .eta_rate
                                 .filter(|rate| *rate > 0.0001)
                                 .map(|rate| ((1.0 - fraction) / rate).max(0.0))
-                                .unwrap_or_else(|| {
-                                    let elapsed = start.elapsed().as_secs_f32();
-                                    (elapsed * (1.0 - fraction) / fraction).max(0.0)
+                                .or_else(|| {
+                                    (fraction > 0.1).then(|| {
+                                        let elapsed = start.elapsed().as_secs_f32();
+                                        (elapsed * (1.0 - fraction) / fraction).max(0.0)
+                                    })
                                 });
-                            self.eta_shown = Some(match self.eta_shown {
-                                Some(previous) => previous + (raw - previous) * 0.15,
-                                None => raw,
-                            });
-                        } else if fraction >= 0.995 {
+                            match raw {
+                                Some(raw) => {
+                                    self.eta_shown = Some(match self.eta_shown {
+                                        Some(previous) => previous + (raw - previous) * 0.15,
+                                        None => raw,
+                                    });
+                                }
+                                None => self.eta_shown = None,
+                            }
+                        } else {
                             self.eta_shown = None;
                         }
                     }
@@ -2592,7 +2618,7 @@ impl App {
         self.pending_rename = generated == 1 && self.completed_count() == 1;
         self.toast = None;
         if self.notifications {
-            notify("Hippo Transcribe", "Transcription complete");
+            notify("Hippo Transcribe", "Finished \u{00b7} saved locally");
         }
         true
     }
@@ -2754,6 +2780,12 @@ impl App {
         self.scroll_target = None;
         self.scroll_seek = false;
         self.transcript_at_bottom = true;
+        // Each explicit transcription starts in follow mode; only the user's
+        // toggle can turn it off, and a follow-up pass keeps that choice.
+        if !preserve {
+            self.follow_playhead = true;
+            self.save_settings();
+        }
         self.turns.clear();
         self.peaks = Arc::new(Vec::new());
         self.peaks_for = None;
@@ -3354,7 +3386,7 @@ impl App {
         };
         let speakers = match s.num_speakers {
             Some(count) => count.to_string(),
-            None => format!("{} (auto)", s.speakers),
+            None => s.speakers.to_string(),
         };
         let mut lines = vec![
             format!("Total run time: {}", format_secs(s.run_seconds)),
@@ -3618,7 +3650,7 @@ impl App {
                 ICON_HOURGLASS,
                 scheme.warn_tint,
                 "Listening for speech",
-                format!("{detail}. Lines will appear here as they are transcribed."),
+                format!("{detail}. Lines appear here as they are transcribed on this device."),
             )
         } else if self
             .selected
@@ -3642,8 +3674,8 @@ impl App {
             (
                 ICON_MIC,
                 scheme.warn_tint,
-                "Drop audio to begin",
-                "Drag audio files anywhere into the window, or add them from the left panel."
+                "Drop audio. It stays here.",
+                "Drag audio files anywhere into the window, or add them from the left panel. Nothing is uploaded."
                     .to_string(),
             )
         } else if has_done {
@@ -3658,7 +3690,7 @@ impl App {
                 ICON_PLAY,
                 scheme.track,
                 "Ready to transcribe",
-                "Press Transcribe (or Ctrl+Enter) to start the queue.".to_string(),
+                "Press Transcribe (or Ctrl+Enter). Processing happens on this device.".to_string(),
             )
         } else {
             (
@@ -3932,7 +3964,7 @@ impl App {
             output_row,
             options,
             row![
-                action_text("Transcribe")
+                action_text("Transcribe on this device")
                     .on_press_maybe(can_start.then_some(Message::Start))
                     .style(color_button(scheme.green, scheme.on_accent)),
                 action_text("Cancel")
@@ -4769,12 +4801,15 @@ impl App {
         } else if missing.is_empty() {
             (
                 "Transcription models are missing".to_string(),
-                "Download the model files once to enable offline transcription.".to_string(),
+                "Download the model files once to enable offline transcription. Audio never leaves this device."
+                    .to_string(),
             )
         } else {
             (
                 "Transcription models are missing".to_string(),
-                format!("Missing: {missing}. One-time download, about 650 MB."),
+                format!(
+                    "Missing: {missing}. One-time download, about 650 MB. Audio never leaves this device."
+                ),
             )
         };
 
@@ -4954,11 +4989,6 @@ impl App {
                 .size(theme::TEXT_XS)
                 .color(scheme.muted)
                 .into()
-        } else if matches!(self.preset, Preset::Speed | Preset::Balanced) {
-            text("English only for the speed and balanced presets")
-                .size(theme::TEXT_XS)
-                .color(scheme.muted)
-                .into()
         } else {
             pick_list(
                 LanguageOpt::ALL,
@@ -5117,7 +5147,30 @@ impl App {
         .spacing(theme::SPACE_SM)
         .width(Length::Fill);
 
+        let privacy_processing = settings_control(
+            text("On this device")
+                .size(theme::TEXT_XS)
+                .color(scheme.green),
+        );
+        let privacy_cloud = settings_control(text("None").size(theme::TEXT_XS).color(scheme.text));
+        let privacy_telemetry =
+            settings_control(text("None").size(theme::TEXT_XS).color(scheme.text));
+        let privacy_network = settings_control(
+            text("Model downloads only")
+                .size(theme::TEXT_XS)
+                .color(scheme.text),
+        );
+        let privacy_storage =
+            settings_control(text("Local files").size(theme::TEXT_XS).color(scheme.text));
+
         let mut body = column![].spacing(theme::SPACE_SM).width(Length::Fill);
+        body = body.push(settings_section_label("Privacy", scheme));
+        body = body.push(settings_row("Processing", privacy_processing, scheme));
+        body = body.push(settings_row("Cloud & accounts", privacy_cloud, scheme));
+        body = body.push(settings_row("Telemetry", privacy_telemetry, scheme));
+        body = body.push(settings_row("Network", privacy_network, scheme));
+        body = body.push(settings_row("Audio & transcripts", privacy_storage, scheme));
+        body = body.push(settings_divider(scheme));
         body = body.push(settings_section_label("Appearance", scheme));
         body = body.push(settings_row("Theme", theme, scheme));
         body = body.push(settings_row("Transcript text size", font_controls, scheme));
@@ -5419,6 +5472,23 @@ impl App {
             AppTheme::System => (ICON_SUN, "Switch to light theme"),
         };
 
+        let privacy_badge = container(
+            row![
+                icon_colored(ICON_SHIELD, 12.0, scheme.green),
+                text("Offline \u{00b7} On this device")
+                    .size(theme::TEXT_XS)
+                    .color(scheme.muted),
+            ]
+            .spacing(4)
+            .align_y(iced::Alignment::Center),
+        )
+        .padding([4, 8])
+        .style(move |_theme| container::Style {
+            background: Some(scheme.track.into()),
+            border: iced::border::rounded(999.0),
+            ..container::Style::default()
+        });
+
         let header = row![
             iced::widget::image(logo_handle())
                 .width(Length::Fixed(32.0))
@@ -5428,11 +5498,12 @@ impl App {
                     weight: font::Weight::Bold,
                     ..Font::DEFAULT
                 }),
-                text("Local transcription & speaker diarization")
+                text("Private, offline transcription & diarization")
                     .size(theme::TEXT_XS)
                     .color(scheme.muted),
             ]
             .spacing(theme::SPACE_2XS),
+            privacy_badge,
             horizontal_space(),
             self.tip(
                 action(icon(theme_icon, 16.0))
@@ -5627,6 +5698,9 @@ impl App {
 
             let col = column![
                 container(scroll).width(Length::Fill),
+                text("Saved locally \u{00b7} Nothing uploaded.")
+                    .size(theme::TEXT_XS)
+                    .color(scheme.muted),
                 container(
                     row![action_text("Close")
                         .on_press(Message::CloseSummary)
@@ -5680,7 +5754,10 @@ impl App {
                                     weight: font::Weight::Medium,
                                     ..Font::DEFAULT
                                 }),
-                            text("Local speaker diarization + transcription.")
+                            text("Private, offline speaker diarization + transcription.")
+                                .size(theme::TEXT_SM)
+                                .color(scheme.muted),
+                            text("Hippo is named for HIPAA. Built so sensitive recordings never leave this machine.")
                                 .size(theme::TEXT_SM)
                                 .color(scheme.muted),
                             text("Diarization: pyannote segmentation + wespeaker (sherpa-onnx).")
@@ -5689,7 +5766,20 @@ impl App {
                             text("Transcription: whisper.cpp.")
                                 .size(theme::TEXT_SM)
                                 .color(scheme.muted),
-                            text("Runs fully offline once models are downloaded.")
+                            text("Runs fully offline; models download once.")
+                                .size(theme::TEXT_SM)
+                                .color(scheme.muted),
+                        ]
+                        .spacing(4),
+                    );
+                    col = col.push(settings_divider(scheme));
+                    col = col.push(
+                        column![
+                            settings_section_label("Privacy", scheme),
+                            text("No cloud. No account. No telemetry.")
+                                .size(theme::TEXT_SM)
+                                .color(scheme.text),
+                            text("Audio and transcripts stay on this device.")
                                 .size(theme::TEXT_SM)
                                 .color(scheme.muted),
                         ]
@@ -6173,6 +6263,7 @@ const ICON_FOLDER_PLUS: char = '\u{f3d3}';
 const ICON_FOLDER_OPEN: char = '\u{f3d8}';
 const ICON_TRASH: char = '\u{f5de}';
 const ICON_RETRY: char = '\u{f116}';
+const ICON_SHIELD: char = '\u{f52f}';
 const ICON_DISPLAY: char = '\u{f302}';
 
 /// Full-window drop target shown while a file hovers over the app.
@@ -7847,13 +7938,14 @@ mod tests {
     }
 
     #[test]
-    fn speaker_options_include_automatic_detection() {
-        assert_eq!(SpeakerOpt::ALL.len(), 6);
-        assert_eq!(SpeakerOpt::from_value(None), SpeakerOpt::Auto);
-        assert_eq!(SpeakerOpt::from_value(Some(0)), SpeakerOpt::Auto);
+    fn speaker_options_are_fixed_counts() {
+        assert_eq!(SpeakerOpt::ALL.len(), 5);
+        assert_eq!(SpeakerOpt::from_value(None), SpeakerOpt::Two);
+        assert_eq!(SpeakerOpt::from_value(Some(0)), SpeakerOpt::Two);
         assert_eq!(SpeakerOpt::from_value(Some(2)), SpeakerOpt::Two);
-        assert_eq!(SpeakerOpt::Auto.value(), None);
-        assert_eq!(SpeakerOpt::Two.value(), Some(2));
+        assert!(SpeakerOpt::ALL
+            .iter()
+            .all(|option| option.value().is_some()));
     }
 
     #[test]

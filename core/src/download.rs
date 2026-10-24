@@ -3,6 +3,10 @@
 //! This is the only code path that touches the network. The same implementation
 //! backs `hippo-transcribe --cli models download` (also used by `deploy.bat`) and the
 //! GUI's first-run download card.
+//!
+//! Files, hashes and mirrors come from `models.lock.json` (see [`models`]).
+//! When a release package ships a model beside the executable, that copy is used
+//! as-is and nothing is downloaded.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
@@ -12,16 +16,24 @@ use std::sync::Arc;
 
 use sha2::{Digest, Sha256};
 
-use crate::models;
+use crate::models::{self, ModelSpec};
+
+/// Environment variable holding an extra mirror base URL. Files are fetched as
+/// `{base}/{file_name}` before the pinned upstream mirrors are tried.
+const MIRROR_ENV: (&str, &str) = ("HIPPO_TRANSCRIBE_MODEL_MIRROR", "TRANSIEL_MODEL_MIRROR");
 
 struct ModelFile {
-    label: &'static str,
-    path: PathBuf,
-    url: &'static str,
-    /// Exact byte length of the upstream file.
-    size: u64,
-    /// SHA-256 of the upstream file, lowercase hex.
-    sha256: &'static str,
+    spec: &'static ModelSpec,
+}
+
+impl ModelFile {
+    fn install_path(&self) -> PathBuf {
+        models::models_dir().join(&self.spec.file)
+    }
+
+    fn resolved(&self) -> PathBuf {
+        models::resolve(&self.spec.file)
+    }
 }
 
 /// Presence and on-disk size of one model file.
@@ -30,6 +42,8 @@ pub struct ModelStatus {
     pub label: &'static str,
     pub path: PathBuf,
     pub bytes: u64,
+    /// `bundled`, `user` or `override`; empty when the file is missing.
+    pub source: &'static str,
 }
 
 impl ModelStatus {
@@ -64,44 +78,11 @@ pub enum DownloadEvent {
 }
 
 fn files() -> Vec<ModelFile> {
-    let dir = models::models_dir();
-    vec![
-        ModelFile {
-            label: "segmentation",
-            path: models::segmentation_model(),
-            url: "https://huggingface.co/csukuangfj/sherpa-onnx-pyannote-segmentation-3-0/resolve/main/model.onnx",
-            size: 5_992_913,
-            sha256: "220ad67ca923bef2fa91f2390c786097bf305bceb5e261d4af67b38e938e1079",
-        },
-        ModelFile {
-            label: "embedding",
-            path: models::embedding_model(),
-            url: "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/wespeaker_en_voxceleb_resnet34_LM.onnx",
-            size: 26_530_550,
-            sha256: "e9848563da86f263117134dfd7ad63c92355b37de492b55e325400c9d9c39012",
-        },
-        ModelFile {
-            label: "whisper-speed",
-            path: dir.join("ggml-tiny.en-q5_1.bin"),
-            url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.en-q5_1.bin",
-            size: 32_166_155,
-            sha256: "c77c5766f1cef09b6b7d47f21b546cbddd4157886b3b5d6d4f709e91e66c7c2b",
-        },
-        ModelFile {
-            label: "whisper-balanced",
-            path: dir.join("ggml-base.en-q5_1.bin"),
-            url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en-q5_1.bin",
-            size: 59_721_011,
-            sha256: "4baf70dd0d7c4247ba2b81fafd9c01005ac77c2f9ef064e00dcf195d0e2fdd2f",
-        },
-        ModelFile {
-            label: "whisper-accuracy",
-            path: dir.join("ggml-large-v3-turbo-q5_0.bin"),
-            url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo-q5_0.bin",
-            size: 574_041_195,
-            sha256: "394221709cd5ad1f40c46e6031ca61bce88931e6e088c188294c6d5a55ffa7e2",
-        },
-    ]
+    models::manifest()
+        .models
+        .iter()
+        .map(|spec| ModelFile { spec })
+        .collect()
 }
 
 fn size(path: &Path) -> Option<u64> {
@@ -116,14 +97,50 @@ fn part_path(path: &Path) -> PathBuf {
     path.with_file_name(format!("{name}.part"))
 }
 
+fn file_name(spec: &ModelSpec) -> &str {
+    spec.file.rsplit('/').next().unwrap_or(&spec.file)
+}
+
+/// Mirror URLs for one model: the configured mirror base first, then the
+/// pinned upstream mirrors. Duplicates are removed.
+fn mirrors(spec: &ModelSpec, base: Option<&str>) -> Vec<String> {
+    let mut urls = Vec::new();
+    if let Some(base) = base.map(str::trim).filter(|base| !base.is_empty()) {
+        urls.push(format!(
+            "{}/{}",
+            base.trim_end_matches('/'),
+            file_name(spec)
+        ));
+    }
+    for url in &spec.mirrors {
+        if !urls.iter().any(|existing| existing == url) {
+            urls.push(url.clone());
+        }
+    }
+    urls
+}
+
+fn mirror_base() -> Option<String> {
+    crate::env_compat(MIRROR_ENV.0, MIRROR_ENV.1)
+}
+
 /// Presence and size of every model file, without touching the network.
 pub fn status() -> Vec<ModelStatus> {
     files()
         .into_iter()
-        .map(|model| ModelStatus {
-            label: model.label,
-            bytes: size(&model.path).unwrap_or(0),
-            path: model.path,
+        .map(|model| {
+            let path = model.resolved();
+            let bytes = size(&path).unwrap_or(0);
+            ModelStatus {
+                label: model.spec.id.as_str(),
+                source: if bytes > 0 {
+                    models::source_of(&path)
+                } else {
+                    ""
+                },
+                bytes,
+                path,
+            }
         })
         .collect()
 }
@@ -182,31 +199,36 @@ pub fn download_with_cancel<F>(
 where
     F: FnMut(DownloadEvent),
 {
+    let base = mirror_base();
     for model in files() {
         if cancel.load(Ordering::SeqCst) {
             notify(DownloadEvent::Finished { ok: false });
             return 1;
         }
-        // Only a file with the expected size is considered complete. This
-        // also means a truncated file left by an older run gets repaired.
-        if !force && size(&model.path) == Some(model.size) {
+        // A file of the expected size is considered complete, whether it came
+        // from a previous download or from the release package. This also
+        // means a truncated file left by an older run gets repaired.
+        let resolved = model.resolved();
+        if !force && size(&resolved) == Some(model.spec.size) {
             notify(DownloadEvent::Completed {
-                label: model.label,
-                path: model.path,
+                label: model.spec.id.as_str(),
+                path: resolved,
             });
             continue;
         }
-        notify(DownloadEvent::Started { label: model.label });
-        if let Err(error) = fetch(&model, &cancel, &mut |done, total| {
+        notify(DownloadEvent::Started {
+            label: model.spec.id.as_str(),
+        });
+        if let Err(error) = fetch(&model, base.as_deref(), &cancel, &mut |done, total| {
             notify(DownloadEvent::Progress {
-                label: model.label,
+                label: model.spec.id.as_str(),
                 done,
                 total,
             })
         }) {
             let cancelled = cancel.load(Ordering::SeqCst);
             notify(DownloadEvent::Failed {
-                label: model.label,
+                label: model.spec.id.as_str(),
                 message: if cancelled {
                     "cancelled".to_string()
                 } else {
@@ -217,8 +239,8 @@ where
             return 1;
         }
         notify(DownloadEvent::Completed {
-            label: model.label,
-            path: model.path,
+            label: model.spec.id.as_str(),
+            path: model.install_path(),
         });
     }
     if cancel.load(Ordering::SeqCst) {
@@ -230,49 +252,53 @@ where
     code
 }
 
-/// Report which models are present and complete (exit 1 if anything is
-/// missing, the wrong size, or has the wrong checksum).
+/// Report which models are present and complete, where each came from, and
+/// whether the bundled set is installed (exit 1 if anything is missing, the
+/// wrong size, or has the wrong checksum).
 pub fn verify_all() -> i32 {
     let mut missing = 0;
     let mut wrong = 0;
+    println!(
+        "model set v{} (manifest models.lock.json)",
+        models::set_version()
+    );
+    if let Some(dir) = models::bundled_dir() {
+        println!("bundled models: {}", dir.display());
+    }
     for model in files() {
-        match size(&model.path) {
-            Some(n) if n != model.size => {
+        let path = model.resolved();
+        let label = model.spec.id.as_str();
+        match size(&path) {
+            Some(n) if n != model.spec.size => {
                 println!(
-                    "[bad] {:16} {} ({n} bytes, expected {} bytes)",
-                    model.label,
-                    model.path.display(),
-                    model.size
+                    "[bad] {label:16} {} ({n} bytes, expected {} bytes)",
+                    path.display(),
+                    model.spec.size
                 );
                 wrong += 1;
             }
-            Some(n) => match sha256_file(&model.path) {
-                Ok(hash) if hash == model.sha256 => println!(
-                    "[ok] {:16} {} ({:.1} MB)",
-                    model.label,
-                    model.path.display(),
-                    n as f64 / (1024.0 * 1024.0)
+            Some(n) => match sha256_file(&path) {
+                Ok(hash) if hash == model.spec.sha256 => println!(
+                    "[ok] {label:16} {} ({:.1} MB, {})",
+                    path.display(),
+                    n as f64 / (1024.0 * 1024.0),
+                    models::source_of(&path)
                 ),
                 Ok(hash) => {
                     println!(
-                        "[bad] {:16} {} (sha256 {hash}, expected {})",
-                        model.label,
-                        model.path.display(),
-                        model.sha256
+                        "[bad] {label:16} {} (sha256 {hash}, expected {})",
+                        path.display(),
+                        model.spec.sha256
                     );
                     wrong += 1;
                 }
                 Err(error) => {
-                    println!(
-                        "[bad] {:16} {} ({error})",
-                        model.label,
-                        model.path.display()
-                    );
+                    println!("[bad] {label:16} {} ({error})", path.display());
                     wrong += 1;
                 }
             },
             None => {
-                println!("[missing] {:16} {}", model.label, model.path.display());
+                println!("[missing] {label:16} {}", path.display());
                 missing += 1;
             }
         }
@@ -289,18 +315,31 @@ pub fn verify_all() -> i32 {
     }
 }
 
-fn whisper_label(preset: &str) -> &'static str {
-    if preset.eq_ignore_ascii_case("speed") {
-        "whisper-speed"
-    } else if preset.eq_ignore_ascii_case("balanced") {
-        "whisper-balanced"
-    } else {
-        "whisper-accuracy"
+/// Attribution/provenance for every model, as Markdown.
+pub fn notice() -> String {
+    let mut out = String::from("# Model attribution\n\n");
+    out.push_str(&format!(
+        "Model set v{} (pinned in `models.lock.json`).\n\n",
+        models::set_version()
+    ));
+    for model in &models::manifest().models {
+        out.push_str(&format!("## {}\n\n", model.id));
+        out.push_str(&format!("- File: `{}`\n", model.file));
+        out.push_str(&format!("- Size: {} bytes\n", model.size));
+        out.push_str(&format!("- SHA-256: `{}`\n", model.sha256));
+        out.push_str(&format!("- License: {}\n", model.license));
+        out.push_str(&format!("- Source: {}\n", model.source));
+        out.push_str(&format!(
+            "- Shipped in the release package: {}\n",
+            if model.bundled { "yes" } else { "no" }
+        ));
+        out.push('\n');
     }
+    out
 }
 
 fn required_for(preset: &str) -> [&'static str; 3] {
-    ["segmentation", "embedding", whisper_label(preset)]
+    ["segmentation", "embedding", models::whisper_id(preset)]
 }
 
 /// True when every file needed to run `preset` exists at the expected size.
@@ -313,12 +352,20 @@ pub fn missing_for(preset: &str) -> Vec<ModelStatus> {
     let required = required_for(preset);
     files()
         .into_iter()
-        .filter(|model| required.contains(&model.label))
-        .filter(|model| size(&model.path) != Some(model.size))
-        .map(|model| ModelStatus {
-            label: model.label,
-            bytes: size(&model.path).unwrap_or(0),
-            path: model.path,
+        .filter(|model| required.contains(&model.spec.id.as_str()))
+        .filter_map(|model| {
+            let path = model.resolved();
+            let bytes = size(&path).unwrap_or(0);
+            (bytes != model.spec.size).then_some(ModelStatus {
+                label: model.spec.id.as_str(),
+                source: if bytes > 0 {
+                    models::source_of(&path)
+                } else {
+                    ""
+                },
+                bytes,
+                path,
+            })
         })
         .collect()
 }
@@ -327,7 +374,7 @@ pub fn missing_for(preset: &str) -> Vec<ModelStatus> {
 pub fn clear_partial() -> Vec<PathBuf> {
     let mut removed = Vec::new();
     for model in files() {
-        let part = part_path(&model.path);
+        let part = part_path(&model.install_path());
         if part.is_file() && fs::remove_file(&part).is_ok() {
             removed.push(part);
         }
@@ -335,22 +382,54 @@ pub fn clear_partial() -> Vec<PathBuf> {
     removed
 }
 
+/// Fetch one model, trying each mirror in order. A checksum mismatch discards
+/// the partial file so the next mirror starts fresh.
 fn fetch(
     model: &ModelFile,
+    base: Option<&str>,
     cancel: &AtomicBool,
     on_progress: &mut dyn FnMut(u64, Option<u64>),
 ) -> Result<(), String> {
-    if let Some(parent) = model.path.parent() {
+    let urls = mirrors(model.spec, base);
+    if urls.is_empty() {
+        return Err("no download mirrors configured".to_string());
+    }
+    let mut failures = Vec::new();
+    for url in &urls {
+        if cancel.load(Ordering::SeqCst) {
+            return Err("cancelled".to_string());
+        }
+        match fetch_from(model, url, cancel, on_progress) {
+            Ok(()) => return Ok(()),
+            Err(error) => {
+                if cancel.load(Ordering::SeqCst) {
+                    return Err("cancelled".to_string());
+                }
+                failures.push(format!("{url}: {error}"));
+            }
+        }
+    }
+    Err(format!("all mirrors failed:\n  {}", failures.join("\n  ")))
+}
+
+fn fetch_from(
+    model: &ModelFile,
+    url: &str,
+    cancel: &AtomicBool,
+    on_progress: &mut dyn FnMut(u64, Option<u64>),
+) -> Result<(), String> {
+    let path = model.install_path();
+    if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| format!("create {}: {e}", parent.display()))?;
     }
 
-    let part = part_path(&model.path);
+    let part = part_path(&path);
     let mut resume_from = if part.is_file() {
         size(&part).unwrap_or(0)
     } else {
         0
     };
-    if resume_from > model.size {
+    if resume_from > model.spec.size {
         // A stale/oversized partial cannot be resumed; start clean.
         let _ = fs::remove_file(&part);
         resume_from = 0;
@@ -359,7 +438,7 @@ fn fetch(
         return Err("cancelled".to_string());
     }
 
-    let mut request = ureq::get(model.url);
+    let mut request = ureq::get(url);
     if resume_from > 0 {
         request = request.set("Range", &format!("bytes={resume_from}-"));
     }
@@ -368,7 +447,7 @@ fn fetch(
         Err(ureq::Error::Status(416, _)) if resume_from > 0 => {
             // The server rejected the range. If the partial is in fact a
             // complete file (some servers do this at EOF), finish it.
-            if size(&part) == Some(model.size) {
+            if size(&part) == Some(model.spec.size) {
                 return finalize(model, &part);
             }
             let _ = fs::remove_file(&part);
@@ -427,10 +506,10 @@ fn fetch(
             return Err(format!("incomplete download: got {done} bytes of {total}"));
         }
     }
-    if done != model.size {
+    if done != model.spec.size {
         return Err(format!(
             "incomplete download: got {done} bytes, expected {}",
-            model.size
+            model.spec.size
         ));
     }
     finalize(model, &part)
@@ -444,21 +523,22 @@ fn content_range_total(response: &ureq::Response) -> Option<u64> {
 
 fn finalize(model: &ModelFile, part: &Path) -> Result<(), String> {
     let actual = size(part).ok_or_else(|| format!("missing {}", part.display()))?;
-    if actual != model.size {
+    if actual != model.spec.size {
         return Err(format!(
             "incomplete download: got {actual} bytes, expected {}",
-            model.size
+            model.spec.size
         ));
     }
-    if let Err(error) = verify_hash(part, model.sha256) {
+    if let Err(error) = verify_hash(part, &model.spec.sha256) {
         // A bad checksum cannot be resumed meaningfully.
         let _ = fs::remove_file(part);
         return Err(error);
     }
-    if model.path.exists() {
-        let _ = fs::remove_file(&model.path);
+    let path = model.install_path();
+    if path.exists() {
+        let _ = fs::remove_file(&path);
     }
-    fs::rename(part, &model.path).map_err(|e| format!("rename: {e}"))
+    fs::rename(part, &path).map_err(|e| format!("rename: {e}"))
 }
 
 fn verify_hash(path: &Path, expected: &str) -> Result<(), String> {
@@ -525,7 +605,45 @@ mod tests {
         );
         // Unknown presets fall back to the accuracy model, matching
         // `models::whisper_model`.
-        assert_eq!(whisper_label("unknown"), "whisper-accuracy");
+        assert_eq!(models::whisper_id("unknown"), "whisper-accuracy");
+    }
+
+    #[test]
+    fn mirrors_put_the_configured_base_first() {
+        let spec = models::spec("whisper-accuracy").unwrap();
+        let urls = mirrors(
+            spec,
+            Some("https://example.test/packages/hippo-models/1.0.0/"),
+        );
+        assert_eq!(
+            urls.first().unwrap(),
+            "https://example.test/packages/hippo-models/1.0.0/ggml-large-v3-turbo-q5_0.bin"
+        );
+        assert_eq!(urls.len(), spec.mirrors.len() + 1);
+    }
+
+    #[test]
+    fn mirrors_without_a_base_are_the_pinned_upstream_list() {
+        let spec = models::spec("whisper-balanced").unwrap();
+        assert_eq!(mirrors(spec, None), spec.mirrors);
+        assert_eq!(mirrors(spec, Some("  ")), spec.mirrors);
+    }
+
+    #[test]
+    fn mirror_file_names_drop_the_relative_directory() {
+        let spec = models::spec("segmentation").unwrap();
+        let urls = mirrors(spec, Some("https://example.test/packages"));
+        assert!(urls[0].ends_with("/packages/model.onnx"), "{}", urls[0]);
+    }
+
+    #[test]
+    fn notice_lists_every_model_with_its_license() {
+        let text = notice();
+        for model in &models::manifest().models {
+            assert!(text.contains(&format!("## {}", model.id)));
+            assert!(text.contains(&model.license));
+            assert!(text.contains(&model.sha256));
+        }
     }
 
     #[test]

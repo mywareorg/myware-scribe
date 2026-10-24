@@ -1,0 +1,70 @@
+{
+  "version": "2",
+  "models": [
+    {
+      "id": "segmentation",
+      "file": "sherpa-onnx-pyannote-segmentation-3-0/model.onnx",
+      "size": 5992913,
+      "sha256": "220ad67ca923bef2fa91f2390c786097bf305bceb5e261d4af67b38e938e1079",
+      "license": "MIT",
+      "source": "pyannote/segmentation-3.0, sherpa-onnx ONNX conversion (csukuangfj)",
+      "bundled": true,
+      "mirrors": [
+        "https://gitlab.com/api/v4/projects/librewarelive%2Fhippo-transcribe-models/packages/generic/hippo-models/1.0.0/model.onnx",
+        "https://huggingface.co/csukuangfj/sherpa-onnx-pyannote-segmentation-3-0/resolve/9403a6902bb58e3d5ae8c7e77c3422de279db2e0/model.onnx"
+      ]
+    },
+    {
+      "id": "embedding",
+      "file": "wespeaker_en_voxceleb_resnet34_LM.onnx",
+      "size": 26530550,
+      "sha256": "e9848563da86f263117134dfd7ad63c92355b37de492b55e325400c9d9c39012",
+      "license": "CC-BY-4.0",
+      "source": "WeSpeaker en_voxceleb_resnet34_LM (sherpa-onnx release)",
+      "bundled": true,
+      "mirrors": [
+        "https://gitlab.com/api/v4/projects/librewarelive%2Fhippo-transcribe-models/packages/generic/hippo-models/1.0.0/wespeaker_en_voxceleb_resnet34_LM.onnx",
+        "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/wespeaker_en_voxceleb_resnet34_LM.onnx"
+      ]
+    },
+    {
+      "id": "whisper-speed",
+      "file": "ggml-tiny-q5_1.bin",
+      "size": 32152673,
+      "sha256": "818710568da3ca15689e31a743197b520007872ff9576237bda97bd1b469c3d7",
+      "license": "MIT",
+      "source": "whisper.cpp ggml-tiny-q5_1 (ggerganov/whisper.cpp)",
+      "bundled": true,
+      "mirrors": [
+        "https://gitlab.com/api/v4/projects/librewarelive%2Fhippo-transcribe-models/packages/generic/hippo-models/1.0.0/ggml-tiny-q5_1.bin",
+        "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-tiny-q5_1.bin"
+      ]
+    },
+    {
+      "id": "whisper-balanced",
+      "file": "ggml-base-q5_1.bin",
+      "size": 59707625,
+      "sha256": "422f1ae452ade6f30a004d7e5c6a43195e4433bc370bf23fac9cc591f01a8898",
+      "license": "MIT",
+      "source": "whisper.cpp ggml-base-q5_1 (ggerganov/whisper.cpp)",
+      "bundled": true,
+      "mirrors": [
+        "https://gitlab.com/api/v4/projects/librewarelive%2Fhippo-transcribe-models/packages/generic/hippo-models/1.0.0/ggml-base-q5_1.bin",
+        "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-base-q5_1.bin"
+      ]
+    },
+    {
+      "id": "whisper-accuracy",
+      "file": "ggml-large-v3-turbo-q5_0.bin",
+      "size": 574041195,
+      "sha256": "394221709cd5ad1f40c46e6031ca61bce88931e6e088c188294c6d5a55ffa7e2",
+      "license": "MIT",
+      "source": "whisper.cpp ggml-large-v3-turbo-q5_0 (ggerganov/whisper.cpp)",
+      "bundled": false,
+      "mirrors": [
+        "https://gitlab.com/api/v4/projects/librewarelive%2Fhippo-transcribe-models/packages/generic/hippo-models/1.0.0/ggml-large-v3-turbo-q5_0.bin",
+        "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-large-v3-turbo-q5_0.bin"
+      ]
+    }
+  ]
+}

@@ -2,6 +2,8 @@
 name = "hippo-transcribe-core"
 version = "0.1.0"
 edition = "2021"
+description = "Private, offline speaker diarization and transcription."
+repository = "https://gitlab.com/librewarelive/hippo-transcribe"
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }

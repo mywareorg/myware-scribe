@@ -1,6 +1,7 @@
 target/
 .cache/
 dist/
+vendor/
 build-windows.log
 models/
 .venv/

@@ -18,6 +18,11 @@ const MIN_TURN_S: f32 = 0.4;
 const CLIP_PAD_S: f32 = 0.1;
 /// Bucket count for the waveform emitted once diarization identifies speakers.
 const TIMELINE_BUCKETS: usize = 2000;
+/// Per-file progress after decoding and after diarization. Keeping these as
+/// fixed phase boundaries makes the progress bar monotonic across stages
+/// instead of jumping back to zero when transcription starts.
+const DECODE_DONE: f32 = 0.03;
+const DIARIZATION_DONE: f32 = 0.45;
 
 #[derive(Debug, Clone)]
 pub struct PipelineOptions {
@@ -205,12 +210,18 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
             audio: input.display().to_string(),
             duration: duration as f32,
         });
+        emit(Event::Stage {
+            stage: "decoding".to_string(),
+            label: "Decoding".to_string(),
+            progress: DECODE_DONE,
+        });
 
         let cache_key = if opts.cache && opts.num_speakers != Some(1) {
             cache::key(input, &diarizer, opts.num_speakers)
         } else {
             None
         };
+        let mut did_diarize = false;
         let raw = if opts.num_speakers == Some(1) {
             // One speaker: skip diarization entirely and transcribe the file as
             // a single turn.
@@ -228,11 +239,12 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
                     emit(Event::Stage {
                         stage: "diarization".to_string(),
                         label: "Running Diarization 100%".to_string(),
-                        progress: 1.0,
+                        progress: DECODE_DONE,
                     });
                     turns
                 }
                 None => {
+                    did_diarize = true;
                     let progress = Arc::new(AtomicU32::new(0));
                     let progress_for_thread = progress.clone();
                     let segmentation = segmentation.clone();
@@ -253,7 +265,7 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
                     emit(Event::Stage {
                         stage: "diarization".to_string(),
                         label: "Running Diarization 0%".to_string(),
-                        progress: 0.0,
+                        progress: DECODE_DONE,
                     });
                     while !handle.is_finished() {
                         if is_cancelled() {
@@ -266,7 +278,9 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
                                 "Running Diarization {:.0}%",
                                 (fraction * 100.0).clamp(0.0, 100.0)
                             ),
-                            progress: fraction.clamp(0.0, 1.0),
+                            progress: (DECODE_DONE
+                                + (DIARIZATION_DONE - DECODE_DONE) * fraction.clamp(0.0, 1.0))
+                            .clamp(0.0, 1.0),
                         });
                         std::thread::sleep(Duration::from_millis(100));
                     }
@@ -275,7 +289,7 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
                     emit(Event::Stage {
                         stage: "diarization".to_string(),
                         label: "Running Diarization 100%".to_string(),
-                        progress: 1.0,
+                        progress: DIARIZATION_DONE,
                     });
                     match joined {
                         Ok(Ok(turns)) => {
@@ -297,6 +311,11 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
                     }
                 }
             }
+        };
+        let transcription_base = if did_diarize {
+            DIARIZATION_DONE
+        } else {
+            DECODE_DONE
         };
         let cleaned = clean_turns(raw);
         let mut map = build_speaker_map(&cleaned);
@@ -355,20 +374,19 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
             let mut done_seconds = 0.0f64;
             let mut done_turns = 0usize;
 
-            // English-only presets ignore the requested language.
-            let english_only = opts.preset.eq_ignore_ascii_case("speed")
-                || opts.preset.eq_ignore_ascii_case("balanced");
-            let decode_language = if english_only {
-                Some("en")
-            } else {
-                opts.language.as_deref()
-            };
+            // Every preset uses a multilingual model, so the requested
+            // language (or auto-detection) always applies. `auto`/empty mean
+            // detection, matching the CLI.
+            let decode_language = opts
+                .language
+                .as_deref()
+                .filter(|code| !code.is_empty() && !code.eq_ignore_ascii_case("auto"));
             let fast_decode = opts.preset.eq_ignore_ascii_case("speed");
 
             emit(Event::Stage {
                 stage: "transcription".to_string(),
                 label: format!("Transcribing 0/{total_turns}"),
-                progress: 0.0,
+                progress: transcription_base,
             });
 
             // Worker pool + channel: turns finish out of order, but lines are
@@ -470,7 +488,9 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
                     emit(Event::Stage {
                         stage: "transcription".to_string(),
                         label: format!("Transcribing {done_turns}/{total_turns}"),
-                        progress: fraction as f32,
+                        progress: (transcription_base
+                            + (1.0 - transcription_base) * fraction as f32)
+                            .clamp(0.0, 1.0),
                     });
                 }
 

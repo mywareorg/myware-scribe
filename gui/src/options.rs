@@ -1,9 +1,8 @@
 use std::fmt;
 
-/// Speaker-count picker options: auto-detect or a fixed 1..=5.
+/// Speaker-count picker options: a fixed 1..=5.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SpeakerOpt {
-    Auto,
     One,
     Two,
     Three,
@@ -12,8 +11,7 @@ pub(crate) enum SpeakerOpt {
 }
 
 impl SpeakerOpt {
-    pub(crate) const ALL: [SpeakerOpt; 6] = [
-        SpeakerOpt::Auto,
+    pub(crate) const ALL: [SpeakerOpt; 5] = [
         SpeakerOpt::One,
         SpeakerOpt::Two,
         SpeakerOpt::Three,
@@ -21,10 +19,9 @@ impl SpeakerOpt {
         SpeakerOpt::Five,
     ];
 
-    /// The pipeline value: `None` asks the diarizer to detect the count.
+    /// The pipeline value.
     pub(crate) fn value(self) -> Option<i32> {
         match self {
-            SpeakerOpt::Auto => None,
             SpeakerOpt::One => Some(1),
             SpeakerOpt::Two => Some(2),
             SpeakerOpt::Three => Some(3),
@@ -35,7 +32,7 @@ impl SpeakerOpt {
 
     pub(crate) fn from_value(value: Option<i32>) -> Self {
         match value {
-            None | Some(0) => SpeakerOpt::Auto,
+            None | Some(0) => SpeakerOpt::Two,
             Some(1) => SpeakerOpt::One,
             Some(3) => SpeakerOpt::Three,
             Some(4) => SpeakerOpt::Four,
@@ -46,7 +43,6 @@ impl SpeakerOpt {
 
     pub(crate) fn label(self) -> &'static str {
         match self {
-            SpeakerOpt::Auto => "Auto",
             SpeakerOpt::One => "1",
             SpeakerOpt::Two => "2",
             SpeakerOpt::Three => "3",
@@ -62,8 +58,8 @@ impl fmt::Display for SpeakerOpt {
     }
 }
 
-/// Spoken-language options. `Auto` lets Whisper detect the language; the
-/// English-only speed model always runs as English.
+/// Spoken-language options. `Auto` lets Whisper detect the language; every
+/// preset uses a multilingual model, so an explicit code always applies.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum LanguageOpt {
     Auto,
@@ -123,22 +119,23 @@ impl LanguageOpt {
     }
 
     pub(crate) fn from_code(code: Option<&str>) -> Self {
-        match code.unwrap_or("en") {
-            "auto" => LanguageOpt::Auto,
-            "es" => LanguageOpt::Spanish,
-            "fr" => LanguageOpt::French,
-            "de" => LanguageOpt::German,
-            "it" => LanguageOpt::Italian,
-            "pt" => LanguageOpt::Portuguese,
-            "nl" => LanguageOpt::Dutch,
-            "ru" => LanguageOpt::Russian,
-            "ja" => LanguageOpt::Japanese,
-            "ko" => LanguageOpt::Korean,
-            "zh" => LanguageOpt::Chinese,
-            "uk" => LanguageOpt::Ukrainian,
-            "pl" => LanguageOpt::Polish,
-            "tr" => LanguageOpt::Turkish,
-            _ => LanguageOpt::English,
+        match code {
+            None | Some("") | Some("auto") => LanguageOpt::Auto,
+            Some("en") => LanguageOpt::English,
+            Some("es") => LanguageOpt::Spanish,
+            Some("fr") => LanguageOpt::French,
+            Some("de") => LanguageOpt::German,
+            Some("it") => LanguageOpt::Italian,
+            Some("pt") => LanguageOpt::Portuguese,
+            Some("nl") => LanguageOpt::Dutch,
+            Some("ru") => LanguageOpt::Russian,
+            Some("ja") => LanguageOpt::Japanese,
+            Some("ko") => LanguageOpt::Korean,
+            Some("zh") => LanguageOpt::Chinese,
+            Some("uk") => LanguageOpt::Ukrainian,
+            Some("pl") => LanguageOpt::Polish,
+            Some("tr") => LanguageOpt::Turkish,
+            _ => LanguageOpt::Auto,
         }
     }
 

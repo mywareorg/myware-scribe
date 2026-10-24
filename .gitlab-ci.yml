@@ -15,3 +15,32 @@ windows-build:
       - dist/*.zip
       - dist/*.sha256
       - build-windows.log
+
+# Publish the on-demand accuracy model to the Generic Package Registry.
+#
+# GitLab does not count the package registry against the repository/LFS quota,
+# so the 574 MB file never enters git history. The resulting URL is:
+#   $CI_API_V4_URL/projects/$MODELS_PROJECT_ID/packages/generic/hippo-models/<version>/<file>
+#
+# Set MODELS_PROJECT_ID (defaults to this project) and MODELS_UPLOAD_TOKEN (a
+# personal access token with `api` scope, masked). The package project must be
+# public if the app downloads it without credentials; otherwise point
+# HIPPO_TRANSCRIBE_MODEL_MIRROR at a public mirror instead.
+publish-models:
+  stage: build
+  when: manual
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main" || $CI_COMMIT_BRANCH == "dev"
+  variables:
+    MODELS_PACKAGE_VERSION: "1.0.0"
+  script:
+    - test -n "$MODELS_UPLOAD_TOKEN" || { echo "MODELS_UPLOAD_TOKEN is not set"; exit 1; }
+    - scripts/fetch-models.sh --all
+    - |
+      project_id="${MODELS_PROJECT_ID:-$CI_PROJECT_ID}"
+      for file in vendor/models/*/ggml-large-v3-turbo-q5_0.bin; do
+        echo "uploading $(basename "$file") ($(wc -c < "$file") bytes)"
+        curl --fail --show-error --upload-file "$file" \
+          --header "PRIVATE-TOKEN: $MODELS_UPLOAD_TOKEN" \
+          "$CI_API_V4_URL/projects/$project_id/packages/generic/hippo-models/$MODELS_PACKAGE_VERSION/$(basename "$file")"
+      done

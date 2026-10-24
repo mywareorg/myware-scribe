@@ -20,9 +20,9 @@ pub fn run(args: &[String]) -> i32 {
     let mut timestamps = true;
     let mut progress_json = false;
     let mut cache = true;
-    // Preserve the historical English default; `--language ""` or `auto`
-    // enables Whisper's language detection.
-    let mut language: Option<String> = Some("en".to_string());
+    // Every preset is multilingual, so default to Whisper's detection;
+    // `--language <code>` pins one.
+    let mut language: Option<String> = None;
 
     let mut i = 0;
     while i < args.len() {
@@ -120,16 +120,19 @@ pub fn run(args: &[String]) -> i32 {
 }
 
 /// `hippo-transcribe --cli models [download] [--force] [--verify]`
+/// `hippo-transcribe --cli models notice` prints model attribution.
 ///
-/// Without `download` this reports which models are present.
+/// Without a subcommand this verifies the installed files.
 fn run_models(args: &[String]) -> i32 {
     let mut download = false;
     let mut force = false;
     let mut verify = false;
+    let mut notice = false;
 
     for arg in args {
         match arg.as_str() {
             "download" => download = true,
+            "notice" => notice = true,
             "--force" => force = true,
             "--verify" => verify = true,
             other => {
@@ -139,6 +142,10 @@ fn run_models(args: &[String]) -> i32 {
         }
     }
 
+    if notice {
+        print!("{}", crate::download::notice());
+        return 0;
+    }
     if download {
         crate::download::download(force, verify)
     } else {

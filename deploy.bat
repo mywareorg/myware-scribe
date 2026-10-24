@@ -4,6 +4,10 @@ rem Model downloading is delegated to the executable so there is one source of
 rem truth for the model list (and progress is shown in this window).
 setlocal EnableExtensions EnableDelayedExpansion
 
+echo Hippo Transcribe - private, offline transcription
+echo Audio and transcripts stay on this device.
+echo.
+
 set "SRC=%~dp0"
 if "%SRC:~-1%"=="\" set "SRC=%SRC:~0,-1%"
 set "INSTALL_DIR=%LOCALAPPDATA%\Programs\hippo-transcribe"
@@ -47,13 +51,16 @@ if exist "%SRC%\sample-short.mp3" (
 ) else if exist "%SRC%\audio\sample-short.mp3" (
   copy /y "%SRC%\audio\sample-short.mp3" "%INSTALL_DIR%\sample-short.mp3" >nul
 )
+if exist "%SRC%\models" (
+  xcopy /e /i /y /q "%SRC%\models" "%INSTALL_DIR%\models\" >nul
+)
 
 rem Explorer and the Start menu show the shortcut name, so users see
 rem "Hippo Transcribe" instead of "hippo-transcribe.exe". The target keeps its .exe
 rem extension because Windows needs it to launch the program.
 set "START_MENU=%APPDATA%\Microsoft\Windows\Start Menu\Programs"
 if not exist "%START_MENU%" mkdir "%START_MENU%" >nul 2>&1
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$s=(New-Object -ComObject WScript.Shell).CreateShortcut('%START_MENU%\Hippo Transcribe.lnk'); $s.TargetPath='%INSTALL_DIR%\hippo-transcribe.exe'; $s.WorkingDirectory='%INSTALL_DIR%'; $s.IconLocation='%INSTALL_DIR%\hippo-transcribe.exe,0'; $s.Description='Hippo Transcribe'; $s.Save()" >nul 2>&1
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$s=(New-Object -ComObject WScript.Shell).CreateShortcut('%START_MENU%\Hippo Transcribe.lnk'); $s.TargetPath='%INSTALL_DIR%\hippo-transcribe.exe'; $s.WorkingDirectory='%INSTALL_DIR%'; $s.IconLocation='%INSTALL_DIR%\hippo-transcribe.exe,0'; $s.Description='Hippo Transcribe - Private, offline transcription'; $s.Save()" >nul 2>&1
 if errorlevel 1 (
   echo [!] Could not create the Start Menu shortcut.
 ) else (
@@ -63,7 +70,7 @@ if errorlevel 1 (
 echo Adding "%INSTALL_DIR%" to the user PATH
 powershell -NoProfile -ExecutionPolicy Bypass -Command "$dir='%INSTALL_DIR%'; $p=[Environment]::GetEnvironmentVariable('Path','User'); if ($null -eq $p) { $p='' }; $parts=@($p.Split(';') | Where-Object { $_ -ne '' -and ($_.TrimEnd('\') -ine $dir.TrimEnd('\')) }); [Environment]::SetEnvironmentVariable('Path', (@($parts + $dir) -join ';'), 'User'); Write-Host 'PATH updated'"
 
-echo Downloading models...
+echo Verifying models...
 "%INSTALL_DIR%\hippo-transcribe.exe" --cli models download --verify
 if errorlevel 1 (
   echo [!] model download failed.

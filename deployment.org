@@ -1,5 +1,28 @@
 #+TITLE: Hippo Transcribe store deployment
 
+* Store listing copy
+
+** Hero
+Private by design. Offline by default.
+
+** Origin
+The name comes from HIPAA. Hippo Transcribe was built for HIPAA-sensitive work:
+audio is processed on the user's machine, and transcripts never leave it.
+
+** Proof points
+- No cloud
+- No accounts
+- No telemetry
+- Audio and transcripts stay on this device
+
+** Technical
+Local speaker diarization and transcription. Network access is limited to the
+one-time model download.
+
+Use this copy consistently across the Microsoft Store, Mac App Store and GitLab
+project description. Do not claim HIPAA certification or compliance. Link the
+privacy policy to =PRIVACY.md= in the repository.
+
 * macOS
 
 ** Prerequisites
@@ -35,7 +58,7 @@
 - [ ] Validate with =codesign --verify --deep --strict= and =spctl=.
 - [ ] Create the app record in App Store Connect.
 - [ ] Upload with Xcode Organizer, =altool=, or =notarytool= as required for MAS.
-- [ ] Provide privacy policy, support URL, description, keywords, and category.
+- [ ] Provide privacy policy (=PRIVACY.md=), support URL, description, keywords, and category.
 - [ ] Provide required Mac screenshots at Apple's current sizes.
 - [ ] Complete export compliance/encryption questions.
 - [ ] Complete age rating and content rights.
@@ -82,7 +105,7 @@
 
 ** Store listing and policy
 - [ ] Provide screenshots at Microsoft Store sizes.
-- [ ] Provide privacy policy, support URL, and description.
+- [ ] Provide privacy policy (=PRIVACY.md=), support URL, and description.
 - [ ] Complete age rating and content questionnaires.
 - [ ] Disclose network access for model downloads and any telemetry.
 - [ ] Do not download executable code. Model weights are data; use HTTPS.

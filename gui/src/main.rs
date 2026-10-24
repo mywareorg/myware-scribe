@@ -82,10 +82,14 @@ fn main() -> iced::Result {
         std::process::exit(hippo_transcribe_core::cli::run(&args[2..]));
     }
 
-    iced::application("Hippo Transcribe", App::update, App::view)
-        .theme(App::theme)
-        .subscription(App::subscription)
-        .font(include_bytes!("../assets/bootstrap-icons.ttf").as_slice())
-        .window(App::window_settings())
-        .run()
+    iced::application(
+        "Hippo Transcribe \u{2014} Private, offline transcription",
+        App::update,
+        App::view,
+    )
+    .theme(App::theme)
+    .subscription(App::subscription)
+    .font(include_bytes!("../assets/bootstrap-icons.ttf").as_slice())
+    .window(App::window_settings())
+    .run()
 }

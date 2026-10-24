@@ -38,7 +38,8 @@ param(
     [switch]$SkipBindgen,
     [switch]$Diagnose,
     [switch]$Clean,
-    [switch]$NoZip
+    [switch]$NoZip,
+    [switch]$SkipModels
 )
 
 $ErrorActionPreference = "Stop"
@@ -231,7 +232,7 @@ try {
         }
         Copy-Item $source (Join-Path $stage $dll)
     }
-    foreach ($file in @("deploy.bat", "undeploy.bat", "README.md", "LICENSE")) {
+    foreach ($file in @("deploy.bat", "undeploy.bat", "README.md", "PRIVACY.md", "LICENSE")) {
         $source = Join-Path $root $file
         if (Test-Path $source) {
             Copy-Item $source (Join-Path $stage $file)
@@ -240,6 +241,11 @@ try {
     $sample = Join-Path $root "audio\sample-short.mp3"
     if (Test-Path $sample) {
         Copy-Item $sample (Join-Path $stage "sample-short.mp3")
+    }
+
+    if (-not $SkipModels) {
+        Write-Step "Staging bundled models (models.lock.json)"
+        & (Join-Path $PSScriptRoot "fetch-models.ps1") -Dest (Join-Path $stage "models")
     }
 
     $zip = Join-Path $outRoot "$name.zip"
