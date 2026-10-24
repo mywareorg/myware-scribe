@@ -4016,11 +4016,7 @@ impl App {
             text(name)
                 .size(theme::TEXT_SM)
                 .wrapping(NO_WRAP)
-                .color(scheme.text)
-                .font(Font {
-                    weight: font::Weight::Medium,
-                    ..Font::DEFAULT
-                }),
+                .color(scheme.text),
             text(meta).size(11).wrapping(NO_WRAP).color(meta_color),
         ]
         .spacing(1)
@@ -4341,11 +4337,7 @@ impl App {
                 border: iced::border::rounded(13.0),
                 ..container::Style::default()
             });
-        let mut label = column![text(title).size(13).wrapping(NO_WRAP).font(Font {
-            weight: font::Weight::Medium,
-            ..Font::DEFAULT
-        })]
-        .spacing(1);
+        let mut label = column![text(title).size(13).wrapping(NO_WRAP)].spacing(1);
         if !meta.is_empty() {
             label = label.push(text(meta).size(11).wrapping(NO_WRAP).color(scheme.muted));
         }
