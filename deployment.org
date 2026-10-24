@@ -1,0 +1,204 @@
+#+TITLE: Hippo Transcribe store deployment
+
+* macOS
+
+** Prerequisites
+- [ ] Enroll in the Apple Developer Program (organization or individual).
+- [ ] Create the App ID / bundle identifier, e.g. =app.hippotranscribe.gui=.
+- [ ] Create a Mac App Store provisioning profile for that App ID.
+- [ ] Create =Apple Distribution= and =Mac Installer Distribution= certificates.
+- [ ] Confirm the minimum macOS version and set =LSMinimumSystemVersion=.
+- [ ] Decide app price and complete App Store Connect agreements, tax, and banking.
+
+** Packaging
+- [ ] Build a proper =.app= bundle. Rust binaries do not create one by default.
+- [ ] Add =Contents/Info.plist= with bundle ID, version, build number, minimum OS, copyright, and =NSHighResolutionCapable=.
+- [ ] Add =CFBundleIconFile= and a complete =.icns= icon set.
+- [ ] Build universal binaries for =aarch64-apple-darwin= and =x86_64-apple-darwin=, then =lipo= them.
+- [ ] Link =sherpa-onnx=, =whisper.cpp=, and any other native libraries statically if possible.
+- [ ] If any =.dylib= remains, place it under =Contents/Frameworks=, set =@rpath=, and sign every library.
+- [ ] Verify the bundle launches on a clean Mac with no Rust/CMake/Xcode build tools installed.
+
+** Sandbox and entitlements
+- [ ] Enable App Sandbox.
+- [ ] Add =com.apple.security.network.client= for model downloads.
+- [ ] Add =com.apple.security.files.user-selected.read-write= for audio and transcript files.
+- [ ] Persist security-scoped bookmarks for user-selected folders and output directories.
+- [ ] Confirm =rfd= open/save panels work inside the sandbox.
+- [ ] Add =com.apple.security.device.audio-input= and =NSMicrophoneUsageDescription= only if recording is added later.
+- [ ] Audit =notify-rust= under App Sandbox; use =UNUserNotificationCenter= if macOS notifications fail.
+- [ ] Remove any temporary sandbox exceptions before submission.
+
+** Signing and submission
+- [ ] Sign the app and embedded libraries with a hardened runtime where applicable.
+- [ ] Sign the installer package with =Mac Installer Distribution=.
+- [ ] Validate with =codesign --verify --deep --strict= and =spctl=.
+- [ ] Create the app record in App Store Connect.
+- [ ] Upload with Xcode Organizer, =altool=, or =notarytool= as required for MAS.
+- [ ] Provide privacy policy, support URL, description, keywords, and category.
+- [ ] Provide required Mac screenshots at Apple's current sizes.
+- [ ] Complete export compliance/encryption questions.
+- [ ] Complete age rating and content rights.
+- [ ] Submit for review.
+
+** Review risks
+- [ ] No private APIs.
+- [ ] No downloading executable code. Model weights are data, but keep downloads HTTPS-only.
+- [ ] No external purchase links or alternate payment paths.
+- [ ] Explain the 650 MB model download and first-run behavior in review notes.
+- [ ] Confirm the app is fully usable offline after models are installed.
+- [ ] Verify accessibility, dark mode, and keyboard navigation.
+- [ ] Include third-party license/attribution text for iced, sherpa-onnx, whisper.cpp, and model licenses.
+
+* Windows
+
+** Prerequisites
+- [ ] Create a Microsoft Partner Center account.
+- [ ] Reserve the app name.
+- [ ] Record the Store identity: package name, publisher ID, and publisher display name.
+- [ ] Decide price, markets, and age rating.
+- [ ] Complete tax and payout profiles if paid.
+
+** Packaging
+- [ ] Package as MSIX. The current =deploy.bat= installer is not a Store package.
+- [ ] Add =Package.appxmanifest= with identity, display name, description, and logos.
+- [ ] Provide MSIX image assets: Square44x44, Square150x150, Wide310x150, StoreLogo, and splash assets.
+- [ ] Declare =runFullTrust= for the Win32 desktop app; provide justification during submission.
+- [ ] Set =requestedExecutionLevel= to =asInvoker=.
+- [ ] Build x64 and arm64 packages if those architectures are supported.
+- [ ] Set the minimum Windows version, e.g. Windows 10 1809 or later.
+- [ ] Make the app self-contained or bundle the required Visual C++ runtime.
+- [ ] Write user data to =%LOCALAPPDATA%\hippo-transcribe=, never the install directory.
+- [ ] Add file-type associations only if they are genuinely supported.
+- [ ] Verify install, upgrade, repair, and uninstall on a clean Windows VM.
+
+** Signing and validation
+- [ ] For local testing, sign the MSIX with a trusted test certificate.
+- [ ] Run the Windows App Certification Kit (WACK).
+- [ ] Validate with =makeappx= and install via =Add-AppxPackage=.
+- [ ] Confirm the Store can sign the submitted package; a separate purchased certificate is not required for Store distribution.
+- [ ] Increment the four-part package version for every submission.
+- [ ] Test launch from the Start menu and from a fresh user profile.
+
+** Store listing and policy
+- [ ] Provide screenshots at Microsoft Store sizes.
+- [ ] Provide privacy policy, support URL, and description.
+- [ ] Complete age rating and content questionnaires.
+- [ ] Disclose network access for model downloads and any telemetry.
+- [ ] Do not download executable code. Model weights are data; use HTTPS.
+- [ ] Avoid requiring administrator rights for normal operation.
+- [ ] Verify toast notifications work under packaged identity; set an AppUserModelID if needed.
+- [ ] Confirm uninstall removes app data or documents what remains.
+- [ ] Submit for certification.
+
+** Store-specific risks
+- [ ] Package size: do not bundle all models if avoidable; download them after install.
+- [ ] Long paths and non-ASCII paths.
+- [ ] Antivirus/SmartScreen reputation for signed binaries.
+- [ ] Native dependency compatibility on arm64.
+- [ ] Third-party license and attribution requirements.
+- [ ] Crash reporting and telemetry must be disclosed and consented to.
+
+* Shared release checklist
+- [ ] Version number and build number are consistent across platforms.
+- [ ] Clean-VM smoke test with no models, no network, and a fresh user profile.
+- [ ] Model download, resume, checksum, cancel, and disk-full behavior.
+- [ ] Sample audio transcription and export on both platforms.
+- [ ] Privacy policy covers local audio processing and model downloads.
+- [ ] Support contact and issue-reporting path are live.
+- [ ] Third-party notices are shipped with the app.
+- [ ] Store screenshots show light and dark themes.
+- [ ] Release notes are written for both stores.
+- [ ] Rollback plan and previous installer/package are archived.
+
+* Paywall
+
+** Decide what is free vs paid
+- [ ] Define the free tier. Keep enough value to evaluate the app, e.g. single-speaker transcription and TXT export.
+- [ ] Define paid features, e.g. multi-speaker diarization, batch queue, all export formats, and premium presets.
+- [ ] Write the feature matrix down before adding gates so UI, backend, and Store products stay consistent.
+- [ ] Decide whether the paywall is a one-time purchase, subscription, or both.
+- [ ] Decide whether a trial exists and whether it is time-based or feature-limited.
+- [ ] Check both Store policies: digital features unlocked in-app must use the platform's in-app purchase system.
+- [ ] Do not link to an external checkout from Store builds.
+
+** Entitlement model
+- [ ] Add one internal entitlement model, e.g. =Free= and =Pro=, plus explicit feature flags.
+- [ ] Centralize gating in one function, e.g. =can_use(Feature) -> bool=; do not scatter boolean checks.
+- [ ] Gate at three layers: UI affordance, command/message handling, and pipeline/backend execution.
+- [ ] Never rely on hiding a button as the only protection.
+- [ ] Keep entitlement state in memory during a session and persist only a validated receipt or signed license.
+- [ ] Define behavior for expired, revoked, refunded, and offline entitlements.
+- [ ] Define an offline grace period and cache the last validated entitlement securely.
+- [ ] Version the entitlement schema so future features can be added without migration bugs.
+
+** Disable locked features in the UI
+- [ ] Show locked controls rather than removing them, so users can see what Pro includes.
+- [ ] Add a lock icon/badge and a short reason, e.g. "Multi-speaker diarization requires Pro".
+- [ ] Route locked controls to an upsell modal instead of silently doing nothing.
+- [ ] Preserve layout and keyboard access; disabled controls must remain legible.
+- [ ] Add an "Unlock Pro" action in Settings and in the upsell modal.
+- [ ] Add a "Restore purchases" action.
+- [ ] Show current plan and renewal/expiry information where applicable.
+- [ ] Make the paywall dismissible; never trap the user in a modal.
+
+** Enforce gates in the backend
+- [ ] Pass an entitlement/feature set into pipeline options instead of reading UI state.
+- [ ] Reject multi-speaker runs when the entitlement is absent, even if the CLI is invoked directly.
+- [ ] Limit speaker count, batch size, export formats, and premium presets according to the entitlement.
+- [ ] Ensure queued or resumed jobs re-check entitlement before starting.
+- [ ] Ensure locked features cannot be enabled by editing =settings.json= or =queue.json=.
+- [ ] Keep a clear error/toast when a blocked action is attempted.
+
+** macOS purchases
+- [ ] Create the in-app purchase products in App Store Connect.
+- [ ] Use StoreKit 2: load products, purchase, and observe =Transaction.currentEntitlements=.
+- [ ] Verify transaction JWS signatures and check revocation/expiration.
+- [ ] Call =AppStore.sync()= for Restore Purchases.
+- [ ] Handle Ask to Buy, family sharing, refunds, and subscription upgrades/downgrades.
+- [ ] Optionally validate subscriptions server-side if offering auto-renewable subscriptions.
+- [ ] Test with StoreKit configuration files and a sandbox Apple ID.
+- [ ] Include subscription duration, price, renewal terms, and links to privacy/terms in the purchase UI.
+
+** Windows purchases
+- [ ] Create durable add-ons or subscriptions in Partner Center.
+- [ ] Use =StoreContext= and =LicenseInformation.AddOnLicenses= to read entitlements.
+- [ ] Use =StoreContext.RequestPurchaseAsync= for the purchase flow.
+- [ ] Listen for =LicenseChanged= and refresh entitlement state without restarting.
+- [ ] Handle trial, expired subscription, refund, and offline license states.
+- [ ] Test with Microsoft Store test accounts and packaged builds.
+- [ ] Do not implement your own checkout for digital features in the Store build.
+
+** Direct-download builds
+- [ ] If shipping outside the Stores, use a license server or merchant of record, e.g. Stripe, Paddle, or Lemon Squeezy.
+- [ ] Issue signed license keys containing product, expiry, and device limits.
+- [ ] Validate server-side and cache a signed offline lease.
+- [ ] Provide deactivation/activation for device limits.
+- [ ] Keep Store builds free of external purchase links and direct-download licensing code paths that violate policy.
+- [ ] Separate Store and direct build features with compile-time or packaging-time flags.
+
+** Trial and anti-abuse
+- [ ] Store trial state in Keychain on macOS and DPAPI/Credential Manager on Windows.
+- [ ] Do not rely on a plain settings file or clock rollback.
+- [ ] Limit trial resets after reinstall where policy allows.
+- [ ] Do not collect unnecessary device identifiers.
+- [ ] Disclose any license check or telemetry in the privacy policy.
+
+** UX and messaging
+- [ ] Explain the value of Pro before showing the purchase sheet.
+- [ ] Show the price and what is included.
+- [ ] Provide Restore Purchases and Manage Subscription.
+- [ ] Confirm successful unlock immediately in the UI.
+- [ ] Do not interrupt an active transcription with an upsell.
+- [ ] Do not remove access to a user's existing transcripts when a subscription expires.
+- [ ] Provide a clear path to export data before downgrade.
+
+** Testing and release
+- [ ] Test purchase, cancel, restore, refund, expiry, and offline launch.
+- [ ] Test reinstall and second device.
+- [ ] Test locked-feature attempts from UI and CLI.
+- [ ] Test entitlement persistence across app updates.
+- [ ] Test Store review builds with no prior purchase state.
+- [ ] Add purchase/entitlement events to crash/error logs without PII.
+- [ ] Document the product IDs, entitlement mapping, and restore flow for support.
+- [ ] Include paywall screenshots and review notes explaining what is free and what is paid.
