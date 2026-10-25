@@ -4093,7 +4093,10 @@ impl App {
 
     /// True when the transcript pane is showing the global empty state.
     fn feature_deck_visible(&self) -> bool {
-        self.queue.is_empty()
+        // The deck is an upgrade pitch, not a workspace: Pro users get the
+        // plain empty state instead.
+        self.license.access.tier == license::Tier::Free
+            && self.queue.is_empty()
             && self.selected.is_none()
             && self.selected_view.is_none()
             && !matches!(self.status, Status::Running)
