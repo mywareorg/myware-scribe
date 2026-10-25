@@ -291,6 +291,7 @@ pub enum Message {
     PurchasePro,
     RestorePro,
     StartTrial,
+    ToggleTier,
     DownloadModels,
     CancelModelDownload,
     ClearPartialModels,
@@ -1287,6 +1288,11 @@ impl App {
                 .size(theme::TEXT_SM)
                 .color(scheme.green),
             );
+            actions = actions.push(
+                action_text("Use Free")
+                    .on_press(Message::ToggleTier)
+                    .style(pill_button_secondary),
+            );
         } else {
             if !self.license.trial_used() {
                 actions = actions.push(
@@ -1295,6 +1301,11 @@ impl App {
                         .style(pill_button_secondary),
                 );
             }
+            actions = actions.push(
+                action_text("Use Pro")
+                    .on_press(Message::ToggleTier)
+                    .style(pill_button_secondary),
+            );
             if self.provider.name() == "none" {
                 actions = actions.push(
                     text("Purchasing is not available in this build yet.")
@@ -2022,6 +2033,20 @@ impl App {
                     license::PurchaseState::Pending | license::PurchaseState::Idle => {
                         self.toast = Some((state.label().to_string(), Instant::now()));
                     }
+                }
+                Task::none()
+            }
+            Message::ToggleTier => {
+                let now = SystemTime::now();
+                if self.license.access.tier == license::Tier::Pro {
+                    self.license.revoke_pro(now);
+                    self.save_license();
+                    self.clamp_preset();
+                    self.toast = Some(("Switched to Free".to_string(), Instant::now()));
+                } else {
+                    self.license.grant_pro(now);
+                    self.save_license();
+                    self.toast = Some(("Switched to Pro".to_string(), Instant::now()));
                 }
                 Task::none()
             }
