@@ -2011,7 +2011,6 @@ impl App {
                 Task::none()
             }
             Message::LockedPreset => {
-                self.paywall_open = true;
                 self.toast = Some((
                     "The free version uses the Balanced preset. Speed and Accuracy are Pro."
                         .to_string(),
@@ -2020,7 +2019,6 @@ impl App {
                 Task::none()
             }
             Message::LockedPreviousView => {
-                self.paywall_open = true;
                 self.toast = Some((
                     "Viewing a previous transcription during active transcription is a Pro feature"
                         .to_string(),
@@ -2029,7 +2027,6 @@ impl App {
                 Task::none()
             }
             Message::LockedPlayer => {
-                self.paywall_open = true;
                 self.toast = Some((
                     "Player is a Pro feature".to_string(),
                     Instant::now(),
@@ -2037,7 +2034,6 @@ impl App {
                 Task::none()
             }
             Message::LockedRename => {
-                self.paywall_open = true;
                 self.toast = Some((
                     "Rename speakers and editing is a Pro feature".to_string(),
                     Instant::now(),
@@ -2045,7 +2041,6 @@ impl App {
                 Task::none()
             }
             Message::LockedImport => {
-                self.paywall_open = true;
                 self.toast = Some((
                     "Import and editing is a Pro feature".to_string(),
                     Instant::now(),
@@ -2053,7 +2048,6 @@ impl App {
                 Task::none()
             }
             Message::LockedSpeakers => {
-                self.paywall_open = true;
                 self.toast = Some((
                     "Speaker labels are a Pro feature.".to_string(),
                     Instant::now(),
@@ -2348,7 +2342,6 @@ impl App {
             }
             Message::AddFolder => {
                 if !self.can(license::Feature::Batch) {
-                    self.paywall_open = true;
                     self.toast = Some((
                         "Folder import is a Pro feature".to_string(),
                         Instant::now(),
@@ -2517,7 +2510,6 @@ impl App {
             Message::OpenRename => self.open_rename(),
             Message::EditLine(index) => {
                 if !self.can(license::Feature::Editing) {
-                    self.paywall_open = true;
                     self.toast = Some((
                         "Editing is a Pro feature".to_string(),
                         Instant::now(),
@@ -2641,7 +2633,6 @@ impl App {
             }
             Message::ImportChoice(kind) if !self.can(license::Feature::Editing) => {
                 let _ = kind;
-                self.paywall_open = true;
                 self.toast = Some((
                     "Import and editing is a Pro feature".to_string(),
                     Instant::now(),
@@ -2714,7 +2705,6 @@ impl App {
                     return Task::none();
                 }
                 if !self.shows(license::Audience::ProOnly) && preset != Preset::Balanced {
-                    self.paywall_open = true;
                     self.toast = Some((
                         "The free version uses the Balanced preset".to_string(),
                         Instant::now(),
@@ -2728,7 +2718,6 @@ impl App {
                 };
                 if let Some(feature) = feature {
                     if !self.can(feature) {
-                        self.paywall_open = true;
                         self.toast = Some((
                             format!("{} is a Pro feature", feature.label()),
                             Instant::now(),
@@ -2978,7 +2967,6 @@ impl App {
     /// field keeps the original name. Focuses the first field.
     fn open_rename(&mut self) -> Task<Message> {
         if !self.can(license::Feature::Editing) {
-            self.paywall_open = true;
             self.toast = Some((
                 format!("{} is a Pro feature", license::Feature::Editing.label()),
                 Instant::now(),
@@ -4491,21 +4479,24 @@ impl App {
                 .width(Length::Fixed(126.0))
                 .into()
         } else {
-            stack![
-                pick_list(ImportKind::ALL, None::<ImportKind>, Message::ImportChoice)
-                    .placeholder("Import")
-                    .style(greyed_pick(scheme))
-                    .handle(caret_handle(false))
-                    .width(Length::Fixed(126.0)),
-                mouse_area(
-                    container(horizontal_space())
-                        .width(Length::Fill)
-                        .height(Length::Fill),
-                )
-                .interaction(mouse::Interaction::Pointer)
-                .on_press(Message::LockedImport),
-            ]
-            .into()
+            self.tip(
+                stack![
+                    pick_list(ImportKind::ALL, None::<ImportKind>, Message::ImportChoice)
+                        .placeholder("Import")
+                        .style(greyed_pick(scheme))
+                        .handle(caret_handle(false))
+                        .width(Length::Fixed(126.0)),
+                    mouse_area(
+                        container(horizontal_space())
+                            .width(Length::Fill)
+                            .height(Length::Fill),
+                    )
+                    .interaction(mouse::Interaction::Pointer)
+                    .on_press(Message::LockedImport),
+                ],
+                "Import and editing is a Pro feature",
+                &scheme,
+            )
         };
 
         let clear_button = self.tip(
@@ -4575,7 +4566,8 @@ impl App {
 
         let preset: Element<Message> = if !self.shows(license::Audience::ProOnly) {
             // Free tier: Balanced only, and the picker cannot be opened.
-            stack![
+            self.tip(
+                stack![
                 pick_list(
                     Preset::ALL,
                     Some(Preset::Balanced),
@@ -4590,8 +4582,10 @@ impl App {
                 )
                 .interaction(mouse::Interaction::Pointer)
                 .on_press(Message::LockedPreset),
-            ]
-            .into()
+            ],
+                "Speed and Accuracy are Pro presets",
+                &scheme,
+            )
         } else if !running && has_queue {
             pick_list(Preset::ALL, Some(self.preset), Message::PresetChanged)
                 .style(pill_pick)
@@ -4634,17 +4628,20 @@ impl App {
             .into()
         } else if !self.shows(license::Audience::ProOnly) {
             // Free runs ASR only, so the speaker count has no effect.
-            stack![
-                speaker_pick.style(greyed_pick(scheme)).width(Length::Fill),
-                mouse_area(
-                    container(horizontal_space())
-                        .width(Length::Fill)
-                        .height(Length::Fill),
-                )
-                .interaction(mouse::Interaction::Pointer)
-                .on_press(Message::LockedSpeakers),
-            ]
-            .into()
+            self.tip(
+                stack![
+                    speaker_pick.style(greyed_pick(scheme)).width(Length::Fill),
+                    mouse_area(
+                        container(horizontal_space())
+                            .width(Length::Fill)
+                            .height(Length::Fill),
+                    )
+                    .interaction(mouse::Interaction::Pointer)
+                    .on_press(Message::LockedSpeakers),
+                ],
+                "Speaker labels are a Pro feature",
+                &scheme,
+            )
         } else {
             speaker_pick.style(pill_pick).width(Length::Fill).into()
         };
@@ -4871,7 +4868,11 @@ impl App {
                     }
                 });
         if locked_previous {
-            row_button.on_press(Message::LockedPreviousView).into()
+            self.tip(
+                row_button.on_press(Message::LockedPreviousView),
+                "Viewing previous transcripts while transcribing is Pro",
+                &scheme,
+            )
         } else if selectable {
             row_button.on_press(Message::ViewItem(index)).into()
         } else {
@@ -5366,11 +5367,14 @@ impl App {
 
         let play_icon = if playing { ICON_PAUSE } else { ICON_PLAY };
         let play_button: Element<Message> = if locked {
-            action(icon_colored(ICON_PLAY, 15.0, scheme.muted))
-                .on_press(Message::LockedPlayer)
-                .style(greyed_button(*scheme))
-                .padding([8, 10])
-                .into()
+            self.tip(
+                action(icon_colored(ICON_PLAY, 15.0, scheme.muted))
+                    .on_press(Message::LockedPlayer)
+                    .style(greyed_button(*scheme))
+                    .padding([8, 10]),
+                "Player is a Pro feature",
+                scheme,
+            )
         } else if ready {
             action(icon_colored(play_icon, 15.0, scheme.on_accent))
                 .on_press(Message::PlayerToggle)
@@ -5431,19 +5435,22 @@ impl App {
             });
 
         let speed: Element<Message> = if locked {
-            stack![
-                pick_list(Speed::ALL, Some(Speed::One), Message::SpeedChanged)
-                    .style(greyed_pick(*scheme))
-                    .handle(caret_handle(false)),
-                mouse_area(
-                    container(horizontal_space())
-                        .width(Length::Fill)
-                        .height(Length::Fill),
-                )
-                .interaction(mouse::Interaction::Pointer)
-                .on_press(Message::LockedPlayer),
-            ]
-            .into()
+            self.tip(
+                stack![
+                    pick_list(Speed::ALL, Some(Speed::One), Message::SpeedChanged)
+                        .style(greyed_pick(*scheme))
+                        .handle(caret_handle(false)),
+                    mouse_area(
+                        container(horizontal_space())
+                            .width(Length::Fill)
+                            .height(Length::Fill),
+                    )
+                    .interaction(mouse::Interaction::Pointer)
+                    .on_press(Message::LockedPlayer),
+                ],
+                "Player is a Pro feature",
+                scheme,
+            )
         } else if ready {
             pick_list(
                 Speed::ALL,
@@ -5754,7 +5761,8 @@ impl App {
                 .color(scheme.muted)
                 .into()
         } else if !self.shows(license::Audience::ProOnly) {
-            stack![
+            self.tip(
+                stack![
                 pick_list(
                     Preset::ALL,
                     Some(Preset::Balanced),
@@ -5770,8 +5778,10 @@ impl App {
                 )
                 .interaction(mouse::Interaction::Pointer)
                 .on_press(Message::LockedPreset),
-            ]
-            .into()
+            ],
+                "Speed and Accuracy are Pro presets",
+                &scheme,
+            )
         } else {
             pick_list(Preset::ALL, Some(self.preset), Message::PresetChanged)
                 .style(pill_pick)
@@ -5786,24 +5796,27 @@ impl App {
                 .color(scheme.muted)
                 .into()
         } else if !self.shows(license::Audience::ProOnly) {
-            stack![
-                pick_list(
-                    SpeakerOpt::ALL,
-                    Some(SpeakerOpt::from_value(self.num_speakers)),
-                    Message::SpeakerCountChanged,
-                )
-                .style(greyed_pick(scheme))
-                .handle(caret_handle(false))
-                .width(Length::Fixed(180.0)),
-                mouse_area(
-                    container(horizontal_space())
-                        .width(Length::Fill)
-                        .height(Length::Fill),
-                )
-                .interaction(mouse::Interaction::Pointer)
-                .on_press(Message::LockedSpeakers),
-            ]
-            .into()
+            self.tip(
+                stack![
+                    pick_list(
+                        SpeakerOpt::ALL,
+                        Some(SpeakerOpt::from_value(self.num_speakers)),
+                        Message::SpeakerCountChanged,
+                    )
+                    .style(greyed_pick(scheme))
+                    .handle(caret_handle(false))
+                    .width(Length::Fixed(180.0)),
+                    mouse_area(
+                        container(horizontal_space())
+                            .width(Length::Fill)
+                            .height(Length::Fill),
+                    )
+                    .interaction(mouse::Interaction::Pointer)
+                    .on_press(Message::LockedSpeakers),
+                ],
+                "Speaker labels are a Pro feature",
+                &scheme,
+            )
         } else {
             pick_list(
                 SpeakerOpt::ALL,
