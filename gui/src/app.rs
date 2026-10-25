@@ -2742,7 +2742,7 @@ impl App {
             }
             Message::Tick => {
                 if self.feature_deck_auto_advance() {
-                    if self.feature_slide_at.elapsed() >= Duration::from_secs(6) {
+                    if self.feature_slide_at.elapsed() >= Duration::from_secs(7) {
                         self.feature_slide = (self.feature_slide + 1) % FEATURE_DECK.len();
                         self.feature_slide_at = Instant::now();
                     }
