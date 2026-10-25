@@ -1288,11 +1288,13 @@ impl App {
                 .size(theme::TEXT_SM)
                 .color(scheme.green),
             );
-            actions = actions.push(
-                action_text("Use Free")
-                    .on_press(Message::ToggleTier)
-                    .style(pill_button_secondary),
-            );
+            if cfg!(debug_assertions) {
+                actions = actions.push(
+                    action_text("Use Free")
+                        .on_press(Message::ToggleTier)
+                        .style(pill_button_secondary),
+                );
+            }
         } else {
             if !self.license.trial_used() {
                 actions = actions.push(
@@ -1301,11 +1303,13 @@ impl App {
                         .style(pill_button_secondary),
                 );
             }
-            actions = actions.push(
-                action_text("Use Pro")
-                    .on_press(Message::ToggleTier)
-                    .style(pill_button_secondary),
-            );
+            if cfg!(debug_assertions) {
+                actions = actions.push(
+                    action_text("Use Pro")
+                        .on_press(Message::ToggleTier)
+                        .style(pill_button_secondary),
+                );
+            }
             if self.provider.name() == "none" {
                 actions = actions.push(
                     text("Purchasing is not available in this build yet.")
