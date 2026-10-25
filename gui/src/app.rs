@@ -2684,6 +2684,14 @@ impl App {
                 if matches!(self.status, Status::Running) {
                     return Task::none();
                 }
+                if !self.shows(license::Audience::ProOnly) && preset != Preset::Balanced {
+                    self.paywall_open = true;
+                    self.toast = Some((
+                        "The free version uses the Balanced preset".to_string(),
+                        Instant::now(),
+                    ));
+                    return Task::none();
+                }
                 let feature = match preset {
                     Preset::Balanced => None,
                     Preset::Speed => Some(license::Feature::SpeedPreset),
@@ -4551,7 +4559,26 @@ impl App {
         .spacing(8)
         .align_y(iced::Alignment::Center);
 
-        let preset: Element<Message> = if !running && has_queue {
+        let preset: Element<Message> = if !self.shows(license::Audience::ProOnly) {
+            // Free tier: Balanced only, and the picker cannot be opened.
+            stack![
+                pick_list(
+                    Preset::ALL,
+                    Some(Preset::Balanced),
+                    Message::PresetChanged,
+                )
+                .style(greyed_pick(scheme))
+                .width(Length::Fill),
+                mouse_area(
+                    container(horizontal_space())
+                        .width(Length::Fill)
+                        .height(Length::Fill),
+                )
+                .interaction(mouse::Interaction::Pointer)
+                .on_press(Message::OpenPaywall),
+            ]
+            .into()
+        } else if !running && has_queue {
             pick_list(Preset::ALL, Some(self.preset), Message::PresetChanged)
                 .style(pill_pick)
                 .width(Length::Fill)
@@ -5635,6 +5662,25 @@ impl App {
                 .size(theme::TEXT_XS)
                 .color(scheme.muted)
                 .into()
+        } else if !self.shows(license::Audience::ProOnly) {
+            stack![
+                pick_list(
+                    Preset::ALL,
+                    Some(Preset::Balanced),
+                    Message::PresetChanged,
+                )
+                .style(greyed_pick(scheme))
+                .handle(caret_handle(false))
+                .width(Length::Fixed(180.0)),
+                mouse_area(
+                    container(horizontal_space())
+                        .width(Length::Fill)
+                        .height(Length::Fill),
+                )
+                .interaction(mouse::Interaction::Pointer)
+                .on_press(Message::OpenPaywall),
+            ]
+            .into()
         } else {
             pick_list(Preset::ALL, Some(self.preset), Message::PresetChanged)
                 .style(pill_pick)
