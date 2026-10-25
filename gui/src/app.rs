@@ -1244,6 +1244,22 @@ impl App {
         )
     }
 
+    /// Development-only Free/Pro switch shown in the header.
+    fn tier_toggle_button<'a>(&'a self, scheme: &Scheme) -> Element<'a, Message> {
+        let label = if self.license.access.tier == license::Tier::Pro {
+            "Use Free"
+        } else {
+            "Use Pro"
+        };
+        self.tip(
+            action_text(label)
+                .on_press(Message::ToggleTier)
+                .style(pill_button_secondary),
+            "Development: switch between the Free and Pro versions",
+            scheme,
+        )
+    }
+
     /// The Pro paywall / license dialog.
     fn paywall_dialog<'a>(&'a self, scheme: &Scheme) -> Element<'a, Message> {
         let scheme = *scheme;
@@ -1288,13 +1304,7 @@ impl App {
                 .size(theme::TEXT_SM)
                 .color(scheme.green),
             );
-            if cfg!(debug_assertions) {
-                actions = actions.push(
-                    action_text("Use Free")
-                        .on_press(Message::ToggleTier)
-                        .style(pill_button_secondary),
-                );
-            }
+
         } else {
             if !self.license.trial_used() {
                 actions = actions.push(
@@ -1303,13 +1313,7 @@ impl App {
                         .style(pill_button_secondary),
                 );
             }
-            if cfg!(debug_assertions) {
-                actions = actions.push(
-                    action_text("Use Pro")
-                        .on_press(Message::ToggleTier)
-                        .style(pill_button_secondary),
-                );
-            }
+
             if self.provider.name() == "none" {
                 actions = actions.push(
                     text("Purchasing is not available in this build yet.")
@@ -6154,7 +6158,7 @@ impl App {
             AppTheme::System => (ICON_SUN, "Switch to light theme"),
         };
 
-        let header = row![
+        let mut header = row![
             iced::widget::image(logo_handle())
                 .width(Length::Fixed(32.0))
                 .height(Length::Fixed(32.0)),
@@ -6170,28 +6174,35 @@ impl App {
             .spacing(theme::SPACE_2XS),
             horizontal_space(),
             self.license_button(&scheme),
-            self.tip(
+        ]
+        .spacing(theme::SPACE_SM)
+        .align_y(iced::Alignment::Center);
+        // Development-only Free/Pro switch, beside the license button.
+        if cfg!(debug_assertions) {
+            header = header.push(self.tier_toggle_button(&scheme));
+        }
+        header = header
+            .push(self.tip(
                 action(icon(theme_icon, 16.0))
                     .on_press(Message::ToggleTheme)
                     .style(pill_button_secondary),
                 theme_tip,
                 &scheme,
-            ),
-            self.tip(
+            ))
+            .push(self.tip(
                 action(icon(ICON_GEAR, 16.0))
                     .on_press(Message::OpenSettings)
                     .style(pill_button_secondary),
                 "Settings (Ctrl+,)",
                 &scheme,
-            ),
-            pick_list(HelpKind::ALL, None::<HelpKind>, Message::HelpChoice)
-                .placeholder("Help")
-                .style(pill_pick)
-                .handle(caret_handle(true))
-                .width(Length::Fixed(92.0)),
-        ]
-        .spacing(theme::SPACE_SM)
-        .align_y(iced::Alignment::Center);
+            ))
+            .push(
+                pick_list(HelpKind::ALL, None::<HelpKind>, Message::HelpChoice)
+                    .placeholder("Help")
+                    .style(pill_pick)
+                    .handle(caret_handle(true))
+                    .width(Length::Fixed(92.0)),
+            );
 
         let mut base = column![
             header,
