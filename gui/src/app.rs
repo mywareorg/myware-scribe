@@ -4138,10 +4138,12 @@ impl App {
 
     /// True when the transcript pane is showing the global empty state.
     fn feature_deck_visible(&self) -> bool {
-        // Free-tier upgrade pitch. It stays up while files are queued and
-        // through model loading, decoding and diarization, and only yields once
-        // transcription actually starts streaming lines.
-        self.shows(license::Audience::FreeOnly) && self.shown_lines().is_empty()
+        // Free-tier upgrade pitch. It is the default pane whenever no
+        // transcription is on screen: empty queue, queued files, model loading,
+        // decoding and diarization. It yields as soon as lines are visible.
+        self.shows(license::Audience::FreeOnly)
+            && self.shown_lines().is_empty()
+            && self.shown_transcript().trim().is_empty()
     }
 
     /// Auto-advance the deck whenever it is on screen and no dialog owns the
@@ -4903,6 +4905,9 @@ impl App {
     /// Transcript view: per-line (search tinted) or SMS bubbles.
     fn transcript_element(&self) -> Element<'_, Message> {
         let scheme = self.scheme();
+        if self.feature_deck_visible() {
+            return self.tagged(license::Audience::FreeOnly, self.feature_deck(&scheme));
+        }
         if self.queue.is_empty() {
             return self.empty_transcript_state(&scheme);
         }
