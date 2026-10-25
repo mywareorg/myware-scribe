@@ -294,6 +294,7 @@ pub enum Message {
     LockedPlayer,
     LockedRename,
     LockedPreviousView,
+    FeatureAdvance,
     PurchasePro,
     RestorePro,
     StartTrial,
@@ -2012,6 +2013,13 @@ impl App {
                     "Speed and Accuracy presets are Pro features".to_string(),
                     Instant::now(),
                 ));
+                Task::none()
+            }
+            Message::FeatureAdvance => {
+                if self.feature_deck_visible() {
+                    self.feature_slide = (self.feature_slide + 1) % FEATURE_DECK.len();
+                    self.feature_slide_at = Instant::now();
+                }
                 Task::none()
             }
             Message::LockedPreviousView => {
@@ -4200,14 +4208,18 @@ impl App {
             .spacing(theme::SPACE_LG)
             .width(Length::Fill);
 
-        container(
-            container(content)
-                .center_x(Length::Fill)
-                .max_width(500.0)
-                .padding([18, 20]),
+        mouse_area(
+            container(
+                container(content)
+                    .center_x(Length::Fill)
+                    .max_width(500.0)
+                    .padding([18, 20]),
+            )
+            .center(Length::Fill)
+            .padding([18, 24]),
         )
-        .center(Length::Fill)
-        .padding([18, 24])
+        .interaction(mouse::Interaction::Pointer)
+        .on_press(Message::FeatureAdvance)
         .into()
     }
 
@@ -7427,13 +7439,13 @@ fn feature_vignette_local(scheme: Scheme) -> Element<'static, Message> {
     let mark = container(
         container(
             iced::widget::image(logo_handle())
-                .width(Length::Fixed(46.0))
-                .height(Length::Fixed(46.0)),
+                .width(Length::Fixed(66.0))
+                .height(Length::Fixed(66.0)),
         )
-        .width(Length::Fixed(72.0))
-        .height(Length::Fixed(72.0))
-        .center_x(Length::Fixed(72.0))
-        .center_y(Length::Fixed(72.0))
+        .width(Length::Fixed(96.0))
+        .height(Length::Fixed(96.0))
+        .center_x(Length::Fixed(96.0))
+        .center_y(Length::Fixed(96.0))
         .style(move |_theme| container::Style {
             background: Some(
                 Color {
@@ -7448,15 +7460,15 @@ fn feature_vignette_local(scheme: Scheme) -> Element<'static, Message> {
                     ..scheme.blue
                 },
                 width: 1.0,
-                radius: 36.0.into(),
+                radius: 48.0.into(),
             },
             ..container::Style::default()
         }),
     )
-    .width(Length::Fixed(88.0))
-    .height(Length::Fixed(88.0))
-    .center_x(Length::Fixed(88.0))
-    .center_y(Length::Fixed(88.0))
+    .width(Length::Fixed(114.0))
+    .height(Length::Fixed(114.0))
+    .center_x(Length::Fixed(114.0))
+    .center_y(Length::Fixed(114.0))
     .style(move |_theme| container::Style {
         border: iced::border::Border {
             color: Color {
@@ -7464,7 +7476,7 @@ fn feature_vignette_local(scheme: Scheme) -> Element<'static, Message> {
                 ..scheme.blue
             },
             width: 1.0,
-            radius: 44.0.into(),
+            radius: 57.0.into(),
         },
         ..container::Style::default()
     });
