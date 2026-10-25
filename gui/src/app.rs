@@ -293,6 +293,7 @@ pub enum Message {
     LockedImport,
     LockedPlayer,
     LockedRename,
+    LockedPreviousView,
     PurchasePro,
     RestorePro,
     StartTrial,
@@ -2013,6 +2014,15 @@ impl App {
                 self.paywall_open = true;
                 self.toast = Some((
                     "The free version uses the Balanced preset. Speed and Accuracy are Pro."
+                        .to_string(),
+                    Instant::now(),
+                ));
+                Task::none()
+            }
+            Message::LockedPreviousView => {
+                self.paywall_open = true;
+                self.toast = Some((
+                    "Viewing a previous transcription during active transcription is a Pro feature"
                         .to_string(),
                     Instant::now(),
                 ));
@@ -4691,9 +4701,16 @@ impl App {
         let running = matches!(self.status, Status::Running);
         let can_remove = !running;
         let viewing = self.selected == Some(index) && self.selected_view.is_some();
-        let selectable = matches!(item.status, ItemStatus::Running)
-            || (!running && matches!(item.status, ItemStatus::Pending))
-            || (matches!(item.status, ItemStatus::Done) && item.transcript.is_some());
+        // Free locks the view to the file being transcribed: older transcripts
+        // cannot be opened while a run is in progress.
+        let locked_previous = self.shows(license::Audience::FreeOnly)
+            && running
+            && matches!(item.status, ItemStatus::Done)
+            && self.current_index != Some(index);
+        let selectable = !locked_previous
+            && (matches!(item.status, ItemStatus::Running)
+                || (!running && matches!(item.status, ItemStatus::Pending))
+                || (matches!(item.status, ItemStatus::Done) && item.transcript.is_some()));
 
         let name = item
             .path
@@ -4735,11 +4752,16 @@ impl App {
             }
         };
 
+        let name_color = if locked_previous {
+            scheme.muted
+        } else {
+            scheme.text
+        };
         let label = column![
             text(name)
                 .size(theme::TEXT_SM)
                 .wrapping(NO_WRAP)
-                .color(scheme.text),
+                .color(name_color),
             text(meta).size(11).wrapping(NO_WRAP).color(meta_color),
         ]
         .spacing(1)
@@ -4815,7 +4837,11 @@ impl App {
             ..scheme.blue
         };
         let hover_tint = scheme.bar_track;
-        let row_text = scheme.text;
+        let row_text = if locked_previous {
+            scheme.muted
+        } else {
+            scheme.text
+        };
         let row_button =
             button(content)
                 .padding([6, 8])
@@ -4844,7 +4870,9 @@ impl App {
                         shadow: Shadow::default(),
                     }
                 });
-        if selectable {
+        if locked_previous {
+            row_button.on_press(Message::LockedPreviousView).into()
+        } else if selectable {
             row_button.on_press(Message::ViewItem(index)).into()
         } else {
             row_button.into()
