@@ -288,6 +288,8 @@ pub enum Message {
     CloseSettings,
     OpenPaywall,
     ClosePaywall,
+    LockedPreset,
+    LockedSpeakers,
     PurchasePro,
     RestorePro,
     StartTrial,
@@ -2016,6 +2018,23 @@ impl App {
             }
             Message::OpenPaywall => {
                 self.paywall_open = true;
+                Task::none()
+            }
+            Message::LockedPreset => {
+                self.paywall_open = true;
+                self.toast = Some((
+                    "The free version uses the Balanced preset. Speed and Accuracy are Pro."
+                        .to_string(),
+                    Instant::now(),
+                ));
+                Task::none()
+            }
+            Message::LockedSpeakers => {
+                self.paywall_open = true;
+                self.toast = Some((
+                    "Speaker labels are a Pro feature.".to_string(),
+                    Instant::now(),
+                ));
                 Task::none()
             }
             Message::ClosePaywall => {
@@ -4483,13 +4502,23 @@ impl App {
             &scheme,
         );
 
-        let folder_button = self.tip(
-            action(icon(ICON_FOLDER_PLUS, 15.0))
-                .on_press(Message::AddFolder)
-                .style(pill_button_secondary),
-            "Add a folder",
-            &scheme,
-        );
+        let folder_button: Element<Message> = if self.can(license::Feature::Batch) {
+            self.tip(
+                action(icon(ICON_FOLDER_PLUS, 15.0))
+                    .on_press(Message::AddFolder)
+                    .style(pill_button_secondary),
+                "Add a folder",
+                &scheme,
+            )
+        } else {
+            self.tip(
+                action(icon_colored(ICON_FOLDER_PLUS, 15.0, scheme.muted))
+                    .on_press(Message::AddFolder)
+                    .style(greyed_button(scheme)),
+                "Folder import is a Pro feature",
+                &scheme,
+            )
+        };
 
         let import_picker: Element<Message> =
             pick_list(ImportKind::ALL, None::<ImportKind>, Message::ImportChoice)
@@ -4580,7 +4609,7 @@ impl App {
                         .height(Length::Fill),
                 )
                 .interaction(mouse::Interaction::Pointer)
-                .on_press(Message::OpenPaywall),
+                .on_press(Message::LockedPreset),
             ]
             .into()
         } else if !running && has_queue {
@@ -4633,7 +4662,7 @@ impl App {
                         .height(Length::Fill),
                 )
                 .interaction(mouse::Interaction::Pointer)
-                .on_press(Message::OpenPaywall),
+                .on_press(Message::LockedSpeakers),
             ]
             .into()
         } else {
@@ -5683,7 +5712,7 @@ impl App {
                         .height(Length::Fill),
                 )
                 .interaction(mouse::Interaction::Pointer)
-                .on_press(Message::OpenPaywall),
+                .on_press(Message::LockedPreset),
             ]
             .into()
         } else {
@@ -5715,7 +5744,7 @@ impl App {
                         .height(Length::Fill),
                 )
                 .interaction(mouse::Interaction::Pointer)
-                .on_press(Message::OpenPaywall),
+                .on_press(Message::LockedSpeakers),
             ]
             .into()
         } else {
