@@ -6346,8 +6346,8 @@ impl App {
 
         let mut header = row![
             iced::widget::image(logo_handle())
-                .width(Length::Fixed(64.0))
-                .height(Length::Fixed(64.0)),
+                .width(Length::Fixed(96.0))
+                .height(Length::Fixed(96.0)),
             column![
                 text("Hippo Transcribe").size(theme::TEXT_XL).font(Font {
                     weight: font::Weight::Bold,
