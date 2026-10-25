@@ -213,7 +213,7 @@ over a corpus for backend and preset comparisons.
 
 The free tier is the full-length pipeline: the balanced model, one speaker,
 unlimited files, no minutes and no account. Copy, save and search are included.
-Pro adds the Speed and Accuracy models, speaker diarization (speaker labels),
+Pro adds the Speed and Accuracy presets, speaker diarization (speaker labels),
 batch transcription, transcript editing and audio playback.
 
 Pro is a one-time purchase on both stores. A 7-day trial is available once per

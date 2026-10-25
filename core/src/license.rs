@@ -89,8 +89,8 @@ impl Feature {
     /// Human-readable name used by the paywall and toasts.
     pub fn label(self) -> &'static str {
         match self {
-            Feature::SpeedPreset => "Speed model",
-            Feature::AccuracyPreset => "Accuracy model",
+            Feature::SpeedPreset => "Speed preset",
+            Feature::AccuracyPreset => "Accuracy preset",
             Feature::Diarization => "Speaker labels",
             Feature::Batch => "Batch transcription",
             Feature::Editing => "Transcript editing",

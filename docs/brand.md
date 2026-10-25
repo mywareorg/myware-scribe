@@ -26,7 +26,7 @@ Associate Agreement.
 
 - **Free:** balanced model, one speaker, full-length transcripts, unlimited
   files, no minutes, no account, no subscription.
-- **Pro:** Speed and Accuracy models, speaker labels, batch transcription,
+- **Pro:** Speed and Accuracy presets, speaker labels, batch transcription,
   transcript editing and audio playback. One-time purchase.
 
 ## Visual system

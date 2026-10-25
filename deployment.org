@@ -24,7 +24,7 @@ Balanced model. One speaker. Full-length transcripts, unlimited files. No
 minutes, no account, no subscription.
 
 ** Pro tier
-Speed and Accuracy models, speaker labels, batch transcription, transcript
+Speed and Accuracy presets, speaker labels, batch transcription, transcript
 editing and audio playback. One-time purchase.
 
 Use this copy consistently across the Microsoft Store, Mac App Store and GitLab
@@ -146,7 +146,7 @@ privacy policy to =PRIVACY.md= in the repository.
 
 ** Decide what is free vs paid
 - [ ] Define the free tier. Balanced model, single speaker, full-length transcripts, unlimited files, no minutes, no account, no subscription.
-- [ ] Define paid features: Speed and Accuracy models, speaker labels, batch transcription, transcript editing and audio playback.
+- [ ] Define paid features: Speed and Accuracy presets, speaker labels, batch transcription, transcript editing and audio playback.
 - [ ] Write the feature matrix down before adding gates so UI, backend, and Store products stay consistent.
 - [ ] Paywall is a one-time purchase. No subscription.
 - [ ] Decide whether a trial exists and whether it is time-based or feature-limited.

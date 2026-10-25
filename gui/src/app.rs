@@ -57,7 +57,6 @@ struct FeatureSlide {
     eyebrow: &'static str,
     title: &'static str,
     body: &'static str,
-    footnote: Option<&'static str>,
 }
 
 const FEATURE_DECK: [FeatureSlide; 5] = [
@@ -66,32 +65,27 @@ const FEATURE_DECK: [FeatureSlide; 5] = [
         title: "Full-length transcription. Forever.",
         body: "Balanced model \u{2014} the best free pipeline. One speaker, unlimited files, \
              no minutes, no subscription.",
-        footnote: None,
     },
     FeatureSlide {
         eyebrow: "PRO",
         title: "Separate every speaker.",
-        body: "Labels each voice and lets you rename speakers.",
-        footnote: None,
+        body: "Shows who said what, labels each voice, and lets you rename speakers in the transcript.",
     },
     FeatureSlide {
         eyebrow: "PRO",
         title: "Queue the whole folder.",
-        body: "Batch runs with one language and speaker setting.",
-        footnote: None,
+        body: "Queue a whole folder and run it as one batch with shared language and speaker settings.",
     },
     FeatureSlide {
         eyebrow: "PRO",
         title: "Review, edit and choose.",
-        body: "Playback, line editing, Speed and Accuracy models. $30 once, no subscription.",
-        footnote: Some("Speed depends on your hardware."),
+        body: "Playback, line editing, and Speed or Accuracy presets give you control over every transcript.",
     },
     FeatureSlide {
         eyebrow: "WHY HIPPO",
         title: "Hippo is HIPAA inspired.",
-        body: "Built to serve the needs of doctors and medical professionals. \
-               Hippo works offline and will never phone home.",
-        footnote: None,
+        body: "Open source. Built for doctors and medical professionals. \
+               Hippo works offline and never phones home.",
     },
 ];
 
@@ -1244,7 +1238,7 @@ impl App {
         };
         self.tip(
             button,
-            "Speed and Accuracy models, speaker labels, batch, editing and playback",
+            "Speed and Accuracy presets, speaker labels, batch, editing and playback",
             scheme,
         )
     }
@@ -4106,7 +4100,7 @@ impl App {
         .align_y(iced::Alignment::Center)
         .width(Length::Fill);
 
-        let mut copy = column![
+        let copy = column![
             text(slide.title)
                 .size(theme::TEXT_XL)
                 .font(Font {
@@ -4121,18 +4115,6 @@ impl App {
                 .width(Length::Fill),
         ]
         .spacing(theme::SPACE_SM);
-
-        if let Some(footnote) = slide.footnote {
-            copy = copy.push(
-                text(footnote)
-                    .size(theme::TEXT_XS)
-                    .font(Font {
-                        style: font::Style::Italic,
-                        ..Font::DEFAULT
-                    })
-                    .color(scheme.muted),
-            );
-        }
 
         let back = action(
             row![
@@ -4909,6 +4891,7 @@ impl App {
                     size,
                     active,
                     self.show_timestamps,
+                    !self.popup_open(),
                 ));
             }
         }
@@ -5368,12 +5351,28 @@ impl App {
     }
 
     /// Wrap `content` with a tooltip.
+    /// True while any modal dialog is showing.
+    fn popup_open(&self) -> bool {
+        self.settings_open
+            || self.paywall_open
+            || self.summary_open
+            || self.help_open.is_some()
+            || self.rename_open
+            || self.line_edit.is_some()
+            || self.delete_confirm
+    }
+
     fn tip<'a>(
         &self,
         content: impl Into<Element<'a, Message>>,
         label: &'static str,
         scheme: &Scheme,
     ) -> Element<'a, Message> {
+        let content = content.into();
+        // A tooltip on the page underneath must not paint over a dialog.
+        if self.popup_open() {
+            return content;
+        }
         let background = scheme.tip_bg;
         let text_color = scheme.tip_text;
         let border_color = scheme.border;
@@ -7766,6 +7765,7 @@ fn line_element(
     size: f32,
     active: bool,
     show_timestamps: bool,
+    show_tip: bool,
 ) -> Element<'static, Message> {
     let ink = scheme.ink;
 
@@ -7852,6 +7852,9 @@ fn line_element(
         keyboard_hit,
     ]
     .into();
+    if !show_tip {
+        return line;
+    }
     let tip_bg = scheme.tip_bg;
     let tip_text = scheme.tip_text;
     let tip_border = scheme.border;
