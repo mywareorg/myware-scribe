@@ -1159,7 +1159,7 @@ impl App {
 
     /// Title-bar / taskbar icon decoded from the bundled PNG.
     fn window_icon() -> Option<iced::window::Icon> {
-        let image = image::load_from_memory(include_bytes!("../assets/icon.png"))
+        let image = image::load_from_memory(include_bytes!("../../icons/hippo-icon-square.png"))
             .ok()?
             .into_rgba8();
         let (width, height) = image.dimensions();
@@ -1329,7 +1329,6 @@ impl App {
                 .size(theme::TEXT_SM)
                 .color(scheme.green),
             );
-
         } else {
             if !self.license.trial_used() {
                 actions = actions.push(
@@ -1721,9 +1720,7 @@ impl App {
                 self.view_error = None;
                 self.save_queue();
                 self.toast = Some(("Queued for transcription".to_string(), Instant::now()));
-                if !matches!(self.status, Status::Running)
-                    && self.can(license::Feature::Batch)
-                {
+                if !matches!(self.status, Status::Running) && self.can(license::Feature::Batch) {
                     self.begin_batch(false);
                 }
                 Task::none()
@@ -2012,25 +2009,20 @@ impl App {
             }
             Message::LockedPreset => {
                 self.toast = Some((
-                    "Speed and Accuracy presets are Pro features"
-                        .to_string(),
+                    "Speed and Accuracy presets are Pro features".to_string(),
                     Instant::now(),
                 ));
                 Task::none()
             }
             Message::LockedPreviousView => {
                 self.toast = Some((
-                    "Reviewing during active transcription is a Pro feature"
-                        .to_string(),
+                    "Reviewing during active transcription is a Pro feature".to_string(),
                     Instant::now(),
                 ));
                 Task::none()
             }
             Message::LockedPlayer => {
-                self.toast = Some((
-                    "Player is a Pro feature".to_string(),
-                    Instant::now(),
-                ));
+                self.toast = Some(("Player is a Pro feature".to_string(), Instant::now()));
                 Task::none()
             }
             Message::LockedRename => {
@@ -2342,10 +2334,8 @@ impl App {
             }
             Message::AddFolder => {
                 if !self.can(license::Feature::Batch) {
-                    self.toast = Some((
-                        "Folder import is a Pro feature".to_string(),
-                        Instant::now(),
-                    ));
+                    self.toast =
+                        Some(("Folder import is a Pro feature".to_string(), Instant::now()));
                     return Task::none();
                 }
                 Task::perform(
@@ -2510,10 +2500,7 @@ impl App {
             Message::OpenRename => self.open_rename(),
             Message::EditLine(index) => {
                 if !self.can(license::Feature::Editing) {
-                    self.toast = Some((
-                        "Editing is a Pro feature".to_string(),
-                        Instant::now(),
-                    ));
+                    self.toast = Some(("Editing is a Pro feature".to_string(), Instant::now()));
                     return Task::none();
                 }
                 // Only transcripts we can write back to are editable, and the
@@ -4209,13 +4196,9 @@ impl App {
         .spacing(theme::SPACE_SM);
 
         // The deck advances on a timer; no manual arrows or dots.
-        let content = column![
-            eyebrow,
-            self.feature_vignette(index, accent, &scheme),
-            copy,
-        ]
-        .spacing(theme::SPACE_LG)
-        .width(Length::Fill);
+        let content = column![eyebrow, self.feature_vignette(index, accent, &scheme), copy,]
+            .spacing(theme::SPACE_LG)
+            .width(Length::Fill);
 
         container(
             container(content)
@@ -4581,21 +4564,17 @@ impl App {
             // Free tier: Balanced only, and the picker cannot be opened.
             self.tip(
                 stack![
-                pick_list(
-                    Preset::ALL,
-                    Some(Preset::Balanced),
-                    Message::PresetChanged,
-                )
-                .style(greyed_pick(scheme))
-                .width(Length::Fill),
-                mouse_area(
-                    container(horizontal_space())
-                        .width(Length::Fill)
-                        .height(Length::Fill),
-                )
-                .interaction(mouse::Interaction::Pointer)
-                .on_press(Message::LockedPreset),
-            ],
+                    pick_list(Preset::ALL, Some(Preset::Balanced), Message::PresetChanged,)
+                        .style(greyed_pick(scheme))
+                        .width(Length::Fill),
+                    mouse_area(
+                        container(horizontal_space())
+                            .width(Length::Fill)
+                            .height(Length::Fill),
+                    )
+                    .interaction(mouse::Interaction::Pointer)
+                    .on_press(Message::LockedPreset),
+                ],
                 "Speed and Accuracy presets are Pro features",
                 &scheme,
             )
@@ -5310,16 +5289,8 @@ impl App {
             } else {
                 scheme.timeline_bg
             },
-            wave: if locked {
-                scheme.muted
-            } else {
-                scheme.green
-            },
-            playhead_color: if locked {
-                scheme.muted
-            } else {
-                scheme.ink
-            },
+            wave: if locked { scheme.muted } else { scheme.green },
+            playhead_color: if locked { scheme.muted } else { scheme.ink },
             enabled,
             zoom: self.waveform_zoom,
         };
@@ -5799,22 +5770,18 @@ impl App {
         } else if !self.shows(license::Audience::ProOnly) {
             self.tip(
                 stack![
-                pick_list(
-                    Preset::ALL,
-                    Some(Preset::Balanced),
-                    Message::PresetChanged,
-                )
-                .style(greyed_pick(scheme))
-                .handle(caret_handle(false))
-                .width(Length::Fixed(180.0)),
-                mouse_area(
-                    container(horizontal_space())
-                        .width(Length::Fill)
-                        .height(Length::Fill),
-                )
-                .interaction(mouse::Interaction::Pointer)
-                .on_press(Message::LockedPreset),
-            ],
+                    pick_list(Preset::ALL, Some(Preset::Balanced), Message::PresetChanged,)
+                        .style(greyed_pick(scheme))
+                        .handle(caret_handle(false))
+                        .width(Length::Fixed(180.0)),
+                    mouse_area(
+                        container(horizontal_space())
+                            .width(Length::Fill)
+                            .height(Length::Fill),
+                    )
+                    .interaction(mouse::Interaction::Pointer)
+                    .on_press(Message::LockedPreset),
+                ],
                 "Speed and Accuracy presets are Pro features",
                 &scheme,
             )
@@ -6128,7 +6095,11 @@ impl App {
         };
         let toast = mouse_area(
             container(text(message.clone()).size(13))
-                .padding([8, 14])
+                .width(Length::Fill)
+                .height(Length::Fixed(52.0))
+                .center_x(Length::Fill)
+                .center_y(Length::Fixed(52.0))
+                .padding([0, 14])
                 .style(move |_theme| container::Style {
                     background: Some(scheme.toast_bg.into()),
                     text_color: Some(scheme.toast_text),
@@ -6141,9 +6112,8 @@ impl App {
         let overlay = container(toast)
             .width(Length::Fill)
             .height(Length::Fill)
-            .align_x(iced::Alignment::End)
             .align_y(iced::Alignment::Start)
-            .padding(20);
+            .padding([20, 20]);
         stack![base, overlay].into()
     }
 
@@ -6267,13 +6237,15 @@ impl App {
                 ),
             );
         } else {
-            controls.push(self.tip(
-                action_text("Rename")
-                    .on_press(Message::LockedRename)
-                    .style(greyed_button(scheme)),
-                "Rename speakers in this transcript",
-                &scheme,
-            ));
+            controls.push(
+                self.tip(
+                    action_text("Rename")
+                        .on_press(Message::LockedRename)
+                        .style(greyed_button(scheme)),
+                    "Rename speakers in this transcript",
+                    &scheme,
+                ),
+            );
         }
         middle = middle.push(
             row(controls)
@@ -6396,20 +6368,24 @@ impl App {
             header = header.push(self.tier_toggle_button(&scheme));
         }
         header = header
-            .push(self.tip(
-                action(icon(theme_icon, 16.0))
-                    .on_press(Message::ToggleTheme)
-                    .style(pill_button_secondary),
-                theme_tip,
-                &scheme,
-            ))
-            .push(self.tip(
-                action(icon(ICON_GEAR, 16.0))
-                    .on_press(Message::OpenSettings)
-                    .style(pill_button_secondary),
-                "Settings (Ctrl+,)",
-                &scheme,
-            ))
+            .push(
+                self.tip(
+                    action(icon(theme_icon, 16.0))
+                        .on_press(Message::ToggleTheme)
+                        .style(pill_button_secondary),
+                    theme_tip,
+                    &scheme,
+                ),
+            )
+            .push(
+                self.tip(
+                    action(icon(ICON_GEAR, 16.0))
+                        .on_press(Message::OpenSettings)
+                        .style(pill_button_secondary),
+                    "Settings (Ctrl+,)",
+                    &scheme,
+                ),
+            )
             .push(
                 pick_list(HelpKind::ALL, None::<HelpKind>, Message::HelpChoice)
                     .placeholder("Help")
@@ -7056,7 +7032,7 @@ fn logo_handle() -> iced::widget::image::Handle {
     static LOGO: OnceLock<iced::widget::image::Handle> = OnceLock::new();
     LOGO.get_or_init(|| {
         let image =
-            image::load_from_memory(include_bytes!("../../icons/hippo-transcribe-logo-256.png"))
+            image::load_from_memory(include_bytes!("../../icons/hippo-icon-square.png"))
                 .expect("bundled Hippo Transcribe logo")
                 .into_rgba8();
         let (width, height) = image.dimensions();
