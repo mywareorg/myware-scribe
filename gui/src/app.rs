@@ -3104,6 +3104,17 @@ impl App {
             .iter()
             .filter(|item| matches!(item.status, ItemStatus::Done) && item.stats.is_some())
             .count();
+        // Free finishes on the upgrade prompt; Pro gets the summary.
+        if self.shows(license::Audience::FreeOnly) {
+            self.summary_open = false;
+            self.pending_rename = false;
+            self.paywall_open = true;
+            self.toast = None;
+            if self.notifications {
+                notify("Hippo Transcribe", "Finished \u{00b7} saved locally");
+            }
+            return true;
+        }
         self.summary_open = true;
         self.pending_rename =
             self.can(license::Feature::Editing) && generated == 1 && self.completed_count() == 1;
