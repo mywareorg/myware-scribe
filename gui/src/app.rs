@@ -5350,7 +5350,6 @@ impl App {
         controls.into()
     }
 
-    /// Wrap `content` with a tooltip.
     /// True while any modal dialog is showing.
     fn popup_open(&self) -> bool {
         self.settings_open
@@ -5362,6 +5361,7 @@ impl App {
             || self.delete_confirm
     }
 
+    /// Wrap `content` with a tooltip, unless a dialog is open.
     fn tip<'a>(
         &self,
         content: impl Into<Element<'a, Message>>,
