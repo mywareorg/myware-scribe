@@ -52,6 +52,48 @@ const NO_WRAP: iced::widget::text::Wrapping = iced::widget::text::Wrapping::None
 /// Number of RMS buckets requested when probing an audio file for the timeline.
 const TIMELINE_BUCKETS: usize = 2000;
 
+/// Copy for the empty-state feature deck. Slides are manual; no autoplay.
+struct FeatureSlide {
+    eyebrow: &'static str,
+    title: &'static str,
+    body: &'static str,
+    footnote: Option<&'static str>,
+}
+
+const FEATURE_DECK: [FeatureSlide; 5] = [
+    FeatureSlide {
+        eyebrow: "FREE",
+        title: "Unlimited transcription.",
+        body: "One speaker, any length, balanced model. No minutes. No account.",
+        footnote: None,
+    },
+    FeatureSlide {
+        eyebrow: "PRO",
+        title: "Separate every speaker.",
+        body: "Labels each voice and lets you rename speakers.",
+        footnote: None,
+    },
+    FeatureSlide {
+        eyebrow: "PRO",
+        title: "Queue the whole folder.",
+        body: "Batch runs with one language and speaker setting.",
+        footnote: None,
+    },
+    FeatureSlide {
+        eyebrow: "PRO",
+        title: "Review and choose.",
+        body:
+            "Click a line to seek. Speed or Accuracy when you need it. $30 once, no subscription.",
+        footnote: Some("Speed depends on your hardware."),
+    },
+    FeatureSlide {
+        eyebrow: "WHY HIPPO",
+        title: "Built for HIPAA-sensitive recordings.",
+        body: "Audio and transcripts stay on this machine.",
+        footnote: None,
+    },
+];
+
 #[derive(Debug, Clone, PartialEq)]
 enum ItemStatus {
     Pending,
@@ -261,6 +303,9 @@ pub enum Message {
     WaveZoom(f32),
     HelpChoice(HelpKind),
     CloseHelp,
+    FeaturePrev,
+    FeatureNext,
+    FeatureSlide(usize),
     Noop,
     OpenSummary,
     SmsToggled(bool),
@@ -386,6 +431,8 @@ pub struct App {
     toast: Option<(String, Instant)>,
     help_open: Option<HelpKind>,
     settings_open: bool,
+    /// Zero-based index of the visible empty-state feature slide.
+    feature_slide: usize,
     search_query: String,
     speaker_filter: Option<String>,
     search_index: usize,
@@ -550,6 +597,7 @@ impl App {
             toast: None,
             help_open: None,
             settings_open: false,
+            feature_slide: 0,
             waveform_zoom: settings.waveform_zoom.unwrap_or(1.0),
             search_query: String::new(),
             speaker_filter: None,
@@ -1755,6 +1803,14 @@ impl App {
                 if self.rename_open || self.line_edit.is_some() || self.settings_open {
                     return Task::none();
                 }
+                if self.feature_deck_nav_active() {
+                    if delta < 0 {
+                        self.feature_slide = self.feature_slide.saturating_sub(1);
+                    } else if delta > 0 {
+                        self.feature_slide = (self.feature_slide + 1).min(FEATURE_DECK.len() - 1);
+                    }
+                    return Task::none();
+                }
                 Self::focus_probe()
                     .map(move |focused| Message::SelectRelativeChecked(delta, focused))
             }
@@ -2022,6 +2078,18 @@ impl App {
                 self.help_open = None;
                 Task::none()
             }
+            Message::FeaturePrev => {
+                self.feature_slide = self.feature_slide.saturating_sub(1);
+                Task::none()
+            }
+            Message::FeatureNext => {
+                self.feature_slide = (self.feature_slide + 1).min(FEATURE_DECK.len() - 1);
+                Task::none()
+            }
+            Message::FeatureSlide(index) => {
+                self.feature_slide = index.min(FEATURE_DECK.len() - 1);
+                Task::none()
+            }
             Message::Noop => Task::none(),
             Message::Escape => {
                 if self.delete_confirm {
@@ -2063,6 +2131,14 @@ impl App {
             }
             Message::SeekBy(delta) => {
                 if self.rename_open || self.line_edit.is_some() || self.settings_open {
+                    return Task::none();
+                }
+                if self.feature_deck_nav_active() {
+                    if delta < 0.0 {
+                        self.feature_slide = self.feature_slide.saturating_sub(1);
+                    } else if delta > 0.0 {
+                        self.feature_slide = (self.feature_slide + 1).min(FEATURE_DECK.len() - 1);
+                    }
                     return Task::none();
                 }
                 Self::focus_probe().map(move |focused| Message::SeekByChecked(delta, focused))
@@ -2519,6 +2595,7 @@ impl App {
                 }
                 let feature = match preset {
                     Preset::Speed => None,
+                    Preset::Balanced => Some(license::Feature::BalancedPreset),
                     Preset::Accuracy => Some(license::Feature::AccuracyPreset),
                 };
                 if let Some(feature) = feature {
@@ -2833,6 +2910,7 @@ impl App {
     }
 
     fn add_paths(&mut self, paths: Vec<PathBuf>) -> Vec<PathBuf> {
+        let was_empty = self.queue.is_empty();
         let mut paths = paths;
         if !self.can(license::Feature::Batch) {
             let has_work = self
@@ -2878,6 +2956,9 @@ impl App {
             added.push(path);
         }
         if !added.is_empty() {
+            if was_empty {
+                self.feature_slide = 0;
+            }
             self.save_queue();
         }
         added
@@ -3924,8 +4005,189 @@ impl App {
         }
     }
 
+    /// True when the transcript pane is showing the global empty state.
+    fn feature_deck_visible(&self) -> bool {
+        self.queue.is_empty()
+            && self.selected.is_none()
+            && self.selected_view.is_none()
+            && !matches!(self.status, Status::Running)
+    }
+
+    /// Arrow keys page the deck only when no dialog owns the keystroke.
+    fn feature_deck_nav_active(&self) -> bool {
+        self.feature_deck_visible()
+            && self.help_open.is_none()
+            && !self.paywall_open
+            && !self.settings_open
+            && !self.summary_open
+            && !self.rename_open
+            && self.line_edit.is_none()
+            && !self.delete_confirm
+    }
+
+    /// Five-slide feature deck for the first-run empty state.
+    fn feature_deck(&self, scheme: &Scheme) -> Element<'_, Message> {
+        let scheme = *scheme;
+        let index = self.feature_slide.min(FEATURE_DECK.len() - 1);
+        let slide = &FEATURE_DECK[index];
+        let accent = match slide.eyebrow {
+            "FREE" => scheme.green,
+            "WHY HIPPO" => scheme.pink,
+            _ => scheme.blue,
+        };
+
+        let eyebrow = row![
+            feature_eyebrow(slide.eyebrow, accent, scheme),
+            horizontal_space(),
+            text(format!("{} of {}", index + 1, FEATURE_DECK.len()))
+                .size(theme::TEXT_XS)
+                .wrapping(NO_WRAP)
+                .color(scheme.muted),
+        ]
+        .align_y(iced::Alignment::Center)
+        .width(Length::Fill);
+
+        let mut copy = column![
+            text(slide.title)
+                .size(theme::TEXT_XL)
+                .font(Font {
+                    weight: font::Weight::Bold,
+                    ..Font::DEFAULT
+                })
+                .color(scheme.ink)
+                .width(Length::Fill),
+            text(slide.body)
+                .size(theme::TEXT_MD)
+                .color(scheme.muted)
+                .width(Length::Fill),
+        ]
+        .spacing(theme::SPACE_SM);
+
+        if let Some(footnote) = slide.footnote {
+            copy = copy.push(
+                text(footnote)
+                    .size(theme::TEXT_XS)
+                    .font(Font {
+                        style: font::Style::Italic,
+                        ..Font::DEFAULT
+                    })
+                    .color(scheme.muted),
+            );
+        }
+
+        let actions = row![
+            action_text("Add File(s)")
+                .on_press(Message::AddFiles)
+                .style(color_button(scheme.blue, scheme.on_accent)),
+            action_text("Add Folder")
+                .on_press(Message::AddFolder)
+                .style(pill_button_secondary),
+            horizontal_space(),
+        ]
+        .spacing(theme::SPACE_MD)
+        .align_y(iced::Alignment::Center)
+        .width(Length::Fill);
+
+        let back = action(
+            row![
+                icon(ICON_CHEVRON_LEFT, 12.0),
+                text("Back").size(theme::TEXT_XS),
+            ]
+            .spacing(theme::SPACE_XS)
+            .align_y(iced::Alignment::Center),
+        )
+        .on_press_maybe((index > 0).then_some(Message::FeaturePrev))
+        .style(pill_button_secondary);
+
+        let next = action(
+            row![
+                text("Next").size(theme::TEXT_XS),
+                icon(ICON_CHEVRON_RIGHT, 12.0),
+            ]
+            .spacing(theme::SPACE_XS)
+            .align_y(iced::Alignment::Center),
+        )
+        .on_press_maybe((index + 1 < FEATURE_DECK.len()).then_some(Message::FeatureNext))
+        .style(pill_button_secondary);
+
+        let mut dots = row![]
+            .spacing(theme::SPACE_2XS)
+            .align_y(iced::Alignment::Center);
+        for dot_index in 0..FEATURE_DECK.len() {
+            dots = dots.push(feature_dot(dot_index, index, accent, scheme));
+        }
+
+        let navigation = row![back, horizontal_space(), dots, horizontal_space(), next]
+            .spacing(theme::SPACE_MD)
+            .align_y(iced::Alignment::Center)
+            .width(Length::Fill);
+
+        let footer = column![settings_divider(scheme), actions, navigation]
+            .spacing(theme::SPACE_MD)
+            .width(Length::Fill);
+
+        let content = column![
+            eyebrow,
+            self.feature_vignette(index, accent, &scheme),
+            copy,
+            footer,
+        ]
+        .spacing(theme::SPACE_LG)
+        .width(Length::Fill);
+
+        container(
+            container(content)
+                .center_x(Length::Fill)
+                .max_width(500.0)
+                .padding([18, 20]),
+        )
+        .center(Length::Fill)
+        .padding([18, 24])
+        .into()
+    }
+
+    /// One abstract UI vignette per slide, all drawn from the active scheme.
+    fn feature_vignette(
+        &self,
+        index: usize,
+        accent: Color,
+        scheme: &Scheme,
+    ) -> Element<'_, Message> {
+        let scheme = *scheme;
+        let body: Element<Message> = match index {
+            0 => feature_vignette_file(scheme),
+            1 => feature_vignette_speakers(scheme),
+            2 => feature_vignette_queue(scheme),
+            3 => feature_vignette_review(scheme),
+            _ => feature_vignette_local(scheme),
+        };
+
+        container(body)
+            .width(Length::Fill)
+            .height(Length::Fixed(160.0))
+            .padding(14)
+            .align_y(iced::Alignment::Center)
+            .style(move |_theme| container::Style {
+                background: Some(linear_gradient(
+                    theme::mix(scheme.bg, accent, 0.06),
+                    scheme.bg,
+                )),
+                border: iced::border::Border {
+                    color: scheme.border,
+                    width: 1.0,
+                    radius: theme::RADIUS_LG.into(),
+                },
+                shadow: soft_shadow(),
+                ..container::Style::default()
+            })
+            .into()
+    }
+
     /// Friendly placeholder shown when there is no text to render yet.
     fn empty_transcript_state(&self, scheme: &Scheme) -> Element<'_, Message> {
+        if self.feature_deck_visible() {
+            return self.feature_deck(scheme);
+        }
         let running = matches!(self.status, Status::Running);
         let selected = self.selected_view.is_some();
         let has_queue = !self.queue.is_empty();
@@ -6537,6 +6799,504 @@ fn queue_status_icon(glyph: char, glyph_size: f32, color: Color) -> Element<'sta
         .into()
 }
 
+fn feature_eyebrow(
+    label: &'static str,
+    accent: Color,
+    scheme: Scheme,
+) -> Element<'static, Message> {
+    container(
+        text(label)
+            .size(10)
+            .wrapping(NO_WRAP)
+            .font(Font {
+                weight: font::Weight::Bold,
+                ..Font::DEFAULT
+            })
+            .color(scheme.text),
+    )
+    .padding([3, 8])
+    .style(move |_theme| container::Style {
+        background: Some(Color { a: 0.14, ..accent }.into()),
+        border: iced::border::Border {
+            color: Color { a: 0.38, ..accent },
+            width: 1.0,
+            radius: PILL.into(),
+        },
+        ..container::Style::default()
+    })
+    .into()
+}
+
+fn feature_dot(
+    index: usize,
+    current: usize,
+    accent: Color,
+    scheme: Scheme,
+) -> Element<'static, Message> {
+    let active = index == current;
+    let width = if active { 18.0 } else { 6.0 };
+    let fill = if active { accent } else { scheme.border };
+    button(
+        container(horizontal_space())
+            .width(Length::Fixed(width))
+            .height(Length::Fixed(6.0))
+            .style(move |_theme| container::Style {
+                background: Some(fill.into()),
+                border: iced::border::Border {
+                    color: Color {
+                        a: if active { 0.40 } else { 0.0 },
+                        ..accent
+                    },
+                    width: if active { 1.0 } else { 0.0 },
+                    radius: 3.0.into(),
+                },
+                ..container::Style::default()
+            }),
+    )
+    .padding([7, 6])
+    .on_press(Message::FeatureSlide(index))
+    .style(subtle_icon_button)
+    .into()
+}
+
+/// A thin bar whose width is `portion / total` of the available row.
+fn feature_bar(portion: u16, total: u16, color: Color, height: f32) -> Element<'static, Message> {
+    let portion = portion.clamp(1, total.saturating_sub(1).max(1));
+    let rest = total.saturating_sub(portion).max(1);
+    row![
+        container(horizontal_space())
+            .width(Length::FillPortion(portion))
+            .height(Length::Fixed(height))
+            .style(move |_theme| container::Style {
+                background: Some(color.into()),
+                border: iced::border::rounded(height / 2.0),
+                ..container::Style::default()
+            }),
+        horizontal_space().width(Length::FillPortion(rest)),
+    ]
+    .width(Length::Fill)
+    .into()
+}
+
+fn feature_speaker_chip(
+    label: &'static str,
+    color: Color,
+    scheme: Scheme,
+) -> Element<'static, Message> {
+    container(
+        row![
+            container(horizontal_space())
+                .width(Length::Fixed(6.0))
+                .height(Length::Fixed(6.0))
+                .style(move |_theme| container::Style {
+                    background: Some(color.into()),
+                    border: iced::border::rounded(3.0),
+                    ..container::Style::default()
+                }),
+            text(label).size(10).wrapping(NO_WRAP).color(scheme.text),
+            icon_colored(ICON_CARET_DOWN, 8.0, scheme.muted),
+        ]
+        .spacing(theme::SPACE_XS)
+        .align_y(iced::Alignment::Center),
+    )
+    .padding([2, 7])
+    .style(move |_theme| container::Style {
+        background: Some(Color { a: 0.12, ..color }.into()),
+        border: iced::border::Border {
+            color: Color { a: 0.34, ..color },
+            width: 1.0,
+            radius: PILL.into(),
+        },
+        ..container::Style::default()
+    })
+    .into()
+}
+
+fn feature_choice(
+    label: &'static str,
+    active: bool,
+    accent: Color,
+    scheme: Scheme,
+) -> Element<'static, Message> {
+    container(text(label).size(10).wrapping(NO_WRAP).color(if active {
+        scheme.text
+    } else {
+        scheme.muted
+    }))
+    .padding([3, 10])
+    .style(move |_theme| container::Style {
+        background: Some(if active {
+            Color { a: 0.15, ..accent }.into()
+        } else {
+            Color::TRANSPARENT.into()
+        }),
+        border: iced::border::Border {
+            color: if active {
+                Color { a: 0.40, ..accent }
+            } else {
+                scheme.border
+            },
+            width: 1.0,
+            radius: PILL.into(),
+        },
+        ..container::Style::default()
+    })
+    .into()
+}
+
+fn feature_icon_chip(
+    glyph: char,
+    label: &'static str,
+    scheme: Scheme,
+) -> Element<'static, Message> {
+    container(
+        row![
+            icon_colored(glyph, 10.0, scheme.muted),
+            text(label).size(10).wrapping(NO_WRAP).color(scheme.text),
+        ]
+        .spacing(theme::SPACE_XS)
+        .align_y(iced::Alignment::Center),
+    )
+    .padding([3, 8])
+    .style(move |_theme| container::Style {
+        background: Some(scheme.track.into()),
+        border: iced::border::Border {
+            color: scheme.border,
+            width: 1.0,
+            radius: PILL.into(),
+        },
+        ..container::Style::default()
+    })
+    .into()
+}
+
+fn feature_vignette_file(scheme: Scheme) -> Element<'static, Message> {
+    let line = Color {
+        a: 0.26,
+        ..scheme.text
+    };
+    let header = row![
+        container(icon_colored(ICON_FILE_TEXT, 14.0, scheme.blue))
+            .width(Length::Fixed(26.0))
+            .height(Length::Fixed(26.0))
+            .center_x(Length::Fixed(26.0))
+            .center_y(Length::Fixed(26.0))
+            .style(move |_theme| container::Style {
+                background: Some(
+                    Color {
+                        a: 0.12,
+                        ..scheme.blue
+                    }
+                    .into()
+                ),
+                border: iced::border::rounded(8.0),
+                ..container::Style::default()
+            }),
+        text("Audio file")
+            .size(11)
+            .wrapping(NO_WRAP)
+            .color(scheme.text),
+        horizontal_space(),
+        text("1 speaker")
+            .size(10)
+            .wrapping(NO_WRAP)
+            .color(scheme.muted),
+    ]
+    .spacing(theme::SPACE_MD)
+    .align_y(iced::Alignment::Center)
+    .width(Length::Fill);
+
+    let mut lines = column![].spacing(theme::SPACE_LG).width(Length::Fill);
+    for portion in [10_u16, 11, 8, 11, 9, 7] {
+        lines = lines.push(feature_bar(portion, 12, line, 5.0));
+    }
+
+    column![header, lines].spacing(theme::SPACE_LG).into()
+}
+
+fn feature_vignette_speakers(scheme: Scheme) -> Element<'static, Message> {
+    let line = Color {
+        a: 0.26,
+        ..scheme.text
+    };
+    let speakers = [
+        ("Speaker 1", scheme.speaker_colors[0], 10_u16, 7_u16),
+        ("Speaker 2", scheme.speaker_colors[1], 11, 6),
+        ("Speaker 3", scheme.speaker_colors[3], 8, 10),
+    ];
+    let mut groups = column![].spacing(theme::SPACE_LG).width(Length::Fill);
+    for (label, color, first, second) in speakers {
+        groups = groups.push(
+            column![
+                row![
+                    feature_speaker_chip(label, color, scheme),
+                    horizontal_space()
+                ]
+                .width(Length::Fill)
+                .align_y(iced::Alignment::Center),
+                feature_bar(first, 12, line, 4.0),
+                feature_bar(second, 12, line, 4.0),
+            ]
+            .spacing(theme::SPACE_XS)
+            .width(Length::Fill),
+        );
+    }
+    groups.into()
+}
+
+fn feature_queue_row(
+    badge: Element<'static, Message>,
+    status: &'static str,
+    scheme: Scheme,
+) -> Element<'static, Message> {
+    let line = Color {
+        a: 0.24,
+        ..scheme.text
+    };
+    row![
+        badge,
+        container(feature_bar(10, 12, line, 5.0)).width(Length::Fill),
+        text(status).size(10).wrapping(NO_WRAP).color(scheme.muted),
+    ]
+    .spacing(theme::SPACE_MD)
+    .align_y(iced::Alignment::Center)
+    .width(Length::Fill)
+    .into()
+}
+
+fn feature_vignette_queue(scheme: Scheme) -> Element<'static, Message> {
+    let header = row![
+        text("Queue")
+            .size(10)
+            .wrapping(NO_WRAP)
+            .font(Font {
+                weight: font::Weight::Bold,
+                ..Font::DEFAULT
+            })
+            .color(scheme.muted),
+        horizontal_space(),
+        icon_colored(ICON_FOLDER_PLUS, 11.0, scheme.muted),
+        text("Folder").size(9).wrapping(NO_WRAP).color(scheme.muted),
+    ]
+    .spacing(theme::SPACE_XS)
+    .align_y(iced::Alignment::Center)
+    .width(Length::Fill);
+
+    let rows = column![
+        feature_queue_row(
+            queue_status_badge(ICON_CHECK, 15.0, scheme.green, scheme.on_accent),
+            "Done",
+            scheme,
+        ),
+        feature_queue_row(
+            queue_status_badge(ICON_HOURGLASS, 13.0, scheme.track, scheme.text),
+            "Running",
+            scheme,
+        ),
+        feature_queue_row(
+            queue_status_icon(ICON_CIRCLE, 15.0, scheme.text),
+            "Queued",
+            scheme,
+        ),
+    ]
+    .spacing(theme::SPACE_MD)
+    .width(Length::Fill);
+
+    column![header, rows].spacing(theme::SPACE_MD).into()
+}
+
+fn feature_vignette_review(scheme: Scheme) -> Element<'static, Message> {
+    let wave = canvas(DeckWaveform {
+        track: scheme.track,
+        wave: scheme.green,
+        playhead: scheme.blue,
+    })
+    .width(Length::Fill)
+    .height(Length::Fixed(52.0));
+
+    let line = Color {
+        a: 0.38,
+        ..scheme.text
+    };
+    let highlight = container(
+        row![
+            icon_colored(ICON_PLAY, 9.0, scheme.blue),
+            container(feature_bar(11, 12, line, 5.0)).width(Length::Fill),
+        ]
+        .spacing(theme::SPACE_SM)
+        .align_y(iced::Alignment::Center)
+        .width(Length::Fill),
+    )
+    .width(Length::Fill)
+    .height(Length::Fixed(24.0))
+    .padding([0, 8])
+    .align_y(iced::Alignment::Center)
+    .style(move |_theme| container::Style {
+        background: Some(
+            Color {
+                a: 0.10,
+                ..scheme.blue
+            }
+            .into(),
+        ),
+        border: iced::border::Border {
+            color: Color {
+                a: 0.32,
+                ..scheme.blue
+            },
+            width: 1.0,
+            radius: 8.0.into(),
+        },
+        ..container::Style::default()
+    });
+
+    let chips = row![
+        feature_choice("Speed", true, scheme.blue, scheme),
+        feature_choice("Accuracy", false, scheme.blue, scheme),
+        horizontal_space(),
+    ]
+    .spacing(theme::SPACE_SM)
+    .align_y(iced::Alignment::Center)
+    .width(Length::Fill);
+
+    column![wave, highlight, chips]
+        .spacing(theme::SPACE_MD)
+        .width(Length::Fill)
+        .into()
+}
+
+fn feature_vignette_local(scheme: Scheme) -> Element<'static, Message> {
+    let mark = container(
+        container(
+            iced::widget::image(logo_handle())
+                .width(Length::Fixed(46.0))
+                .height(Length::Fixed(46.0)),
+        )
+        .width(Length::Fixed(72.0))
+        .height(Length::Fixed(72.0))
+        .center_x(Length::Fixed(72.0))
+        .center_y(Length::Fixed(72.0))
+        .style(move |_theme| container::Style {
+            background: Some(
+                Color {
+                    a: 0.10,
+                    ..scheme.blue
+                }
+                .into(),
+            ),
+            border: iced::border::Border {
+                color: Color {
+                    a: 0.35,
+                    ..scheme.blue
+                },
+                width: 1.0,
+                radius: 36.0.into(),
+            },
+            ..container::Style::default()
+        }),
+    )
+    .width(Length::Fixed(88.0))
+    .height(Length::Fixed(88.0))
+    .center_x(Length::Fixed(88.0))
+    .center_y(Length::Fixed(88.0))
+    .style(move |_theme| container::Style {
+        border: iced::border::Border {
+            color: Color {
+                a: 0.18,
+                ..scheme.blue
+            },
+            width: 1.0,
+            radius: 44.0.into(),
+        },
+        ..container::Style::default()
+    });
+
+    let chips = row![
+        feature_icon_chip(ICON_MIC, "Audio", scheme),
+        feature_icon_chip(ICON_FILE_TEXT, "Transcripts", scheme),
+    ]
+    .spacing(theme::SPACE_SM)
+    .align_y(iced::Alignment::Center);
+
+    container(
+        column![mark, chips]
+            .spacing(theme::SPACE_SM)
+            .align_x(iced::Alignment::Center),
+    )
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .center_y(Length::Fill)
+    .into()
+}
+
+/// Abstract waveform used by the review slide: deterministic, no audio needed.
+struct DeckWaveform {
+    track: Color,
+    wave: Color,
+    playhead: Color,
+}
+
+impl canvas::Program<Message> for DeckWaveform {
+    type State = ();
+
+    fn update(
+        &self,
+        _state: &mut Self::State,
+        _event: canvas::Event,
+        _bounds: Rectangle,
+        _cursor: mouse::Cursor,
+    ) -> (canvas::event::Status, Option<Message>) {
+        (canvas::event::Status::Ignored, None)
+    }
+
+    fn draw(
+        &self,
+        _state: &Self::State,
+        renderer: &Renderer,
+        _theme: &Theme,
+        bounds: Rectangle,
+        _cursor: mouse::Cursor,
+    ) -> Vec<canvas::Geometry> {
+        let mut frame = canvas::Frame::new(renderer, bounds.size());
+        let width = bounds.width;
+        let height = bounds.height;
+        let background =
+            canvas::Path::rounded_rectangle(Point::ORIGIN, Size::new(width, height), 8.0.into());
+        frame.fill(&background, self.track);
+
+        let count = 48usize;
+        let gap = 2.0;
+        let bar = ((width - gap * (count as f32 - 1.0)) / count as f32).max(1.0);
+        let mid = height / 2.0;
+        for index in 0..count {
+            let t = index as f32 / count as f32;
+            let envelope = (t * std::f32::consts::PI).sin().max(0.16);
+            let texture =
+                0.35 + 0.65 * ((t * 41.0).sin().abs() * 0.6 + (t * 97.0).cos().abs() * 0.4);
+            let amplitude = (height * 0.36 * envelope * texture).clamp(1.5, (mid * 0.88).max(1.5));
+            let x = index as f32 * (bar + gap);
+            frame.fill_rectangle(
+                Point::new(x, mid - amplitude),
+                Size::new(bar, amplitude * 2.0),
+                Color {
+                    a: 0.82,
+                    ..self.wave
+                },
+            );
+        }
+
+        let x = (width * 0.42).clamp(0.0, (width - 2.0).max(0.0));
+        frame.fill_rectangle(Point::new(x, 0.0), Size::new(2.0, height), self.playhead);
+        frame.fill_rectangle(
+            Point::new((x - 3.0).max(0.0), 0.0),
+            Size::new(8.0, 3.0),
+            self.playhead,
+        );
+
+        vec![frame.into_geometry()]
+    }
+}
+
 /// A dynamic pick-list handle: caret points down when closed (or up when
 /// `invert` is set), flipping when the menu opens.
 fn caret_handle(invert: bool) -> pick_list::Handle<Font> {
@@ -6580,6 +7340,8 @@ const ICON_CHECK: char = '\u{f633}';
 const ICON_X: char = '\u{f659}';
 const ICON_CARET_DOWN: char = '\u{f229}';
 const ICON_CARET_UP: char = '\u{f235}';
+const ICON_CHEVRON_LEFT: char = '\u{f284}';
+const ICON_CHEVRON_RIGHT: char = '\u{f285}';
 const ICON_ZOOM_IN: char = '\u{f62c}';
 const ICON_ZOOM_OUT: char = '\u{f62d}';
 const ICON_CLOCK: char = '\u{f293}';

@@ -62,6 +62,8 @@ impl Tier {
 /// copying, saving, playback and search.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Feature {
+    /// The `balanced` preset.
+    BalancedPreset,
     /// The `accuracy` preset.
     AccuracyPreset,
     /// Speaker diarization / speaker labels.
@@ -71,7 +73,8 @@ pub enum Feature {
 }
 
 impl Feature {
-    pub const ALL: [Feature; 3] = [
+    pub const ALL: [Feature; 4] = [
+        Feature::BalancedPreset,
         Feature::AccuracyPreset,
         Feature::Diarization,
         Feature::Batch,
@@ -80,6 +83,7 @@ impl Feature {
     /// Human-readable name used by the paywall and toasts.
     pub fn label(self) -> &'static str {
         match self {
+            Feature::BalancedPreset => "Balanced model",
             Feature::AccuracyPreset => "Accuracy model",
             Feature::Diarization => "Speaker labels",
             Feature::Batch => "Batch transcription",
@@ -90,7 +94,10 @@ impl Feature {
 /// The single source of truth for what each tier can do.
 pub fn tier_allows(tier: Tier, feature: Feature) -> bool {
     match feature {
-        Feature::AccuracyPreset | Feature::Diarization | Feature::Batch => tier == Tier::Pro,
+        Feature::BalancedPreset
+        | Feature::AccuracyPreset
+        | Feature::Diarization
+        | Feature::Batch => tier == Tier::Pro,
     }
 }
 

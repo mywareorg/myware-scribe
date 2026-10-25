@@ -188,6 +188,8 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
             };
             let name = if opts.preset.eq_ignore_ascii_case("speed") {
                 "Speed"
+            } else if opts.preset.eq_ignore_ascii_case("balanced") {
+                "Balanced"
             } else {
                 "Accuracy"
             };
@@ -459,7 +461,13 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
                 .as_deref()
                 .filter(|code| !code.is_empty() && !code.eq_ignore_ascii_case("auto"));
             let fast_decode = opts.preset.eq_ignore_ascii_case("speed");
-            let best_of = if fast_decode { 1 } else { 5 };
+            let best_of = if fast_decode {
+                1
+            } else if opts.preset.eq_ignore_ascii_case("accuracy") {
+                5
+            } else {
+                3
+            };
 
             emit(Event::Stage {
                 stage: "transcription".to_string(),

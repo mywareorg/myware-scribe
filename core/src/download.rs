@@ -645,11 +645,16 @@ mod tests {
             ["segmentation", "embedding", "whisper-speed"]
         );
         assert_eq!(
+            required_for("balanced", true),
+            ["segmentation", "embedding", "whisper-balanced"]
+        );
+        assert_eq!(
             required_for("accuracy", true),
             ["segmentation", "embedding", "whisper-accuracy"]
         );
         // ASR-only needs no diarization models.
         assert_eq!(required_for("speed", false), ["whisper-speed"]);
+        assert_eq!(required_for("balanced", false), ["whisper-balanced"]);
         // Unknown presets fall back to the accuracy model, matching
         // `models::whisper_model`.
         assert_eq!(models::whisper_id("unknown"), "whisper-accuracy");
