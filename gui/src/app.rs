@@ -1300,7 +1300,7 @@ impl App {
         for feature in license::Feature::ALL {
             body = body.push(
                 row![
-                    text("\u{2713}").size(theme::TEXT_SM).color(scheme.green),
+                    icon_colored(ICON_CHECK, 14.0, scheme.green),
                     text(feature.label()).size(theme::TEXT_SM),
                 ]
                 .spacing(6),
@@ -2336,10 +2336,20 @@ impl App {
                 }
                 Task::none()
             }
-            Message::AddFolder => Task::perform(
-                async { rfd::FileDialog::new().pick_folder() },
-                Message::FolderPicked,
-            ),
+            Message::AddFolder => {
+                if !self.can(license::Feature::Batch) {
+                    self.paywall_open = true;
+                    self.toast = Some((
+                        "Folder import is a Pro feature".to_string(),
+                        Instant::now(),
+                    ));
+                    return Task::none();
+                }
+                Task::perform(
+                    async { rfd::FileDialog::new().pick_folder() },
+                    Message::FolderPicked,
+                )
+            }
             Message::FolderPicked(dir) => {
                 if let Some(dir) = dir {
                     let files = audio_files_in(&dir);
@@ -3026,29 +3036,6 @@ impl App {
 
     fn add_paths(&mut self, paths: Vec<PathBuf>) -> Vec<PathBuf> {
         let was_empty = self.queue.is_empty();
-        let mut paths = paths;
-        if !self.can(license::Feature::Batch) {
-            let has_work = self
-                .queue
-                .iter()
-                .any(|item| matches!(item.status, ItemStatus::Pending | ItemStatus::Running));
-            if has_work {
-                self.paywall_open = true;
-                self.toast = Some((
-                    "Batch transcription is a Pro feature".to_string(),
-                    Instant::now(),
-                ));
-                return Vec::new();
-            }
-            if paths.len() > 1 {
-                self.paywall_open = true;
-                self.toast = Some((
-                    "Free transcribes one file per run".to_string(),
-                    Instant::now(),
-                ));
-                paths.truncate(1);
-            }
-        }
         let mut added = Vec::new();
         for path in paths {
             if self
@@ -3220,20 +3207,29 @@ impl App {
             return;
         }
         let preserve = preserve_view && self.keep_pinned_view();
-        let mut inputs: Vec<PathBuf> = self
+        let pending: Vec<usize> = self
             .queue
             .iter()
-            .filter(|item| matches!(item.status, ItemStatus::Pending))
-            .map(|item| item.path.clone())
+            .enumerate()
+            .filter(|(_, item)| matches!(item.status, ItemStatus::Pending))
+            .map(|(index, _)| index)
             .collect();
-        // A downgrade must not grant a batch that was queued while Pro.
-        if !self.can(license::Feature::Batch) && inputs.len() > 1 {
-            inputs.truncate(1);
-            self.toast = Some((
-                "Free transcribes one file per run; the rest stay queued".to_string(),
-                Instant::now(),
-            ));
-        }
+        // Free runs exactly one file per press: the selected pending item, or
+        // the first pending item when nothing is selected. The rest stay queued.
+        let inputs: Vec<PathBuf> = if self.can(license::Feature::Batch) {
+            pending
+                .iter()
+                .map(|index| self.queue[*index].path.clone())
+                .collect()
+        } else {
+            let chosen = self
+                .selected
+                .filter(|index| pending.contains(index))
+                .or_else(|| pending.first().copied());
+            chosen
+                .map(|index| vec![self.queue[index].path.clone()])
+                .unwrap_or_default()
+        };
         if inputs.is_empty() {
             self.status = Status::Error("add at least one file".to_string());
             return;
