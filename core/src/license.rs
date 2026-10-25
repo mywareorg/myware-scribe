@@ -58,6 +58,39 @@ impl Tier {
     }
 }
 
+/// Which tier an interface element belongs to.
+///
+/// `Feature` answers "may this run?"; `Audience` answers "should this be on
+/// screen?". Keeping them separate lets a control be shown-but-locked instead
+/// of silently missing, and gives every widget an explicit tier tag.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Audience {
+    /// Present in both tiers.
+    Everyone,
+    /// Free-tier onboarding and upgrade surfaces; hidden once Pro is active.
+    FreeOnly,
+    /// Pro controls and status surfaces; hidden on the free tier.
+    ProOnly,
+}
+
+impl Audience {
+    pub fn visible_for(self, tier: Tier) -> bool {
+        match self {
+            Audience::Everyone => true,
+            Audience::FreeOnly => tier == Tier::Free,
+            Audience::ProOnly => tier == Tier::Pro,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Audience::Everyone => "both",
+            Audience::FreeOnly => "free",
+            Audience::ProOnly => "pro",
+        }
+    }
+}
+
 /// Everything the paid tier unlocks. Free keeps balanced-model transcription,
 /// copy, save and search.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -455,6 +488,16 @@ mod tests {
 
     fn at(seconds: u64) -> SystemTime {
         UNIX_EPOCH + Duration::from_secs(seconds)
+    }
+
+    #[test]
+    fn audiences_map_to_tiers() {
+        assert!(Audience::Everyone.visible_for(Tier::Free));
+        assert!(Audience::Everyone.visible_for(Tier::Pro));
+        assert!(Audience::FreeOnly.visible_for(Tier::Free));
+        assert!(!Audience::FreeOnly.visible_for(Tier::Pro));
+        assert!(Audience::ProOnly.visible_for(Tier::Pro));
+        assert!(!Audience::ProOnly.visible_for(Tier::Free));
     }
 
     #[test]

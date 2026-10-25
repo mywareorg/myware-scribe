@@ -1189,6 +1189,28 @@ impl App {
         license::tier_allows(self.license.access.tier, feature)
     }
 
+    /// True when a UI element tagged for `audience` belongs on screen.
+    fn shows(&self, audience: license::Audience) -> bool {
+        audience.visible_for(self.license.access.tier)
+    }
+
+    /// Tag a widget with its tier: rendered for the matching audience,
+    /// otherwise collapsed to nothing.
+    fn tagged<'a>(
+        &'a self,
+        audience: license::Audience,
+        content: impl Into<Element<'a, Message>>,
+    ) -> Element<'a, Message> {
+        if self.shows(audience) {
+            content.into()
+        } else {
+            container(horizontal_space())
+                .width(Length::Fixed(0.0))
+                .height(Length::Fixed(0.0))
+                .into()
+        }
+    }
+
     /// Free runs ASR only; Pro adds diarization and speaker labels.
     fn diarized(&self) -> bool {
         self.can(license::Feature::Diarization)
@@ -1226,7 +1248,7 @@ impl App {
             license::Tier::Pro => "Pro",
             license::Tier::Free => "Get Pro",
         };
-        let button: Element<Message> = if self.license.access.tier == license::Tier::Pro {
+        let button: Element<Message> = if self.shows(license::Audience::ProOnly) {
             action_text(label)
                 .on_press(Message::OpenPaywall)
                 .style(pill_button_secondary)
@@ -1246,7 +1268,7 @@ impl App {
 
     /// Development-only Free/Pro switch shown in the header.
     fn tier_toggle_button<'a>(&'a self, scheme: &Scheme) -> Element<'a, Message> {
-        let label = if self.license.access.tier == license::Tier::Pro {
+        let label = if self.shows(license::Audience::ProOnly) {
             "Use Free"
         } else {
             "Use Pro"
@@ -1295,7 +1317,7 @@ impl App {
         );
 
         let mut actions = row![].spacing(8).align_y(iced::Alignment::Center);
-        if self.license.access.tier == license::Tier::Pro {
+        if self.shows(license::Audience::ProOnly) {
             actions = actions.push(
                 text(format!(
                     "Pro is active ({}).",
@@ -4095,7 +4117,7 @@ impl App {
     fn feature_deck_visible(&self) -> bool {
         // The deck is an upgrade pitch, not a workspace: Pro users get the
         // plain empty state instead.
-        self.license.access.tier == license::Tier::Free
+        self.shows(license::Audience::FreeOnly)
             && self.queue.is_empty()
             && self.selected.is_none()
             && self.selected_view.is_none()
@@ -4250,7 +4272,7 @@ impl App {
     /// Friendly placeholder shown when there is no text to render yet.
     fn empty_transcript_state(&self, scheme: &Scheme) -> Element<'_, Message> {
         if self.feature_deck_visible() {
-            return self.feature_deck(scheme);
+            return self.tagged(license::Audience::FreeOnly, self.feature_deck(scheme));
         }
         let running = matches!(self.status, Status::Running);
         let selected = self.selected_view.is_some();
@@ -4569,7 +4591,7 @@ impl App {
                 .on_press(Message::Tick),
             ]
             .into()
-        } else if !self.can(license::Feature::Diarization) {
+        } else if !self.shows(license::Audience::ProOnly) {
             // Free runs ASR only, so the speaker count has no effect.
             stack![
                 speaker_pick.style(greyed_pick(scheme)).width(Length::Fill),
@@ -5626,7 +5648,7 @@ impl App {
                 .size(theme::TEXT_XS)
                 .color(scheme.muted)
                 .into()
-        } else if !self.can(license::Feature::Diarization) {
+        } else if !self.shows(license::Audience::ProOnly) {
             stack![
                 pick_list(
                     SpeakerOpt::ALL,
