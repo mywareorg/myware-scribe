@@ -3036,6 +3036,15 @@ impl App {
 
     fn add_paths(&mut self, paths: Vec<PathBuf>) -> Vec<PathBuf> {
         let was_empty = self.queue.is_empty();
+        // Free adds one file per action; multi-select and folder drops are Pro.
+        let mut paths = paths;
+        if !self.can(license::Feature::Batch) && paths.len() > 1 {
+            paths.truncate(1);
+            self.toast = Some((
+                "The free version adds one file at a time".to_string(),
+                Instant::now(),
+            ));
+        }
         let mut added = Vec::new();
         for path in paths {
             if self
