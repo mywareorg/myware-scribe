@@ -291,6 +291,8 @@ pub enum Message {
     LockedPreset,
     LockedSpeakers,
     LockedImport,
+    LockedPlayer,
+    LockedRename,
     PurchasePro,
     RestorePro,
     StartTrial,
@@ -1192,6 +1194,29 @@ impl App {
         license::tier_allows(self.license.access.tier, feature)
     }
 
+    /// Dim `content` and route any click to `message`. Used to show a Pro
+    /// control in place instead of hiding it.
+    fn locked<'a>(
+        &'a self,
+        content: impl Into<Element<'a, Message>>,
+        message: Message,
+    ) -> Element<'a, Message> {
+        let scrim = container(horizontal_space())
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .style(|_theme| container::Style {
+                background: Some(Color::from_rgba(0.5, 0.5, 0.5, 0.30).into()),
+                ..container::Style::default()
+            });
+        stack![
+            content.into(),
+            mouse_area(scrim)
+                .interaction(mouse::Interaction::Pointer)
+                .on_press(message),
+        ]
+        .into()
+    }
+
     /// True when a UI element tagged for `audience` belongs on screen.
     fn shows(&self, audience: license::Audience) -> bool {
         audience.visible_for(self.license.access.tier)
@@ -2030,6 +2055,22 @@ impl App {
                 ));
                 Task::none()
             }
+            Message::LockedPlayer => {
+                self.paywall_open = true;
+                self.toast = Some((
+                    "Player is a Pro feature".to_string(),
+                    Instant::now(),
+                ));
+                Task::none()
+            }
+            Message::LockedRename => {
+                self.paywall_open = true;
+                self.toast = Some((
+                    "Rename speakers and editing is a Pro feature".to_string(),
+                    Instant::now(),
+                ));
+                Task::none()
+            }
             Message::LockedImport => {
                 self.paywall_open = true;
                 self.toast = Some((
@@ -2537,7 +2578,7 @@ impl App {
                 if !self.can(license::Feature::Editing) {
                     self.paywall_open = true;
                     self.toast = Some((
-                        format!("{} is a Pro feature", license::Feature::Editing.label()),
+                        "Editing is a Pro feature".to_string(),
                         Instant::now(),
                     ));
                     return Task::none();
@@ -3135,7 +3176,8 @@ impl App {
             .filter(|item| matches!(item.status, ItemStatus::Done) && item.stats.is_some())
             .count();
         self.summary_open = true;
-        self.pending_rename = generated == 1 && self.completed_count() == 1;
+        self.pending_rename =
+            self.can(license::Feature::Editing) && generated == 1 && self.completed_count() == 1;
         self.toast = None;
         if self.notifications {
             notify("Hippo Transcribe", "Finished \u{00b7} saved locally");
@@ -6171,10 +6213,14 @@ impl App {
         let editing = self.can(license::Feature::Editing);
         if playback {
             middle = middle.push(self.timeline_element(&scheme));
+        } else {
+            middle = middle.push(self.locked(self.timeline_element(&scheme), Message::LockedPlayer));
         }
         let mut controls: Vec<Element<Message>> = Vec::new();
         if playback {
             controls.push(self.player_element(&scheme));
+        } else {
+            controls.push(self.locked(self.player_element(&scheme), Message::LockedPlayer));
         }
         controls.push(horizontal_space().into());
         controls.push(
@@ -6198,6 +6244,14 @@ impl App {
                     &scheme,
                 ),
             );
+        } else {
+            controls.push(self.tip(
+                action_text("Rename")
+                    .on_press(Message::LockedRename)
+                    .style(greyed_button(scheme)),
+                "Rename speakers in this transcript",
+                &scheme,
+            ));
         }
         middle = middle.push(
             row(controls)
