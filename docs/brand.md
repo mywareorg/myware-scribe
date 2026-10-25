@@ -11,7 +11,7 @@ behavior is the proof. Do not claim certification or literal compliance.
 - **Origin:** The name comes from HIPAA. Your recordings stay on this machine.
 - **Proof:** No cloud · No accounts · No telemetry · Audio and transcripts stay
   on this device.
-- **Positioning:** Hippo is HIPAA inspired. Built to serve the needs of doctors
+- **Positioning:** Hippo Transcribe is HIPAA inspired. Built to serve the needs of doctors
   and medical professionals, Hippo works offline and will never phone home.
 - **Technical:** Local diarization and transcription. Network access is limited
   to the one-time model download.

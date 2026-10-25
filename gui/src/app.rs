@@ -83,7 +83,7 @@ const FEATURE_DECK: [FeatureSlide; 5] = [
     },
     FeatureSlide {
         eyebrow: "WHY HIPPO",
-        title: "Hippo is HIPAA inspired.",
+        title: "Hippo Transcribe is HIPAA inspired.",
         body: "Open source. Built for doctors and medical professionals. \
                Hippo works offline and never phones home.",
     },
