@@ -19,6 +19,14 @@ transcripts stay there.
 Local speaker diarization and transcription. Network access is limited to the
 one-time model download.
 
+** Free tier
+Balanced model. One speaker. Full-length transcripts, unlimited files. No
+minutes, no account, no subscription.
+
+** Pro tier
+Speed and Accuracy models, speaker labels, batch transcription, transcript
+editing and audio playback. One-time purchase.
+
 Use this copy consistently across the Microsoft Store, Mac App Store and GitLab
 project description. Do not claim HIPAA certification or compliance. Link the
 privacy policy to =PRIVACY.md= in the repository.
@@ -137,10 +145,10 @@ privacy policy to =PRIVACY.md= in the repository.
 * Paywall
 
 ** Decide what is free vs paid
-- [ ] Define the free tier. Keep enough value to evaluate the app, e.g. single-speaker transcription and TXT export.
-- [ ] Define paid features, e.g. multi-speaker diarization, batch queue, all export formats, and premium presets.
+- [ ] Define the free tier. Balanced model, single speaker, full-length transcripts, unlimited files, no minutes, no account, no subscription.
+- [ ] Define paid features: Speed and Accuracy models, speaker labels, batch transcription, transcript editing and audio playback.
 - [ ] Write the feature matrix down before adding gates so UI, backend, and Store products stay consistent.
-- [ ] Decide whether the paywall is a one-time purchase, subscription, or both.
+- [ ] Paywall is a one-time purchase. No subscription.
 - [ ] Decide whether a trial exists and whether it is time-based or feature-limited.
 - [ ] Check both Store policies: digital features unlocked in-app must use the platform's in-app purchase system.
 - [ ] Do not link to an external checkout from Store builds.

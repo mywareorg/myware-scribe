@@ -58,35 +58,43 @@ impl Tier {
     }
 }
 
-/// Everything the paid tier unlocks. Free keeps transcription, editing,
-/// copying, saving, playback and search.
+/// Everything the paid tier unlocks. Free keeps balanced-model transcription,
+/// copy, save and search.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Feature {
-    /// The `balanced` preset.
-    BalancedPreset,
+    /// The `speed` preset.
+    SpeedPreset,
     /// The `accuracy` preset.
     AccuracyPreset,
     /// Speaker diarization / speaker labels.
     Diarization,
     /// More than one file per run.
     Batch,
+    /// Editing transcript lines and renaming speakers.
+    Editing,
+    /// Audio playback and playhead seeking.
+    Playback,
 }
 
 impl Feature {
-    pub const ALL: [Feature; 4] = [
-        Feature::BalancedPreset,
+    pub const ALL: [Feature; 6] = [
+        Feature::SpeedPreset,
         Feature::AccuracyPreset,
         Feature::Diarization,
         Feature::Batch,
+        Feature::Editing,
+        Feature::Playback,
     ];
 
     /// Human-readable name used by the paywall and toasts.
     pub fn label(self) -> &'static str {
         match self {
-            Feature::BalancedPreset => "Balanced model",
+            Feature::SpeedPreset => "Speed model",
             Feature::AccuracyPreset => "Accuracy model",
             Feature::Diarization => "Speaker labels",
             Feature::Batch => "Batch transcription",
+            Feature::Editing => "Transcript editing",
+            Feature::Playback => "Audio playback",
         }
     }
 }
@@ -94,10 +102,12 @@ impl Feature {
 /// The single source of truth for what each tier can do.
 pub fn tier_allows(tier: Tier, feature: Feature) -> bool {
     match feature {
-        Feature::BalancedPreset
+        Feature::SpeedPreset
         | Feature::AccuracyPreset
         | Feature::Diarization
-        | Feature::Batch => tier == Tier::Pro,
+        | Feature::Batch
+        | Feature::Editing
+        | Feature::Playback => tier == Tier::Pro,
     }
 }
 

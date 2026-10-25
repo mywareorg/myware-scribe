@@ -17,7 +17,7 @@ pub fn run(args: &[String]) -> i32 {
     }
 
     let mut inputs: Vec<PathBuf> = Vec::new();
-    let mut preset = String::from("speed");
+    let mut preset = String::from("balanced");
     let mut num_speakers: Option<i32> = Some(2);
     let mut output_dir: Option<PathBuf> = None;
     let mut timestamps = true;
@@ -51,6 +51,7 @@ pub fn run(args: &[String]) -> i32 {
             }
             "--no-timestamps" => timestamps = false,
             "--progress-json" => progress_json = true,
+            "--asr-only" => mode = PipelineMode::AsrOnly,
             "--no-cache" => cache = false,
             "--language" => {
                 i += 1;
@@ -85,7 +86,7 @@ pub fn run(args: &[String]) -> i32 {
         return 2;
     }
     if inputs.is_empty() {
-        eprintln!("usage: hippo-transcribe --cli <audio>... [--preset speed|balanced|accuracy] [--language <code>] [--progress-json]");
+        eprintln!("usage: hippo-transcribe --cli <audio>... [--preset speed|balanced|accuracy] [--language <code>] [--asr-only] [--progress-json]");
         return 2;
     }
 
@@ -102,15 +103,15 @@ pub fn run(args: &[String]) -> i32 {
 
     if tier == Tier::Free {
         let preset_feature = if preset.eq_ignore_ascii_case("speed") {
-            None
-        } else if preset.eq_ignore_ascii_case("balanced") {
-            Some(Feature::BalancedPreset)
-        } else {
+            Some(Feature::SpeedPreset)
+        } else if preset.eq_ignore_ascii_case("accuracy") {
             Some(Feature::AccuracyPreset)
+        } else {
+            None
         };
         if let Some(feature) = preset_feature {
             eprintln!(
-                "{} is a Pro feature. Use --preset speed, or start the trial / buy Pro in the app.",
+                "{} is a Pro feature. Use --preset balanced, or start the trial / buy Pro in the app.",
                 feature.label()
             );
             return 1;

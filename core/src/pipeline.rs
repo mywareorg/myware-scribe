@@ -148,6 +148,102 @@ fn output_path(
     output_path_with_suffix(input, output_dir, preset, speakers, "")
 }
 
+/// One ASR call: a span of audio covering one or more speaker turns.
+struct Clip {
+    /// (turn index, turn start, turn end) used to attribute segments.
+    turns: Vec<(usize, f32, f32)>,
+    /// Absolute start time of the decoded span.
+    start: f32,
+    from: usize,
+    to: usize,
+}
+
+/// Trim leading/trailing near-silence inside a span, keeping a 50 ms margin.
+/// A cheap energy VAD: it does not need another model and never touches the
+/// middle of the clip.
+fn trim_silence(samples: &[f32], from: usize, to: usize, rate: u32) -> (usize, usize) {
+    const THRESHOLD: f32 = 0.003;
+    let step = (rate as usize / 100).max(1);
+    if to <= from + 2 * step {
+        return (from, to);
+    }
+    let rms = |slice: &[f32]| {
+        (slice.iter().map(|sample| sample * sample).sum::<f32>() / slice.len() as f32).sqrt()
+    };
+    let mut start = from;
+    while start + step <= to && rms(&samples[start..start + step]) < THRESHOLD {
+        start += step;
+    }
+    let mut end = to;
+    while end >= start + step && rms(&samples[end - step..end]) < THRESHOLD {
+        end -= step;
+    }
+    let min_len = (rate as f32 * 0.2) as usize;
+    if end.saturating_sub(start) < min_len {
+        return (from, to);
+    }
+    let margin = (rate as f32 * 0.05) as usize;
+    (
+        start.saturating_sub(margin).max(from),
+        (end + margin).min(to),
+    )
+}
+
+/// Build one clip per turn (split at the whisper window size). Turns are not
+/// batched together: diarization can emit nested short interjections, and
+/// grouping across them re-encodes the same audio and duplicates text. Each
+/// clip is silence-trimmed at its edges.
+fn build_clips(turns: &[Turn], duration: f32, rate: u32, samples: &[f32]) -> Vec<Clip> {
+    const TARGET_S: f32 = 29.0;
+    const MIN_S: f32 = 0.15;
+    let mut clips = Vec::new();
+    for (index, turn) in turns.iter().enumerate() {
+        let start = (turn.start - CLIP_PAD_S).max(0.0);
+        let end = (turn.end + CLIP_PAD_S).min(duration);
+        let mut chunk_start = start;
+        while chunk_start < end {
+            let chunk_end = (chunk_start + TARGET_S).min(end);
+            let raw_from = (chunk_start * rate as f32) as usize;
+            let raw_to = ((chunk_end * rate as f32) as usize).min(samples.len());
+            let (from, to) = trim_silence(samples, raw_from, raw_to, rate);
+            if to > from && (to - from) as f32 >= MIN_S * rate as f32 {
+                clips.push(Clip {
+                    turns: vec![(index, turn.start, turn.end)],
+                    start: from as f32 / rate as f32,
+                    from,
+                    to,
+                });
+            }
+            chunk_start = chunk_end;
+        }
+    }
+    clips
+}
+
+/// Pick the turn that overlaps a segment most; fall back to the nearest turn.
+fn attribute_turn(clip: &Clip, start: f32, end: f32) -> Option<usize> {
+    let mut best: Option<(usize, f32)> = None;
+    for (index, turn_start, turn_end) in &clip.turns {
+        let overlap = (end.min(*turn_end) - start.max(*turn_start)).max(0.0);
+        if overlap > 0.0 && best.map_or(true, |(_, best_overlap)| overlap > best_overlap) {
+            best = Some((*index, overlap));
+        }
+    }
+    if let Some((index, _)) = best {
+        return Some(index);
+    }
+    let midpoint = (start + end) * 0.5;
+    clip.turns
+        .iter()
+        .min_by(|a, b| {
+            let distance = |turn: &(usize, f32, f32)| (midpoint - (turn.1 + turn.2) * 0.5).abs();
+            distance(a)
+                .partial_cmp(&distance(b))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .map(|(index, _, _)| *index)
+}
+
 /// Run the pipeline over all inputs, emitting progress events.
 pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
     let total = opts.inputs.len().max(1);
@@ -223,8 +319,15 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
     let env_int = |current: &str, legacy: &str| {
         crate::env_compat(current, legacy).and_then(|v| v.parse::<usize>().ok())
     };
+    // Turbo is encoder-bound: one call with all threads beats four calls
+    // splitting the same cores. Smaller models keep the parallel pool.
+    let default_workers = if opts.preset.eq_ignore_ascii_case("accuracy") {
+        1
+    } else {
+        physical.min(4)
+    };
     let workers = env_int("HIPPO_TRANSCRIBE_ASR_WORKERS", "TRANSIEL_ASR_WORKERS")
-        .unwrap_or(physical.min(4))
+        .unwrap_or(default_workers)
         .max(1);
     let per_call_threads = env_int("HIPPO_TRANSCRIBE_ASR_THREADS", "TRANSIEL_ASR_THREADS")
         .map(|v| v as i32)
@@ -284,8 +387,16 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
             progress: DECODE_DONE,
         });
 
-        let cache_key = if diarized && opts.cache && opts.num_speakers != Some(1) {
-            cache::key(input, &diarizer, opts.num_speakers)
+        // Hash the audio once: diarization and per-clip ASR caches both use it.
+        let audio_hash = if opts.cache {
+            cache::audio_hash(input)
+        } else {
+            None
+        };
+        let cache_key = if diarized && opts.num_speakers != Some(1) {
+            audio_hash
+                .as_deref()
+                .map(|hash| cache::key_from_hash(hash, &diarizer, opts.num_speakers))
         } else {
             None
         };
@@ -425,30 +536,14 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
 
         let mut lines: Vec<Line> = Vec::new();
         if let Some(transcriber) = &transcriber {
-            // (turn_index, clip_start, from, to) for each transcribable clip.
-            // Long turns are chunked so progress and ETA advance during a
-            // single-speaker file instead of waiting for the whole turn.
-            const MAX_CLIP_S: f32 = 45.0;
-            let mut clips: Vec<(usize, f32, usize, usize)> = Vec::new();
-            for (turn_index, turn) in turns.iter().enumerate() {
-                let clip_start = (turn.start - CLIP_PAD_S).max(0.0);
-                let clip_end = (turn.end + CLIP_PAD_S).min(duration as f32);
-                let mut chunk_start = clip_start;
-                while chunk_start < clip_end {
-                    let chunk_end = (chunk_start + MAX_CLIP_S).min(clip_end);
-                    let from = (chunk_start * rate as f32) as usize;
-                    let to = ((chunk_end * rate as f32) as usize).min(samples.len());
-                    if to > from && (to - from) >= (0.15 * rate as f32) as usize {
-                        clips.push((turn_index, chunk_start, from, to));
-                    }
-                    chunk_start = chunk_end;
-                }
-            }
+            // Consecutive turns are grouped into ~29 s clips so each ASR call
+            // encodes one whisper window instead of one window per short turn.
+            let clips = build_clips(&turns, duration as f32, rate, samples.as_slice());
 
             let total_turns = clips.len();
             let total_seconds: f64 = clips
                 .iter()
-                .map(|(_, _, from, to)| (to - from) as f64 / rate as f64)
+                .map(|clip| (clip.to - clip.from) as f64 / rate as f64)
                 .sum();
             let mut done_seconds = 0.0f64;
             let mut done_turns = 0usize;
@@ -461,13 +556,10 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
                 .as_deref()
                 .filter(|code| !code.is_empty() && !code.eq_ignore_ascii_case("auto"));
             let fast_decode = opts.preset.eq_ignore_ascii_case("speed");
-            let best_of = if fast_decode {
-                1
-            } else if opts.preset.eq_ignore_ascii_case("accuracy") {
-                5
-            } else {
-                3
-            };
+            // `best_of` only repeats the decoder; the encoder dominates. Keep
+            // it at 1 for speed and at 2 for the quality tiers.
+            let best_of = if fast_decode { 1 } else { 2 };
+            let model_name = models::whisper_relative(&opts.preset);
 
             emit(Event::Stage {
                 stage: "transcription".to_string(),
@@ -486,20 +578,42 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
                 for _ in 0..workers {
                     let tx = tx.clone();
                     let next = &next;
+                    let model_name = model_name.clone();
+                    let audio_hash = audio_hash.clone();
                     scope.spawn(move || loop {
                         let index = next.fetch_add(1, Ordering::Relaxed);
                         if index >= clips_ref.len() {
                             break;
                         }
-                        let (turn_index, clip_start, from, to) = clips_ref[index];
-                        let result = transcriber.transcribe_with_threads_and_language(
-                            &samples_ref[from..to],
-                            per_call_threads,
-                            decode_language,
-                            fast_decode,
-                            best_of,
-                        );
-                        if tx.send((index, turn_index, clip_start, result)).is_err() {
+                        let clip = &clips_ref[index];
+                        let key = audio_hash.as_ref().map(|hash| {
+                            cache::clip_key(
+                                hash,
+                                &model_name,
+                                decode_language,
+                                clip.from,
+                                clip.to,
+                                best_of,
+                                fast_decode,
+                            )
+                        });
+                        let result = match key.as_ref().and_then(|key| cache::read_segments(key)) {
+                            Some(segments) => Ok(segments),
+                            None => {
+                                let result = transcriber.transcribe_with_threads_and_language(
+                                    &samples_ref[clip.from..clip.to],
+                                    per_call_threads,
+                                    decode_language,
+                                    fast_decode,
+                                    best_of,
+                                );
+                                if let (Ok(segments), Some(key)) = (&result, key.as_ref()) {
+                                    cache::write_segments(key, segments);
+                                }
+                                result
+                            }
+                        };
+                        if tx.send((index, result)).is_err() {
                             break;
                         }
                     });
@@ -507,8 +621,7 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
                 // Drop the spare sender so the channel closes when workers finish.
                 drop(tx);
 
-                let mut pending: BTreeMap<usize, (usize, f32, Result<Vec<Segment>, String>)> =
-                    BTreeMap::new();
+                let mut pending: BTreeMap<usize, Result<Vec<Segment>, String>> = BTreeMap::new();
                 let mut buffer: Vec<Line> = Vec::new();
                 let mut next_emit = 0usize;
                 let mut remaining = clips.len();
@@ -516,27 +629,33 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
                     if is_cancelled() {
                         break;
                     }
-                    let Ok((index, turn_index, clip_start, result)) = rx.recv() else {
+                    let Ok((index, result)) = rx.recv() else {
                         break;
                     };
                     remaining -= 1;
 
                     // Progress reflects completed work.
-                    done_seconds += (clips[index].3 - clips[index].2) as f64 / rate as f64;
+                    done_seconds += (clips[index].to - clips[index].from) as f64 / rate as f64;
                     done_turns += 1;
-                    pending.insert(index, (turn_index, clip_start, result));
+                    pending.insert(index, result);
 
                     // Process completed clips in clip order. Overlapping turns can
                     // make a later clip's lines start earlier, so buffer lines and
                     // emit only up to the next unprocessed clip's start time.
-                    while let Some((turn_index, clip_start, result)) = pending.remove(&next_emit) {
-                        let speaker = turns[turn_index].speaker.clone();
+                    while let Some(result) = pending.remove(&next_emit) {
+                        let clip = &clips[next_emit];
                         match result {
                             Ok(segments) => {
                                 for segment in segments {
+                                    let start = clip.start + segment.start;
+                                    let end = clip.start + segment.end;
+                                    let speaker = attribute_turn(clip, start, end)
+                                        .and_then(|turn| turns.get(turn))
+                                        .map(|turn| turn.speaker.clone())
+                                        .unwrap_or_default();
                                     buffer.push(Line {
-                                        start: clip_start + segment.start,
-                                        speaker: speaker.clone(),
+                                        start,
+                                        speaker,
                                         text: segment.text,
                                         confidence: segment.confidence,
                                     });
@@ -548,7 +667,7 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
 
                         let watermark = clips
                             .get(next_emit)
-                            .map(|clip| clip.1)
+                            .map(|clip| clip.start)
                             .unwrap_or(f32::INFINITY);
                         buffer.sort_by(|a, b| {
                             a.start

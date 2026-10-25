@@ -4,7 +4,7 @@ use std::path::Path;
 
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Segment {
     pub start: f32,
     pub end: f32,
@@ -183,6 +183,10 @@ impl Transcriber {
             // The speed preset trades the temperature fallback for latency.
             params.set_temperature_inc(0.0);
             params.set_suppress_nst(true);
+        } else {
+            // Cap fallback retries: 0.4 increments stop at 0.8 instead of
+            // walking all the way to 1.0 on noisy windows.
+            params.set_temperature_inc(0.4);
         }
 
         state

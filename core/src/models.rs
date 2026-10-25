@@ -275,8 +275,8 @@ mod tests {
     #[test]
     fn bundled_models_fit_the_release_budget() {
         let bytes: u64 = bundled().map(|model| model.size).sum();
-        // The free tier (two whisper models + both diarization models) must
-        // stay small enough to ship in every store package.
+        // The release package ships the speed model and both diarization
+        // models; balanced and accuracy download on demand.
         assert!(
             bytes < 200 * 1024 * 1024,
             "bundled models total {bytes} bytes"

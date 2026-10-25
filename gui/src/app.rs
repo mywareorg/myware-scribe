@@ -63,8 +63,9 @@ struct FeatureSlide {
 const FEATURE_DECK: [FeatureSlide; 5] = [
     FeatureSlide {
         eyebrow: "FREE",
-        title: "Unlimited transcription.",
-        body: "One speaker, any length, balanced model. No minutes. No account.",
+        title: "Full-length transcription. Forever.",
+        body: "Balanced model \u{2014} the best free pipeline. One speaker, unlimited files, \
+             no minutes, no subscription.",
         footnote: None,
     },
     FeatureSlide {
@@ -81,15 +82,15 @@ const FEATURE_DECK: [FeatureSlide; 5] = [
     },
     FeatureSlide {
         eyebrow: "PRO",
-        title: "Review and choose.",
-        body:
-            "Click a line to seek. Speed or Accuracy when you need it. $30 once, no subscription.",
+        title: "Review, edit and choose.",
+        body: "Playback, line editing, Speed and Accuracy models. $30 once, no subscription.",
         footnote: Some("Speed depends on your hardware."),
     },
     FeatureSlide {
         eyebrow: "WHY HIPPO",
-        title: "Built for HIPAA-sensitive recordings.",
-        body: "Audio and transcripts stay on this machine.",
+        title: "Hippo is HIPAA inspired.",
+        body: "Built to serve the needs of doctors and medical professionals. \
+               Hippo works offline and will never phone home.",
         footnote: None,
     },
 ];
@@ -433,6 +434,8 @@ pub struct App {
     settings_open: bool,
     /// Zero-based index of the visible empty-state feature slide.
     feature_slide: usize,
+    /// When the current slide was shown; drives auto-advance.
+    feature_slide_at: Instant,
     search_query: String,
     speaker_filter: Option<String>,
     search_index: usize,
@@ -524,16 +527,15 @@ impl App {
             now,
         );
         license_state.refresh(pro_override, now);
-        // A downgrade must never leave a Pro-only preset selected.
+        // Free only offers the balanced model; a downgrade must never leave a
+        // Pro-only preset selected.
         let mut preset = settings
             .preset
             .as_deref()
             .and_then(Preset::from_arg)
             .unwrap_or_default();
-        if preset != Preset::Speed
-            && !license::tier_allows(license_state.access.tier, license::Feature::AccuracyPreset)
-        {
-            preset = Preset::Speed;
+        if license_state.access.tier == license::Tier::Free {
+            preset = Preset::Balanced;
         }
         Self {
             output_dir: settings.output_dir.as_ref().map(PathBuf::from),
@@ -598,6 +600,7 @@ impl App {
             help_open: None,
             settings_open: false,
             feature_slide: 0,
+            feature_slide_at: Instant::now(),
             waveform_zoom: settings.waveform_zoom.unwrap_or(1.0),
             search_query: String::new(),
             speaker_filter: None,
@@ -919,7 +922,8 @@ impl App {
     /// Playback is available for any shown transcript with audio, except the
     /// live file while it is still being transcribed.
     fn player_ready(&self) -> bool {
-        self.shown_audio().is_some()
+        self.can(license::Feature::Playback)
+            && self.shown_audio().is_some()
             && !(self.selected_view.is_none() && matches!(self.status, Status::Running))
     }
 
@@ -1209,9 +1213,12 @@ impl App {
 
     /// Drop back to the free preset after a trial/downgrade.
     fn clamp_preset(&mut self) {
-        if self.preset != Preset::Speed && !self.can(license::Feature::AccuracyPreset) {
-            self.preset = Preset::Speed;
+        if self.preset != Preset::Balanced && !self.can(license::Feature::SpeedPreset) {
+            self.preset = Preset::Balanced;
             self.save_settings();
+        }
+        if !self.can(license::Feature::Playback) {
+            self.player = None;
         }
     }
 
@@ -1237,7 +1244,7 @@ impl App {
         };
         self.tip(
             button,
-            "Speaker labels, batch transcription and larger models",
+            "Speed and Accuracy models, speaker labels, batch, editing and playback",
             scheme,
         )
     }
@@ -1269,8 +1276,8 @@ impl App {
 
         body = body.push(
             text(
-                "Free keeps transcription with the speed model, editing, copy, \
-                 save, playback and search.",
+                "The best free pipeline: balanced model, full-length transcripts \
+                 and unlimited files. No minutes. No account. No subscription.",
             )
             .size(theme::TEXT_XS)
             .color(scheme.muted),
@@ -1725,6 +1732,9 @@ impl App {
                 Task::none()
             }
             Message::Seek(seconds) => {
+                if !self.can(license::Feature::Playback) {
+                    return Task::none();
+                }
                 let max = self.shown_duration().unwrap_or(0.0).max(0.0);
                 self.playhead = seconds.clamp(0.0, max);
                 self.last_tick = Some(Instant::now());
@@ -1786,6 +1796,9 @@ impl App {
                 Task::none()
             }
             Message::SelectLine(index) => {
+                if !self.can(license::Feature::Playback) {
+                    return Task::none();
+                }
                 if let Some(line) = self.shown_lines().get(index) {
                     if let Some(start) = line.start {
                         let max = self.shown_duration().unwrap_or(start);
@@ -1805,10 +1818,15 @@ impl App {
                 }
                 if self.feature_deck_nav_active() {
                     if delta < 0 {
-                        self.feature_slide = self.feature_slide.saturating_sub(1);
+                        self.feature_slide = if self.feature_slide == 0 {
+                            FEATURE_DECK.len() - 1
+                        } else {
+                            self.feature_slide - 1
+                        };
                     } else if delta > 0 {
-                        self.feature_slide = (self.feature_slide + 1).min(FEATURE_DECK.len() - 1);
+                        self.feature_slide = (self.feature_slide + 1) % FEATURE_DECK.len();
                     }
+                    self.feature_slide_at = Instant::now();
                     return Task::none();
                 }
                 Self::focus_probe()
@@ -2079,15 +2097,22 @@ impl App {
                 Task::none()
             }
             Message::FeaturePrev => {
-                self.feature_slide = self.feature_slide.saturating_sub(1);
+                self.feature_slide = if self.feature_slide == 0 {
+                    FEATURE_DECK.len() - 1
+                } else {
+                    self.feature_slide - 1
+                };
+                self.feature_slide_at = Instant::now();
                 Task::none()
             }
             Message::FeatureNext => {
-                self.feature_slide = (self.feature_slide + 1).min(FEATURE_DECK.len() - 1);
+                self.feature_slide = (self.feature_slide + 1) % FEATURE_DECK.len();
+                self.feature_slide_at = Instant::now();
                 Task::none()
             }
             Message::FeatureSlide(index) => {
                 self.feature_slide = index.min(FEATURE_DECK.len() - 1);
+                self.feature_slide_at = Instant::now();
                 Task::none()
             }
             Message::Noop => Task::none(),
@@ -2135,10 +2160,15 @@ impl App {
                 }
                 if self.feature_deck_nav_active() {
                     if delta < 0.0 {
-                        self.feature_slide = self.feature_slide.saturating_sub(1);
+                        self.feature_slide = if self.feature_slide == 0 {
+                            FEATURE_DECK.len() - 1
+                        } else {
+                            self.feature_slide - 1
+                        };
                     } else if delta > 0.0 {
-                        self.feature_slide = (self.feature_slide + 1).min(FEATURE_DECK.len() - 1);
+                        self.feature_slide = (self.feature_slide + 1) % FEATURE_DECK.len();
                     }
+                    self.feature_slide_at = Instant::now();
                     return Task::none();
                 }
                 Self::focus_probe().map(move |focused| Message::SeekByChecked(delta, focused))
@@ -2417,6 +2447,14 @@ impl App {
             }
             Message::OpenRename => self.open_rename(),
             Message::EditLine(index) => {
+                if !self.can(license::Feature::Editing) {
+                    self.paywall_open = true;
+                    self.toast = Some((
+                        format!("{} is a Pro feature", license::Feature::Editing.label()),
+                        Instant::now(),
+                    ));
+                    return Task::none();
+                }
                 // Only transcripts we can write back to are editable, and the
                 // live transcript is left alone while it is still being built.
                 if self.shown_output().is_none()
@@ -2471,11 +2509,15 @@ impl App {
                 iced::clipboard::write(line)
             }
             Message::MergeNextLine => {
-                self.merge_next_line();
+                if self.can(license::Feature::Editing) {
+                    self.merge_next_line();
+                }
                 Task::none()
             }
             Message::SplitLineAtPlayhead => {
-                self.split_line_at_playhead();
+                if self.can(license::Feature::Editing) {
+                    self.split_line_at_playhead();
+                }
                 Task::none()
             }
             Message::CancelLineEdit => {
@@ -2594,8 +2636,8 @@ impl App {
                     return Task::none();
                 }
                 let feature = match preset {
-                    Preset::Speed => None,
-                    Preset::Balanced => Some(license::Feature::BalancedPreset),
+                    Preset::Balanced => None,
+                    Preset::Speed => Some(license::Feature::SpeedPreset),
                     Preset::Accuracy => Some(license::Feature::AccuracyPreset),
                 };
                 if let Some(feature) = feature {
@@ -2623,6 +2665,14 @@ impl App {
                 Task::none()
             }
             Message::Tick => {
+                if self.feature_deck_nav_active() {
+                    if self.feature_slide_at.elapsed() >= Duration::from_secs(6) {
+                        self.feature_slide = (self.feature_slide + 1) % FEATURE_DECK.len();
+                        self.feature_slide_at = Instant::now();
+                    }
+                } else {
+                    self.feature_slide_at = Instant::now();
+                }
                 let mut tasks = vec![self.drain_events()];
                 self.drain_model_download();
                 if self.model_download.is_none()
@@ -2841,6 +2891,14 @@ impl App {
     /// Fields start empty (the current name is the placeholder); saving an empty
     /// field keeps the original name. Focuses the first field.
     fn open_rename(&mut self) -> Task<Message> {
+        if !self.can(license::Feature::Editing) {
+            self.paywall_open = true;
+            self.toast = Some((
+                format!("{} is a Pro feature", license::Feature::Editing.label()),
+                Instant::now(),
+            ));
+            return Task::none();
+        }
         let mut seen: Vec<String> = Vec::new();
         for line in self.shown_lines() {
             if !line.speaker.is_empty() && !seen.contains(&line.speaker) {
@@ -2958,6 +3016,7 @@ impl App {
         if !added.is_empty() {
             if was_empty {
                 self.feature_slide = 0;
+                self.feature_slide_at = Instant::now();
             }
             self.save_queue();
         }
@@ -4075,19 +4134,6 @@ impl App {
             );
         }
 
-        let actions = row![
-            action_text("Add File(s)")
-                .on_press(Message::AddFiles)
-                .style(color_button(scheme.blue, scheme.on_accent)),
-            action_text("Add Folder")
-                .on_press(Message::AddFolder)
-                .style(pill_button_secondary),
-            horizontal_space(),
-        ]
-        .spacing(theme::SPACE_MD)
-        .align_y(iced::Alignment::Center)
-        .width(Length::Fill);
-
         let back = action(
             row![
                 icon(ICON_CHEVRON_LEFT, 12.0),
@@ -4096,7 +4142,7 @@ impl App {
             .spacing(theme::SPACE_XS)
             .align_y(iced::Alignment::Center),
         )
-        .on_press_maybe((index > 0).then_some(Message::FeaturePrev))
+        .on_press(Message::FeaturePrev)
         .style(pill_button_secondary);
 
         let next = action(
@@ -4107,7 +4153,7 @@ impl App {
             .spacing(theme::SPACE_XS)
             .align_y(iced::Alignment::Center),
         )
-        .on_press_maybe((index + 1 < FEATURE_DECK.len()).then_some(Message::FeatureNext))
+        .on_press(Message::FeatureNext)
         .style(pill_button_secondary);
 
         let mut dots = row![]
@@ -4122,7 +4168,7 @@ impl App {
             .align_y(iced::Alignment::Center)
             .width(Length::Fill);
 
-        let footer = column![settings_divider(scheme), actions, navigation]
+        let footer = column![settings_divider(scheme), navigation]
             .spacing(theme::SPACE_MD)
             .width(Length::Fill);
 
@@ -5774,9 +5820,13 @@ impl App {
         body = body.push(settings_row("Language", language, scheme));
         body = body.push(settings_row("Show timestamps", timestamps, scheme));
         body = body.push(settings_divider(scheme));
-        body = body.push(settings_section_label("Playback", scheme));
-        body = body.push(settings_row("Speed", speed, scheme));
-        body = body.push(settings_row("Follow playhead", follow, scheme));
+        if self.can(license::Feature::Playback) {
+            body = body.push(settings_section_label("Playback", scheme));
+            body = body.push(settings_row("Speed", speed, scheme));
+            body = body.push(settings_row("Follow playhead", follow, scheme));
+            body = body.push(settings_divider(scheme));
+        }
+        body = body.push(settings_section_label("Notifications", scheme));
         body = body.push(settings_row(
             "Completion notifications",
             notifications,
@@ -5947,32 +5997,43 @@ impl App {
             .align_y(iced::Alignment::Center);
 
         let mut middle = column![status_row].spacing(8).width(Length::Fill);
-        middle = middle.push(self.timeline_element(&scheme));
-        middle = middle.push(
-            row![
-                self.player_element(&scheme),
-                horizontal_space(),
-                action_text("Summary")
-                    .on_press_maybe(
-                        (!running && self.has_results()).then_some(Message::OpenSummary)
-                    )
-                    .style(pill_button_secondary),
+        let playback = self.can(license::Feature::Playback);
+        let editing = self.can(license::Feature::Editing);
+        if playback {
+            middle = middle.push(self.timeline_element(&scheme));
+        }
+        let mut controls: Vec<Element<Message>> = Vec::new();
+        if playback {
+            controls.push(self.player_element(&scheme));
+        }
+        controls.push(horizontal_space().into());
+        controls.push(
+            action_text("Summary")
+                .on_press_maybe((!running && self.has_results()).then_some(Message::OpenSummary))
+                .style(pill_button_secondary)
+                .into(),
+        );
+        if editing {
+            controls.push(
                 self.tip(
                     action_text("Rename")
                         .on_press_maybe(
                             (!running
                                 && self.shown_output().is_some()
                                 && !self.shown_lines().is_empty())
-                            .then_some(Message::OpenRename)
+                            .then_some(Message::OpenRename),
                         )
                         .style(pill_button_secondary),
                     "Rename speakers in this transcript",
                     &scheme,
                 ),
-            ]
-            .spacing(4)
-            .align_y(iced::Alignment::Center)
-            .width(Length::Fill),
+            );
+        }
+        middle = middle.push(
+            row(controls)
+                .spacing(4)
+                .align_y(iced::Alignment::Center)
+                .width(Length::Fill),
         );
 
         let middle = container(middle)
@@ -8236,6 +8297,13 @@ mod tests {
         }
     }
 
+    /// App with Pro entitlements so feature-gated tests exercise their feature.
+    fn pro_app() -> App {
+        let mut app = App::new();
+        app.license.grant_pro(std::time::SystemTime::now());
+        app
+    }
+
     #[test]
     fn queue_state_round_trips() {
         let _guard = env_lock();
@@ -8247,7 +8315,7 @@ mod tests {
         let transcript = dir.join("talk-transcript.txt");
         std::fs::write(&transcript, "[00:00] SPEAKER 1: hi\n").unwrap();
 
-        let mut app = App::new();
+        let mut app = pro_app();
         assert!(app.queue.is_empty());
         app.queue.push(QueueItem {
             path: audio.clone(),
@@ -8311,7 +8379,7 @@ mod tests {
         )
         .unwrap();
 
-        let mut app = App::new();
+        let mut app = pro_app();
         app.queue.push(QueueItem {
             path: audio.clone(),
             audio: Some(audio),
@@ -8363,7 +8431,7 @@ mod tests {
         )
         .unwrap();
 
-        let mut app = App::new();
+        let mut app = pro_app();
         app.queue.push(QueueItem {
             path: audio.clone(),
             audio: Some(audio),
@@ -8412,7 +8480,7 @@ mod tests {
         )
         .unwrap();
 
-        let mut app = App::new();
+        let mut app = pro_app();
         app.queue.push(QueueItem {
             path: audio.clone(),
             audio: Some(audio),
@@ -8460,7 +8528,7 @@ mod tests {
     fn checked_shortcuts_respect_focus() {
         let _guard = env_lock();
         let _config = ConfigEnv::new("focus-config");
-        let mut app = App::new();
+        let mut app = pro_app();
         app.selected_view = Some(ItemView {
             index: 0,
             source: PathBuf::from("talk.txt"),
@@ -8495,7 +8563,7 @@ mod tests {
         )
         .unwrap();
 
-        let mut app = App::new();
+        let mut app = pro_app();
         app.queue.push(QueueItem {
             path: audio.clone(),
             audio: Some(audio),
@@ -8536,7 +8604,7 @@ mod tests {
             }
         };
 
-        let mut app = App::new();
+        let mut app = pro_app();
         app.queue.push(make_item("old.mp3"));
         app.queue.push(make_item("first.mp3"));
         app.queue.push(make_item("second.mp3"));
@@ -8570,7 +8638,7 @@ mod tests {
         )
         .unwrap();
 
-        let mut app = App::new();
+        let mut app = pro_app();
         app.queue.push(QueueItem {
             path: audio.clone(),
             audio: Some(audio.clone()),
@@ -8618,7 +8686,7 @@ mod tests {
         let text = "[00:00] SPEAKER 1: imported line\n";
         std::fs::write(&transcript, text).unwrap();
 
-        let mut app = App::new();
+        let mut app = pro_app();
         assert!(app.queue.is_empty());
         let _ = app.update(Message::ImportLoaded(Some((
             transcript.clone(),
@@ -8649,7 +8717,7 @@ mod tests {
         )
         .unwrap();
 
-        let mut app = App::new();
+        let mut app = pro_app();
         app.queue.push(QueueItem {
             path: audio.clone(),
             audio: Some(audio),
@@ -8734,7 +8802,7 @@ mod tests {
         let transcript = media.join("talk.txt");
         std::fs::write(&transcript, "[00:00] SPEAKER 1: hello\n").unwrap();
 
-        let mut app = App::new();
+        let mut app = pro_app();
         app.queue.push(QueueItem {
             path: audio.clone(),
             audio: Some(audio.clone()),
@@ -8763,7 +8831,7 @@ mod tests {
         let _guard = env_lock();
         let _config = ConfigEnv::new("follow-config");
 
-        let mut app = App::new();
+        let mut app = pro_app();
         app.status = Status::Running;
         app.follow_playhead = true;
         let _ = app.update(Message::ToggleFollowPlayhead);
@@ -8785,7 +8853,7 @@ mod tests {
         )
         .unwrap();
 
-        let mut app = App::new();
+        let mut app = pro_app();
         app.queue.push(QueueItem {
             path: audio.clone(),
             audio: Some(audio),
@@ -8815,13 +8883,13 @@ mod tests {
         let _guard = env_lock();
         let _dir = ConfigEnv::new("theme");
 
-        let mut app = App::new();
+        let mut app = pro_app();
         assert_eq!(app.theme_mode, AppTheme::Light);
 
         let _ = app.update(Message::ToggleTheme);
         assert_eq!(app.theme_mode, AppTheme::Dark);
 
-        let reloaded = App::new();
+        let reloaded = pro_app();
         assert_eq!(reloaded.theme_mode, AppTheme::Dark);
     }
 
@@ -8830,7 +8898,7 @@ mod tests {
         let _guard = env_lock();
         let _dir = ConfigEnv::new("settings-modal");
 
-        let mut app = App::new();
+        let mut app = pro_app();
         assert!(!app.settings_open);
 
         let _ = app.update(Message::OpenSettings);
@@ -8850,7 +8918,7 @@ mod tests {
         let _ = app.update(Message::CloseSettings);
         assert!(!app.settings_open);
 
-        let reloaded = App::new();
+        let reloaded = pro_app();
         assert_eq!(reloaded.theme_mode, AppTheme::Dark);
         assert_eq!(reloaded.preset, Preset::Accuracy);
         assert!((reloaded.font_scale - 1.1).abs() < 0.001);
@@ -8870,7 +8938,7 @@ mod tests {
         let notes = media.join("notes.txt");
         std::fs::write(&notes, b"text").unwrap();
 
-        let mut app = App::new();
+        let mut app = pro_app();
         let _ = app.update(Message::WindowEvent(iced::window::Event::FileHovered(
             first.clone(),
         )));
@@ -8906,7 +8974,7 @@ mod tests {
         let old_models = std::env::var("HIPPO_TRANSCRIBE_MODELS_DIR").ok();
         std::env::set_var("HIPPO_TRANSCRIBE_MODELS_DIR", &models);
 
-        let mut app = App::new();
+        let mut app = pro_app();
         assert!(!app.models_ready());
         assert!(app.model_notice(&app.scheme()).is_some());
         let _ = app.view();
@@ -8975,7 +9043,7 @@ mod tests {
         let config = ConfigEnv::new("queue-summary");
         let dir = config.dir.clone();
 
-        let mut app = App::new();
+        let mut app = pro_app();
         assert_eq!(app.queue_summary_text(), "No files yet");
 
         for (name, duration) in [("one.mp3", Some(60.0)), ("two.mp3", Some(30.0))] {
@@ -9048,7 +9116,7 @@ mod tests {
         let audio = dir.join("talk.mp3");
         std::fs::write(&audio, b"audio").unwrap();
 
-        let mut app = App::new();
+        let mut app = pro_app();
         app.queue.push(QueueItem {
             path: audio.clone(),
             audio: Some(audio),
@@ -9080,7 +9148,7 @@ mod tests {
         let config = ConfigEnv::new("reorder-config");
         let dir = config.dir.clone();
 
-        let mut app = App::new();
+        let mut app = pro_app();
         for name in ["a.mp3", "b.mp3", "c.mp3"] {
             let path = dir.join(name);
             std::fs::write(&path, b"audio").unwrap();
@@ -9165,7 +9233,7 @@ mod tests {
         )
         .unwrap();
 
-        let mut app = App::new();
+        let mut app = pro_app();
         app.queue.push(QueueItem {
             path: audio.clone(),
             audio: Some(audio),

@@ -173,7 +173,9 @@ hippo-transcribe --cli probe audio.mp3 120               # duration + RMS wavefo
 ```
 
 Presets: `speed` (whisper `tiny`, multilingual), `balanced` (whisper `small`,
-multilingual) and `accuracy` (whisper `large-v3-turbo`).
+multilingual) and `accuracy` (whisper `large-v3-turbo`). `balanced` is the
+default and the only preset available on the free tier; `speed` and `accuracy`
+require Pro.
 
 Options: `--preset speed|balanced|accuracy`, `--language <code>|auto`,
 `--num-speakers N`, `--output-dir`, `--no-timestamps`,
@@ -202,15 +204,17 @@ transcribe each turn. A single-speaker run never loads or downloads the
 diarization models, whatever the preset.
 
 Each file logs a `timing ...` line (decode, diarize, ASR, write, realtime
-factor). `scripts/benchmark.sh [--preset P] [--speakers N] <audio>...` runs that
+factor). Per-clip ASR results are cached by audio hash, model, language and
+decode settings, so re-runs and re-opened transcripts skip whisper entirely;
+clip edges are silence-trimmed before encoding. `scripts/benchmark.sh [--preset P] [--speakers N] <audio>...` runs that
 over a corpus for backend and preset comparisons.
 
 ## Free and Pro
 
-The free tier transcribes with the speed model, shows the transcript window,
-and lets you edit, copy and save; playback and search stay available. Pro adds
-the balanced and accuracy models, speaker diarization (speaker labels), batch
-transcription, and SRT/WebVTT/JSON export.
+The free tier is the full-length pipeline: the balanced model, one speaker,
+unlimited files, no minutes and no account. Copy, save and search are included.
+Pro adds the Speed and Accuracy models, speaker diarization (speaker labels),
+batch transcription, transcript editing and audio playback.
 
 Pro is a one-time purchase on both stores. A 7-day trial is available once per
 install. Entitlement state lives in `license.json` beside the settings and is
@@ -229,15 +233,15 @@ files and folders anywhere into the window, then choose a preset and speaker
 count and press Transcribe. The header theme button cycles light, dark and
 system themes. Files added (or imported) while a run is active join the queue
 and are processed in a follow-up pass automatically. The gear button (or
-`Ctrl+,`) opens Settings for theme, transcript text size, preset, speaker count
-(including auto-detect), language, playback speed, follow mode, notifications,
-save location, and model storage.
+`Ctrl+,`) opens Settings for theme, transcript text size, preset, speaker count,
+language, playback speed, follow mode, notifications, save location, and model
+storage.
 
 The Export picker writes the current transcript as plain text, SRT, WebVTT, or
 JSON. Failed queue items can be retried, and pending items can be reordered.
 Keyboard: Up/Down moves through the transcript, Alt+Enter edits the active line,
 Space toggles playback, and Left/Right seek ±5 seconds while no text field has
-focus.
+focus. Editing and playback keys require Pro.
 
 Transcript search supports a speaker filter, match case (`Aa`) and whole-word
 (`W`) matching. Right-click a line to edit it; the editor can copy the line,
