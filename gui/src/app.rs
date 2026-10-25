@@ -2012,7 +2012,7 @@ impl App {
             }
             Message::LockedPreset => {
                 self.toast = Some((
-                    "The free version uses the Balanced preset. Speed and Accuracy are Pro."
+                    "Speed and Accuracy presets are Pro features"
                         .to_string(),
                     Instant::now(),
                 ));
@@ -2706,7 +2706,7 @@ impl App {
                 }
                 if !self.shows(license::Audience::ProOnly) && preset != Preset::Balanced {
                     self.toast = Some((
-                        "The free version uses the Balanced preset".to_string(),
+                        "Speed and Accuracy presets are Pro features".to_string(),
                         Instant::now(),
                     ));
                     return Task::none();
@@ -4583,7 +4583,7 @@ impl App {
                 .interaction(mouse::Interaction::Pointer)
                 .on_press(Message::LockedPreset),
             ],
-                "Speed and Accuracy are Pro presets",
+                "Speed and Accuracy presets are Pro features",
                 &scheme,
             )
         } else if !running && has_queue {
@@ -5779,7 +5779,7 @@ impl App {
                 .interaction(mouse::Interaction::Pointer)
                 .on_press(Message::LockedPreset),
             ],
-                "Speed and Accuracy are Pro presets",
+                "Speed and Accuracy presets are Pro features",
                 &scheme,
             )
         } else {
