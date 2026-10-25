@@ -211,6 +211,10 @@ pub struct Record {
     pub trial_started_unix: Option<u64>,
     #[serde(default)]
     pub source: Option<String>,
+    /// Local opt-out used by the development Free/Pro switch. A live trial
+    /// would otherwise keep granting Pro after a downgrade.
+    #[serde(default)]
+    pub force_free: bool,
 }
 
 fn unix(now: SystemTime) -> u64 {
@@ -226,6 +230,11 @@ fn days_between(from: u64, to: u64) -> u64 {
 /// Pure effective-access calculation. `pro_override` lets the dev provider
 /// force a tier without touching the persisted record.
 pub fn access_for(record: &Record, pro_override: Option<bool>, now: SystemTime) -> Access {
+    // An explicit development override wins; otherwise a local opt-out beats
+    // both a purchased entitlement and an active trial.
+    if pro_override.is_none() && record.force_free {
+        return Access::default();
+    }
     let now_s = unix(now);
     let pro = pro_override.unwrap_or(record.pro);
     if pro {
@@ -327,6 +336,7 @@ impl State {
 
     /// Record a successful store entitlement check.
     pub fn grant_pro(&mut self, now: SystemTime) {
+        self.record.force_free = false;
         self.record.pro = true;
         self.record.checked_unix = Some(unix(now));
         self.record.source = Some(Source::Store.as_str().to_string());
@@ -335,6 +345,7 @@ impl State {
 
     /// Record a refund/expiry.
     pub fn revoke_pro(&mut self, now: SystemTime) {
+        self.record.force_free = true;
         self.record.pro = false;
         self.record.checked_unix = Some(unix(now));
         self.record.source = Some(Source::None.as_str().to_string());
@@ -508,6 +519,17 @@ mod tests {
             ..Record::default()
         };
         assert_eq!(access_for(&paid, Some(false), at(0)).tier, Tier::Free);
+    }
+
+    #[test]
+    fn a_local_opt_out_beats_an_active_trial() {
+        let mut state = State::default();
+        state.start_trial(at(10));
+        assert_eq!(state.access.tier, Tier::Pro);
+        state.revoke_pro(at(20));
+        assert_eq!(state.access.tier, Tier::Free);
+        state.grant_pro(at(30));
+        assert_eq!(state.access.tier, Tier::Pro);
     }
 
     #[test]
