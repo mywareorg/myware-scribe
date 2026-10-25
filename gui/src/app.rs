@@ -4039,7 +4039,11 @@ impl App {
                 weight: font::Weight::Bold,
                 ..Font::DEFAULT
             }),
-            text(body).size(14).color(scheme.muted).width(Length::Fill),
+            text(body)
+                .size(14)
+                .color(scheme.muted)
+                .width(Length::Fill)
+                .align_x(iced::Alignment::Center),
         ]
         .spacing(10)
         .align_x(iced::Alignment::Center);
@@ -5964,42 +5968,51 @@ impl App {
 
         if self.summary_open {
             let lines = self.stats_lines();
-            let mut body = column![text("Summary").size(20)].spacing(8);
-            const FILE_INDENT: f32 = 16.0;
-            const BODY_INDENT: f32 = 32.0;
+            // Same typography and section treatment as the About dialog: a
+            // 20 px title, muted body copy, section labels and dividers.
+            let mut groups: Vec<(String, Vec<String>)> = Vec::new();
             for line in &lines {
                 match line {
-                    SummaryLine::File(name) => {
-                        // Dark, regular text: still larger than the body but
-                        // not competing with the "Summary" title.
-                        body = body.push(
-                            container(text(name.clone()).size(17).color(scheme.text))
-                                .width(Length::Fill)
-                                .padding(iced::Padding {
-                                    top: 0.0,
-                                    right: 0.0,
-                                    bottom: 0.0,
-                                    left: FILE_INDENT,
-                                }),
-                        );
-                    }
-                    SummaryLine::Body(line) => {
-                        body =
-                            body.push(container(text(line.clone())).width(Length::Fill).padding(
-                                iced::Padding {
-                                    top: 0.0,
-                                    right: 0.0,
-                                    bottom: 0.0,
-                                    left: BODY_INDENT,
-                                },
-                            ));
+                    SummaryLine::File(name) => groups.push((name.clone(), Vec::new())),
+                    SummaryLine::Body(text_line) => {
+                        if let Some((_, rows)) = groups.last_mut() {
+                            rows.push(text_line.clone());
+                        } else {
+                            groups.push((String::new(), vec![text_line.clone()]));
+                        }
                     }
                 }
             }
 
+            let mut body = column![text("Summary").size(20)].spacing(8);
+            for (index, (name, rows)) in groups.iter().enumerate() {
+                if index > 0 {
+                    body = body.push(settings_divider(scheme));
+                }
+                let mut section = column![].spacing(4);
+                if !name.is_empty() {
+                    // Owned string: the dialog outlives the local group list.
+                    section = section.push(
+                        text(name.clone())
+                            .size(11)
+                            .wrapping(NO_WRAP)
+                            .font(Font {
+                                weight: font::Weight::Bold,
+                                ..Font::DEFAULT
+                            })
+                            .color(scheme.muted),
+                    );
+                }
+                for row in rows {
+                    section =
+                        section.push(text(row.clone()).size(theme::TEXT_SM).color(scheme.muted));
+                }
+                body = body.push(section);
+            }
+
             // Cap the scrollable height so long queues stay usable.
             let cap = (self.window_size.height * 0.8).max(300.0);
-            let estimated = (lines.len() as f32 + 1.0) * 22.0 + 24.0;
+            let estimated = (lines.len() as f32 + groups.len() as f32 + 1.0) * 22.0 + 24.0;
             let height = estimated.min(cap);
 
             let scroll = scrollable(body)
@@ -6009,9 +6022,6 @@ impl App {
 
             let col = column![
                 container(scroll).width(Length::Fill),
-                text("Saved locally \u{00b7} Nothing uploaded.")
-                    .size(theme::TEXT_XS)
-                    .color(scheme.muted),
                 container(
                     row![action_text("Close")
                         .on_press(Message::CloseSummary)
@@ -6023,7 +6033,7 @@ impl App {
             ]
             .spacing(8);
 
-            let dialog = modal_card(col, 380.0, scheme);
+            let dialog = modal_card(col, 460.0, scheme);
             return self.with_toast(modal_overlay(base, dialog, scheme), scheme);
         }
 
@@ -6056,8 +6066,13 @@ impl App {
                         ("Esc", "Dismiss"),
                     ] {
                         col = col.push(
-                            row![text(key).width(Length::Fixed(KEY_WIDTH)), text(description),]
-                                .spacing(12),
+                            row![
+                                text(key)
+                                    .size(theme::TEXT_SM)
+                                    .width(Length::Fixed(KEY_WIDTH)),
+                                text(description).size(theme::TEXT_SM).color(scheme.muted),
+                            ]
+                            .spacing(12),
                         );
                     }
                 }
