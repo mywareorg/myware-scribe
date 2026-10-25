@@ -272,6 +272,7 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
             }
         };
         let duration = samples.len() as f64 / rate as f64;
+        let decoded_at = Instant::now();
         let samples = Arc::new(samples);
         emit(Event::Meta {
             audio: input.display().to_string(),
@@ -386,6 +387,7 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
                 }
             }
         };
+        let diarized_at = Instant::now();
         let transcription_base = if did_diarize {
             DIARIZATION_DONE
         } else {
@@ -459,6 +461,13 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
                 .as_deref()
                 .filter(|code| !code.is_empty() && !code.eq_ignore_ascii_case("auto"));
             let fast_decode = opts.preset.eq_ignore_ascii_case("speed");
+            let best_of = if fast_decode {
+                1
+            } else if opts.preset.eq_ignore_ascii_case("accuracy") {
+                5
+            } else {
+                3
+            };
 
             emit(Event::Stage {
                 stage: "transcription".to_string(),
@@ -488,6 +497,7 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
                             per_call_threads,
                             decode_language,
                             fast_decode,
+                            best_of,
                         );
                         if tx.send((index, turn_index, clip_start, result)).is_err() {
                             break;
@@ -589,6 +599,7 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
             });
         }
 
+        let asr_at = Instant::now();
         lines.sort_by(|a, b| {
             a.start
                 .partial_cmp(&b.start)
@@ -647,6 +658,23 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
             label: "Done".to_string(),
             progress: (index + 1) as f32 / total as f32,
         });
+        let total_elapsed = file_start.elapsed().as_secs_f64().max(0.001);
+        let name = input
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("audio");
+        emit(Event::Log {
+            message: format!(
+                "timing {name}: decode {:.2}s diarize {:.2}s asr {:.2}s write {:.2}s total {:.2}s (audio {:.1}s, {:.1}x realtime)",
+                decoded_at.duration_since(file_start).as_secs_f64(),
+                diarized_at.duration_since(decoded_at).as_secs_f64(),
+                asr_at.duration_since(diarized_at).as_secs_f64(),
+                asr_at.elapsed().as_secs_f64(),
+                total_elapsed,
+                duration,
+                duration / total_elapsed,
+            ),
+        });
         emit(Event::Done {
             txt: ts_path.display().to_string(),
             stats: Stats {
@@ -666,6 +694,17 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn routing_skips_diarization_for_one_speaker() {
+        assert_eq!(route(Some(1)), PipelineMode::AsrOnly);
+        assert_eq!(route(Some(2)), PipelineMode::Diarized);
+        assert_eq!(route(Some(5)), PipelineMode::Diarized);
+        // No speaker count means auto behaviour, which still diarizes.
+        assert_eq!(route(None), PipelineMode::Diarized);
+        assert!(!PipelineMode::AsrOnly.diarizes());
+        assert!(PipelineMode::Diarized.diarizes());
+    }
 
     #[test]
     fn output_name_includes_the_preset() {

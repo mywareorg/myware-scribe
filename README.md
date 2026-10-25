@@ -196,9 +196,14 @@ whisper.cpp uses the fastest backend the build provides:
 - **CPU fallback** — if GPU context creation fails, the run continues on the CPU
   and the console reports why. `HIPPO_TRANSCRIBE_ACCEL=cpu` forces CPU.
 
-The `Speed` preset routes internally: a single speaker skips diarization
-entirely and transcribes in one pass; two or more speakers run diarization and
-then transcribe each turn.
+Every preset routes internally: one speaker skips diarization entirely and
+transcribes in one pass; two or more speakers run diarization and then
+transcribe each turn. A single-speaker run never loads or downloads the
+diarization models, whatever the preset.
+
+Each file logs a `timing ...` line (decode, diarize, ASR, write, realtime
+factor). `scripts/benchmark.sh [--preset P] [--speakers N] <audio>...` runs that
+over a corpus for backend and preset comparisons.
 
 ## Free and Pro
 

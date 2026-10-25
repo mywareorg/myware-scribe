@@ -133,7 +133,7 @@ impl Transcriber {
         samples: &[f32],
         language: Option<&str>,
     ) -> Result<Vec<Segment>, String> {
-        self.transcribe_with_threads_and_language(samples, self.threads, language, false)
+        self.transcribe_with_threads_and_language(samples, self.threads, language, false, 1)
     }
 
     /// Transcribe 16 kHz mono samples, returning one entry per Whisper segment.
@@ -145,7 +145,7 @@ impl Transcriber {
         samples: &[f32],
         threads: i32,
     ) -> Result<Vec<Segment>, String> {
-        self.transcribe_with_threads_and_language(samples, threads, Some("en"), false)
+        self.transcribe_with_threads_and_language(samples, threads, Some("en"), false, 1)
     }
 
     /// Transcribe 16 kHz mono samples with a specific thread count and language.
@@ -159,13 +159,18 @@ impl Transcriber {
         threads: i32,
         language: Option<&str>,
         fast: bool,
+        best_of: i32,
     ) -> Result<Vec<Segment>, String> {
         let mut state = self
             .ctx
             .create_state()
             .map_err(|e| format!("whisper state: {e}"))?;
 
-        let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
+        // `best_of` trades decode time for quality: 1 for speed, more for the
+        // higher tiers.
+        let mut params = FullParams::new(SamplingStrategy::Greedy {
+            best_of: best_of.max(1),
+        });
         params.set_language(language);
         params.set_translate(false);
         params.set_no_context(true);

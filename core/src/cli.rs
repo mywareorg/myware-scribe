@@ -51,7 +51,6 @@ pub fn run(args: &[String]) -> i32 {
             }
             "--no-timestamps" => timestamps = false,
             "--progress-json" => progress_json = true,
-            "--asr-only" => mode = PipelineMode::AsrOnly,
             "--no-cache" => cache = false,
             "--language" => {
                 i += 1;
@@ -79,7 +78,7 @@ pub fn run(args: &[String]) -> i32 {
     }
 
     if inputs.is_empty() {
-        eprintln!("usage: hippo-transcribe --cli <audio>... [--preset speed|balanced|accuracy] [--language <code>] [--asr-only] [--progress-json]");
+        eprintln!("usage: hippo-transcribe --cli <audio>... [--preset speed|balanced|accuracy] [--language <code>] [--progress-json]");
         return 2;
     }
 
