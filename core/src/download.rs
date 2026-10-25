@@ -645,16 +645,11 @@ mod tests {
             ["segmentation", "embedding", "whisper-speed"]
         );
         assert_eq!(
-            required_for("balanced", true),
-            ["segmentation", "embedding", "whisper-balanced"]
-        );
-        assert_eq!(
             required_for("accuracy", true),
             ["segmentation", "embedding", "whisper-accuracy"]
         );
         // ASR-only needs no diarization models.
         assert_eq!(required_for("speed", false), ["whisper-speed"]);
-        assert_eq!(required_for("balanced", false), ["whisper-balanced"]);
         // Unknown presets fall back to the accuracy model, matching
         // `models::whisper_model`.
         assert_eq!(models::whisper_id("unknown"), "whisper-accuracy");
@@ -676,7 +671,7 @@ mod tests {
 
     #[test]
     fn mirrors_without_a_base_are_the_pinned_upstream_list() {
-        let spec = models::spec("whisper-balanced").unwrap();
+        let spec = models::spec("whisper-speed").unwrap();
         assert_eq!(mirrors(spec, None), spec.mirrors);
         assert_eq!(mirrors(spec, Some("  ")), spec.mirrors);
     }

@@ -11,7 +11,6 @@ pub(crate) fn friendly_model(label: &str) -> &'static str {
         "segmentation" => "speaker segmentation",
         "embedding" => "speaker embedding",
         "whisper-speed" => "Whisper speed model",
-        "whisper-balanced" => "Whisper balanced model",
         "whisper-accuracy" => "Whisper accuracy model",
         _ => "model",
     }

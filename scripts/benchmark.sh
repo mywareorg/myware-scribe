@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Report per-stage timings for one or more audio files.
 #
-#   scripts/benchmark.sh [--preset speed|balanced|accuracy] [--speakers N] <audio>...
+#   scripts/benchmark.sh [--preset speed|accuracy] [--speakers N] <audio>...
 #
 # Runs the CLI and prints the pipeline's own `timing` lines. Build first, e.g.
 # `cargo build --profile release-fast`, and set BIN to override the binary.

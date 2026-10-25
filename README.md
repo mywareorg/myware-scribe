@@ -109,8 +109,7 @@ a model it does not use.
 
 Every preset uses a multilingual model:
 
-- `ggml-tiny-q5_1.bin` (speed), `ggml-base-q5_1.bin` (balanced) — bundled with
-  release packages
+- `ggml-tiny-q5_1.bin` (speed) — bundled with release packages
 - `ggml-large-v3-turbo-q5_0.bin` (accuracy) — downloaded on demand
 - `sherpa-onnx-pyannote-segmentation-3-0/model.onnx`
 - `wespeaker_en_voxceleb_resnet34_LM.onnx`
@@ -163,7 +162,6 @@ scripts/fetch-models.sh --verify-only
 
 ```bash
 hippo-transcribe --cli audio.mp3                         # default preset (speed)
-hippo-transcribe --cli audio.mp3 --preset balanced
 hippo-transcribe --cli audio.mp3 --preset accuracy
 hippo-transcribe --cli a.mp3 b.mp3 --output-dir out/     # batch
 hippo-transcribe --cli audio.mp3 --no-timestamps
@@ -172,10 +170,10 @@ hippo-transcribe --cli audio.mp3 --progress-json         # line-delimited JSON e
 hippo-transcribe --cli probe audio.mp3 120               # duration + RMS waveform
 ```
 
-Presets: `speed` (whisper `tiny`, multilingual), `balanced` (whisper `base`,
-multilingual), and `accuracy` (whisper `large-v3-turbo`).
+Presets: `speed` (whisper `tiny`, multilingual) and `accuracy` (whisper
+`large-v3-turbo`).
 
-Options: `--preset speed|balanced|accuracy`, `--language <code>|auto`,
+Options: `--preset speed|accuracy`, `--language <code>|auto`,
 `--num-speakers N`, `--output-dir`, `--no-timestamps`,
 `--no-cache`, `--progress-json`. Every preset accepts any supported language;
 the language auto-detects by default and `--language <code>` pins one.
@@ -209,8 +207,8 @@ over a corpus for backend and preset comparisons.
 
 The free tier transcribes with the speed model, shows the transcript window,
 and lets you edit, copy and save; playback and search stay available. Pro adds
-the balanced and accuracy models, speaker diarization (speaker labels), batch
-transcription, and SRT/WebVTT/JSON export.
+the accuracy model, speaker diarization (speaker labels), batch transcription,
+and SRT/WebVTT/JSON export.
 
 Pro is a one-time purchase on both stores. A 7-day trial is available once per
 install. Entitlement state lives in `license.json` beside the settings and is

@@ -484,7 +484,7 @@ impl App {
             .and_then(Preset::from_arg)
             .unwrap_or_default();
         if preset != Preset::Speed
-            && !license::tier_allows(license_state.access.tier, license::Feature::BalancedPreset)
+            && !license::tier_allows(license_state.access.tier, license::Feature::AccuracyPreset)
         {
             preset = Preset::Speed;
         }
@@ -1161,7 +1161,7 @@ impl App {
 
     /// Drop back to the free preset after a trial/downgrade.
     fn clamp_preset(&mut self) {
-        if self.preset != Preset::Speed && !self.can(license::Feature::BalancedPreset) {
+        if self.preset != Preset::Speed && !self.can(license::Feature::AccuracyPreset) {
             self.preset = Preset::Speed;
             self.save_settings();
         }
@@ -2519,7 +2519,6 @@ impl App {
                 }
                 let feature = match preset {
                     Preset::Speed => None,
-                    Preset::Balanced => Some(license::Feature::BalancedPreset),
                     Preset::Accuracy => Some(license::Feature::AccuracyPreset),
                 };
                 if let Some(feature) = feature {

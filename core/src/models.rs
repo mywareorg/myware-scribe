@@ -29,7 +29,7 @@ pub const MIRROR_BASE: &str = "https://gitlab.com/api/v4/projects/librewarelive%
 pub struct ModelSpec {
     /// Stable id used by the downloader and by `required_for`.
     pub id: String,
-    /// Path relative to a models directory, e.g. `ggml-base-q5_1.bin`.
+    /// Path relative to a models directory, e.g. `ggml-tiny-q5_1.bin`.
     pub file: String,
     /// Exact byte length of the upstream file.
     pub size: u64,
@@ -159,8 +159,6 @@ pub fn embedding_model() -> PathBuf {
 pub fn whisper_id(preset: &str) -> &'static str {
     if preset.eq_ignore_ascii_case("speed") {
         "whisper-speed"
-    } else if preset.eq_ignore_ascii_case("balanced") {
-        "whisper-balanced"
     } else {
         "whisper-accuracy"
     }
@@ -217,7 +215,7 @@ mod tests {
     fn manifest_parses_and_is_internally_consistent() {
         let manifest = manifest();
         assert!(!manifest.version.is_empty());
-        assert_eq!(manifest.models.len(), 5);
+        assert_eq!(manifest.models.len(), 4);
         for model in &manifest.models {
             assert!(!model.id.is_empty());
             assert!(!model.file.is_empty());
@@ -281,17 +279,15 @@ mod tests {
             bytes < 200 * 1024 * 1024,
             "bundled models total {bytes} bytes"
         );
-        assert!(bundled().count() >= 4);
+        assert!(bundled().count() >= 3);
         assert!(spec("whisper-accuracy").is_some_and(|m| !m.bundled));
     }
 
     #[test]
     fn presets_map_to_multilingual_models() {
         assert_eq!(whisper_id("speed"), "whisper-speed");
-        assert_eq!(whisper_id("balanced"), "whisper-balanced");
         assert_eq!(whisper_id("nonsense"), "whisper-accuracy");
         assert_eq!(whisper_relative("speed"), "ggml-tiny-q5_1.bin");
-        assert_eq!(whisper_relative("balanced"), "ggml-base-q5_1.bin");
         assert_eq!(whisper_relative("accuracy"), "ggml-large-v3-turbo-q5_0.bin");
     }
 }

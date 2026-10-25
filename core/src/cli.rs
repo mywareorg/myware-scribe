@@ -38,7 +38,6 @@ pub fn run(args: &[String]) -> i32 {
                 }
             }
             "--speed" => preset = "speed".to_string(),
-            "--balanced" => preset = "balanced".to_string(),
             "--accuracy" => preset = "accuracy".to_string(),
             "--num-speakers" => {
                 i += 1;
@@ -77,8 +76,12 @@ pub fn run(args: &[String]) -> i32 {
         i += 1;
     }
 
+    if !preset.eq_ignore_ascii_case("speed") && !preset.eq_ignore_ascii_case("accuracy") {
+        eprintln!("unknown preset: {preset} (use speed or accuracy)");
+        return 2;
+    }
     if inputs.is_empty() {
-        eprintln!("usage: hippo-transcribe --cli <audio>... [--preset speed|balanced|accuracy] [--language <code>] [--progress-json]");
+        eprintln!("usage: hippo-transcribe --cli <audio>... [--preset speed|accuracy] [--language <code>] [--progress-json]");
         return 2;
     }
 
@@ -94,9 +97,7 @@ pub fn run(args: &[String]) -> i32 {
     let tier = license_state.access.tier;
 
     if tier == Tier::Free {
-        let preset_feature = if preset.eq_ignore_ascii_case("balanced") {
-            Some(Feature::BalancedPreset)
-        } else if preset.eq_ignore_ascii_case("speed") {
+        let preset_feature = if preset.eq_ignore_ascii_case("speed") {
             None
         } else {
             Some(Feature::AccuracyPreset)
