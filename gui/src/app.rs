@@ -4165,18 +4165,16 @@ impl App {
 
     /// True when the transcript pane is showing the global empty state.
     fn feature_deck_visible(&self) -> bool {
-        // The deck is an upgrade pitch, not a workspace: Pro users get the
-        // plain empty state instead.
-        self.shows(license::Audience::FreeOnly)
-            && self.queue.is_empty()
-            && self.selected.is_none()
-            && self.selected_view.is_none()
-            && !matches!(self.status, Status::Running)
+        // Free-tier upgrade pitch. It stays up while files are queued and
+        // through model loading, decoding and diarization, and only yields once
+        // transcription actually starts streaming lines.
+        self.shows(license::Audience::FreeOnly) && self.shown_lines().is_empty()
     }
 
     /// Arrow keys page the deck only when no dialog owns the keystroke.
     fn feature_deck_nav_active(&self) -> bool {
         self.feature_deck_visible()
+            && !matches!(self.status, Status::Running)
             && self.help_open.is_none()
             && !self.paywall_open
             && !self.settings_open
