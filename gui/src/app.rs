@@ -1194,29 +1194,6 @@ impl App {
         license::tier_allows(self.license.access.tier, feature)
     }
 
-    /// Dim `content` and route any click to `message`. Used to show a Pro
-    /// control in place instead of hiding it.
-    fn locked<'a>(
-        &'a self,
-        content: impl Into<Element<'a, Message>>,
-        message: Message,
-    ) -> Element<'a, Message> {
-        let scrim = container(horizontal_space())
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .style(|_theme| container::Style {
-                background: Some(Color::from_rgba(0.5, 0.5, 0.5, 0.30).into()),
-                ..container::Style::default()
-            });
-        stack![
-            content.into(),
-            mouse_area(scrim)
-                .interaction(mouse::Interaction::Pointer)
-                .on_press(message),
-        ]
-        .into()
-    }
-
     /// True when a UI element tagged for `audience` belongs on screen.
     fn shows(&self, audience: license::Audience) -> bool {
         audience.visible_for(self.license.access.tier)
@@ -5335,6 +5312,7 @@ impl App {
     fn timeline_element(&self, scheme: &Scheme) -> Element<'_, Message> {
         let duration = self.shown_duration().unwrap_or(0.0);
         let enabled = duration > 0.0 && !self.shown_peaks().is_empty();
+        let locked = !self.can(license::Feature::Playback);
         let program = Timeline {
             peaks: self.shown_peaks_arc(),
             turns: Arc::new(if enabled {
@@ -5343,10 +5321,22 @@ impl App {
                 Vec::new()
             }),
             duration,
-            playhead: self.playhead,
-            track: scheme.timeline_bg,
-            wave: scheme.green,
-            playhead_color: scheme.ink,
+            playhead: if locked { 0.0 } else { self.playhead },
+            track: if locked {
+                scheme.track
+            } else {
+                scheme.timeline_bg
+            },
+            wave: if locked {
+                scheme.muted
+            } else {
+                scheme.green
+            },
+            playhead_color: if locked {
+                scheme.muted
+            } else {
+                scheme.ink
+            },
             enabled,
             zoom: self.waveform_zoom,
         };
@@ -5354,7 +5344,12 @@ impl App {
             .width(Length::Fill)
             .height(Length::Fixed(TIMELINE_HEIGHT));
         let mut column = column![].spacing(4).width(Length::Fill);
-        if enabled {
+        if locked {
+            let click = mouse_area(strip)
+                .interaction(mouse::Interaction::Pointer)
+                .on_press(Message::LockedPlayer);
+            column = column.push(self.tip(click, "Player is a Pro feature", scheme));
+        } else if enabled {
             column = column.push(self.tip(strip, "Click/drag to seek, scroll to zoom", scheme));
             column = column.push(self.timeline_legend(scheme));
         } else {
@@ -5415,7 +5410,8 @@ impl App {
     /// Playback controls: play/pause, time, and a speed selector.
     fn player_element(&self, scheme: &Scheme) -> Element<'_, Message> {
         let duration = self.shown_duration().unwrap_or(0.0).max(0.0);
-        let ready = self.player_ready();
+        let locked = !self.can(license::Feature::Playback);
+        let ready = !locked && self.player_ready();
         let playing = self
             .player
             .as_ref()
@@ -5423,7 +5419,13 @@ impl App {
         let glyph = if ready { scheme.ink } else { scheme.muted };
 
         let play_icon = if playing { ICON_PAUSE } else { ICON_PLAY };
-        let play_button: Element<Message> = if ready {
+        let play_button: Element<Message> = if locked {
+            action(icon_colored(ICON_PLAY, 15.0, scheme.muted))
+                .on_press(Message::LockedPlayer)
+                .style(greyed_button(*scheme))
+                .padding([8, 10])
+                .into()
+        } else if ready {
             action(icon_colored(play_icon, 15.0, scheme.on_accent))
                 .on_press(Message::PlayerToggle)
                 .style(color_button(scheme.blue, scheme.on_accent))
@@ -5435,20 +5437,40 @@ impl App {
                 .padding([8, 10])
                 .into()
         };
-        let skip_back: Element<Message> = self.tip(
-            action(icon_colored(ICON_REWIND, 13.0, glyph))
-                .on_press_maybe(ready.then_some(Message::SeekBy(-5.0)))
-                .style(pill_button_secondary),
-            "Back 5 seconds",
-            scheme,
-        );
-        let skip_forward: Element<Message> = self.tip(
-            action(icon_colored(ICON_FORWARD, 13.0, glyph))
-                .on_press_maybe(ready.then_some(Message::SeekBy(5.0)))
-                .style(pill_button_secondary),
-            "Forward 5 seconds",
-            scheme,
-        );
+        let skip_back: Element<Message> = if locked {
+            self.tip(
+                action(icon_colored(ICON_REWIND, 13.0, scheme.muted))
+                    .on_press(Message::LockedPlayer)
+                    .style(greyed_button(*scheme)),
+                "Player is a Pro feature",
+                scheme,
+            )
+        } else {
+            self.tip(
+                action(icon_colored(ICON_REWIND, 13.0, glyph))
+                    .on_press_maybe(ready.then_some(Message::SeekBy(-5.0)))
+                    .style(pill_button_secondary),
+                "Back 5 seconds",
+                scheme,
+            )
+        };
+        let skip_forward: Element<Message> = if locked {
+            self.tip(
+                action(icon_colored(ICON_FORWARD, 13.0, scheme.muted))
+                    .on_press(Message::LockedPlayer)
+                    .style(greyed_button(*scheme)),
+                "Player is a Pro feature",
+                scheme,
+            )
+        } else {
+            self.tip(
+                action(icon_colored(ICON_FORWARD, 13.0, glyph))
+                    .on_press_maybe(ready.then_some(Message::SeekBy(5.0)))
+                    .style(pill_button_secondary),
+                "Forward 5 seconds",
+                scheme,
+            )
+        };
 
         let time_color = if ready { scheme.ink } else { scheme.muted };
         let total = if duration > 0.0 {
@@ -5462,7 +5484,21 @@ impl App {
                 color: Some(time_color),
             });
 
-        let speed: Element<Message> = if ready {
+        let speed: Element<Message> = if locked {
+            stack![
+                pick_list(Speed::ALL, Some(Speed::One), Message::SpeedChanged)
+                    .style(greyed_pick(*scheme))
+                    .handle(caret_handle(false)),
+                mouse_area(
+                    container(horizontal_space())
+                        .width(Length::Fill)
+                        .height(Length::Fill),
+                )
+                .interaction(mouse::Interaction::Pointer)
+                .on_press(Message::LockedPlayer),
+            ]
+            .into()
+        } else if ready {
             pick_list(
                 Speed::ALL,
                 Some(Speed::from_factor(self.playback_speed)),
@@ -6209,19 +6245,10 @@ impl App {
             .align_y(iced::Alignment::Center);
 
         let mut middle = column![status_row].spacing(8).width(Length::Fill);
-        let playback = self.can(license::Feature::Playback);
         let editing = self.can(license::Feature::Editing);
-        if playback {
-            middle = middle.push(self.timeline_element(&scheme));
-        } else {
-            middle = middle.push(self.locked(self.timeline_element(&scheme), Message::LockedPlayer));
-        }
+        middle = middle.push(self.timeline_element(&scheme));
         let mut controls: Vec<Element<Message>> = Vec::new();
-        if playback {
-            controls.push(self.player_element(&scheme));
-        } else {
-            controls.push(self.locked(self.player_element(&scheme), Message::LockedPlayer));
-        }
+        controls.push(self.player_element(&scheme));
         controls.push(horizontal_space().into());
         controls.push(
             action_text("Summary")
