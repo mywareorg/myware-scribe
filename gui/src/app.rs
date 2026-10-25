@@ -1159,7 +1159,7 @@ impl App {
 
     /// Title-bar / taskbar icon decoded from the bundled PNG.
     fn window_icon() -> Option<iced::window::Icon> {
-        let image = image::load_from_memory(include_bytes!("../../icons/hippo-icon-square.png"))
+        let image = image::load_from_memory(include_bytes!("../../icons/hippo-mirror-square.png"))
             .ok()?
             .into_rgba8();
         let (width, height) = image.dimensions();
@@ -7032,7 +7032,7 @@ fn logo_handle() -> iced::widget::image::Handle {
     static LOGO: OnceLock<iced::widget::image::Handle> = OnceLock::new();
     LOGO.get_or_init(|| {
         let image =
-            image::load_from_memory(include_bytes!("../../icons/hippo-icon-square.png"))
+            image::load_from_memory(include_bytes!("../../icons/hippo-mirror-square.png"))
                 .expect("bundled Hippo Transcribe logo")
                 .into_rgba8();
         let (width, height) = image.dimensions();
