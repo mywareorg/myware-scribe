@@ -4764,7 +4764,27 @@ impl App {
         .spacing(1)
         .width(Length::Fill);
 
-        let mut content = row![badge, label]
+        // Left-edge marker: green while this row is being transcribed, blue
+        // while its transcript is on screen.
+        let transcribing = self.current_index == Some(index);
+        let viewing_item = self.selected == Some(index) && self.selected_view.is_some();
+        let marker_color = if transcribing {
+            scheme.green
+        } else if viewing_item {
+            scheme.blue
+        } else {
+            Color::TRANSPARENT
+        };
+        let marker = container(horizontal_space())
+            .width(Length::Fixed(3.0))
+            .height(Length::Fixed(22.0))
+            .style(move |_theme| container::Style {
+                background: Some(marker_color.into()),
+                border: iced::border::rounded(2.0),
+                ..container::Style::default()
+            });
+
+        let mut content = row![marker, badge, label]
             .spacing(8)
             .align_y(iced::Alignment::Center);
 
