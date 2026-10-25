@@ -13,22 +13,52 @@
       <stop offset="1" stop-color="#DCEFE4"/>
     </linearGradient>
   </defs>
+
+  <!-- mint rounded square -->
   <rect x="0" y="0" width="1024" height="1024" rx="224" fill="url(#bg)"/>
-  <g transform="translate(512 512) scale(0.86) translate(-512 -512)">
-    <path d="M512 92 L844 204 V500 C844 694 700 846 512 936 C324 846 180 694 180 500 V204 Z"
-          fill="url(#shield)" stroke="#34D399" stroke-width="26" stroke-linejoin="round"/>
-    <circle cx="356" cy="336" r="80" fill="url(#face)"/>
-    <circle cx="668" cy="336" r="80" fill="url(#face)"/>
-    <circle cx="356" cy="336" r="38" fill="#B9DCCB"/>
-    <circle cx="668" cy="336" r="38" fill="#B9DCCB"/>
-    <ellipse cx="512" cy="524" rx="232" ry="196" fill="url(#face)"/>
-    <ellipse cx="512" cy="650" rx="176" ry="116" fill="#CBE6D8"/>
-    <circle cx="418" cy="486" r="17" fill="#082F34"/>
-    <circle cx="606" cy="486" r="17" fill="#082F34"/>
-    <circle cx="424" cy="480" r="6" fill="#FFFFFF"/>
-    <circle cx="612" cy="480" r="6" fill="#FFFFFF"/>
-    <ellipse cx="452" cy="612" rx="17" ry="25" fill="#082F34"/>
-    <ellipse cx="572" cy="612" rx="17" ry="25" fill="#082F34"/>
-    <path d="M452 700 Q512 742 572 700" fill="none" stroke="#082F34" stroke-width="16" stroke-linecap="round"/>
-  </g>
+
+  <!-- shield -->
+  <path d="M512 92 L844 204 V500 C844 694 700 846 512 936 C324 846 180 694 180 500 V204 Z"
+        fill="url(#shield)" stroke="#34D399" stroke-width="26" stroke-linejoin="round"/>
+
+  <!-- stethoscope: one tube from behind the ear to the chest piece -->
+  <path d="M700 334 C752 476 748 588 716 640 C704 660 686 682 672 694"
+        fill="none" stroke="#F4FBF7" stroke-width="34" stroke-linecap="round"/>
+  <circle cx="664" cy="700" r="38" fill="#F4FBF7"/>
+  <circle cx="664" cy="700" r="21" fill="none" stroke="#082F34" stroke-width="10"/>
+
+  <!-- ears -->
+  <circle cx="346" cy="306" r="76" fill="url(#face)"/>
+  <circle cx="678" cy="306" r="76" fill="url(#face)"/>
+  <circle cx="336" cy="298" r="26" fill="#B9DCCB"/>
+  <circle cx="688" cy="298" r="26" fill="#B9DCCB"/>
+
+  <!-- head and muzzle -->
+  <ellipse cx="512" cy="426" rx="228" ry="174" fill="url(#face)"/>
+  <ellipse cx="512" cy="552" rx="190" ry="98" fill="#BCDDCE"/>
+
+  <!-- eyes -->
+  <circle cx="424" cy="396" r="20" fill="#082F34"/>
+  <circle cx="600" cy="396" r="20" fill="#082F34"/>
+  <circle cx="431" cy="389" r="7" fill="#FFFFFF"/>
+  <circle cx="607" cy="389" r="7" fill="#FFFFFF"/>
+
+  <!-- nostrils -->
+  <ellipse cx="430" cy="518" rx="13" ry="16" fill="#082F34"/>
+  <ellipse cx="594" cy="518" rx="13" ry="16" fill="#082F34"/>
+
+  <!-- microphone, in front of the muzzle -->
+  <path d="M512 552 C546 552 572 580 572 612 L572 658 C572 678 558 690 544 694
+           L544 752 C544 766 554 772 554 784 C554 800 540 810 512 810
+           C484 810 470 800 470 784 C470 772 480 766 480 752 L480 694
+           C466 690 452 678 452 658 L452 612 C452 580 478 552 512 552 Z"
+        fill="#34D399" stroke="#082F34" stroke-width="16"/>
+  <path d="M480 590 H544 M480 620 H544 M480 650 H544" stroke="#082F34" stroke-width="11"
+        stroke-linecap="round"/>
+
+  <!-- sound arcs -->
+  <path d="M416 648 C382 686 382 754 416 792" fill="none" stroke="#F4FBF7"
+        stroke-width="32" stroke-linecap="round"/>
+  <path d="M378 624 C326 680 326 760 378 816" fill="none" stroke="#F4FBF7"
+        stroke-width="30" stroke-linecap="round"/>
 </svg>
