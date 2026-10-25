@@ -2020,7 +2020,7 @@ impl App {
             }
             Message::LockedPreviousView => {
                 self.toast = Some((
-                    "Viewing a previous transcription during active transcription is a Pro feature"
+                    "Reviewing during active transcription is a Pro feature"
                         .to_string(),
                     Instant::now(),
                 ));
@@ -4892,7 +4892,7 @@ impl App {
         if locked_previous {
             self.tip(
                 row_button.on_press(Message::LockedPreviousView),
-                "Viewing previous transcripts while transcribing is Pro",
+                "Reviewing during active transcription is a Pro feature",
                 &scheme,
             )
         } else if selectable {
