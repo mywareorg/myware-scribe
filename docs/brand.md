@@ -8,8 +8,7 @@ behavior is the proof. Do not claim certification or literal compliance.
 ## Approved lines
 
 - **Hero:** Private by design. Offline by default.
-- **Origin:** The name comes from HIPAA. Built so sensitive recordings never
-  leave this machine.
+- **Origin:** The name comes from HIPAA. Your recordings stay on this machine.
 - **Proof:** No cloud · No accounts · No telemetry · Audio and transcripts stay
   on this device.
 - **Technical:** Local diarization and transcription. Network access is limited

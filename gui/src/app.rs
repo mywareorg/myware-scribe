@@ -18,10 +18,10 @@ use rodio::{Decoder, OutputStream, Sink};
 use serde::{Deserialize, Serialize};
 
 use crate::backend::{self, Event};
-use hippo_transcribe_core::license;
 use crate::theme::{self, AppTheme, Scheme};
 use crate::{documents::*, files::*, format::*, options::*};
 use hippo_transcribe_core::download::{self, DownloadEvent, ModelStatus};
+use hippo_transcribe_core::license;
 use hippo_transcribe_core::models;
 
 const AUDIO_EXTS: &[&str] = &[
@@ -484,10 +484,7 @@ impl App {
             .and_then(Preset::from_arg)
             .unwrap_or_default();
         if preset != Preset::Speed
-            && !license::tier_allows(
-                license_state.access.tier,
-                license::Feature::BalancedPreset,
-            )
+            && !license::tier_allows(license_state.access.tier, license::Feature::BalancedPreset)
         {
             preset = Preset::Speed;
         }
@@ -1173,7 +1170,9 @@ impl App {
     /// Header control showing the current tier and opening the paywall.
     fn license_button<'a>(&'a self, scheme: &Scheme) -> Element<'a, Message> {
         let label = match self.license.access.tier {
-            license::Tier::Pro if self.license.access.source == license::Source::Trial => "Pro trial",
+            license::Tier::Pro if self.license.access.source == license::Source::Trial => {
+                "Pro trial"
+            }
             license::Tier::Pro => "Pro",
             license::Tier::Free => "Get Pro",
         };
@@ -1274,8 +1273,12 @@ impl App {
         );
         body = body.push(
             container(
-                row![horizontal_space(),
-                    action_text("Close").on_press(Message::ClosePaywall).style(pill_button_secondary)]
+                row![
+                    horizontal_space(),
+                    action_text("Close")
+                        .on_press(Message::ClosePaywall)
+                        .style(pill_button_secondary)
+                ]
                 .spacing(8),
             )
             .width(Length::Fill)
@@ -1949,8 +1952,7 @@ impl App {
                         self.toast = Some(("Purchase failed".to_string(), Instant::now()));
                     }
                     license::PurchaseState::Pending | license::PurchaseState::Idle => {
-                        self.toast =
-                            Some((state.label().to_string(), Instant::now()));
+                        self.toast = Some((state.label().to_string(), Instant::now()));
                     }
                 }
                 Task::none()
@@ -3944,7 +3946,7 @@ impl App {
                 ICON_HOURGLASS,
                 scheme.warn_tint,
                 "Listening for speech",
-                format!("{detail}. Lines appear here as they are transcribed on this device."),
+                format!("{detail}. Lines will appear here as they are transcribed."),
             )
         } else if self
             .selected
@@ -3968,8 +3970,8 @@ impl App {
             (
                 ICON_MIC,
                 scheme.warn_tint,
-                "Drop audio. It stays here.",
-                "Drag audio files anywhere into the window, or add them from the left panel. Nothing is uploaded."
+                "Drop audio here",
+                "Drag audio files anywhere into the window, or add them from the left panel."
                     .to_string(),
             )
         } else if has_done {
@@ -3984,7 +3986,7 @@ impl App {
                 ICON_PLAY,
                 scheme.track,
                 "Ready to transcribe",
-                "Press Transcribe (or Ctrl+Enter). Processing happens on this device.".to_string(),
+                "Press Transcribe (or Ctrl+Enter) to start the queue.".to_string(),
             )
         } else {
             (
@@ -4271,7 +4273,7 @@ impl App {
             output_row,
             options,
             row![
-                action_text("Transcribe on this device")
+                action_text("Transcribe")
                     .on_press_maybe(can_start.then_some(Message::Start))
                     .style(color_button(scheme.green, scheme.on_accent)),
                 action_text("Cancel")
@@ -5798,23 +5800,6 @@ impl App {
             AppTheme::System => (ICON_SUN, "Switch to light theme"),
         };
 
-        let privacy_badge = container(
-            row![
-                icon_colored(ICON_SHIELD, 12.0, scheme.green),
-                text("Offline \u{00b7} On this device")
-                    .size(theme::TEXT_XS)
-                    .color(scheme.muted),
-            ]
-            .spacing(4)
-            .align_y(iced::Alignment::Center),
-        )
-        .padding([4, 8])
-        .style(move |_theme| container::Style {
-            background: Some(scheme.track.into()),
-            border: iced::border::rounded(999.0),
-            ..container::Style::default()
-        });
-
         let header = row![
             iced::widget::image(logo_handle())
                 .width(Length::Fixed(32.0))
@@ -5829,7 +5814,6 @@ impl App {
                     .color(scheme.muted),
             ]
             .spacing(theme::SPACE_2XS),
-            privacy_badge,
             horizontal_space(),
             self.license_button(&scheme),
             self.tip(
@@ -6078,8 +6062,9 @@ impl App {
                     }
                 }
                 HelpKind::About => {
-                    col = col.push(
-                        column![
+                    col =
+                        col.push(
+                            column![
                             text(format!("Hippo Transcribe {}", env!("CARGO_PKG_VERSION")))
                                 .size(theme::TEXT_MD)
                                 .font(Font {
@@ -6089,7 +6074,7 @@ impl App {
                             text("Private, offline speaker diarization + transcription.")
                                 .size(theme::TEXT_SM)
                                 .color(scheme.muted),
-                            text("Hippo is named for HIPAA. Built so sensitive recordings never leave this machine.")
+                            text("The name comes from HIPAA. Your recordings stay on this machine.")
                                 .size(theme::TEXT_SM)
                                 .color(scheme.muted),
                             text("Diarization: pyannote segmentation + wespeaker (sherpa-onnx).")
@@ -6102,8 +6087,8 @@ impl App {
                                 .size(theme::TEXT_SM)
                                 .color(scheme.muted),
                         ]
-                        .spacing(4),
-                    );
+                            .spacing(4),
+                        );
                     col = col.push(settings_divider(scheme));
                     col = col.push(
                         column![
@@ -6595,7 +6580,6 @@ const ICON_FOLDER_PLUS: char = '\u{f3d3}';
 const ICON_FOLDER_OPEN: char = '\u{f3d8}';
 const ICON_TRASH: char = '\u{f5de}';
 const ICON_RETRY: char = '\u{f116}';
-const ICON_SHIELD: char = '\u{f52f}';
 const ICON_DISPLAY: char = '\u{f302}';
 
 /// Full-window drop target shown while a file hovers over the app.

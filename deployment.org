@@ -6,8 +6,8 @@
 Private by design. Offline by default.
 
 ** Origin
-The name comes from HIPAA. Hippo Transcribe was built for HIPAA-sensitive work:
-audio is processed on the user's machine, and transcripts never leave it.
+The name comes from HIPAA. Audio is processed on the user's machine, and
+transcripts stay there.
 
 ** Proof points
 - No cloud

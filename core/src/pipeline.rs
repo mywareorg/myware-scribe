@@ -22,6 +22,9 @@ const TIMELINE_BUCKETS: usize = 2000;
 /// fixed phase boundaries makes the progress bar monotonic across stages
 /// instead of jumping back to zero when transcription starts.
 const DECODE_DONE: f32 = 0.03;
+/// Never prefetch-decode a file longer than this: decoded 16 kHz f32 audio for
+/// 30 minutes is ~115 MB, so a batch stays within a predictable memory budget.
+const PREFETCH_MAX_SECONDS: f64 = 1800.0;
 const DIARIZATION_DONE: f32 = 0.45;
 
 /// Whether the pipeline runs the speaker-diarization stage.
@@ -228,6 +231,11 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
         .unwrap_or((physical / workers).max(1) as i32)
         .max(1);
 
+    // Decode the next file while the current one is diarized and transcribed.
+    // This only helps batches; a single file is decoded inline.
+    type Decoded = Result<(Vec<f32>, u32), String>;
+    let mut prefetched: Option<std::thread::JoinHandle<Decoded>> = None;
+
     for (index, input) in opts.inputs.iter().enumerate() {
         if is_cancelled() {
             break;
@@ -242,7 +250,21 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
             progress: 0.0,
         });
 
-        let (samples, rate) = match audio::decode(input) {
+        let decoded = match prefetched.take() {
+            Some(handle) => handle
+                .join()
+                .unwrap_or_else(|_| Err("audio decode thread panicked".to_string())),
+            None => audio::decode(input),
+        };
+        if index + 1 < opts.inputs.len() {
+            let next = opts.inputs[index + 1].clone();
+            let small =
+                audio::duration_fast(&next).is_some_and(|seconds| seconds <= PREFETCH_MAX_SECONDS);
+            if small {
+                prefetched = Some(std::thread::spawn(move || audio::decode(&next)));
+            }
+        }
+        let (samples, rate) = match decoded {
             Ok(value) => value,
             Err(message) => {
                 emit(Event::Error { message });

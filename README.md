@@ -6,8 +6,8 @@ Local, offline speaker diarization and transcription. A single native Rust
 executable provides both the desktop GUI (iced) and a command-line mode
 (`--cli`). No Python. Network access is limited to downloading models.
 
-**The name comes from HIPAA.** Hippo Transcribe was built for HIPAA-sensitive
-work: audio is processed on your machine, and transcripts never leave it.
+**The name comes from HIPAA.** Audio is processed on your machine, and
+transcripts stay there.
 
 No cloud · No accounts · No telemetry · Audio and transcripts stay on this device.
 

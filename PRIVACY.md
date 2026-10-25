@@ -1,8 +1,8 @@
 # Privacy
 
-Hippo Transcribe is built so sensitive recordings stay on the machine that
-processes them. This document describes exactly what the application stores and
-what it sends over the network.
+Hippo Transcribe processes recordings on the machine where it runs. This
+document describes exactly what the application stores and what it sends over
+the network.
 
 ## What is processed locally
 

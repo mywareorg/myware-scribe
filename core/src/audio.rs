@@ -45,7 +45,12 @@ pub fn decode(path: &Path) -> Result<(Vec<f32>, u32), String> {
         .map_err(|e| format!("decoder: {e}"))?;
 
     let mut sample_rate = track.codec_params.sample_rate.unwrap_or(0);
-    let mut mono: Vec<f32> = Vec::new();
+    // Pre-allocate from container metadata: avoiding repeated growth copies is
+    // a measurable win on hour-long files.
+    let mut mono: Vec<f32> = Vec::with_capacity(track.codec_params.n_frames.unwrap_or(0) as usize);
+    // Reuse one conversion buffer across packets instead of allocating per
+    // packet (a one-hour MP3 is ~140k packets).
+    let mut sample_buffer: Option<SampleBuffer<f32>> = None;
 
     loop {
         let packet = match format.next_packet() {
@@ -67,12 +72,17 @@ pub fn decode(path: &Path) -> Result<(Vec<f32>, u32), String> {
                 }
                 let frames = buf.frames();
                 let channels = spec.channels.count();
-                let mut sbuf = SampleBuffer::<f32>::new(frames as u64, spec);
+                let needed = frames * channels;
+                let mut sbuf = match sample_buffer.take() {
+                    Some(buffer) if buffer.capacity() >= needed => buffer,
+                    _ => SampleBuffer::<f32>::new(frames as u64, spec),
+                };
                 sbuf.copy_interleaved_ref(buf);
                 let inter = sbuf.samples();
                 if channels == 1 {
                     mono.extend_from_slice(&inter[..frames]);
                 } else {
+                    mono.reserve(frames);
                     for frame in 0..frames {
                         let mut sum = 0.0f32;
                         for channel in 0..channels {
@@ -81,6 +91,7 @@ pub fn decode(path: &Path) -> Result<(Vec<f32>, u32), String> {
                         mono.push(sum / channels as f32);
                     }
                 }
+                sample_buffer = Some(sbuf);
             }
             Err(SymphoniaError::DecodeError(_)) => continue,
             Err(e) => return Err(format!("decode: {e}")),
@@ -98,21 +109,27 @@ pub fn decode(path: &Path) -> Result<(Vec<f32>, u32), String> {
 }
 
 fn resample(input: &[f32], in_rate: u32, out_rate: u32) -> Result<Vec<f32>, String> {
-    let chunk = 1024;
+    // A larger chunk cuts FFT setup overhead; 4096 frames is ~93 ms at 44.1 kHz.
+    let chunk = 4096;
     let mut resampler =
         rubato::FftFixedInOut::<f32>::new(in_rate as usize, out_rate as usize, chunk, 1)
             .map_err(|e| format!("resampler: {e}"))?;
 
     let mut output = Vec::with_capacity(input.len() * out_rate as usize / in_rate as usize + chunk);
+    // Reuse one input block for the whole file.
+    let mut block = vec![0.0f32; resampler.input_frames_next()];
     let mut pos = 0;
     while pos < input.len() {
         let need = resampler.input_frames_next();
-        let mut block = vec![0.0f32; need];
+        if block.len() < need {
+            block.resize(need, 0.0);
+        }
+        block[..need].fill(0.0);
         let avail = (input.len() - pos).min(need);
         block[..avail].copy_from_slice(&input[pos..pos + avail]);
         pos += avail;
         let res = resampler
-            .process(&[block], None)
+            .process(&[&block[..need]], None)
             .map_err(|e| format!("resample: {e}"))?;
         output.extend_from_slice(&res[0]);
     }
@@ -158,6 +175,7 @@ pub fn waveform(path: &Path, buckets: usize) -> Result<(f64, Vec<f32>), String> 
     let mut chunk_frames: usize = 0;
     let mut chunk_sq: f64 = 0.0;
     let mut chunks: Vec<f32> = Vec::new();
+    let mut sample_buffer: Option<SampleBuffer<f32>> = None;
 
     loop {
         let packet = match format.next_packet() {
@@ -179,7 +197,11 @@ pub fn waveform(path: &Path, buckets: usize) -> Result<(f64, Vec<f32>), String> 
                 }
                 let frames = buf.frames();
                 let channels = spec.channels.count();
-                let mut sbuf = SampleBuffer::<f32>::new(frames as u64, spec);
+                let needed = frames * channels;
+                let mut sbuf = match sample_buffer.take() {
+                    Some(buffer) if buffer.capacity() >= needed => buffer,
+                    _ => SampleBuffer::<f32>::new(frames as u64, spec),
+                };
                 sbuf.copy_interleaved_ref(buf);
                 let inter = sbuf.samples();
                 // One RMS bucket per ~10 ms of audio.
@@ -203,6 +225,7 @@ pub fn waveform(path: &Path, buckets: usize) -> Result<(f64, Vec<f32>), String> 
                         chunk_frames = 0;
                     }
                 }
+                sample_buffer = Some(sbuf);
             }
             Err(SymphoniaError::DecodeError(_)) => continue,
             Err(e) => return Err(format!("decode: {e}")),
@@ -317,9 +340,9 @@ pub fn duration_fast(path: &Path) -> Option<f64> {
     Some(frames as f64 / rate as f64)
 }
 
+/// Duration from container metadata only. Callers must not fall back to a full
+/// decode: the pipeline reports the real duration once it has decoded the file,
+/// and decoding twice per file was the main avoidable cost.
 pub fn duration(path: &Path) -> Result<f64, String> {
-    if let Some(seconds) = duration_fast(path) {
-        return Ok(seconds);
-    }
-    probe(path, 1).map(|(d, _)| d)
+    duration_fast(path).ok_or_else(|| "duration is not in the container metadata".to_string())
 }
