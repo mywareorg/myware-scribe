@@ -290,6 +290,7 @@ pub enum Message {
     ClosePaywall,
     LockedPreset,
     LockedSpeakers,
+    LockedImport,
     PurchasePro,
     RestorePro,
     StartTrial,
@@ -2029,6 +2030,14 @@ impl App {
                 ));
                 Task::none()
             }
+            Message::LockedImport => {
+                self.paywall_open = true;
+                self.toast = Some((
+                    "Import and editing is a Pro feature".to_string(),
+                    Instant::now(),
+                ));
+                Task::none()
+            }
             Message::LockedSpeakers => {
                 self.paywall_open = true;
                 self.toast = Some((
@@ -2646,6 +2655,15 @@ impl App {
                         self.toast = Some(("No output file yet".to_string(), Instant::now()));
                     }
                 }
+                Task::none()
+            }
+            Message::ImportChoice(kind) if !self.can(license::Feature::Editing) => {
+                let _ = kind;
+                self.paywall_open = true;
+                self.toast = Some((
+                    "Import and editing is a Pro feature".to_string(),
+                    Instant::now(),
+                ));
                 Task::none()
             }
             Message::ImportChoice(kind) => match kind {
@@ -4520,13 +4538,30 @@ impl App {
             )
         };
 
-        let import_picker: Element<Message> =
+        let import_picker: Element<Message> = if self.can(license::Feature::Editing) {
             pick_list(ImportKind::ALL, None::<ImportKind>, Message::ImportChoice)
                 .placeholder("Import")
                 .style(ink_pick(scheme.ink))
                 .handle(caret_handle(false))
                 .width(Length::Fixed(126.0))
-                .into();
+                .into()
+        } else {
+            stack![
+                pick_list(ImportKind::ALL, None::<ImportKind>, Message::ImportChoice)
+                    .placeholder("Import")
+                    .style(greyed_pick(scheme))
+                    .handle(caret_handle(false))
+                    .width(Length::Fixed(126.0)),
+                mouse_area(
+                    container(horizontal_space())
+                        .width(Length::Fill)
+                        .height(Length::Fill),
+                )
+                .interaction(mouse::Interaction::Pointer)
+                .on_press(Message::LockedImport),
+            ]
+            .into()
+        };
 
         let clear_button = self.tip(
             action(icon(ICON_TRASH, 15.0))
