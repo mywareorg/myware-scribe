@@ -1720,7 +1720,9 @@ impl App {
                 self.view_error = None;
                 self.save_queue();
                 self.toast = Some(("Queued for transcription".to_string(), Instant::now()));
-                if !matches!(self.status, Status::Running) {
+                if !matches!(self.status, Status::Running)
+                    && self.can(license::Feature::Batch)
+                {
                     self.begin_batch(false);
                 }
                 Task::none()
@@ -3818,12 +3820,14 @@ impl App {
                     self.eta_shown = None;
                     self.toast = None;
                     self.save_queue();
-                    // Files added while a run was active are picked up as a
-                    // follow-up pass without prompting.
-                    if self
-                        .queue
-                        .iter()
-                        .any(|item| matches!(item.status, ItemStatus::Pending))
+                    // Pro chains a follow-up pass for files queued during the
+                    // run. The free tier stops after one item and waits for a
+                    // manual Transcribe.
+                    if self.can(license::Feature::Batch)
+                        && self
+                            .queue
+                            .iter()
+                            .any(|item| matches!(item.status, ItemStatus::Pending))
                     {
                         self.begin_batch(true);
                     } else if self.has_results() {
