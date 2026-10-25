@@ -304,9 +304,6 @@ pub enum Message {
     WaveZoom(f32),
     HelpChoice(HelpKind),
     CloseHelp,
-    FeaturePrev,
-    FeatureNext,
-    FeatureSlide(usize),
     Noop,
     OpenSummary,
     SmsToggled(bool),
@@ -1856,19 +1853,6 @@ impl App {
                 if self.rename_open || self.line_edit.is_some() || self.settings_open {
                     return Task::none();
                 }
-                if self.feature_deck_nav_active() {
-                    if delta < 0 {
-                        self.feature_slide = if self.feature_slide == 0 {
-                            FEATURE_DECK.len() - 1
-                        } else {
-                            self.feature_slide - 1
-                        };
-                    } else if delta > 0 {
-                        self.feature_slide = (self.feature_slide + 1) % FEATURE_DECK.len();
-                    }
-                    self.feature_slide_at = Instant::now();
-                    return Task::none();
-                }
                 Self::focus_probe()
                     .map(move |focused| Message::SelectRelativeChecked(delta, focused))
             }
@@ -2191,25 +2175,6 @@ impl App {
                 self.help_open = None;
                 Task::none()
             }
-            Message::FeaturePrev => {
-                self.feature_slide = if self.feature_slide == 0 {
-                    FEATURE_DECK.len() - 1
-                } else {
-                    self.feature_slide - 1
-                };
-                self.feature_slide_at = Instant::now();
-                Task::none()
-            }
-            Message::FeatureNext => {
-                self.feature_slide = (self.feature_slide + 1) % FEATURE_DECK.len();
-                self.feature_slide_at = Instant::now();
-                Task::none()
-            }
-            Message::FeatureSlide(index) => {
-                self.feature_slide = index.min(FEATURE_DECK.len() - 1);
-                self.feature_slide_at = Instant::now();
-                Task::none()
-            }
             Message::Noop => Task::none(),
             Message::Escape => {
                 if self.delete_confirm {
@@ -2251,19 +2216,6 @@ impl App {
             }
             Message::SeekBy(delta) => {
                 if self.rename_open || self.line_edit.is_some() || self.settings_open {
-                    return Task::none();
-                }
-                if self.feature_deck_nav_active() {
-                    if delta < 0.0 {
-                        self.feature_slide = if self.feature_slide == 0 {
-                            FEATURE_DECK.len() - 1
-                        } else {
-                            self.feature_slide - 1
-                        };
-                    } else if delta > 0.0 {
-                        self.feature_slide = (self.feature_slide + 1) % FEATURE_DECK.len();
-                    }
-                    self.feature_slide_at = Instant::now();
                     return Task::none();
                 }
                 Self::focus_probe().map(move |focused| Message::SeekByChecked(delta, focused))
@@ -2787,7 +2739,7 @@ impl App {
                 Task::none()
             }
             Message::Tick => {
-                if self.feature_deck_nav_active() {
+                if self.feature_deck_auto_advance() {
                     if self.feature_slide_at.elapsed() >= Duration::from_secs(6) {
                         self.feature_slide = (self.feature_slide + 1) % FEATURE_DECK.len();
                         self.feature_slide_at = Instant::now();
@@ -4190,10 +4142,10 @@ impl App {
         self.shows(license::Audience::FreeOnly) && self.shown_lines().is_empty()
     }
 
-    /// Arrow keys page the deck only when no dialog owns the keystroke.
-    fn feature_deck_nav_active(&self) -> bool {
+    /// Auto-advance the deck whenever it is on screen and no dialog owns the
+    /// window.
+    fn feature_deck_auto_advance(&self) -> bool {
         self.feature_deck_visible()
-            && !matches!(self.status, Status::Running)
             && self.help_open.is_none()
             && !self.paywall_open
             && !self.settings_open
@@ -4241,49 +4193,11 @@ impl App {
         ]
         .spacing(theme::SPACE_SM);
 
-        let back = action(
-            row![
-                icon(ICON_CHEVRON_LEFT, 12.0),
-                text("Back").size(theme::TEXT_XS),
-            ]
-            .spacing(theme::SPACE_XS)
-            .align_y(iced::Alignment::Center),
-        )
-        .on_press(Message::FeaturePrev)
-        .style(pill_button_secondary);
-
-        let next = action(
-            row![
-                text("Next").size(theme::TEXT_XS),
-                icon(ICON_CHEVRON_RIGHT, 12.0),
-            ]
-            .spacing(theme::SPACE_XS)
-            .align_y(iced::Alignment::Center),
-        )
-        .on_press(Message::FeatureNext)
-        .style(pill_button_secondary);
-
-        let mut dots = row![]
-            .spacing(theme::SPACE_2XS)
-            .align_y(iced::Alignment::Center);
-        for dot_index in 0..FEATURE_DECK.len() {
-            dots = dots.push(feature_dot(dot_index, index, accent, scheme));
-        }
-
-        let navigation = row![back, horizontal_space(), dots, horizontal_space(), next]
-            .spacing(theme::SPACE_MD)
-            .align_y(iced::Alignment::Center)
-            .width(Length::Fill);
-
-        let footer = column![settings_divider(scheme), navigation]
-            .spacing(theme::SPACE_MD)
-            .width(Length::Fill);
-
+        // The deck advances on a timer; no manual arrows or dots.
         let content = column![
             eyebrow,
             self.feature_vignette(index, accent, &scheme),
             copy,
-            footer,
         ]
         .spacing(theme::SPACE_LG)
         .width(Length::Fill);
@@ -7146,38 +7060,6 @@ fn feature_eyebrow(
     .into()
 }
 
-fn feature_dot(
-    index: usize,
-    current: usize,
-    accent: Color,
-    scheme: Scheme,
-) -> Element<'static, Message> {
-    let active = index == current;
-    let width = if active { 18.0 } else { 6.0 };
-    let fill = if active { accent } else { scheme.border };
-    button(
-        container(horizontal_space())
-            .width(Length::Fixed(width))
-            .height(Length::Fixed(6.0))
-            .style(move |_theme| container::Style {
-                background: Some(fill.into()),
-                border: iced::border::Border {
-                    color: Color {
-                        a: if active { 0.40 } else { 0.0 },
-                        ..accent
-                    },
-                    width: if active { 1.0 } else { 0.0 },
-                    radius: 3.0.into(),
-                },
-                ..container::Style::default()
-            }),
-    )
-    .padding([7, 6])
-    .on_press(Message::FeatureSlide(index))
-    .style(subtle_icon_button)
-    .into()
-}
-
 /// A thin bar whose width is `portion / total` of the available row.
 fn feature_bar(portion: u16, total: u16, color: Color, height: f32) -> Element<'static, Message> {
     let portion = portion.clamp(1, total.saturating_sub(1).max(1));
@@ -7659,8 +7541,6 @@ const ICON_CHECK: char = '\u{f633}';
 const ICON_X: char = '\u{f659}';
 const ICON_CARET_DOWN: char = '\u{f229}';
 const ICON_CARET_UP: char = '\u{f235}';
-const ICON_CHEVRON_LEFT: char = '\u{f284}';
-const ICON_CHEVRON_RIGHT: char = '\u{f285}';
 const ICON_ZOOM_IN: char = '\u{f62c}';
 const ICON_ZOOM_OUT: char = '\u{f62d}';
 const ICON_CLOCK: char = '\u{f293}';
