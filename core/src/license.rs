@@ -450,7 +450,7 @@ impl Provider for DevProvider {
         "dev"
     }
     fn price(&self) -> Option<String> {
-        Some("$29.99".to_string())
+        Some("$14.99".to_string())
     }
     fn purchase(&mut self) -> PurchaseState {
         match Self::forced() {
@@ -480,7 +480,7 @@ pub fn provider() -> Box<dyn Provider> {
 }
 
 /// Display price used before a store client is wired up.
-pub const FALLBACK_PRICE: &str = "$29.99";
+pub const FALLBACK_PRICE: &str = "$14.99";
 
 #[cfg(test)]
 mod tests {
