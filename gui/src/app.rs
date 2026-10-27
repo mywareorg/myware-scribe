@@ -1321,6 +1321,8 @@ impl App {
         );
 
         let mut actions = row![].spacing(8).align_y(iced::Alignment::Center);
+        let mut secondary = row![].spacing(8).align_y(iced::Alignment::Center);
+        let mut has_secondary = false;
         if self.shows(license::Audience::ProOnly) {
             actions = actions.push(
                 text(format!(
@@ -1352,11 +1354,13 @@ impl App {
                         .style(color_button(scheme.blue, scheme.on_accent)),
                 );
             }
-            actions = actions.push(
+            // Keep restore on its own line so the label never wraps.
+            secondary = secondary.push(
                 action_text("Restore purchase")
                     .on_press(Message::RestorePro)
                     .style(pill_button_secondary),
             );
+            has_secondary = true;
         }
 
         body = body.push(
@@ -1364,6 +1368,13 @@ impl App {
                 .width(Length::Fill)
                 .align_x(iced::Alignment::End),
         );
+        if has_secondary {
+            body = body.push(
+                container(secondary)
+                    .width(Length::Fill)
+                    .align_x(iced::Alignment::End),
+            );
+        }
         body = body.push(
             container(
                 row![
@@ -6362,7 +6373,7 @@ impl App {
                     weight: font::Weight::Bold,
                     ..Font::DEFAULT
                 }),
-                text("Private, offline transcription & diarization")
+                text("HIPAA inspired offline transcription & diarization")
                     .size(theme::TEXT_XS)
                     .color(scheme.muted),
             ]
