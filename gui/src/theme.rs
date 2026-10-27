@@ -246,7 +246,7 @@ impl Scheme {
             search_active: Color::from_rgba(1.0, 0.72, 0.2, 0.8),
             tip_bg: Color::from_rgb(0.99, 0.99, 1.0),
             tip_text: Color::from_rgb(0.13, 0.13, 0.17),
-            toast_bg: Color::from_rgb(0.357, 0.808, 0.980),
+            toast_bg: Color::from_rgb(0.30, 0.72, 0.42),
             toast_text: Color::from_rgb(0.13, 0.13, 0.17),
             scrim: Color::from_rgba(0.0, 0.0, 0.0, 0.40),
         }
@@ -289,8 +289,8 @@ impl Scheme {
             search_active: Color::from_rgba(0.890, 0.710, 0.353, 0.70),
             tip_bg: Color::from_rgb(0.114, 0.124, 0.145),
             tip_text: Color::from_rgb(0.890, 0.902, 0.925),
-            toast_bg: Color::from_rgb(0.125, 0.216, 0.275),
-            toast_text: Color::from_rgb(0.910, 0.922, 0.941),
+            toast_bg: Color::from_rgb(0.302, 0.741, 0.475),
+            toast_text: Color::from_rgb(0.059, 0.071, 0.090),
             scrim: Color::from_rgba(0.0, 0.0, 0.0, 0.64),
         }
     }

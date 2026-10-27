@@ -6107,11 +6107,7 @@ impl App {
         };
         let toast = mouse_area(
             container(text(message.clone()).size(13))
-                .width(Length::Fill)
-                .height(Length::Fixed(52.0))
-                .center_x(Length::Fill)
-                .center_y(Length::Fixed(52.0))
-                .padding([0, 14])
+                .padding([8, 14])
                 .style(move |_theme| container::Style {
                     background: Some(scheme.toast_bg.into()),
                     text_color: Some(scheme.toast_text),
@@ -6124,8 +6120,9 @@ impl App {
         let overlay = container(toast)
             .width(Length::Fill)
             .height(Length::Fill)
+            .align_x(iced::Alignment::End)
             .align_y(iced::Alignment::Start)
-            .padding([20, 20]);
+            .padding(20);
         stack![base, overlay].into()
     }
 
