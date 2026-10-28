@@ -1,0 +1,3 @@
+Package/Identity/Name	SeanWu.HippoTranscribe
+Package/Identity/Publisher	CN=6862352A-51D9-40F2-9242-0F769B2F87AB
+Package/Properties/PublisherDisplayName	Sean Wu
