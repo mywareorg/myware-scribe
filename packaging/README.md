@@ -33,6 +33,13 @@ run the same signing step on its own:
 
     .\scripts\sign-msix.ps1 -Msix dist\hippo-transcribe-0.1.0-windows-x64.msix
 
+Installing needs the certificate in the machine store, because
+`Add-AppxPackage` validates in the deployment service rather than the caller's
+profile. `scripts/install-msix.ps1` re-launches itself through UAC, imports the
+certificate there, and installs the newest package:
+
+    .\scripts\install-msix.ps1
+
 When a package will not install and the status is not `Valid`,
 `scripts/check-msix.ps1` prints the manifest publisher, the certificate that
 actually signed the file, whether that certificate is trusted, and the exact
