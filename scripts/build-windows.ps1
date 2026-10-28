@@ -321,6 +321,16 @@ if ($useGpu) {
     Write-Step "Configuring CMake with Ninja for the Vulkan build"
     $env:CMAKE_GENERATOR = "Ninja"
     Write-Host "  CMAKE_GENERATOR=$env:CMAKE_GENERATOR" -ForegroundColor DarkGray
+
+    # ggml builds its Vulkan shader generator as a nested CMake project. On this
+    # toolchain the compiler identification step inside that project emits an
+    # /Fd with an empty file name, and cl rejects it with "Cannot open compiler
+    # generated file: ''". Emptying the debug flag sets keeps /Zi and /Fd out of
+    # that try-compile; nothing here is built as Debug.
+    $env:CMAKE_C_FLAGS_DEBUG = ""
+    $env:CMAKE_CXX_FLAGS_DEBUG = ""
+    $env:CMAKE_EXE_LINKER_FLAGS_DEBUG = ""
+
     Reset-CmakeGenerator -Root $root -Generator "Ninja"
 }
 
@@ -350,6 +360,8 @@ try {
             throw "$command was not found. Use a machine with the Visual Studio C++ workload and the Rust MSVC toolchain."
         }
     }
+    Write-Host ("  cl: " + $clPath) -ForegroundColor DarkGray
+    Write-Host ("  cmake: " + (Get-Command cmake.exe).Source + " " + ((& cmake --version) | Select-Object -First 1)) -ForegroundColor DarkGray
 
     $hostLine = (& rustc -vV) | Where-Object { $_ -like "host:*" } | Select-Object -First 1
     if ($hostLine -notmatch "windows-msvc") {
