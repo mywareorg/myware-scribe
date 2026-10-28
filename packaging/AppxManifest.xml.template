@@ -3,18 +3,20 @@
   Rendered by scripts/build-windows.ps1 -Msix from packaging/identity.json.
   Do not hand-edit the generated copy; edit this template instead.
 
-  uap10:RuntimeBehavior="win32App" plus the runFullTrust capability is the
-  desktop bridge for a plain Win32 executable. mediumIL keeps the process at the
+  EntryPoint="Windows.FullTrustApplication" plus the runFullTrust capability is
+  the desktop bridge for a plain Win32 executable, and the process runs at the
   same integrity level the loose .exe has, so file access and the sherpa DLLs
-  load unchanged. A win32App application must not declare EntryPoint; makeappx
-  rejects it with 80080204.
+  load unchanged.
+
+  Do not add uap10:RuntimeBehavior="win32App" here. makeappx rejects that value
+  alongside EntryPoint (80080204) and rejects Executable without EntryPoint, and
+  older SDKs have no value that satisfies both.
 -->
 <Package
   xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
   xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
-  xmlns:uap10="http://schemas.microsoft.com/appx/manifest/uap/windows10/10"
   xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
-  IgnorableNamespaces="uap uap10 rescap">
+  IgnorableNamespaces="uap rescap">
 
   <Identity
     Name="{{PackageName}}"
@@ -44,8 +46,7 @@
     <Application
       Id="{{ApplicationId}}"
       Executable="hippo-transcribe.exe"
-      uap10:TrustLevel="mediumIL"
-      uap10:RuntimeBehavior="win32App">
+      EntryPoint="Windows.FullTrustApplication">
       <uap:VisualElements
         DisplayName="{{DisplayName}}"
         Description="{{Description}}"
