@@ -42,7 +42,11 @@ function Enter-DevEnvironment {
     # that aborts the script even when the tool succeeded.
     $stdoutFile = [System.IO.Path]::GetTempFileName()
     $stderrFile = [System.IO.Path]::GetTempFileName()
-    $commandLine = '""{0}" -arch=x64 -host_arch=x64 >nul && set > "{1}" 2> "{2}"' -f $cmd, $stdoutFile, $stderrFile
+    # cmd /c strips the first and last quote off the command line when it holds
+    # more than two quotes, so the string must start with a spare quote and end
+    # with a character that is not one. Ending on `echo ok` keeps the closing
+    # quote of the last redirect intact.
+    $commandLine = '""{0}" -arch=x64 -host_arch=x64 >nul && (set > "{1}" 2> "{2}") && echo ok' -f $cmd, $stdoutFile, $stderrFile
     $null = & cmd.exe /c $commandLine
     $code = $LASTEXITCODE
     $lines = @()
