@@ -548,7 +548,24 @@ try {
             Join-Path $root "packaging\identity.json"
         }
 
-        $msix = New-MsixPackage -Root $root -Stage $stage -OutRoot $outRoot -Name $name -Version $releaseVersion -IdentityFile $identityFile
+        # Splat the arguments and dump the effective signature: a parameter
+        # binding failure here is otherwise invisible, since the trap reports
+        # the call site rather than the offending parameter.
+        $packArgs = @{
+            Root         = $root
+            Stage        = $stage
+            OutRoot      = $outRoot
+            Name         = $name
+            Version      = $releaseVersion
+            IdentityFile = $identityFile
+        }
+        $packSignature = (Get-Command New-MsixPackage).Parameters.GetEnumerator() |
+            Sort-Object Key |
+            ForEach-Object { "{0}:{1}" -f $_.Key, $_.Value.ParameterType.Name }
+        Write-Host ("  New-MsixPackage -> " + ($packSignature -join " ")) -ForegroundColor DarkGray
+        Write-Host ("  packing args -> " + ($packArgs.GetEnumerator() | Sort-Object Key | ForEach-Object { "$($_.Key)=$($_.Value)" } -join " | ")) -ForegroundColor DarkGray
+
+        $msix = New-MsixPackage @packArgs
 
         if ($Sign -or $CertificatePath) {
             if (-not $CertificatePath) {
