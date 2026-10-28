@@ -80,6 +80,32 @@ function Test-CertInStore {
     return [bool]$found
 }
 
+# PowerShell's Get-AuthenticodeSignature collapses every failure into
+# UnknownError. signtool reports the failing step and a Win32 code, which is
+# what actually says whether the chain or the file digest is at fault.
+function Get-SignToolReport {
+    param([Parameter(Mandatory = $true)][string]$Package)
+
+    $signtool = Resolve-SdkTool -Name "signtool.exe"
+    if (-not $signtool) {
+        return [pscustomobject]@{ Code = $null; Lines = @() }
+    }
+
+    # Native stderr must not be merged into the pipeline while
+    # ErrorActionPreference is Stop: PowerShell 5.1 turns it into a
+    # terminating error even when the tool itself succeeded.
+    $previous = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        $lines = & $signtool verify /pa /v $Package 2>&1 | ForEach-Object { "$_" }
+        $code = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previous
+    }
+
+    return [pscustomobject]@{ Code = $code; Lines = @($lines) }
+}
+
 if ($Msix) {
     $packagePath = Resolve-RepoPath $Msix
     if (-not (Test-Path $packagePath)) { throw "Package not found: $packagePath" }
@@ -87,6 +113,7 @@ if ($Msix) {
 } else {
     $distPath = Resolve-RepoPath $Dist
     $packages = @(Get-ChildItem -Path $distPath -Filter *.msix -Recurse -ErrorAction SilentlyContinue |
+        Where-Object { $_.FullName -notmatch 'msix-probe' } |
         Sort-Object LastWriteTime -Descending)
     if ($packages.Count -eq 0) {
         throw "No .msix under $distPath. Build one first, or pass -Msix."
@@ -126,6 +153,19 @@ foreach ($package in $packages) {
         Write-Host "  Subject = publisher: $(if ($subjectMatches) { 'yes' } else { 'no' })"
     }
 
+    $report = Get-SignToolReport -Package $package.FullName
+    $signToolError = $null
+    if ($report.Lines.Count -gt 0) {
+        Write-Host "  signtool verify:    $(if ($report.Code -eq 0) { 'passed' } else { "failed (exit $($report.Code))" })"
+        foreach ($line in $report.Lines) {
+            if ($line -match 'SignTool Error|Error: |0x[0-9A-Fa-f]{8}') {
+                $trimmed = $line.Trim()
+                if (-not $signToolError) { $signToolError = $trimmed }
+                Write-Host "    $trimmed"
+            }
+        }
+    }
+
     $verdict = @()
     if ($signature.Status -eq "Valid") {
         $verdict += "OK"
@@ -153,10 +193,27 @@ foreach ($package in $packages) {
             $verdict += "Fix: import the certificate that signed the package into Cert:\CurrentUser\TrustedPeople,"
             $verdict += "     or re-run .\scripts\make-test-cert.ps1 without -NoTrust and sign again."
         }
+    } elseif ($signToolError -match '0x800B0109|0x800B010A|not trusted|certificate chain') {
+        # The certificate is in a user store, but Appx signature validation
+        # builds the chain to a root. A self-signed certificate is its own
+        # root, so it also has to be trusted as one.
+        $verdict += "FAIL"
+        $verdict += "The signature chain does not lead to a trusted root."
+        $cer = Resolve-RepoPath $CerPath
+        if (Test-Path $cer) {
+            $verdict += "Fix: Import-Certificate -FilePath `"$cer`" -CertStoreLocation Cert:\CurrentUser\Root"
+            $verdict += "     Windows shows a security prompt; accept it, then run this script again."
+        } else {
+            $verdict += "Fix: import the signing certificate into Cert:\CurrentUser\Root as well as TrustedPeople."
+        }
+    } elseif ($signToolError -match '0x80091007|0x80096010|0xA000000C') {
+        $verdict += "FAIL"
+        $verdict += "The file digest does not match the signature, so the package changed after signing."
+        $verdict += "Fix: sign the current file: .\scripts\sign-msix.ps1 -Msix `"$($package.FullName)`""
     } else {
         $verdict += "FAIL"
         $verdict += "The certificate is trusted but the signature is still $($signature.Status)."
-        $verdict += "Common causes: the file was modified after signing, or the certificate has expired."
+        if ($signToolError) { $verdict += "signtool: $signToolError" }
         $verdict += "Fix: re-sign the package with .\scripts\sign-msix.ps1."
     }
 
