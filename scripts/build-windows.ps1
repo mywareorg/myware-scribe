@@ -64,14 +64,14 @@ param(
     [string]$CertificatePassword,
     # Run the Windows App Certification Kit against the finished package.
     [switch]$Wack,
-    # Vulkan + OpenMP acceleration. Needs the Vulkan SDK installed; pass
-    # -Gpu:$false for a CPU-only build.
-    [bool]$Gpu = $true
+    # Vulkan + OpenMP acceleration. Off by default for MSIX builds and enabled
+    # automatically for local builds when the Vulkan SDK is present; pass -Gpu
+    # to force it (and fail loudly if the SDK is missing).
+    [switch]$Gpu
 )
 
 $ErrorActionPreference = "Stop"
 
-$featureArgs = if ($Gpu) { @("--features", "gpu") } else { @() }
 Set-StrictMode -Version Latest
 
 # PowerShell 7.3+ can turn native stderr into a terminating error. We check
@@ -81,6 +81,34 @@ if (Test-Path variable:PSNativeCommandUseErrorActionPreference) {
 }
 
 . (Join-Path $PSScriptRoot "windows-env.ps1")
+
+# The gpu feature compiles whisper against Vulkan, which needs the SDK at build
+# time and a Vulkan-capable driver at run time. A Store package cannot assume
+# the latter, so -Msix stays CPU-only unless -Gpu is passed explicitly.
+$gpuExplicit = $PSBoundParameters.ContainsKey("Gpu")
+$useGpu = $false
+if ($gpuExplicit) {
+    $useGpu = [bool]$Gpu
+} elseif ($Msix) {
+    Write-Step "Packaging for the Store with the CPU-only build"
+} else {
+    $vulkanSdk = Resolve-VulkanSdk
+    if ($vulkanSdk) {
+        $env:VULKAN_SDK = $vulkanSdk
+        $useGpu = $true
+        Write-Step "Vulkan SDK at $vulkanSdk"
+    } else {
+        Write-Warn "Vulkan SDK not found; building CPU-only. Install it for GPU inference, or pass -Gpu to require it."
+    }
+}
+if ($useGpu -and -not $env:VULKAN_SDK) {
+    $vulkanSdk = Resolve-VulkanSdk
+    if (-not $vulkanSdk) {
+        throw "-Gpu needs the Vulkan SDK (VULKAN_SDK). Install it from LunarG, or drop -Gpu for a CPU-only build."
+    }
+    $env:VULKAN_SDK = $vulkanSdk
+}
+$featureArgs = if ($useGpu) { @("--features", "gpu") } else { @() }
 
 function Invoke-Native {
     param(

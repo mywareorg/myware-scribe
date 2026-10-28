@@ -46,6 +46,29 @@ function Enter-DevEnvironment {
     }
 }
 
+function Resolve-VulkanSdk {
+    if ($env:VULKAN_SDK -and (Test-Path (Join-Path $env:VULKAN_SDK "Include\vulkan\vulkan.h"))) {
+        return $env:VULKAN_SDK
+    }
+
+    # The LunarG installer drops a versioned directory; use the newest one,
+    # which is what the installer points VULKAN_SDK at in a fresh shell.
+    $roots = @(
+        "C:\VulkanSDK",
+        "${env:ProgramFiles}\VulkanSDK",
+        "${env:ProgramFiles(x86)}\VulkanSDK"
+    ) | Where-Object { $_ -and (Test-Path $_) }
+    foreach ($root in $roots) {
+        $found = Get-ChildItem -Path $root -Directory -ErrorAction SilentlyContinue |
+            Sort-Object Name -Descending |
+            ForEach-Object { $_.FullName } |
+            Where-Object { Test-Path (Join-Path $_ "Include\vulkan\vulkan.h") } |
+            Select-Object -First 1
+        if ($found) { return $found }
+    }
+    return $null
+}
+
 function Resolve-LibClang {
     if ($env:LIBCLANG_PATH -and (Test-Path (Join-Path $env:LIBCLANG_PATH "libclang.dll"))) {
         return $env:LIBCLANG_PATH
