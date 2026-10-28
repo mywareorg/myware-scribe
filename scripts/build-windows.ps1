@@ -282,8 +282,15 @@ Push-Location $root
 try {
     Remove-Item (Join-Path $root "build-windows.log") -Force -ErrorAction SilentlyContinue
 
-    if (-not (Get-Command cl.exe -ErrorAction SilentlyContinue)) {
-        Enter-DevEnvironment
+    # Always re-enter: a Developer PowerShell may have been opened for x86, and a
+    # Ninja build trusts whichever cl.exe is first on PATH.
+    Enter-DevEnvironment
+    $clPath = (Get-Command cl.exe -ErrorAction SilentlyContinue).Source
+    if (-not $clPath) {
+        throw "cl.exe is not on PATH after entering the Visual Studio environment."
+    }
+    if ($clPath -notmatch 'Host(X64|ARM64)\\x64') {
+        throw "cl.exe resolves to $clPath; this build needs the x64-hosted compiler under HostX64\x64 or HostARM64\x64."
     }
     Add-CMakeIfNeeded
 
