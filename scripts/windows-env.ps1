@@ -32,14 +32,31 @@ function Enter-DevEnvironment {
         throw "VsDevCmd.bat was not found under $vs"
     }
     Write-Step "Entering the Visual Studio developer environment"
+
     # Import the environment into this process. Dot-sourcing Launch-VsDevShell
     # from a function would scope the PATH changes to the function.
-    $commandLine = '""{0}" -arch=x64 -host_arch=x64 >nul && set"' -f $cmd
-    $lines = & cmd.exe /c $commandLine 2>&1
-    if ($LASTEXITCODE -ne 0) {
-        $why = @($lines | Where-Object { $_ -and $_.ToString().Trim() } | Select-Object -First 20) -join " / "
-        throw "VsDevCmd.bat failed with exit code $LASTEXITCODE. Output: $why"
+    #
+    # Both streams are redirected to files rather than merged with 2>&1: in
+    # Windows PowerShell 5.1 a native command's stderr becomes an ErrorRecord as
+    # soon as it joins the pipeline, and with $ErrorActionPreference = "Stop"
+    # that aborts the script even when the tool succeeded.
+    $stdoutFile = [System.IO.Path]::GetTempFileName()
+    $stderrFile = [System.IO.Path]::GetTempFileName()
+    $commandLine = '""{0}" -arch=x64 -host_arch=x64 >nul && set > "{1}" 2> "{2}"' -f $cmd, $stdoutFile, $stderrFile
+    $null = & cmd.exe /c $commandLine
+    $code = $LASTEXITCODE
+    $lines = @()
+    if (Test-Path $stdoutFile) { $lines = @(Get-Content -Path $stdoutFile) }
+    if ($code -ne 0) {
+        $why = @()
+        if (Test-Path $stderrFile) { $why += @(Get-Content -Path $stderrFile) }
+        $why += $lines
+        $why = @($why | Where-Object { $_ -and "$_".Trim() } | Select-Object -First 20) -join " / "
+        Remove-Item $stdoutFile, $stderrFile -Force -ErrorAction SilentlyContinue
+        throw "VsDevCmd.bat failed with exit code $code. Output: $why"
     }
+    Remove-Item $stdoutFile, $stderrFile -Force -ErrorAction SilentlyContinue
+
     foreach ($line in $lines) {
         if ($line -match '^([^=]+)=(.*)$') {
             [Environment]::SetEnvironmentVariable($matches[1], $matches[2], 'Process')
