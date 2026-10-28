@@ -17,7 +17,8 @@ transcripts stay there.
 
 ** Technical
 Local speaker diarization and transcription. Network access is limited to the
-one-time model download.
+one-time model download. A Pro purchase or restore additionally asks the store
+whether the add-on is owned; no audio, transcript, filename or path is sent.
 
 ** Free tier
 Balanced model. One speaker. Full-length transcripts, unlimited files. No

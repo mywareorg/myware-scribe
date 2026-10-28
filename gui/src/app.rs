@@ -85,7 +85,7 @@ const FEATURE_DECK: [FeatureSlide; 5] = [
         eyebrow: "WHY HIPPO",
         title: "Hippo Transcribe is HIPAA inspired.",
         body: "Open source. Built for doctors and medical professionals. \
-               Hippo works offline and never phones home.",
+               Your recordings stay on this machine.",
     },
 ];
 
@@ -6690,7 +6690,7 @@ impl App {
                             text("Transcription: whisper.cpp.")
                                 .size(theme::TEXT_SM)
                                 .color(scheme.muted),
-                            text("Runs fully offline; models download once.")
+                            text("Runs offline once the models are downloaded.")
                                 .size(theme::TEXT_SM)
                                 .color(scheme.muted),
                         ]
@@ -6704,6 +6704,9 @@ impl App {
                                 .size(theme::TEXT_SM)
                                 .color(scheme.text),
                             text("Audio and transcripts stay on this device.")
+                                .size(theme::TEXT_SM)
+                                .color(scheme.muted),
+                            text("Once models are installed the free tier makes no network requests.")
                                 .size(theme::TEXT_SM)
                                 .color(scheme.muted),
                         ]

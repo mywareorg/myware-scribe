@@ -12,15 +12,24 @@ behavior is the proof. Do not claim certification or literal compliance.
 - **Proof:** No cloud · No accounts · No telemetry · Audio and transcripts stay
   on this device.
 - **Positioning:** Hippo Transcribe is HIPAA inspired. Built to serve the needs of doctors
-  and medical professionals, Hippo works offline and will never phone home.
+  and medical professionals, Hippo keeps recordings on the machine that made
+  them.
 - **Technical:** Local diarization and transcription. Network access is limited
   to the one-time model download.
+- **Store builds:** A Pro purchase or restore asks the store whether the add-on
+  is owned. No audio, transcript, filename or path is part of that request.
 
 ## Banned claims
 
 Do not use: HIPAA compliant, HIPAA certified, guaranteed private, unhackable,
 zero risk, or any wording that implies a certification, audit or Business
 Associate Agreement.
+
+Also banned, because a store build contacts the store to confirm a Pro purchase:
+"never phones home", "100% offline", "works without any network access ever", and
+any claim that the application makes no network requests at all. Say what is
+true instead — "your recordings never leave this machine", "offline after the
+models are installed".
 
 ## Product split
 
