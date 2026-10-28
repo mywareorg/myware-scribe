@@ -141,6 +141,20 @@ if ($useGpu -and $Msix) {
 }
 $featureArgs = if ($useGpu) { @("--features", "gpu") } else { @() }
 
+if ($useGpu) {
+    # ggml is configured with CMake, and its Vulkan shader generator is a nested
+    # ExternalProject that inherits the parent generator. Under a Visual Studio
+    # generator the parent has no CMAKE_C_COMPILER at configure time, so the nested
+    # configure fails with "No CMAKE_C_COMPILER could be found." Ninja sets the
+    # compiler explicitly, and is the configuration ggml is tested against.
+    if (-not (Get-Command ninja.exe -ErrorAction SilentlyContinue)) {
+        throw "Ninja is required for the Vulkan build; it ships with Visual Studio under CommonExtensions\Microsoft\CMake\Ninja."
+    }
+    Write-Step "Configuring CMake with Ninja for the Vulkan build"
+    $env:CMAKE_GENERATOR = "Ninja"
+    Reset-CmakeGenerator -Root $root -Generator "Ninja"
+}
+
 function Invoke-Native {
     param(
         [Parameter(Mandatory = $true)][string]$FilePath,

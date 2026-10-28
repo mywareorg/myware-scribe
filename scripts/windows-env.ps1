@@ -46,6 +46,40 @@ function Enter-DevEnvironment {
     }
 }
 
+function Reset-CmakeGenerator {
+    param(
+        [Parameter(Mandatory = $true)][string]$Root,
+        [Parameter(Mandatory = $true)][string]$Generator
+    )
+
+    # CMake refuses to reuse a build directory that was configured with another
+    # generator, and cargo keeps one whisper-rs-sys build directory per feature
+    # set. A previous Visual Studio configure therefore blocks a Ninja one.
+    $buildRoot = Join-Path $Root "target\release\build"
+    if (-not (Test-Path $buildRoot)) { return }
+
+    $seen = @{}
+    $caches = Get-ChildItem -Path $buildRoot -Recurse -Filter "CMakeCache.txt" -ErrorAction SilentlyContinue
+    foreach ($cache in $caches) {
+        if ($cache.FullName -notmatch "whisper-rs-sys-") { continue }
+        $line = Get-Content -Path $cache.FullName -ErrorAction SilentlyContinue |
+            Where-Object { $_ -like "CMAKE_GENERATOR:INTERNAL=*" } |
+            Select-Object -First 1
+        if (-not $line) { continue }
+        $recorded = ($line -split "=", 2)[1]
+        if ($recorded -eq $Generator) { continue }
+
+        $marker = "whisper-rs-sys-"
+        $index = $cache.FullName.IndexOf($marker)
+        $segment = ($cache.FullName.Substring($index) -split "\\")[0]
+        $directory = $cache.FullName.Substring(0, $index) + $segment
+        if ($seen.ContainsKey($directory)) { continue }
+        $seen[$directory] = $true
+        Write-Step "Discarding the $recorded configure in $segment"
+        Remove-Item -Path $directory -Recurse -Force
+    }
+}
+
 function Resolve-VulkanSdk {
     if ($env:VULKAN_SDK -and (Test-Path (Join-Path $env:VULKAN_SDK "Include\vulkan\vulkan.h"))) {
         return $env:VULKAN_SDK
