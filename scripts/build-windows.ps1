@@ -74,6 +74,16 @@ $ErrorActionPreference = "Stop"
 
 Set-StrictMode -Version Latest
 
+# A bare throw only prints the message, which hides which statement failed.
+# Print the position and the offending command line instead.
+trap {
+    Write-Host ""
+    Write-Host "Build failed:" -ForegroundColor Red
+    Write-Host $_.InvocationInfo.PositionMessage
+    Write-Host ("  Message: " + $_.Exception.Message)
+    exit 1
+}
+
 # PowerShell 7.3+ can turn native stderr into a terminating error. We check
 # $LASTEXITCODE ourselves, so keep that behavior off when the switch exists.
 if (Test-Path variable:PSNativeCommandUseErrorActionPreference) {
@@ -298,6 +308,13 @@ function Invoke-MsixSigning {
     & $signtool @arguments | Out-Host
     if ($LASTEXITCODE -ne 0) {
         throw "signtool failed with exit code $LASTEXITCODE"
+    }
+
+    # signtool can exit 0 and still leave the package untrusted when the
+    # certificate is not in a trusted store; the Store needs a valid chain.
+    $signature = Get-AuthenticodeSignature -FilePath $Msix
+    if ($signature.Status -ne "Valid") {
+        Write-Warn "The package is signed but its chain is not trusted ($($signature.Status)). Add the certificate to TrustedPeople, or use a real code-signing certificate."
     }
 }
 
