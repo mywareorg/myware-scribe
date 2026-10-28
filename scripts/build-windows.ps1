@@ -96,6 +96,37 @@ trap {
             ("Stack:   " + $_.ScriptStackTrace)
         ) -join "`r`n"
         Add-Content -Path $logPath -Value $detail -Encoding UTF8
+
+        # Attach the build's own explanation. A failed GPU build names the
+        # generator it used, the compiler CMake detected, and the MSBuild or CMake
+        # error, all of which are otherwise buried thousands of lines deep.
+        $repo = Split-Path -Parent $PSScriptRoot
+        $buildLog = Join-Path $repo "build-windows.log"
+        if (Test-Path $buildLog) {
+            $pattern = "CMake Error|CMake Warning|No CMAKE_|CMAKE_C_COMPILER|CMAKE_CXX_COMPILER|CMAKE_GENERATOR|error MSB|error C[0-9]|Generator|compilerid|vulkan-shaders|ninja"
+            $extract = @("", "=== build-windows.log ===")
+            $hits = Select-String -Path $buildLog -Pattern $pattern -ErrorAction SilentlyContinue
+            foreach ($hit in ($hits | Select-Object -First 80)) {
+                $extract += ("{0}: {1}" -f $hit.LineNumber, $hit.Line.Trim())
+            }
+            $extract += @("", "=== last 40 lines ===")
+            $extract += (Get-Content -Path $buildLog -Tail 40 -ErrorAction SilentlyContinue)
+            Add-Content -Path $logPath -Value ($extract -join "`r`n") -Encoding UTF8
+        }
+
+        $configured = Get-ChildItem -Path (Join-Path $repo "target\release\build") -Recurse -Filter "CMakeCache.txt" -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -match "whisper-rs-sys" }
+        if ($configured) {
+            $cacheLines = @("", "=== configure state ===")
+            foreach ($cache in $configured) {
+                $generator = Get-Content -Path $cache.FullName -ErrorAction SilentlyContinue |
+                    Where-Object { $_ -like "CMAKE_GENERATOR:*" } |
+                    Select-Object -First 1
+                $cacheLines += ("{0}`r`n    {1}" -f $cache.FullName, $generator)
+            }
+            Add-Content -Path $logPath -Value ($cacheLines -join "`r`n") -Encoding UTF8
+        }
+
         Write-Host ("  Logged to: " + $logPath) -ForegroundColor DarkGray
     } catch {
         Write-Host "  (could not write the build log)"
@@ -275,6 +306,7 @@ if ($useGpu) {
     }
     Write-Step "Configuring CMake with Ninja for the Vulkan build"
     $env:CMAKE_GENERATOR = "Ninja"
+    Write-Host "  CMAKE_GENERATOR=$env:CMAKE_GENERATOR" -ForegroundColor DarkGray
     Reset-CmakeGenerator -Root $root -Generator "Ninja"
 }
 
