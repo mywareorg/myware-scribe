@@ -81,6 +81,7 @@ trap {
     Write-Host "Build failed:" -ForegroundColor Red
     Write-Host $_.InvocationInfo.PositionMessage
     Write-Host ("  Message: " + $_.Exception.Message)
+    Write-Host ("  Stack:   " + ($_.ScriptStackTrace -replace "`r?`n", " | "))
     exit 1
 }
 
