@@ -1,4 +1,4 @@
-﻿=== Build failed 2026-10-28 15:31:21 ===
+﻿=== Build failed 2026-10-28 15:32:40 ===
 At C:\Users\wuphy\Documents\hippo-transcribe\scripts\windows-env.ps1:56 char:9
 +         throw "VsDevCmd.bat failed with exit code $code. Output: $why ...
 +         ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -10,7 +10,7 @@ at <ScriptBlock>, <No file>: line 1
 === console ===
 **********************
 Windows PowerShell transcript start
-Start time: 20261028153120
+Start time: 20261028153239
 Username: DESKTOP-VLNCP54\wuphy
 RunAs User: DESKTOP-VLNCP54\wuphy
 Configuration Name: 
@@ -29,17 +29,9 @@ SerializationVersion: 1.1.0.1
 ==> Configuring CMake with Ninja for the Vulkan build
   CMAKE_GENERATOR=Ninja
 ==> Discarding the Visual Studio 18 2026 configure in whisper-rs-sys-a4a4abcf5807047e
-    cargo clean -p whisper-rs-sys
-     Removed 0 files
 ==> Entering the Visual Studio developer environment
 PS>TerminatingError(): "VsDevCmd.bat failed with exit code 1. Output: "
 **********************
 Windows PowerShell transcript end
-End time: 20261028153121
+End time: 20261028153240
 **********************
-
-=== configure state ===
-C:\Users\wuphy\Documents\hippo-transcribe\target\release\build\whisper-rs-sys-a4a4abcf5807047e\out\build\CMakeCache.txt
-    CMAKE_GENERATOR:INTERNAL=Visual Studio 18 2026
-C:\Users\wuphy\Documents\hippo-transcribe\target\release\build\whisper-rs-sys-a4a4abcf5807047e\out\build\ggml\src\ggml-vulkan\vulkan-shaders-gen-prefix\src\vulkan-shaders-gen-build\CMakeCache.txt
-    CMAKE_GENERATOR:INTERNAL=Visual Studio 18 2026
