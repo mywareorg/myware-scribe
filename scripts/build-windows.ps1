@@ -321,23 +321,24 @@ if ($useGpu) {
     Write-Step "Configuring CMake with Ninja for the Vulkan build"
     $env:CMAKE_GENERATOR = "Ninja"
     Write-Host "  CMAKE_GENERATOR=$env:CMAKE_GENERATOR" -ForegroundColor DarkGray
-    if (Reset-CmakeGenerator -Root $root -Generator "Ninja") {
-        # cargo clean removes the stale build directory and its fingerprint; the
-        # fingerprint would otherwise tell cargo the build script is up to date.
-        Invoke-Native cargo @("clean", "-p", "whisper-rs-sys")
-    }
+    Reset-CmakeGenerator -Root $root -Generator "Ninja"
 }
 
 Push-Location $root
 try {
     Remove-Item (Join-Path $root "build-windows.log") -Force -ErrorAction SilentlyContinue
 
-    # Always re-enter: a Developer PowerShell may have been opened for x86, and a
-    # Ninja build trusts whichever cl.exe is first on PATH.
-    Enter-DevEnvironment
+    # A Ninja build trusts whichever cl.exe is first on PATH, and a Developer
+    # PowerShell may have been opened for x86. Only re-enter the environment when
+    # the current compiler is missing or hosted on the wrong architecture;
+    # VsDevCmd.bat is slow and fails for reasons of its own.
     $clPath = (Get-Command cl.exe -ErrorAction SilentlyContinue).Source
+    if (-not $clPath -or $clPath -notmatch 'Host(X64|ARM64)\\x64') {
+        Enter-DevEnvironment
+        $clPath = (Get-Command cl.exe -ErrorAction SilentlyContinue).Source
+    }
     if (-not $clPath) {
-        throw "cl.exe is not on PATH after entering the Visual Studio environment."
+        throw "cl.exe is not on PATH; install the Visual Studio C++ workload or run this from a Developer PowerShell."
     }
     if ($clPath -notmatch 'Host(X64|ARM64)\\x64') {
         throw "cl.exe resolves to $clPath; this build needs the x64-hosted compiler under HostX64\x64 or HostARM64\x64."

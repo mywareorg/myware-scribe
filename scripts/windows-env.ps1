@@ -64,6 +64,27 @@ function Enter-DevEnvironment {
     }
 }
 
+function Remove-DirectoryTree {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    # Visual Studio build trees contain TryCompile scratch directories whose full
+    # path runs past MAX_PATH. Remove-Item then reports the misleading
+    # "Could not find a part of the path 'CompilerIdCXX.lastbuildstate'", so hand
+    # the path to .NET with the verbatim prefix, which has no length limit.
+    if (-not (Test-Path -LiteralPath $Path)) { return }
+    $full = [System.IO.Path]::GetFullPath($Path)
+    $verbatim = if ($full.StartsWith('\\?\')) { $full } else { '\\?\' + $full }
+    try {
+        [System.IO.Directory]::Delete($verbatim, $true)
+    } catch {
+        Write-Warn "Could not delete $Path through .NET ($($_.Exception.Message)); falling back to rd"
+        & cmd.exe /c "rd /s /q `"$full`"" | Out-Null
+    }
+    if (Test-Path -LiteralPath $Path) {
+        throw "Could not remove $Path"
+    }
+}
+
 function Reset-CmakeGenerator {
     param(
         [Parameter(Mandatory = $true)][string]$Root,
@@ -74,14 +95,10 @@ function Reset-CmakeGenerator {
     # generator, and cargo keeps one whisper-rs-sys build directory per feature
     # set. A previous Visual Studio configure therefore blocks a Ninja one.
     #
-    # This only reports. Deleting a Visual Studio tree from PowerShell fails on
-    # the TryCompile scratch directories, whose full paths run past MAX_PATH;
-    # Remove-Item reports that as "Could not find a part of the path
-    # 'CompilerIdCXX.lastbuildstate'". The caller runs `cargo clean -p
-    # whisper-rs-sys` instead, which clears the build directory and the
-    # fingerprint that would otherwise keep cargo from rebuilding.
+    # Deleting the build directory alone is not enough: cargo's fingerprint would
+    # still say the build script is up to date and it would never run again.
     $buildRoot = Join-Path $Root "target\release\build"
-    if (-not (Test-Path $buildRoot)) { return $false }
+    if (-not (Test-Path $buildRoot)) { return }
 
     $stale = @()
     foreach ($directory in (Get-ChildItem -Path $buildRoot -Directory -Filter "whisper-rs-sys-*" -ErrorAction SilentlyContinue)) {
@@ -94,9 +111,16 @@ function Reset-CmakeGenerator {
         $recorded = ($line -split "=", 2)[1]
         if ($recorded -eq $Generator) { continue }
         Write-Step "Discarding the $recorded configure in $($directory.Name)"
+        Remove-DirectoryTree -Path $directory.FullName
         $stale += $directory.Name
     }
-    return ($stale.Count -gt 0)
+
+    if ($stale.Count -gt 0) {
+        $fingerprints = Join-Path $Root "target\release\.fingerprint"
+        foreach ($entry in (Get-ChildItem -Path $fingerprints -Directory -Filter "whisper-rs-sys-*" -ErrorAction SilentlyContinue)) {
+            Remove-DirectoryTree -Path $entry.FullName
+        }
+    }
 }
 
 function Resolve-VulkanSdk {
