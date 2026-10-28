@@ -44,3 +44,16 @@ publish-models:
           --header "PRIVATE-TOKEN: $MODELS_UPLOAD_TOKEN" \
           "$CI_API_V4_URL/projects/$project_id/packages/generic/hippo-models/$MODELS_PACKAGE_VERSION/$(basename "$file")"
       done
+
+# Serve PRIVACY.md as the Store listing's privacy policy URL.
+pages:
+  stage: build
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+  script:
+    - mkdir -p public
+    - cp PRIVACY.md public/index.md
+    - cp PRIVACY.md public/privacy.md
+  artifacts:
+    paths:
+      - public

@@ -10,3 +10,13 @@ models/
 
 *.hippo-transcribe.bak
 *.transiel.bak
+
+# Microsoft Store packaging
+*.pfx
+*.p12
+*.cer
+*.msix
+*.appx
+*.msixupload
+*.appxupload
+AppPackages/

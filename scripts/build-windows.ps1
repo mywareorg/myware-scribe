@@ -1,7 +1,8 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-Build Hippo Transcribe for Windows, stage a release folder, and optionally zip it.
+Build Hippo Transcribe for Windows, stage a release folder, and optionally zip it
+or package it as an MSIX for the Microsoft Store.
 
 .DESCRIPTION
 Enters the Visual Studio developer environment (so cl.exe, rc.exe, the Windows
@@ -9,6 +10,12 @@ SDK, and CMake are on PATH), configures the static CRT for the executable,
 stages the sherpa-onnx shared DLLs beside it, builds the release binary, checks
 its runtime dependencies, stages deploy.bat/undeploy.bat/README/LICENSE plus
 the sample audio, and writes a zip with a SHA-256 checksum.
+
+With -Msix the staged binary is also packed into an MSIX: the manifest is
+rendered from packaging/AppxManifest.xml.template and packaging/identity.json,
+and only the executable plus its two runtime DLLs are included. deploy.bat, the
+sample audio and the models stay out; the Store build downloads models on
+first run.
 
 The app loads sherpa-onnx and ONNX Runtime from the shipped DLLs at runtime, so
 only whisper.cpp is compiled locally. Tests run in release mode because the
@@ -22,12 +29,16 @@ Requires:
   - Rust stable MSVC (rustup default stable-x86_64-pc-windows-msvc)
   - LLVM (winget install LLVM.LLVM) unless -SkipBindgen is used
   - CMake (included with the VS C++ workload, or winget install Kitware.CMake)
+  - Windows 10/11 SDK for -Msix (makeappx), -Sign (signtool) and -Wack (appcert)
 
 .EXAMPLE
 powershell -ExecutionPolicy Bypass -File .\scripts\build-windows.ps1
 
 .EXAMPLE
 .\scripts\build-windows.ps1 -SkipTests -Version 0.2.0 -OutDir C:\builds
+
+.EXAMPLE
+.\scripts\build-windows.ps1 -SkipTests -Msix -Sign -CertificatePath C:\keys\hippo-test.pfx -CertificatePassword hunter2
 #>
 [CmdletBinding()]
 param(
@@ -40,6 +51,19 @@ param(
     [switch]$Clean,
     [switch]$NoZip,
     [switch]$SkipModels,
+    # Microsoft Store packaging. Off by default so the portable zip build is
+    # unchanged.
+    [switch]$Msix,
+    # Identity to render into the manifest. Defaults to
+    # packaging/identity.json.
+    [string]$IdentityPath,
+    # Sign the MSIX with a code-signing certificate. Required before
+    # Add-AppxPackage or the certification kit will accept the package.
+    [switch]$Sign,
+    [string]$CertificatePath,
+    [string]$CertificatePassword,
+    # Run the Windows App Certification Kit against the finished package.
+    [switch]$Wack,
     # Vulkan + OpenMP acceleration. Needs the Vulkan SDK installed; pass
     # -Gpu:$false for a CPU-only build.
     [bool]$Gpu = $true
@@ -101,6 +125,174 @@ function Get-CargoMetadata {
         throw "cargo metadata failed with exit code $LASTEXITCODE"
     }
     return ($json | ConvertFrom-Json)
+}
+
+# Store tooling ships with the Windows SDK, which VsDevCmd does not always put
+# on PATH. Fall back to the newest installed kit.
+function Resolve-SdkTool {
+    param([Parameter(Mandatory = $true)][string]$Name)
+
+    $command = Get-Command $Name -ErrorAction SilentlyContinue
+    if ($command) { return $command.Source }
+
+    $kits = @(
+        "${env:ProgramFiles(x86)}\Windows Kits\10\bin",
+        "$env:ProgramFiles\Windows Kits\10\bin"
+    ) | Where-Object { $_ -and (Test-Path $_) }
+    foreach ($kitsRoot in $kits) {
+        $found = Get-ChildItem -Path $kitsRoot -Directory -ErrorAction SilentlyContinue |
+            Sort-Object Name -Descending |
+            ForEach-Object { Join-Path $_.FullName "x64\$Name" } |
+            Where-Object { Test-Path $_ } |
+            Select-Object -First 1
+        if ($found) { return $found }
+    }
+    return $null
+}
+
+# The manifest needs four parts; the crate version only has three.
+function ConvertTo-FourPartVersion {
+    param([Parameter(Mandatory = $true)][string]$Version)
+
+    $parts = @($Version -split '\.')
+    if ($parts.Count -gt 4) {
+        throw "MSIX versions have at most four parts ($Version)"
+    }
+    foreach ($part in $parts) {
+        if ($part -notmatch '^\d+$') {
+            throw "MSIX versions must be numeric ($Version)"
+        }
+    }
+    while ($parts.Count -lt 4) { $parts += "0" }
+    return ($parts -join '.')
+}
+
+function New-MsixPackage {
+    param(
+        [Parameter(Mandatory = $true)][string]$Root,
+        [Parameter(Mandatory = $true)][string]$Stage,
+        [Parameter(Mandatory = $true)][string]$OutRoot,
+        [Parameter(Mandatory = $true)][string]$Name,
+        [Parameter(Mandatory = $true)][string]$Version,
+        [Parameter(Mandatory = $true)][string]$IdentityFile
+    )
+
+    $makeappx = Resolve-SdkTool -Name "makeappx.exe"
+    if (-not $makeappx) {
+        throw "makeappx.exe was not found. Install the Windows 10/11 SDK, or run this from a developer prompt."
+    }
+    if (-not (Test-Path $IdentityFile)) {
+        throw "Identity file not found: $IdentityFile"
+    }
+
+    $identity = Get-Content -Path $IdentityFile -Raw | ConvertFrom-Json
+    foreach ($key in @("packageName", "publisher", "publisherDisplayName", "displayName", "description", "applicationId", "backgroundColor")) {
+        $value = $identity.PSObject.Properties[$key]
+        if (-not $value -or -not $value.Value) {
+            throw "$IdentityFile is missing '$key'"
+        }
+    }
+    if ($identity.publisher -match '^CN=0{8}-') {
+        Write-Warn "The publisher in $IdentityFile is still the placeholder; the Store will reject this package."
+    }
+
+    $layout = Join-Path $OutRoot "$Name-msix\layout"
+    if (Test-Path $layout) { Remove-Item $layout -Recurse -Force }
+    New-Item -ItemType Directory -Path $layout -Force | Out-Null
+
+    # Only the executable and its two runtime DLLs. deploy.bat, the sample audio
+    # and the models are direct-download baggage; the Store build downloads
+    # models on first run instead.
+    Copy-Item (Join-Path $Stage "hippo-transcribe.exe") $layout
+    foreach ($dll in @("sherpa-onnx-c-api.dll", "onnxruntime.dll")) {
+        Copy-Item (Join-Path $Stage $dll) $layout
+    }
+    $assets = Join-Path $layout "Assets"
+    New-Item -ItemType Directory -Path $assets -Force | Out-Null
+    Copy-Item (Join-Path $Root "packaging\assets\*.png") $assets
+
+    $template = Get-Content -Path (Join-Path $Root "packaging\AppxManifest.xml.template") -Raw
+    if (-not $template) {
+        throw "packaging\AppxManifest.xml.template is missing or empty"
+    }
+    $values = [ordered]@{
+        PackageName          = $identity.packageName
+        Publisher            = $identity.publisher
+        PublisherDisplayName = $identity.publisherDisplayName
+        DisplayName          = $identity.displayName
+        Description          = $identity.description
+        ApplicationId        = $identity.applicationId
+        BackgroundColor      = $identity.backgroundColor
+        Version              = (ConvertTo-FourPartVersion -Version $Version)
+    }
+    foreach ($key in $values.Keys) {
+        $template = $template.Replace("{{$key}}", [string]$values[$key])
+    }
+    if ($template -match '\{\{') {
+        throw "The rendered manifest still has placeholders; check packaging\AppxManifest.xml.template"
+    }
+    Set-Content -Path (Join-Path $layout "AppxManifest.xml") -Value $template -Encoding UTF8
+
+    $msix = Join-Path $OutRoot "$Name.msix"
+    if (Test-Path $msix) { Remove-Item $msix -Force }
+    Write-Step "Packing $msix"
+    # Out-Host keeps makeappx's chatter out of the function's return value.
+    & $makeappx pack /d $layout /p $msix /o | Out-Host
+    if ($LASTEXITCODE -ne 0) {
+        throw "makeappx failed with exit code $LASTEXITCODE"
+    }
+
+    $hash = (Get-FileHash $msix -Algorithm SHA256).Hash.ToLowerInvariant()
+    "$hash  $(Split-Path $msix -Leaf)" | Set-Content "$msix.sha256" -Encoding ASCII
+    return $msix
+}
+
+function Invoke-MsixSigning {
+    param(
+        [Parameter(Mandatory = $true)][string]$Msix,
+        [Parameter(Mandatory = $true)][string]$Certificate,
+        [string]$Password
+    )
+
+    $signtool = Resolve-SdkTool -Name "signtool.exe"
+    if (-not $signtool) {
+        throw "signtool.exe was not found. Install the Windows 10/11 SDK."
+    }
+    if (-not (Test-Path $Certificate)) {
+        throw "Certificate not found: $Certificate"
+    }
+
+    $arguments = @("sign", "/fd", "SHA256", "/f", $Certificate)
+    if ($Password) { $arguments += @("/p", $Password) }
+    $arguments += $Msix
+
+    Write-Step "Signing the package"
+    & $signtool @arguments | Out-Host
+    if ($LASTEXITCODE -ne 0) {
+        throw "signtool failed with exit code $LASTEXITCODE"
+    }
+}
+
+function Invoke-Wack {
+    param(
+        [Parameter(Mandatory = $true)][string]$Msix,
+        [Parameter(Mandatory = $true)][string]$ReportPath
+    )
+
+    $appcert = Resolve-SdkTool -Name "appcert.exe"
+    if (-not $appcert) {
+        throw "appcert.exe (Windows App Certification Kit) was not found. Install the Windows 10/11 SDK."
+    }
+
+    Write-Step "Running the Windows App Certification Kit"
+    & $appcert reset | Out-Null
+    # appcert installs the package, then removes it again. The package must be
+    # signed by a certificate this machine trusts.
+    & $appcert test -appxpackagepath $Msix -reportoutputpath $ReportPath | Out-Host
+    if ($LASTEXITCODE -ne 0) {
+        throw "appcert failed with exit code $LASTEXITCODE (report: $ReportPath)"
+    }
+    Write-Host "  WACK report: $ReportPath"
 }
 
 $scriptDir = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
@@ -262,11 +454,46 @@ try {
         "$hash  $(Split-Path $zip -Leaf)" | Set-Content "$zip.sha256" -Encoding ASCII
     }
 
+    $msix = $null
+    if ($Msix -or $Sign -or $Wack -or $CertificatePath) {
+        $identityFile = if ($IdentityPath) {
+            if ([System.IO.Path]::IsPathRooted($IdentityPath)) {
+                $IdentityPath
+            } else {
+                Join-Path $root $IdentityPath
+            }
+        } else {
+            Join-Path $root "packaging\identity.json"
+        }
+
+        $msix = New-MsixPackage -Root $root -Stage $stage -OutRoot $outRoot -Name $name -Version $releaseVersion -IdentityFile $identityFile
+
+        if ($Sign -or $CertificatePath) {
+            if (-not $CertificatePath) {
+                throw "-Sign needs -CertificatePath pointing at a .pfx"
+            }
+            $certificate = if ([System.IO.Path]::IsPathRooted($CertificatePath)) {
+                $CertificatePath
+            } else {
+                Join-Path $root $CertificatePath
+            }
+            Invoke-MsixSigning -Msix $msix -Certificate $certificate -Password $CertificatePassword
+        }
+
+        if ($Wack) {
+            if (-not $CertificatePath) {
+                throw "-Wack needs a signed package; pass -Sign -CertificatePath as well"
+            }
+            Invoke-Wack -Msix $msix -ReportPath (Join-Path $outRoot "$name-wack.xml")
+        }
+    }
+
     Write-Host ""
     Write-Host "Build complete" -ForegroundColor Green
     Write-Host "  Binary: $binary"
     Write-Host "  Stage:  $stage"
     if (-not $NoZip) { Write-Host "  Zip:    $zip" }
+    if ($msix) { Write-Host "  MSIX:   $msix" }
 }
 finally {
     Pop-Location

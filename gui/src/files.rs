@@ -59,14 +59,41 @@ pub(crate) fn open_path(path: &Path) {
     }
 }
 
+/// The AUMID Windows attributes a toast to. Under MSIX this must be the
+/// package's own `PackageFamilyName!ApplicationId`, otherwise the shell drops
+/// the notification. Unpackaged builds keep notify-rust's default.
+#[cfg(target_os = "windows")]
+fn packaged_app_id() -> Option<String> {
+    use windows_sys::Win32::Storage::Packaging::Appx::GetCurrentApplicationUserModelId;
+
+    // An AUMID is capped at 130 characters.
+    let mut buffer = vec![0u16; 130];
+    let mut length = buffer.len() as u32;
+    let status = unsafe { GetCurrentApplicationUserModelId(&mut length, buffer.as_mut_ptr()) };
+    if status != 0 || length == 0 {
+        return None;
+    }
+    // The returned length includes the terminating null.
+    let end = (length as usize).saturating_sub(1).min(buffer.len());
+    let id = String::from_utf16_lossy(&buffer[..end]);
+    if id.is_empty() {
+        None
+    } else {
+        Some(id)
+    }
+}
+
 /// Fire a best-effort desktop notification (non-blocking).
 pub(crate) fn notify(title: &str, body: &str) {
     let title = title.to_string();
     let body = body.to_string();
     std::thread::spawn(move || {
-        let _ = notify_rust::Notification::new()
-            .summary(&title)
-            .body(&body)
-            .show();
+        let mut notification = notify_rust::Notification::new();
+        notification.summary(&title).body(&body);
+        #[cfg(target_os = "windows")]
+        if let Some(id) = packaged_app_id() {
+            notification.app_id(&id);
+        }
+        let _ = notification.show();
     });
 }

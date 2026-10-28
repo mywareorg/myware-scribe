@@ -1,0 +1,10 @@
+{
+  "_comment": "Copy the three identity values from Partner Center > your product > Product identity. The values below are placeholders and will be rejected by the Store until they are replaced.",
+  "packageName": "SeanWu.HippoTranscribe",
+  "publisher": "CN=00000000-0000-0000-0000-000000000000",
+  "publisherDisplayName": "Sean Wu",
+  "displayName": "Hippo Transcribe",
+  "description": "Private, offline transcription and speaker diarization.",
+  "applicationId": "HippoTranscribe",
+  "backgroundColor": "#C1CAD0"
+}
