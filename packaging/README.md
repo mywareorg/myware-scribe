@@ -28,6 +28,11 @@ it for the current user:
     .\scripts\build-windows.ps1 -SkipTests -SkipModels -NoZip -Msix -Sign `
         -CertificatePath C:\keys\hippo-test.pfx -CertificatePassword hippo-dev
 
+To sign a package that already exists (for example one a build left unsigned),
+run the same signing step on its own:
+
+    .\scripts\sign-msix.ps1 -Msix dist\hippo-transcribe-0.1.0-windows-x64.msix
+
 Packing lives in `scripts/make-msix.ps1` and runs as its own process, so
 manifest and makeappx errors can be reproduced without compiling anything:
 
