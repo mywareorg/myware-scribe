@@ -5,6 +5,14 @@ edition = "2021"
 description = "Private, offline speaker diarization and transcription."
 repository = "https://gitlab.com/librewarelive/hippo-transcribe"
 
+[features]
+default = []
+# Forward the accelerator flags to the core crate. The GUI is the workspace's
+# default member, so a bare `--features gpu` resolves against this package;
+# without these the flag fails with "does not contain this feature".
+gpu = ["hippo-transcribe-core/gpu"]
+coreml = ["hippo-transcribe-core/coreml"]
+
 [dependencies]
 hippo-transcribe-core = { path = "../core" }
 iced = { version = "0.13", features = ["tokio", "advanced", "canvas", "image-without-codecs"] }
