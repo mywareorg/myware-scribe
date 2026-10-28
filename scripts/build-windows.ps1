@@ -307,7 +307,11 @@ if ($useGpu) {
     Write-Step "Configuring CMake with Ninja for the Vulkan build"
     $env:CMAKE_GENERATOR = "Ninja"
     Write-Host "  CMAKE_GENERATOR=$env:CMAKE_GENERATOR" -ForegroundColor DarkGray
-    Reset-CmakeGenerator -Root $root -Generator "Ninja"
+    if (Reset-CmakeGenerator -Root $root -Generator "Ninja") {
+        # cargo clean removes the stale build directory and its fingerprint; the
+        # fingerprint would otherwise tell cargo the build script is up to date.
+        Invoke-Native cargo @("clean", "-p", "whisper-rs-sys")
+    }
 }
 
 Push-Location $root

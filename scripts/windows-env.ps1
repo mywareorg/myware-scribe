@@ -55,29 +55,30 @@ function Reset-CmakeGenerator {
     # CMake refuses to reuse a build directory that was configured with another
     # generator, and cargo keeps one whisper-rs-sys build directory per feature
     # set. A previous Visual Studio configure therefore blocks a Ninja one.
+    #
+    # This only reports. Deleting a Visual Studio tree from PowerShell fails on
+    # the TryCompile scratch directories, whose full paths run past MAX_PATH;
+    # Remove-Item reports that as "Could not find a part of the path
+    # 'CompilerIdCXX.lastbuildstate'". The caller runs `cargo clean -p
+    # whisper-rs-sys` instead, which clears the build directory and the
+    # fingerprint that would otherwise keep cargo from rebuilding.
     $buildRoot = Join-Path $Root "target\release\build"
-    if (-not (Test-Path $buildRoot)) { return }
+    if (-not (Test-Path $buildRoot)) { return $false }
 
-    $seen = @{}
-    $caches = Get-ChildItem -Path $buildRoot -Recurse -Filter "CMakeCache.txt" -ErrorAction SilentlyContinue
-    foreach ($cache in $caches) {
-        if ($cache.FullName -notmatch "whisper-rs-sys-") { continue }
-        $line = Get-Content -Path $cache.FullName -ErrorAction SilentlyContinue |
+    $stale = @()
+    foreach ($directory in (Get-ChildItem -Path $buildRoot -Directory -Filter "whisper-rs-sys-*" -ErrorAction SilentlyContinue)) {
+        $cache = Join-Path $directory.FullName "out\build\CMakeCache.txt"
+        if (-not (Test-Path -LiteralPath $cache)) { continue }
+        $line = Get-Content -LiteralPath $cache -ErrorAction SilentlyContinue |
             Where-Object { $_ -like "CMAKE_GENERATOR:INTERNAL=*" } |
             Select-Object -First 1
         if (-not $line) { continue }
         $recorded = ($line -split "=", 2)[1]
         if ($recorded -eq $Generator) { continue }
-
-        $marker = "whisper-rs-sys-"
-        $index = $cache.FullName.IndexOf($marker)
-        $segment = ($cache.FullName.Substring($index) -split "\\")[0]
-        $directory = $cache.FullName.Substring(0, $index) + $segment
-        if ($seen.ContainsKey($directory)) { continue }
-        $seen[$directory] = $true
-        Write-Step "Discarding the $recorded configure in $segment"
-        Remove-Item -Path $directory -Recurse -Force
+        Write-Step "Discarding the $recorded configure in $($directory.Name)"
+        $stale += $directory.Name
     }
+    return ($stale.Count -gt 0)
 }
 
 function Resolve-VulkanSdk {
