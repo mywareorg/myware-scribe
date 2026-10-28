@@ -1176,9 +1176,11 @@ impl App {
         }
     }
 
-    /// Title-bar / taskbar icon decoded from the bundled PNG.
+    /// Title-bar / taskbar icon decoded from the bundled PNG. It is the same
+    /// artwork that build.rs embeds into the executable, so the window, the
+    /// taskbar and Explorer all agree.
     fn window_icon() -> Option<iced::window::Icon> {
-        let image = image::load_from_memory(include_bytes!("../../icons/hippo-mirror-square.png"))
+        let image = image::load_from_memory(include_bytes!("../assets/icon.png"))
             .ok()?
             .into_rgba8();
         let (width, height) = image.dimensions();
