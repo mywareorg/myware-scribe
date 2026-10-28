@@ -68,16 +68,25 @@ function Get-ManifestPublisher {
     return $match.Groups[1].Value
 }
 
-function Test-CertInStore {
-    param(
-        [Parameter(Mandatory = $true)][string]$Thumbprint,
-        [Parameter(Mandatory = $true)][string]$Store
-    )
+# The package deployment service does not run as the interactive user, so a
+# certificate that PowerShell trusts can still be invisible to
+# Add-AppxPackage. Both scopes are checked and reported separately.
+function Get-CertTrust {
+    param([Parameter(Mandatory = $true)][string]$Thumbprint)
 
-    $found = Get-ChildItem -Path "Cert:\CurrentUser\$Store" -ErrorAction SilentlyContinue |
-        Where-Object { $_.Thumbprint -eq $Thumbprint } |
-        Select-Object -First 1
-    return [bool]$found
+    $hits = @()
+    foreach ($path in @(
+        "Cert:\CurrentUser\TrustedPeople",
+        "Cert:\CurrentUser\Root",
+        "Cert:\LocalMachine\TrustedPeople",
+        "Cert:\LocalMachine\Root"
+    )) {
+        $found = Get-ChildItem -Path $path -ErrorAction SilentlyContinue |
+            Where-Object { $_.Thumbprint -eq $Thumbprint } |
+            Select-Object -First 1
+        if ($found) { $hits += ($path -replace '^Cert:\\', '') }
+    }
+    return @($hits)
 }
 
 # PowerShell's Get-AuthenticodeSignature collapses every failure into
@@ -144,10 +153,11 @@ foreach ($package in $packages) {
         Write-Host "  Signer thumbprint:  $($certificate.Thumbprint)"
         Write-Host "  Signer expires:     $($certificate.NotAfter.ToString('yyyy-MM-dd'))"
 
-        $inTrustedPeople = Test-CertInStore -Thumbprint $certificate.Thumbprint -Store "TrustedPeople"
-        $inRoot = Test-CertInStore -Thumbprint $certificate.Thumbprint -Store "Root"
-        $trusted = ($inTrustedPeople -or $inRoot)
-        Write-Host "  Trusted:            $(if ($trusted) { 'yes' } else { 'no' }) (TrustedPeople: $(if ($inTrustedPeople) { 'yes' } else { 'no' }), Root: $(if ($inRoot) { 'yes' } else { 'no' }))"
+        $trust = Get-CertTrust -Thumbprint $certificate.Thumbprint
+        $trusted = ($trust.Count -gt 0)
+        $machineTrusted = @($trust | Where-Object { $_ -like "LocalMachine\*" }).Count -gt 0
+        Write-Host "  Trusted:            $(if ($trusted) { 'yes' } else { 'no' })$(if ($trusted) { ' (' + ($trust -join ', ') + ')' } else { '' })"
+        Write-Host "  Machine trust:      $(if ($machineTrusted) { 'yes' } else { 'no' })"
 
         $subjectMatches = $publisher -and ($certificate.Subject -eq $publisher)
         Write-Host "  Subject = publisher: $(if ($subjectMatches) { 'yes' } else { 'no' })"
@@ -188,10 +198,24 @@ foreach ($package in $packages) {
         $verdict += "The signing certificate is not trusted by this user."
         $cer = Resolve-RepoPath $CerPath
         if (Test-Path $cer) {
-            $verdict += "Fix: Import-Certificate -FilePath `"$cer`" -CertStoreLocation Cert:\CurrentUser\TrustedPeople"
+            $verdict += "Fix, in an elevated PowerShell:"
+            $verdict += "     Import-Certificate -FilePath `"$cer`" -CertStoreLocation Cert:\LocalMachine\TrustedPeople"
         } else {
             $verdict += "Fix: import the certificate that signed the package into Cert:\CurrentUser\TrustedPeople,"
             $verdict += "     or re-run .\scripts\make-test-cert.ps1 without -NoTrust and sign again."
+        }
+    } elseif (-not $machineTrusted) {
+        $verdict += "FAIL"
+        $verdict += "The signature validates for this user, but the certificate is not trusted in the machine store."
+        $verdict += "The Appx deployment service does not see per-user stores, so Add-AppxPackage rejects the package"
+        $verdict += "with a chain-to-untrusted-root error."
+        $cer = Resolve-RepoPath $CerPath
+        if (Test-Path $cer) {
+            $verdict += "Fix, in an elevated PowerShell:"
+            $verdict += "     Import-Certificate -FilePath `"$cer`" -CertStoreLocation Cert:\LocalMachine\TrustedPeople"
+        } else {
+            $verdict += "Fix, in an elevated PowerShell: import the signing certificate into"
+            $verdict += "     Cert:\LocalMachine\TrustedPeople."
         }
     } elseif ($signToolError -match '0x800B0109|0x800B010A|not trusted|certificate chain') {
         # The certificate is in a user store, but Appx signature validation
