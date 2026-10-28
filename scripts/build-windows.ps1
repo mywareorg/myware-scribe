@@ -114,6 +114,14 @@ trap {
             Add-Content -Path $logPath -Value ($extract -join "`r`n") -Encoding UTF8
         }
 
+        # The step names matter as much as the error: they show which stage ran.
+        $console = Join-Path $repo "build-console.txt"
+        if (Test-Path $console) {
+            $consoleTail = @("", "=== console ===")
+            $consoleTail += (Get-Content -Path $console -Tail 80 -ErrorAction SilentlyContinue)
+            Add-Content -Path $logPath -Value ($consoleTail -join "`r`n") -Encoding UTF8
+        }
+
         $configured = Get-ChildItem -Path (Join-Path $repo "target\release\build") -Recurse -Filter "CMakeCache.txt" -ErrorAction SilentlyContinue |
             Where-Object { $_.FullName -match "whisper-rs-sys" }
         if ($configured) {
@@ -131,6 +139,7 @@ trap {
     } catch {
         Write-Host "  (could not write the build log)"
     }
+    try { Stop-Transcript | Out-Null } catch { }
     exit 1
 }
 
@@ -294,6 +303,11 @@ function Invoke-Wack {
 
 $scriptDir = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
 $root = Split-Path -Parent $scriptDir
+
+# The Windows VM cannot copy out of its console, so keep a transcript that the
+# failure file can quote and that can be pushed when a run goes wrong.
+$transcriptPath = Join-Path $root "build-console.txt"
+try { Start-Transcript -Path $transcriptPath -Force | Out-Null } catch { }
 
 if ($useGpu) {
     # ggml is configured with CMake, and its Vulkan shader generator is a nested
@@ -537,4 +551,5 @@ try {
 }
 finally {
     Pop-Location
+    try { Stop-Transcript | Out-Null } catch { }
 }

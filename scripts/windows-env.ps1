@@ -35,9 +35,10 @@ function Enter-DevEnvironment {
     # Import the environment into this process. Dot-sourcing Launch-VsDevShell
     # from a function would scope the PATH changes to the function.
     $commandLine = '""{0}" -arch=x64 -host_arch=x64 >nul && set"' -f $cmd
-    $lines = & cmd.exe /c $commandLine
+    $lines = & cmd.exe /c $commandLine 2>&1
     if ($LASTEXITCODE -ne 0) {
-        throw "VsDevCmd.bat failed with exit code $LASTEXITCODE"
+        $why = @($lines | Where-Object { $_ -and $_.ToString().Trim() } | Select-Object -First 20) -join " / "
+        throw "VsDevCmd.bat failed with exit code $LASTEXITCODE. Output: $why"
     }
     foreach ($line in $lines) {
         if ($line -match '^([^=]+)=(.*)$') {
