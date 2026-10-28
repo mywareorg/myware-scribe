@@ -40,6 +40,12 @@ certificate there, and installs the newest package:
 
     .\scripts\install-msix.ps1
 
+Removing a package also removes its private data, which is where downloaded
+models live, so every reinstall re-downloads them. `-Fresh` additionally
+deletes that folder explicitly and fails if anything is left behind:
+
+    .\scripts\install-msix.ps1 -Fresh
+
 When a package will not install and the status is not `Valid`,
 `scripts/check-msix.ps1` prints the manifest publisher, the certificate that
 actually signed the file, whether that certificate is trusted, and the exact

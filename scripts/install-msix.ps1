@@ -30,7 +30,10 @@ param(
     # Certificate to trust. make-test-cert.ps1 writes one beside the .pfx.
     [string]$CerPath = "C:\keys\hippo-test.cer",
     # Install without importing the certificate (needs Developer Mode).
-    [switch]$SkipTrust
+    [switch]$SkipTrust,
+    # Also delete the package's private data, so the app starts as a first run
+    # with no models downloaded (the folder is recreated on install).
+    [switch]$Fresh
 )
 
 $ErrorActionPreference = "Stop"
@@ -45,6 +48,27 @@ function Resolve-RepoPath {
 
     if ([System.IO.Path]::IsPathRooted($Path)) { return $Path }
     return (Join-Path $root $Path)
+}
+
+function Remove-PackageData {
+    param([Parameter(Mandatory = $true)][string]$FamilyName)
+
+    $path = Join-Path $env:LOCALAPPDATA "Packages\$FamilyName"
+    if (-not (Test-Path $path)) {
+        Write-Host "  No package data at $path"
+        return
+    }
+
+    $bytes = (Get-ChildItem -Path $path -Recurse -Force -ErrorAction SilentlyContinue |
+        Measure-Object -Property Length -Sum).Sum
+    if (-not $bytes) { $bytes = 0 }
+    Write-Host ("  Deleting {0} ({1:N2} GB)" -f $path, ($bytes / 1GB))
+
+    Remove-Item -Path $path -Recurse -Force -ErrorAction SilentlyContinue
+    if (Test-Path $path) {
+        throw "Could not delete $path. Close the app and any Explorer window showing it, then run this script again."
+    }
+    Write-Host "  Deleted"
 }
 
 function Test-Elevated {
@@ -83,7 +107,9 @@ if (-not $SkipTrust -and -not (Test-Elevated)) {
         "-File", "`"$PSCommandPath`"",
         "-Msix", "`"$package`"",
         "-CerPath", "`"$certificate`""
-    ) -join " "
+    )
+    if ($Fresh) { $arguments += "-Fresh" }
+    $arguments = $arguments -join " "
     $elevated = Start-Process -FilePath "powershell" -ArgumentList $arguments -Verb RunAs -Wait -PassThru
     if ($elevated.ExitCode -ne 0) {
         throw "The elevated install failed with exit code $($elevated.ExitCode). Run this script from an elevated Prompt to see the output, or enable Developer Mode and pass -SkipTrust."
@@ -118,12 +144,41 @@ if (Test-Path $identityFile) {
     if ($identity.applicationId) { $applicationId = $identity.applicationId }
 }
 
+# An environment override moves the models out of the package, where purging
+# the package data would not touch them.
+$modelsOverride = [Environment]::GetEnvironmentVariable("HIPPO_TRANSCRIBE_MODELS_DIR", "User")
+if (-not $modelsOverride) {
+    $modelsOverride = [Environment]::GetEnvironmentVariable("HIPPO_TRANSCRIBE_MODELS_DIR", "Machine")
+}
+if ($modelsOverride) {
+    Write-Warn "HIPPO_TRANSCRIBE_MODELS_DIR is set to $modelsOverride; -Fresh does not delete that folder."
+}
+
 # A stale registration blocks the install with 0x80073CF9, so replace it.
 if ($packageName) {
     $existing = Get-AppxPackage -Name $packageName -ErrorAction SilentlyContinue
     if ($existing) {
         Write-Step "Removing the previous install"
+        $familyName = $existing.PackageFamilyName
         Remove-AppxPackage -Package $existing.PackageFullName
+        Write-Host "  Uninstalling removes the package data, so models download again."
+        if ($Fresh) {
+            Write-Step "Deleting the package data (models included)"
+            Remove-PackageData -FamilyName $familyName
+        }
+    } elseif ($Fresh) {
+        Write-Warn "Nothing is installed, so there is no package data to delete."
+    }
+}
+
+if ($Fresh) {
+    # Belt and braces: prove the folder is gone before claiming a clean first run.
+    $leftover = if ($packageName) {
+        @(Get-ChildItem -Path (Join-Path $env:LOCALAPPDATA "Packages") -Directory -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -like "$($packageName)_*" })
+    } else { @() }
+    if ($leftover.Count -gt 0) {
+        throw "Package data still present: $($leftover[0].FullName)"
     }
 }
 
@@ -144,3 +199,9 @@ Write-Host "  Version: $($installed.Version)"
 if ($applicationId) {
     Write-Host "  Launch:  explorer.exe shell:AppsFolder\$($installed.PackageFamilyName)!$applicationId"
 }
+$modelDir = if ($modelsOverride) {
+    $modelsOverride
+} else {
+    Join-Path $env:LOCALAPPDATA "Packages\$($installed.PackageFamilyName)\LocalCache\Local\hippo-transcribe\models"
+}
+Write-Host "  Models:  $modelDir"
