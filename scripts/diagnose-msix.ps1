@@ -1,18 +1,12 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-  Inspects the MSIX helpers in build-windows.ps1 and can exercise them without
-  a Rust build.
+  Packs a throwaway MSIX without running a Rust build.
 
 .DESCRIPTION
-  Loads the function definitions out of build-windows.ps1 without running the
-  build, prints the signature of New-MsixPackage so a stray [switch] is
-  obvious, and with -Probe packs a throwaway layout through makeappx. The
-  probe uses empty placeholder files, so it reproduces packing and signing
-  failures in seconds instead of after a full cargo build.
-
-.PARAMETER Probe
-  Run New-MsixPackage against a scratch layout under dist\msix-probe.
+  Creates a scratch stage of empty placeholder files and runs make-msix.ps1
+  against it, so manifest, asset and makeappx problems show up in seconds
+  instead of after a full cargo build.
 
 .PARAMETER Version
   Version to render into the probe manifest. Defaults to 0.1.0.
@@ -24,10 +18,10 @@
   .\scripts\diagnose-msix.ps1
 
 .EXAMPLE
-  .\scripts\diagnose-msix.ps1 -Probe -Keep
+  .\scripts\diagnose-msix.ps1 -Keep
 #>
+[CmdletBinding()]
 param(
-    [switch]$Probe,
     [string]$Version = "0.1.0",
     [switch]$Keep
 )
@@ -48,41 +42,11 @@ $root = Split-Path -Parent $scriptDir
 
 . (Join-Path $scriptDir "windows-env.ps1")
 
-$buildScript = Join-Path $scriptDir "build-windows.ps1"
-$ast = [System.Management.Automation.Language.Parser]::ParseFile($buildScript, [ref]$null, [ref]$null)
-$definitions = @($ast.EndBlock.Statements | Where-Object {
-    $_ -is [System.Management.Automation.Language.FunctionDefinitionAst]
-})
-if ($definitions.Count -eq 0) {
-    throw "No function definitions were found in $buildScript"
-}
-
-# Dot-sourcing each definition makes the helpers callable without executing
-# the build body underneath them.
-foreach ($definition in $definitions) {
-    . ([scriptblock]::Create($definition.Extent.Text))
-}
-
-Write-Step "PowerShell $($PSVersionTable.PSVersion)"
-Write-Step "Functions found in build-windows.ps1: $($definitions.Name -join ', ')"
-
-Write-Step "New-MsixPackage signature"
-(Get-Command New-MsixPackage).Parameters.GetEnumerator() | Sort-Object Key | ForEach-Object {
-    $type = $_.Value.ParameterType.Name
-    $flag = if ($type -eq "SwitchParameter") { "  <-- switch" } else { "" }
-    Write-Host ("    {0,-18} {1,-16}{2}" -f $_.Key, $type, $flag)
-}
-
-if (-not $Probe) {
-    Write-Host ""
-    Write-Host "Pass -Probe to pack a scratch layout through makeappx." -ForegroundColor DarkGray
-    return
-}
-
 $makeappx = Resolve-SdkTool -Name "makeappx.exe"
 if (-not $makeappx) {
     throw "makeappx.exe was not found. Install the Windows 10/11 SDK."
 }
+Write-Step "PowerShell $($PSVersionTable.PSVersion)"
 Write-Step "makeappx: $makeappx"
 
 $probeRoot = Join-Path $root "dist\msix-probe"
@@ -96,21 +60,28 @@ foreach ($file in @("hippo-transcribe.exe", "sherpa-onnx-c-api.dll", "onnxruntim
     New-Item -ItemType File -Path (Join-Path $stage $file) -Force | Out-Null
 }
 
-$identityFile = Join-Path $root "packaging\identity.json"
-try {
-    $msix = New-MsixPackage -Root $root -Stage $stage -OutRoot $probeRoot `
-        -Name "probe" -Version $Version -IdentityFile $identityFile
+$packer = Join-Path $scriptDir "make-msix.ps1"
+$msix = Join-Path $probeRoot "probe.msix"
+$packArguments = @(
+    "-NoProfile", "-ExecutionPolicy", "Bypass",
+    "-File", $packer,
+    "-Stage", $stage,
+    "-OutDir", $probeRoot,
+    "-Name", "probe",
+    "-Version", $Version,
+    "-IdentityPath", (Join-Path $root "packaging\identity.json")
+)
+if ($Keep) { $packArguments += "-KeepLayout" }
+
+& powershell @packArguments | Out-Host
+if ($LASTEXITCODE -ne 0 -or -not (Test-Path $msix)) {
     Write-Host ""
-    Write-Host "Packing succeeded: $msix" -ForegroundColor Green
-} catch {
-    Write-Host ""
-    Write-Host "Packing failed." -ForegroundColor Red
-    Write-Host $_.InvocationInfo.PositionMessage
-    Write-Host ("  Message: " + $_.Exception.Message)
-    Write-Host ("  Stack:   " + ($_.ScriptStackTrace -replace "`r?`n", " | "))
+    Write-Host "Packing failed (exit $LASTEXITCODE)." -ForegroundColor Red
     exit 1
 }
 
+Write-Host ""
+Write-Host "Packing succeeded: $msix" -ForegroundColor Green
 if ($Keep) {
     Write-Host "  Kept: $probeRoot" -ForegroundColor DarkGray
 } else {

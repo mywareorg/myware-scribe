@@ -28,12 +28,10 @@ it for the current user:
     .\scripts\build-windows.ps1 -SkipTests -SkipModels -NoZip -Msix -Sign `
         -CertificatePath C:\keys\hippo-test.pfx -CertificatePassword hippo-dev
 
-If packing misbehaves, `scripts/diagnose-msix.ps1` loads the packaging helpers
-without compiling and prints the `New-MsixPackage` signature; `-Probe` runs a
-packing pass over a scratch layout of empty files, which reproduces manifest
-and makeappx errors in seconds:
+Packing lives in `scripts/make-msix.ps1` and runs as its own process, so
+manifest and makeappx errors can be reproduced without compiling anything:
 
-    .\scripts\diagnose-msix.ps1 -Probe -Keep
+    .\scripts\diagnose-msix.ps1 -Keep
 
 ## Assets
 

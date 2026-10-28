@@ -202,126 +202,6 @@ function Get-CargoMetadata {
     return ($json | ConvertFrom-Json)
 }
 
-# Store tooling ships with the Windows SDK, which VsDevCmd does not always put
-# on PATH. Fall back to the newest installed kit.
-function Resolve-SdkTool {
-    param([Parameter(Mandatory = $true)][string]$Name)
-
-    $command = Get-Command $Name -ErrorAction SilentlyContinue
-    if ($command) { return $command.Source }
-
-    $kits = @(
-        "${env:ProgramFiles(x86)}\Windows Kits\10\bin",
-        "$env:ProgramFiles\Windows Kits\10\bin"
-    ) | Where-Object { $_ -and (Test-Path $_) }
-    foreach ($kitsRoot in $kits) {
-        $found = Get-ChildItem -Path $kitsRoot -Directory -ErrorAction SilentlyContinue |
-            Sort-Object Name -Descending |
-            ForEach-Object { Join-Path $_.FullName "x64\$Name" } |
-            Where-Object { Test-Path $_ } |
-            Select-Object -First 1
-        if ($found) { return $found }
-    }
-    return $null
-}
-
-# The manifest needs four parts; the crate version only has three.
-function ConvertTo-FourPartVersion {
-    param([Parameter(Mandatory = $true)][string]$Version)
-
-    $parts = @($Version -split '\.')
-    if ($parts.Count -gt 4) {
-        throw "MSIX versions have at most four parts ($Version)"
-    }
-    foreach ($part in $parts) {
-        if ($part -notmatch '^\d+$') {
-            throw "MSIX versions must be numeric ($Version)"
-        }
-    }
-    while ($parts.Count -lt 4) { $parts += "0" }
-    return ($parts -join '.')
-}
-
-function New-MsixPackage {
-    param(
-        [Parameter(Mandatory = $true)][string]$Root,
-        [Parameter(Mandatory = $true)][string]$Stage,
-        [Parameter(Mandatory = $true)][string]$OutRoot,
-        [Parameter(Mandatory = $true)][string]$Name,
-        [Parameter(Mandatory = $true)][string]$Version,
-        [Parameter(Mandatory = $true)][string]$IdentityFile
-    )
-
-    $makeappx = Resolve-SdkTool -Name "makeappx.exe"
-    if (-not $makeappx) {
-        throw "makeappx.exe was not found. Install the Windows 10/11 SDK, or run this from a developer prompt."
-    }
-    if (-not (Test-Path $IdentityFile)) {
-        throw "Identity file not found: $IdentityFile"
-    }
-
-    $identity = Get-Content -Path $IdentityFile -Raw | ConvertFrom-Json
-    foreach ($key in @("packageName", "publisher", "publisherDisplayName", "displayName", "description", "applicationId", "backgroundColor")) {
-        $value = $identity.PSObject.Properties[$key]
-        if (-not $value -or -not $value.Value) {
-            throw "$IdentityFile is missing '$key'"
-        }
-    }
-    if ($identity.publisher -match '^CN=0{8}-') {
-        Write-Warn "The publisher in $IdentityFile is still the placeholder; the Store will reject this package."
-    }
-
-    $layout = Join-Path $OutRoot "$Name-msix\layout"
-    if (Test-Path $layout) { Remove-Item $layout -Recurse -Force }
-    New-Item -ItemType Directory -Path $layout -Force | Out-Null
-
-    # Only the executable and its two runtime DLLs. deploy.bat, the sample audio
-    # and the models are direct-download baggage; the Store build downloads
-    # models on first run instead.
-    Copy-Item (Join-Path $Stage "hippo-transcribe.exe") $layout
-    foreach ($dll in @("sherpa-onnx-c-api.dll", "onnxruntime.dll")) {
-        Copy-Item (Join-Path $Stage $dll) $layout
-    }
-    $assets = Join-Path $layout "Assets"
-    New-Item -ItemType Directory -Path $assets -Force | Out-Null
-    Copy-Item (Join-Path $Root "packaging\assets\*.png") $assets
-
-    $template = Get-Content -Path (Join-Path $Root "packaging\AppxManifest.xml.template") -Raw
-    if (-not $template) {
-        throw "packaging\AppxManifest.xml.template is missing or empty"
-    }
-    $values = [ordered]@{
-        PackageName          = $identity.packageName
-        Publisher            = $identity.publisher
-        PublisherDisplayName = $identity.publisherDisplayName
-        DisplayName          = $identity.displayName
-        Description          = $identity.description
-        ApplicationId        = $identity.applicationId
-        BackgroundColor      = $identity.backgroundColor
-        Version              = (ConvertTo-FourPartVersion -Version $Version)
-    }
-    foreach ($key in $values.Keys) {
-        $template = $template.Replace("{{$key}}", [string]$values[$key])
-    }
-    if ($template -match '\{\{') {
-        throw "The rendered manifest still has placeholders; check packaging\AppxManifest.xml.template"
-    }
-    Set-Content -Path (Join-Path $layout "AppxManifest.xml") -Value $template -Encoding UTF8
-
-    $msix = Join-Path $OutRoot "$Name.msix"
-    if (Test-Path $msix) { Remove-Item $msix -Force }
-    Write-Step "Packing $msix"
-    # Out-Host keeps makeappx's chatter out of the function's return value.
-    & $makeappx pack /d $layout /p $msix /o | Out-Host
-    if ($LASTEXITCODE -ne 0) {
-        throw "makeappx failed with exit code $LASTEXITCODE"
-    }
-
-    $hash = (Get-FileHash $msix -Algorithm SHA256).Hash.ToLowerInvariant()
-    "$hash  $(Split-Path $msix -Leaf)" | Set-Content "$msix.sha256" -Encoding ASCII
-    return $msix
-}
-
 function Invoke-MsixSigning {
     param(
         [Parameter(Mandatory = $true)][string]$Msix,
@@ -548,26 +428,24 @@ try {
             Join-Path $root "packaging\identity.json"
         }
 
-        # Splat the arguments and dump the effective signature: a parameter
-        # binding failure here is otherwise invisible, since the trap reports
-        # the call site rather than the offending parameter.
-        $packArgs = @{
-            Root         = $root
-            Stage        = $stage
-            OutRoot      = $outRoot
-            Name         = $name
-            Version      = $releaseVersion
-            IdentityFile = $identityFile
+        # Packing runs in its own process. Windows PowerShell 5.1 fails to bind
+        # the in-script helper here with a spurious SwitchParameter error, while
+        # the identical call works from a fresh runspace.
+        $packer = Join-Path $PSScriptRoot "make-msix.ps1"
+        $msix = Join-Path $outRoot "$name.msix"
+        if (Test-Path $msix) { Remove-Item $msix -Force }
+        Invoke-Native powershell @(
+            "-NoProfile", "-ExecutionPolicy", "Bypass",
+            "-File", $packer,
+            "-Stage", $stage,
+            "-OutDir", $outRoot,
+            "-Name", $name,
+            "-Version", $releaseVersion,
+            "-IdentityPath", $identityFile
+        )
+        if (-not (Test-Path $msix)) {
+            throw "Packing returned without producing $msix"
         }
-        $packSignature = (Get-Command New-MsixPackage).Parameters.GetEnumerator() |
-            Sort-Object Key |
-            ForEach-Object { "{0}:{1}" -f $_.Key, $_.Value.ParameterType.Name }
-        Write-Host ("  New-MsixPackage -> " + ($packSignature -join " ")) -ForegroundColor DarkGray
-        $packDump = ($packArgs.GetEnumerator() | Sort-Object Key |
-            ForEach-Object { "$($_.Key)=$($_.Value)" }) -join " | "
-        Write-Host ("  packing args -> " + $packDump) -ForegroundColor DarkGray
-
-        $msix = New-MsixPackage @packArgs
 
         if ($Sign -or $CertificatePath) {
             if (-not $CertificatePath) {

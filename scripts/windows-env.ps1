@@ -258,3 +258,43 @@ function Ensure-SherpaDlls {
     }
     return $lib
 }
+
+# Store tooling ships with the Windows SDK, which VsDevCmd does not always put
+# on PATH. Fall back to the newest installed kit.
+function Resolve-SdkTool {
+    param([Parameter(Mandatory = $true)][string]$Name)
+
+    $command = Get-Command $Name -ErrorAction SilentlyContinue
+    if ($command) { return $command.Source }
+
+    $kits = @(
+        "${env:ProgramFiles(x86)}\Windows Kits\10\bin",
+        "$env:ProgramFiles\Windows Kits\10\bin"
+    ) | Where-Object { $_ -and (Test-Path $_) }
+    foreach ($kitsRoot in $kits) {
+        $found = Get-ChildItem -Path $kitsRoot -Directory -ErrorAction SilentlyContinue |
+            Sort-Object Name -Descending |
+            ForEach-Object { Join-Path $_.FullName "x64\$Name" } |
+            Where-Object { Test-Path $_ } |
+            Select-Object -First 1
+        if ($found) { return $found }
+    }
+    return $null
+}
+
+# The manifest needs four parts; the crate version only has three.
+function ConvertTo-FourPartVersion {
+    param([Parameter(Mandatory = $true)][string]$Version)
+
+    $parts = @($Version -split '\.')
+    if ($parts.Count -gt 4) {
+        throw "MSIX versions have at most four parts ($Version)"
+    }
+    foreach ($part in $parts) {
+        if ($part -notmatch '^\d+$') {
+            throw "MSIX versions must be numeric ($Version)"
+        }
+    }
+    while ($parts.Count -lt 4) { $parts += "0" }
+    return ($parts -join '.')
+}
