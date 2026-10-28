@@ -33,6 +33,13 @@ run the same signing step on its own:
 
     .\scripts\sign-msix.ps1 -Msix dist\hippo-transcribe-0.1.0-windows-x64.msix
 
+When a package will not install and the status is not `Valid`,
+`scripts/check-msix.ps1` prints the manifest publisher, the certificate that
+actually signed the file, whether that certificate is trusted, and the exact
+command that fixes it:
+
+    .\scripts\check-msix.ps1
+
 Packing lives in `scripts/make-msix.ps1` and runs as its own process, so
 manifest and makeappx errors can be reproduced without compiling anything:
 
