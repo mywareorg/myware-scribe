@@ -64,10 +64,11 @@ param(
     [string]$CertificatePassword,
     # Run the Windows App Certification Kit against the finished package.
     [switch]$Wack,
-    # Vulkan + OpenMP acceleration. Off by default for MSIX builds and enabled
-    # automatically for local builds when the Vulkan SDK is present; pass -Gpu
-    # to force it (and fail loudly if the SDK is missing).
-    [switch]$Gpu
+    # Vulkan + OpenMP acceleration. Enabled automatically whenever the Vulkan
+    # SDK is installed; -Gpu requires the SDK and fails without it, -Cpu forces
+    # the CPU-only build even on a machine that has the SDK.
+    [switch]$Gpu,
+    [switch]$Cpu
 )
 
 $ErrorActionPreference = "Stop"
@@ -110,31 +111,33 @@ if (Test-Path variable:PSNativeCommandUseErrorActionPreference) {
 
 . (Join-Path $PSScriptRoot "windows-env.ps1")
 
-# The gpu feature compiles whisper against Vulkan, which needs the SDK at build
-# time and a Vulkan-capable driver at run time. A Store package cannot assume
-# the latter, so -Msix stays CPU-only unless -Gpu is passed explicitly.
+# The gpu feature compiles whisper against Vulkan. The SDK is only needed to
+# compile: at run time ggml loads vulkan-1.dll from the graphics driver and
+# falls back to the CPU when no Vulkan device exists, so the Store package can
+# carry the same accelerated build as a local one.
 $gpuExplicit = $PSBoundParameters.ContainsKey("Gpu")
+$cpuExplicit = $PSBoundParameters.ContainsKey("Cpu")
+if ($gpuExplicit -and $cpuExplicit) {
+    throw "-Gpu and -Cpu cannot be combined."
+}
+
 $useGpu = $false
-if ($gpuExplicit) {
-    $useGpu = [bool]$Gpu
-} elseif ($Msix) {
-    Write-Step "Packaging for the Store with the CPU-only build"
+if ($cpuExplicit) {
+    Write-Step "Building the CPU-only backend (-Cpu)"
 } else {
     $vulkanSdk = Resolve-VulkanSdk
     if ($vulkanSdk) {
         $env:VULKAN_SDK = $vulkanSdk
         $useGpu = $true
         Write-Step "Vulkan SDK at $vulkanSdk"
+    } elseif ($gpuExplicit) {
+        throw "-Gpu needs the Vulkan SDK (VULKAN_SDK). Install it from LunarG, or pass -Cpu for a CPU-only build."
     } else {
         Write-Warn "Vulkan SDK not found; building CPU-only. Install it for GPU inference, or pass -Gpu to require it."
     }
 }
-if ($useGpu -and -not $env:VULKAN_SDK) {
-    $vulkanSdk = Resolve-VulkanSdk
-    if (-not $vulkanSdk) {
-        throw "-Gpu needs the Vulkan SDK (VULKAN_SDK). Install it from LunarG, or drop -Gpu for a CPU-only build."
-    }
-    $env:VULKAN_SDK = $vulkanSdk
+if ($useGpu -and $Msix) {
+    Write-Step "Packaging for the Store with Vulkan; machines without a Vulkan driver fall back to the CPU"
 }
 $featureArgs = if ($useGpu) { @("--features", "gpu") } else { @() }
 
