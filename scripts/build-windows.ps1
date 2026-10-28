@@ -87,15 +87,15 @@ trap {
     # Also append to the build log, so the failure can be read from a file when
     # the console is not copyable (a VM console, for instance).
     try {
-        $logPath = Join-Path (Split-Path -Parent $PSScriptRoot) "build-windows.failure.txt"
+        $logPath = Join-Path (Split-Path -Parent $PSScriptRoot) "dist\build-failure.txt"
+        New-Item -ItemType Directory -Path (Split-Path -Parent $logPath) -Force | Out-Null
         $detail = @(
-            "",
-            "=== Build failed ===",
+            ("=== Build failed " + (Get-Date -Format "yyyy-MM-dd HH:mm:ss") + " ==="),
             $_.InvocationInfo.PositionMessage,
             ("Message: " + $_.Exception.Message),
             ("Stack:   " + $_.ScriptStackTrace)
         ) -join "`r`n"
-        Add-Content -Path $logPath -Value $detail -Encoding UTF8
+        Set-Content -Path $logPath -Value $detail -Encoding UTF8
 
         # Attach the build's own explanation. A failed GPU build names the
         # generator it used, the compiler CMake detected, and the MSBuild or CMake
