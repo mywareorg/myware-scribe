@@ -8,6 +8,24 @@ use std::time::{Duration, Instant};
 
 pub use hippo_transcribe_core::event::{Event, SpeakerStat, Stats, Turn};
 
+/// Stop Windows from giving a console-subsystem helper its own console window.
+///
+/// The GUI has no console, so spawning `taskkill.exe` without this flag makes
+/// Windows allocate one, which the user sees as a terminal flashing up.
+fn hide_console(command: &mut Command) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        /// CREATE_NO_WINDOW: run the process without a console window.
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = command;
+    }
+}
+
 /// Load a transcript from a .txt or .json file as "[time] speaker: text" lines.
 pub fn read_transcript(path: &Path) -> Option<String> {
     let contents = std::fs::read_to_string(path).ok()?;
@@ -70,15 +88,17 @@ pub fn probe_waveform(path: &Path, buckets: usize) -> Option<(f64, Vec<f32>)> {
 pub fn kill(pid: u32) {
     #[cfg(windows)]
     {
-        let _ = Command::new("taskkill")
-            .args(["/PID", &pid.to_string(), "/F"])
-            .status();
+        let mut command = Command::new("taskkill");
+        command.args(["/PID", &pid.to_string(), "/F"]);
+        hide_console(&mut command);
+        let _ = command.status();
     }
     #[cfg(not(windows))]
     {
-        let _ = Command::new("kill")
-            .args(["-TERM", &pid.to_string()])
-            .status();
+        let mut command = Command::new("kill");
+        command.args(["-TERM", &pid.to_string()]);
+        hide_console(&mut command);
+        let _ = command.status();
     }
 }
 
@@ -148,6 +168,9 @@ pub fn spawn(
             command.arg("--no-cache");
         }
         command.arg("--progress-json");
+        // The child re-runs this same GUI binary, but a stray console must not
+        // appear if the subsystem attribute is ever lost.
+        hide_console(&mut command);
         command
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
