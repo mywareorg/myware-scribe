@@ -1,16 +1,16 @@
-﻿=== Build failed 2026-10-28 15:32:40 ===
-At C:\Users\wuphy\Documents\hippo-transcribe\scripts\windows-env.ps1:56 char:9
+﻿=== Build failed 2026-10-28 15:34:22 ===
+At C:\Users\wuphy\Documents\hippo-transcribe\scripts\windows-env.ps1:60 char:9
 +         throw "VsDevCmd.bat failed with exit code $code. Output: $why ...
 +         ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 Message: VsDevCmd.bat failed with exit code 1. Output: 
-Stack:   at Enter-DevEnvironment, C:\Users\wuphy\Documents\hippo-transcribe\scripts\windows-env.ps1: line 56
+Stack:   at Enter-DevEnvironment, C:\Users\wuphy\Documents\hippo-transcribe\scripts\windows-env.ps1: line 60
 at <ScriptBlock>, C:\Users\wuphy\Documents\hippo-transcribe\scripts\build-windows.ps1: line 337
 at <ScriptBlock>, <No file>: line 1
 
 === console ===
 **********************
 Windows PowerShell transcript start
-Start time: 20261028153239
+Start time: 20261028153422
 Username: DESKTOP-VLNCP54\wuphy
 RunAs User: DESKTOP-VLNCP54\wuphy
 Configuration Name: 
@@ -28,10 +28,9 @@ SerializationVersion: 1.1.0.1
 **********************
 ==> Configuring CMake with Ninja for the Vulkan build
   CMAKE_GENERATOR=Ninja
-==> Discarding the Visual Studio 18 2026 configure in whisper-rs-sys-a4a4abcf5807047e
 ==> Entering the Visual Studio developer environment
 PS>TerminatingError(): "VsDevCmd.bat failed with exit code 1. Output: "
 **********************
 Windows PowerShell transcript end
-End time: 20261028153240
+End time: 20261028153422
 **********************
