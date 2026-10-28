@@ -86,7 +86,7 @@ trap {
     # Also append to the build log, so the failure can be read from a file when
     # the console is not copyable (a VM console, for instance).
     try {
-        $logPath = Join-Path (Split-Path -Parent $PSScriptRoot) "build-windows.log"
+        $logPath = Join-Path (Split-Path -Parent $PSScriptRoot) "build-windows.failure.txt"
         $detail = @(
             "",
             "=== Build failed ===",
@@ -149,14 +149,33 @@ function Invoke-Native {
 
     # Every native command is teed to one log so a failure leaves the real
     # cargo/rustc error behind instead of only the rethrown exit code.
+    #
+    # PowerShell 5.1 turns a native command's stderr into an ErrorRecord as soon
+    # as it is merged with 2>&1, and with $ErrorActionPreference = "Stop" that
+    # aborts the script even when the tool succeeded. cargo reports progress on
+    # stderr, so capture both streams through files instead of the pipeline.
     $log = Join-Path $root "build-windows.log"
-    $savedPreference = $ErrorActionPreference
-    $ErrorActionPreference = "Continue"
-    try {
-        & $FilePath @Arguments 2>&1 | Tee-Object -FilePath $log -Append
-        $exitCode = $LASTEXITCODE
-    } finally {
-        $ErrorActionPreference = $savedPreference
+    $stdoutFile = Join-Path $root "build-windows.out.log"
+    $stderrFile = Join-Path $root "build-windows.err.log"
+    Remove-Item $stdoutFile, $stderrFile -Force -ErrorAction SilentlyContinue
+
+    $startArgs = @{
+        FilePath               = $FilePath
+        NoNewWindow            = $true
+        Wait                   = $true
+        PassThru               = $true
+        RedirectStandardOutput = $stdoutFile
+        RedirectStandardError  = $stderrFile
+    }
+    if ($Arguments.Count -gt 0) { $startArgs.ArgumentList = $Arguments }
+
+    $process = Start-Process @startArgs
+    $exitCode = $process.ExitCode
+
+    foreach ($file in @($stdoutFile, $stderrFile)) {
+        if (Test-Path $file) {
+            Get-Content -Path $file | Tee-Object -FilePath $log -Append | Out-Host
+        }
     }
 
     if ($exitCode -ne 0) {

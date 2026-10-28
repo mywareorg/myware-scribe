@@ -20,3 +20,7 @@ models/
 *.msixupload
 *.appxupload
 AppPackages/
+build-windows.log
+build-windows.out.log
+build-windows.err.log
+build-windows.failure.txt
