@@ -1,0 +1,29 @@
+﻿**********************
+Windows PowerShell transcript start
+Start time: 20261028153120
+Username: DESKTOP-VLNCP54\wuphy
+RunAs User: DESKTOP-VLNCP54\wuphy
+Configuration Name: 
+Machine: DESKTOP-VLNCP54 (Microsoft Windows NT 10.0.19045.0)
+Host Application: C:\Windows\SysWOW64\WindowsPowerShell\v1.0\powershell.exe -noe -c &{Import-Module "C:\Program Files\Microsoft Visual Studio\18\Community\Common7\Tools\Microsoft.VisualStudio.DevShell.dll"; Enter-VsDevShell 26189f4f}
+Process ID: 10156
+PSVersion: 5.1.19041.6456
+PSEdition: Desktop
+PSCompatibleVersions: 1.0, 2.0, 3.0, 4.0, 5.0, 5.1.19041.6456
+BuildVersion: 10.0.19041.6456
+CLRVersion: 4.0.30319.42000
+WSManStackVersion: 3.0
+PSRemotingProtocolVersion: 2.3
+SerializationVersion: 1.1.0.1
+**********************
+==> Configuring CMake with Ninja for the Vulkan build
+  CMAKE_GENERATOR=Ninja
+==> Discarding the Visual Studio 18 2026 configure in whisper-rs-sys-a4a4abcf5807047e
+    cargo clean -p whisper-rs-sys
+     Removed 0 files
+==> Entering the Visual Studio developer environment
+PS>TerminatingError(): "VsDevCmd.bat failed with exit code 1. Output: "
+**********************
+Windows PowerShell transcript end
+End time: 20261028153121
+**********************
