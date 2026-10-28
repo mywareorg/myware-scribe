@@ -4,10 +4,12 @@
 
 Local, offline speaker diarization and transcription. A single native Rust
 executable provides both the desktop GUI (iced) and a command-line mode
-(`--cli`). No Python. Network access is limited to downloading models.
+(`--cli`). No Python. Network access is limited to downloading models and, in a
+store build that has bought or is restoring Pro, the store's entitlement check.
 
 **The name comes from HIPAA.** Audio is processed on your machine, and
-transcripts stay there.
+transcripts stay there. The design is HIPAA inspired; it is not HIPAA certified,
+and no certification is claimed.
 
 No cloud · No accounts · No telemetry · Audio and transcripts stay on this device.
 
@@ -92,8 +94,9 @@ forces that). Pass `-SkipTests`, `-SkipBindgen`, `-Diagnose`, `-Clean`, `-NoZip`
 ## Models
 
 Models are non-gated and installed into `%LOCALAPPDATA%\hippo-transcribe\models`
-(Windows) or `~/.cache/hippo-transcribe/models` (Linux/macOS). Downloading is the only
-time the app needs the network; the pipeline itself is fully offline.
+(Windows) or `~/.cache/hippo-transcribe/models` (Linux/macOS). Downloading models
+and confirming a Pro purchase are the only reasons the app uses the network; the
+transcription pipeline itself never does.
 
 Download everything at once (also what `deploy.bat` runs on Windows):
 
@@ -274,8 +277,10 @@ run `hippo-transcribe`. `undeploy.bat` removes the install and shortcut
 
 Audio, transcripts, diarization caches, models and settings stay on the machine
 that runs Hippo Transcribe. There is no cloud service, no account, no telemetry
-and no analytics. The only network access is the one-time model download (and
-optional checksum-verified mirror overrides).
+and no analytics. Network access is the one-time model download (with optional
+checksum-verified mirror overrides) and, only for a Pro purchase or restore, the
+store's entitlement check: the store reports whether the add-on is owned, and
+nothing about the audio or the transcript is part of that request.
 
 See [`PRIVACY.md`](PRIVACY.md) for the full data-flow and retention details.
 
