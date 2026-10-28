@@ -36,35 +36,41 @@ function Enter-DevEnvironment {
     # Import the environment into this process. Dot-sourcing Launch-VsDevShell
     # from a function would scope the PATH changes to the function.
     #
-    # Both streams are redirected to files rather than merged with 2>&1: in
-    # Windows PowerShell 5.1 a native command's stderr becomes an ErrorRecord as
-    # soon as it joins the pipeline, and with $ErrorActionPreference = "Stop"
-    # that aborts the script even when the tool succeeded.
+    # cmd.exe is started through Start-Process because the command line needs a
+    # path with spaces, a nested call and a captured environment, and hand-built
+    # quoting for `cmd /c` silently loses its final quote. Both streams go to
+    # files: in Windows PowerShell 5.1 a native command's stderr becomes an
+    # ErrorRecord as soon as it joins the pipeline, and with
+    # $ErrorActionPreference = "Stop" that aborts the script even on success.
     $stdoutFile = [System.IO.Path]::GetTempFileName()
     $stderrFile = [System.IO.Path]::GetTempFileName()
-    # cmd /c strips the first and last quote off the command line when it holds
-    # more than two quotes, so the string must start with a spare quote and end
-    # with a character that is not one. Ending on `echo ok` keeps the closing
-    # quote of the last redirect intact.
-    $commandLine = '""{0}" -arch=x64 -host_arch=x64 >nul && (set > "{1}" 2> "{2}") && echo ok' -f $cmd, $stdoutFile, $stderrFile
-    $null = & cmd.exe /c $commandLine
-    $code = $LASTEXITCODE
+    $inner = '""{0}" -arch=x64 -host_arch=x64 && set"' -f $cmd
+    $process = Start-Process -FilePath "cmd.exe" `
+        -ArgumentList @("/c", $inner) `
+        -NoNewWindow -Wait -PassThru `
+        -RedirectStandardOutput $stdoutFile -RedirectStandardError $stderrFile
+    $code = $process.ExitCode
+
     $lines = @()
     if (Test-Path $stdoutFile) { $lines = @(Get-Content -Path $stdoutFile) }
-    if ($code -ne 0) {
-        $why = @()
-        if (Test-Path $stderrFile) { $why += @(Get-Content -Path $stderrFile) }
-        $why += $lines
-        $why = @($why | Where-Object { $_ -and "$_".Trim() } | Select-Object -First 20) -join " / "
-        Remove-Item $stdoutFile, $stderrFile -Force -ErrorAction SilentlyContinue
-        throw "VsDevCmd.bat failed with exit code $code. Output: $why"
-    }
+    $errors = @()
+    if (Test-Path $stderrFile) { $errors = @(Get-Content -Path $stderrFile) }
     Remove-Item $stdoutFile, $stderrFile -Force -ErrorAction SilentlyContinue
 
+    if ($code -ne 0) {
+        $why = @(@($errors) + @($lines) | Where-Object { $_ -and "$_".Trim() } | Select-Object -First 20) -join " / "
+        throw "VsDevCmd.bat failed with exit code $code. Output: $why"
+    }
+
+    $imported = 0
     foreach ($line in $lines) {
         if ($line -match '^([^=]+)=(.*)$') {
             [Environment]::SetEnvironmentVariable($matches[1], $matches[2], 'Process')
+            $imported++
         }
+    }
+    if ($imported -eq 0) {
+        throw "VsDevCmd.bat produced no environment variables; the developer environment was not applied."
     }
 }
 
