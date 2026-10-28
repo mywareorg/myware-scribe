@@ -58,6 +58,7 @@ manifest and makeappx errors can be reproduced without compiling anything:
 artwork:
 
     python3 scripts/make-store-assets.py
+    python3 scripts/make-app-icons.py
 
 Square assets are masked to the round badge and left transparent; the wide
 tile and splash fill their rectangle with the artwork's background colour.
