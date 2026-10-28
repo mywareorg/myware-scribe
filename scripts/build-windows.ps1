@@ -82,6 +82,23 @@ trap {
     Write-Host $_.InvocationInfo.PositionMessage
     Write-Host ("  Message: " + $_.Exception.Message)
     Write-Host ("  Stack:   " + ($_.ScriptStackTrace -replace "`r?`n", " | "))
+
+    # Also append to the build log, so the failure can be read from a file when
+    # the console is not copyable (a VM console, for instance).
+    try {
+        $logPath = Join-Path (Split-Path -Parent $PSScriptRoot) "build-windows.log"
+        $detail = @(
+            "",
+            "=== Build failed ===",
+            $_.InvocationInfo.PositionMessage,
+            ("Message: " + $_.Exception.Message),
+            ("Stack:   " + $_.ScriptStackTrace)
+        ) -join "`r`n"
+        Add-Content -Path $logPath -Value $detail -Encoding UTF8
+        Write-Host ("  Logged to: " + $logPath) -ForegroundColor DarkGray
+    } catch {
+        Write-Host "  (could not write the build log)"
+    }
     exit 1
 }
 
