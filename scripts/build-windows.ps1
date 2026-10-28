@@ -563,7 +563,9 @@ try {
             Sort-Object Key |
             ForEach-Object { "{0}:{1}" -f $_.Key, $_.Value.ParameterType.Name }
         Write-Host ("  New-MsixPackage -> " + ($packSignature -join " ")) -ForegroundColor DarkGray
-        Write-Host ("  packing args -> " + ($packArgs.GetEnumerator() | Sort-Object Key | ForEach-Object { "$($_.Key)=$($_.Value)" } -join " | ")) -ForegroundColor DarkGray
+        $packDump = ($packArgs.GetEnumerator() | Sort-Object Key |
+            ForEach-Object { "$($_.Key)=$($_.Value)" }) -join " | "
+        Write-Host ("  packing args -> " + $packDump) -ForegroundColor DarkGray
 
         $msix = New-MsixPackage @packArgs
 
