@@ -17,6 +17,17 @@ values in `identity.json`, then packs the executable and its runtime DLLs.
 The Store rejects any package whose identity does not match the reservation
 character for character, so these values are not optional.
 
+## Testing locally
+
+The Store re-signs submitted packages, so no certificate is needed to upload.
+To install a build on your own machine first, `scripts/make-test-cert.ps1`
+creates a self-signed code-signing certificate, exports the `.pfx`, and trusts
+it for the current user:
+
+    .\scripts\make-test-cert.ps1
+    .\scripts\build-windows.ps1 -SkipTests -SkipModels -NoZip -Msix -Sign `
+        -CertificatePath C:\keys\hippo-test.pfx -CertificatePassword hippo-dev
+
 ## Assets
 
 `assets/` is generated — do not hand-edit. Regenerate after changing the
