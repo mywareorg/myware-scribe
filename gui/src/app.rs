@@ -183,6 +183,24 @@ const REVEAL_INTERVAL_S: f32 = 0.15;
 const REVEAL_CATCHUP_S: f32 = 0.04;
 const REVEAL_BACKLOG: usize = 8;
 
+/// The upgrade prompt after a Free run opens on roughly one run in five.
+const UPSELL_SHOW_MOD: u64 = 5;
+
+/// Roll the per-completion nudge, so Free users see the paywall occasionally
+/// rather than after every run. FNV-1a spreads the clock seed evenly.
+fn upsell_roll() -> bool {
+    let seed = SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos())
+        .unwrap_or(0);
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in seed.to_le_bytes() {
+        hash ^= byte as u64;
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash % UPSELL_SHOW_MOD == 0
+}
+
 #[derive(Serialize, Deserialize)]
 struct Settings {
     preset: Option<String>,
@@ -3110,8 +3128,9 @@ impl App {
             .iter()
             .filter(|item| matches!(item.status, ItemStatus::Done) && item.stats.is_some())
             .count();
-        // Free finishes on the upgrade prompt; Pro gets the summary.
-        if self.shows(license::Audience::FreeOnly) {
+        // Free finishes on the summary; roughly one run in five also opens the
+        // upgrade prompt, so it stays a nudge instead of a nag.
+        if self.shows(license::Audience::FreeOnly) && upsell_roll() {
             self.summary_open = false;
             self.pending_rename = false;
             self.paywall_open = true;
