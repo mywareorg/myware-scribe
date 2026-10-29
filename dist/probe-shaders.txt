@@ -1,83 +1,44 @@
-﻿=== Shader probe 2026-10-29 12:39:03 ===
+﻿=== Shader probe 2026-10-29 13:18:34 ===
 cl    : C:\Program Files\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.51.36231\bin\HostX64\x64\cl.exe
 cmake : C:\Program Files\Microsoft Visual Studio\18\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe
 ninja : C:\Program Files\Microsoft Visual Studio\18\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\Ninja\ninja.exe
 generator : Ninja
 source: C:\Users\wuphy\Documents\hippo-transcribe\target\release\build\whisper-rs-sys-a4a4abcf5807047e\out\whisper.cpp\ggml\src\ggml-vulkan\vulkan-shaders
-build : C:\Users\wuphy\Documents\hippo-transcribe\target\release\build\whisper-rs-sys-a4a4abcf5807047e\out\build\ggml\src\ggml-vulkan\vulkan-shaders-gen-prefix\src\vulkan-shaders-gen-build
-length: 180 characters (+ \CMakeFiles\cmTC_xxxxxx.dir\ is 207)
+build : C:\Users\wuphy\hb\release\build\whisper-rs-sys-a4a4abcf5807047e\out\build\ggml\src\ggml-vulkan\vulkan-shaders-gen-prefix\src\vulkan-shaders-gen-build
+length: 149 characters (+ \CMakeFiles\cmTC_xxxxxx.dir\ is 176)
 
 === Command ===
-C:\Program Files\Microsoft Visual Studio\18\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe -DCMAKE_INSTALL_PREFIX=C:\Users\wuphy\Documents\hippo-transcribe\dist\probe-shaders\install -DCMAKE_INSTALL_BINDIR=. -DCMAKE_BUILD_TYPE=Release -DGGML_VULKAN_COOPMAT_GLSLC_SUPPORT=ON -DGGML_VULKAN_COOPMAT2_GLSLC_SUPPORT=ON -DGGML_VULKAN_INTEGER_DOT_GLSLC_SUPPORT=ON -DGGML_VULKAN_BFLOAT16_GLSLC_SUPPORT=ON -GNinja -S C:\Users\wuphy\Documents\hippo-transcribe\target\release\build\whisper-rs-sys-a4a4abcf5807047e\out\whisper.cpp\ggml\src\ggml-vulkan\vulkan-shaders -B C:\Users\wuphy\Documents\hippo-transcribe\target\release\build\whisper-rs-sys-a4a4abcf5807047e\out\build\ggml\src\ggml-vulkan\vulkan-shaders-gen-prefix\src\vulkan-shaders-gen-build
+C:\Program Files\Microsoft Visual Studio\18\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe -DCMAKE_INSTALL_PREFIX=C:\Users\wuphy\Documents\hippo-transcribe\dist\probe-shaders\install -DCMAKE_INSTALL_BINDIR=. -DCMAKE_BUILD_TYPE=Release -DGGML_VULKAN_COOPMAT_GLSLC_SUPPORT=ON -DGGML_VULKAN_COOPMAT2_GLSLC_SUPPORT=ON -DGGML_VULKAN_INTEGER_DOT_GLSLC_SUPPORT=ON -DGGML_VULKAN_BFLOAT16_GLSLC_SUPPORT=ON -GNinja -S C:\Users\wuphy\Documents\hippo-transcribe\target\release\build\whisper-rs-sys-a4a4abcf5807047e\out\whisper.cpp\ggml\src\ggml-vulkan\vulkan-shaders -B C:\Users\wuphy\hb\release\build\whisper-rs-sys-a4a4abcf5807047e\out\build\ggml\src\ggml-vulkan\vulkan-shaders-gen-prefix\src\vulkan-shaders-gen-build
 
 === Output ===
 -- The C compiler identification is MSVC 19.51.36260.0
 -- The CXX compiler identification is MSVC 19.51.36260.0
 -- Detecting C compiler ABI info
--- Detecting C compiler ABI info - failed
--- Check for working C compiler: C:/Program Files/Microsoft Visual Studio/18/Community/VC/Tools/MSVC/14.51.36231/bin/Hostx64/x64/cl.exe
--- Check for working C compiler: C:/Program Files/Microsoft Visual Studio/18/Community/VC/Tools/MSVC/14.51.36231/bin/Hostx64/x64/cl.exe - broken
--- Configuring incomplete, errors occurred!
-CMake Warning in C:/Users/wuphy/Documents/hippo-transcribe/target/release/build/whisper-rs-sys-a4a4abcf5807047e/out/build/ggml/src/ggml-vulkan/vulkan-shaders-gen-prefix/src/vulkan-shaders-gen-build/CMakeFiles/CMakeScratch/TryCompile-8znwbv/CMakeLists.txt:
-  The object file directory
-
-    C:/Users/wuphy/Documents/hippo-transcribe/target/release/build/whisper-rs-sys-a4a4abcf5807047e/out/build/ggml/src/ggml-vulkan/vulkan-shaders-gen-prefix/src/vulkan-shaders-gen-build/CMakeFiles/CMakeScratch/TryCompile-8znwbv/CMakeFiles/cmTC_65ff9.dir/./
-
-  has 251 characters.  The maximum full path to an object file is 250
-  characters (see CMAKE_OBJECT_PATH_MAX).  Object file
-
-    f5b8881f.obj
-
-  cannot be safely placed under this directory.  The build may not work
-  correctly.
-
-
-CMake Warning in C:/Users/wuphy/Documents/hippo-transcribe/target/release/build/whisper-rs-sys-a4a4abcf5807047e/out/build/ggml/src/ggml-vulkan/vulkan-shaders-gen-prefix/src/vulkan-shaders-gen-build/CMakeFiles/CMakeScratch/TryCompile-4erlee/CMakeLists.txt:
-  The object file directory
-
-    C:/Users/wuphy/Documents/hippo-transcribe/target/release/build/whisper-rs-sys-a4a4abcf5807047e/out/build/ggml/src/ggml-vulkan/vulkan-shaders-gen-prefix/src/vulkan-shaders-gen-build/CMakeFiles/CMakeScratch/TryCompile-4erlee/CMakeFiles/cmTC_119fd.dir/./
-
-  has 251 characters.  The maximum full path to an object file is 250
-  characters (see CMAKE_OBJECT_PATH_MAX).  Object file
-
-    9b49cb7c.obj
-
-  cannot be safely placed under this directory.  The build may not work
-  correctly.
-
-
-CMake Error at C:/Program Files/Microsoft Visual Studio/18/Community/Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/share/cmake-4.3/Modules/CMakeTestCCompiler.cmake:67 (message):
-  The C compiler
-
-    "C:/Program Files/Microsoft Visual Studio/18/Community/VC/Tools/MSVC/14.51.36231/bin/Hostx64/x64/cl.exe"
-
-  is not able to compile a simple test program.
-
-  It fails with the following output:
-
-    Change Dir: 'C:/Users/wuphy/Documents/hippo-transcribe/target/release/build/whisper-rs-sys-a4a4abcf5807047e/out/build/ggml/src/ggml-vulkan/vulkan-shaders-gen-prefix/src/vulkan-shaders-gen-build/CMakeFiles/CMakeScratch/TryCompile-4erlee'
-    
-    Run Build Command(s): C:/PROGRA~1/MICROS~2/18/COMMUN~1/Common7/IDE/COMMON~1/MICROS~1/CMake/Ninja/ninja.exe -v cmTC_119fd
-    [1/2] C:\PROGRA~1\MICROS~2\18\COMMUN~1\VC\Tools\MSVC\1451~1.362\bin\Hostx64\x64\cl.exe  /nologo -D_MBCS  /DWIN32 /D_WINDOWS  /Zi /Ob0 /Od /RTC1 -MDd /showIncludes /FoCMakeFiles\cmTC_119fd.dir\testCCompiler.c.obj /FdCMakeFiles\cmTC_119fd.dir\ /FS -c C:\Users\wuphy\Documents\hippo-transcribe\target\release\build\whisper-rs-sys-a4a4abcf5807047e\out\build\ggml\src\ggml-vulkan\vulkan-shaders-gen-prefix\src\vulkan-shaders-gen-build\CMakeFiles\CMakeScratch\TryCompile-4erlee\testCCompiler.c
-    FAILED: [code=1] CMakeFiles/cmTC_119fd.dir/testCCompiler.c.obj 
-    C:\PROGRA~1\MICROS~2\18\COMMUN~1\VC\Tools\MSVC\1451~1.362\bin\Hostx64\x64\cl.exe  /nologo -D_MBCS  /DWIN32 /D_WINDOWS  /Zi /Ob0 /Od /RTC1 -MDd /showIncludes /FoCMakeFiles\cmTC_119fd.dir\testCCompiler.c.obj /FdCMakeFiles\cmTC_119fd.dir\ /FS -c C:\Users\wuphy\Documents\hippo-transcribe\target\release\build\whisper-rs-sys-a4a4abcf5807047e\out\build\ggml\src\ggml-vulkan\vulkan-shaders-gen-prefix\src\vulkan-shaders-gen-build\CMakeFiles\CMakeScratch\TryCompile-4erlee\testCCompiler.c
-    C:\Users\wuphy\Documents\hippo-transcribe\target\release\build\whisper-rs-sys-a4a4abcf5807047e\out\build\ggml\src\ggml-vulkan\vulkan-shaders-gen-prefix\src\vulkan-shaders-gen-build\CMakeFiles\CMakeScratch\TryCompile-4erlee\testCCompiler.c : fatal error C1083: Cannot open compiler generated file: '': Invalid argument
-    ninja: build stopped: subcommand failed.
-    
-    
-
-
-
-  CMake will not be able to correctly generate this project.
-Call Stack (most recent call first):
-  CMakeLists.txt:2 (project)
-
-
+-- Detecting C compiler ABI info - done
+-- Check for working C compiler: C:/Program Files/Microsoft Visual Studio/18/Community/VC/Tools/MSVC/14.51.36231/bin/Hostx64/x64/cl.exe - skipped
+-- Detecting C compile features
+-- Detecting C compile features - done
+-- Detecting CXX compiler ABI info
+-- Detecting CXX compiler ABI info - done
+-- Check for working CXX compiler: C:/Program Files/Microsoft Visual Studio/18/Community/VC/Tools/MSVC/14.51.36231/bin/Hostx64/x64/cl.exe - skipped
+-- Detecting CXX compile features
+-- Detecting CXX compile features - done
+-- Performing Test CMAKE_HAVE_LIBC_PTHREAD
+-- Performing Test CMAKE_HAVE_LIBC_PTHREAD - Failed
+-- Looking for pthread_create in pthreads
+-- Looking for pthread_create in pthreads - not found
+-- Looking for pthread_create in pthread
+-- Looking for pthread_create in pthread - not found
+-- Found Threads: TRUE
+-- Enabling coopmat glslc support
+-- Enabling coopmat2 glslc support
+-- Enabling dot glslc support
+-- Enabling bfloat16 glslc support
+-- Configuring done (2.7s)
+-- Generating done (0.0s)
+-- Build files have been written to: C:/Users/wuphy/hb/release/build/whisper-rs-sys-a4a4abcf5807047e/out/build/ggml/src/ggml-vulkan/vulkan-shaders-gen-prefix/src/vulkan-shaders-gen-build
 
 === Verdict ===
-exit code: 1
+exit code: 0
 Compiler identification succeeded: cmake accepted the toolchain.
-  CMake Error at C:/Program Files/Microsoft Visual Studio/18/Community/Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/share/cmake-4.3/Modules/CMakeTestCCompiler.cmake:67 (message):
-  C:\Users\wuphy\Documents\hippo-transcribe\target\release\build\whisper-rs-sys-a4a4abcf5807047e\out\build\ggml\src\ggml-vulkan\vulkan-shaders-gen-prefix\src\vulkan-shaders-gen-build\CMakeFiles\CMakeScratch\TryCompile-4erlee\testCCompiler.c : fatal error C1083: Cannot open compiler generated file: '': Invalid argument
-  ninja: build stopped: subcommand failed.
-The nested configure fails here, so a full build is not needed to iterate: change the arguments or the environment and run this again.
+The nested configure passes here. A build failure elsewhere is not this step.
