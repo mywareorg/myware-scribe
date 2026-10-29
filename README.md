@@ -54,10 +54,10 @@ Run the build script from a normal PowerShell prompt:
 powershell -ExecutionPolicy Bypass -File .\scripts\build-windows.ps1
 ```
 
-It enters the Visual Studio developer environment, configures the static CRT
-for the executable, downloads the sherpa-onnx shared DLLs, runs the release
-tests, builds, checks the executable's dependencies, stages the bundled model
-set from `models.lock.json`, and writes a release folder and zip under `dist\`. Use
+It enters the Visual Studio developer environment, runs the release tests,
+builds, then stages the executable together with the sherpa-onnx and Visual C++
+runtime DLLs and the bundled model set from `models.lock.json`, and writes a
+release folder and zip under `dist\`. Use
 `-SkipModels` to stage only the executable and DLLs.
 
 The app loads `sherpa-onnx-c-api.dll` and `onnxruntime.dll` from beside
@@ -320,6 +320,6 @@ see LICENSE for details.
 - `pyannote/segmentation-3.0` weights: MIT (via the sherpa-onnx ONNX conversion).
 - `wespeaker` speaker-embedding weights: CC BY 4.0 (attribution required).
 - Whisper GGML models: MIT.
-- The Windows bundle redistributes **sherpa-onnx** (Apache-2.0) and **ONNX Runtime** (MIT) DLLs.
+- The Windows bundle redistributes **sherpa-onnx** (Apache-2.0) and **ONNX Runtime** (MIT) DLLs, plus the **Microsoft Visual C++ runtime** (`vcruntime140.dll`, `vcruntime140_1.dll`, `msvcp140.dll`), which ship beside the executable so the app runs without the redistributable installed.
 - The GUI bundles **Bootstrap Icons** (`gui/assets/bootstrap-icons.ttf`), MIT.
 - Other components retain their own licenses (MIT/Apache/etc.).

@@ -3,10 +3,11 @@
 [target.x86_64-unknown-linux-gnu]
 rustflags = ["-C", "relocation-model=dynamic-no-pic"]
 
-# The executable is self-contained (sherpa-onnx and ONNX Runtime are loaded
-# from DLLs at runtime).
-[target.x86_64-pc-windows-msvc]
-rustflags = ["-C", "target-feature=+crt-static"]
+# Windows deliberately keeps the default DLL CRT. whisper-rs-sys compiles
+# whisper.cpp and ggml through CMake, which links the DLL runtime; asking Rust
+# for the static CRT as well leaves every CRT symbol those C++ objects import
+# unresolved (LNK2019 __imp_*, then LNK1120). The runtime DLLs are staged beside
+# the executable instead, so the bundle is still self-contained.
 
 # Fast edit/run loop: no LTO, parallel codegen, incremental.
 [alias]

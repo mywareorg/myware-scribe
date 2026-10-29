@@ -6,10 +6,9 @@ or package it as an MSIX for the Microsoft Store.
 
 .DESCRIPTION
 Enters the Visual Studio developer environment (so cl.exe, rc.exe, the Windows
-SDK, and CMake are on PATH), configures the static CRT for the executable,
-stages the sherpa-onnx shared DLLs beside it, builds the release binary, checks
-its runtime dependencies, stages deploy.bat/undeploy.bat/README/LICENSE plus
-the sample audio, and writes a zip with a SHA-256 checksum.
+SDK, and CMake are on PATH), builds the release binary, stages the sherpa-onnx
+and Visual C++ runtime DLLs beside it, stages deploy.bat/undeploy.bat/README/LICENSE
+plus the sample audio, and writes a zip with a SHA-256 checksum.
 
 With -Msix the staged binary is also packed into an MSIX: the manifest is
 rendered from packaging/AppxManifest.xml.template and packaging/identity.json,
@@ -423,33 +422,17 @@ try {
         }
     }
 
-    # Keep the executable self-contained by linking the static CRT. whisper-rs-sys
-    # compiles whisper.cpp and ggml through CMake, which has to be told the same
-    # thing: the C++ objects would otherwise import the DLL runtime while the Rust
-    # side pulls in libcmt, leaving every CRT symbol unresolved at link time.
-    $rustFlags = @()
-    if ($env:RUSTFLAGS) {
-        # Preserve extra flags, but drop any existing crt-static selection so
-        # this script fully controls the CRT mode.
-        $tokens = @($env:RUSTFLAGS -split '\s+' | Where-Object { $_ })
-        for ($i = 0; $i -lt $tokens.Count; $i++) {
-            $token = $tokens[$i]
-            if ($token -eq "-C" -and ($i + 1) -lt $tokens.Count -and
-                $tokens[$i + 1] -match 'crt-static') {
-                $i++
-                continue
-            }
-            if ($token -match 'crt-static') { continue }
-            $rustFlags += $token
-        }
-    }
-    $rustFlags += @("-C", "target-feature=+crt-static")
-    $env:RUSTFLAGS = $rustFlags -join " "
-    $env:CMAKE_MSVC_RUNTIME_LIBRARY = "MultiThreaded"
+    # Both halves of the link use the DLL CRT, which is CMake's default and the
+    # Rust default. Do not ask for the static CRT: whisper-rs-sys builds
+    # whisper.cpp and ggml with CMake, and the two runtimes cannot be mixed
+    # (LNK2019 __imp_* followed by LNK1120). The C++ runtime DLLs are staged
+    # beside the executable instead, so nothing has to be installed first.
     if ($TargetDir) {
         $env:CARGO_TARGET_DIR = $TargetDir
     }
-    Reset-CmakeRuntime -Root $root -Runtime "MultiThreaded" -TargetRoot $TargetDir
+    # A configure left behind by an earlier static-CRT attempt still compiles the
+    # C++ side with /MT; discard it so CMake falls back to its DLL default.
+    Reset-CmakeRuntime -Root $root -Runtime "MultiThreadedDLL" -TargetRoot $TargetDir
 
     if ($Clean) {
         Write-Step "Cleaning previous build output"
@@ -496,13 +479,9 @@ try {
         }
     }
 
-    $dumpbin = Get-Command dumpbin.exe -ErrorAction SilentlyContinue
-    if ($dumpbin) {
-        $dependencies = & $dumpbin.Source /dependents $binary | Out-String
-        if ($dependencies -match "VCRUNTIME140|MSVCP140") {
-            Write-Warn "The executable depends on the dynamic C++ runtime, but the prebuilt sherpa/ONNX Runtime libraries expect the static CRT."
-        }
-    }
+    # Nothing to verify with dumpbin: the C++ runtime DLLs are staged below and
+    # sherpa-onnx/ONNX Runtime are loaded through libloading, so no load-time
+    # dependency is missing from the bundle.
 
     $outRoot = if ([System.IO.Path]::IsPathRooted($OutDir)) {
         $OutDir
@@ -525,6 +504,15 @@ try {
         }
         Copy-Item $source (Join-Path $stage $dll)
     }
+    $vcRuntime = Resolve-VcRuntime
+    foreach ($dll in @("vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll")) {
+        $source = Join-Path $vcRuntime $dll
+        if (-not (Test-Path $source)) {
+            throw "$dll was not found in $vcRuntime"
+        }
+        Copy-Item $source (Join-Path $stage $dll)
+    }
+
     foreach ($file in @("deploy.bat", "undeploy.bat", "README.md", "PRIVACY.md", "LICENSE")) {
         $source = Join-Path $root $file
         if (Test-Path $source) {

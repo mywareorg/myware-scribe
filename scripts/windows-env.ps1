@@ -146,12 +146,12 @@ function Reset-CmakeRuntime {
         [string]$TargetRoot = ""
     )
 
-    # whisper-rs-sys builds whisper.cpp and ggml through CMake, which defaults to
-    # the DLL CRT. The Rust side is linked against the static one, and the two
-    # cannot be mixed: every CRT symbol the C++ objects import through the import
-    # library stays unresolved (LNK2019 __imp_* followed by LNK1120). Cargo does
-    # not watch this variable, so an existing configure has to be discarded or
-    # the new runtime never reaches the compiler.
+    # whisper-rs-sys builds whisper.cpp and ggml through CMake, and CMake caches
+    # the runtime library it was configured with. A cache left behind by an
+    # earlier static-CRT attempt keeps compiling the C++ objects with /MT even
+    # though the build now asks for the DLL runtime, and the link fails again
+    # with LNK2019 __imp_* and LNK1120. Cargo does not watch this, so a stale
+    # configure has to be discarded or the build silently repeats the old mode.
     $targetRoot = if ($TargetRoot) { $TargetRoot } else { Join-Path $Root "target" }
     $buildRoot = Join-Path $targetRoot "release\build"
     if (-not (Test-Path $buildRoot)) { return }
@@ -177,6 +177,32 @@ function Reset-CmakeRuntime {
             Remove-DirectoryTree -Path $entry.FullName
         }
     }
+}
+
+function Resolve-VcRuntime {
+    # The executable links the DLL CRT, so the redistributable runtime DLLs have
+    # to travel beside it: the Store certification machine and a fresh Windows
+    # install cannot be assumed to have the Visual C++ redistributable. The
+    # newest installed redist wins, matching the toolset that did the build.
+    $vs = Get-VsInstallPath
+    $root = Join-Path $vs "VC\Redist\MSVC"
+    if (-not (Test-Path -LiteralPath $root)) {
+        throw "The Visual C++ redistributable directory was not found under $root."
+    }
+
+    $versions = Get-ChildItem -LiteralPath $root -Directory -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -as [version] } |
+        Sort-Object { [version]$_.Name } -Descending
+
+    foreach ($version in $versions) {
+        $x64 = Join-Path $version.FullName "x64"
+        if (-not (Test-Path -LiteralPath $x64)) { continue }
+        $crt = Get-ChildItem -LiteralPath $x64 -Directory -Filter "Microsoft.VC*.CRT" -ErrorAction SilentlyContinue |
+            Select-Object -First 1
+        if ($crt) { return $crt.FullName }
+    }
+
+    throw "No x64 Microsoft.VC*.CRT directory was found under $root."
 }
 
 function Resolve-VulkanSdk {

@@ -85,11 +85,13 @@ $layout = Join-Path $OutDir "$Name-msix\layout"
 if (Test-Path $layout) { Remove-Item $layout -Recurse -Force }
 New-Item -ItemType Directory -Path $layout -Force | Out-Null
 
-# Only the executable and its two runtime DLLs. deploy.bat, the sample audio and
+# Only the executable and its runtime DLLs. deploy.bat, the sample audio and
 # the models are direct-download baggage; the Store build downloads models on
-# first run instead.
+# first run instead. The Visual C++ runtime DLLs are part of that set: the
+# executable links the DLL CRT, and the certification machine has no
+# redistributable installed.
 Copy-Item (Join-Path $Stage "hippo-transcribe.exe") $layout
-foreach ($dll in @("sherpa-onnx-c-api.dll", "onnxruntime.dll")) {
+foreach ($dll in @("sherpa-onnx-c-api.dll", "onnxruntime.dll", "vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll")) {
     Copy-Item (Join-Path $Stage $dll) $layout
 }
 $assets = Join-Path $layout "Assets"

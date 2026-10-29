@@ -5,8 +5,7 @@ Run Hippo Transcribe on Windows with the fast iteration profile.
 
 .DESCRIPTION
 Enters the Visual Studio developer environment if needed, points bindgen at
-LLVM, selects the static CRT used by the prebuilt sherpa-onnx libraries, and
-runs `cargo run --profile release-fast`.
+LLVM, and runs `cargo run --profile release-fast`.
 
 Use this for the edit/run loop. Use `scripts/build-windows.ps1` for the final
 LTO release and zip.

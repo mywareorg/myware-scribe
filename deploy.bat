@@ -42,10 +42,8 @@ echo Installing Hippo Transcribe to "%INSTALL_DIR%"
 if exist "%INSTALL_DIR%" rmdir /s /q "%INSTALL_DIR%"
 mkdir "%INSTALL_DIR%" >nul
 copy /y "%SRC%\hippo-transcribe.exe" "%INSTALL_DIR%\hippo-transcribe.exe" >nul
-if exist "%SRC%\sherpa-onnx-c-api.dll" (
-  copy /y "%SRC%\sherpa-onnx-c-api.dll" "%INSTALL_DIR%\" >nul
-  copy /y "%SRC%\onnxruntime.dll" "%INSTALL_DIR%\" >nul
-)
+rem Copy every DLL: sherpa-onnx, ONNX Runtime, and the Visual C++ runtime.
+for %%f in ("%SRC%\*.dll") do copy /y "%%~f" "%INSTALL_DIR%\" >nul
 if exist "%SRC%\sample-short.mp3" (
   copy /y "%SRC%\sample-short.mp3" "%INSTALL_DIR%\sample-short.mp3" >nul
 ) else if exist "%SRC%\audio\sample-short.mp3" (
