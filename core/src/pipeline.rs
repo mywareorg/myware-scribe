@@ -246,12 +246,23 @@ fn attribute_turn(clip: &Clip, start: f32, end: f32) -> Option<usize> {
 
 /// Run the pipeline over all inputs, emitting progress events.
 pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
+    let run_start = std::time::Instant::now();
     let total = opts.inputs.len().max(1);
     let is_cancelled = || {
         opts.cancel
             .as_ref()
             .is_some_and(|c| c.load(Ordering::SeqCst))
     };
+
+    crate::logging::info(format!(
+        "run: {} input(s), preset {}, mode {:?}, {} speakers",
+        opts.inputs.len(),
+        opts.preset,
+        opts.mode,
+        opts.num_speakers
+            .map(|count| count.to_string())
+            .unwrap_or_else(|| "auto".to_string())
+    ));
 
     let segmentation = models::segmentation_model();
     let embedding = models::embedding_model();
@@ -300,10 +311,15 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
     };
 
     if let Some(transcriber) = &transcriber {
+        crate::logging::info(format!("ASR backend: {}", transcriber.backend().label()));
         emit(Event::Log {
             message: format!("ASR backend: {}", transcriber.backend().label()),
         });
         if let Some(reason) = transcriber.fallback_reason() {
+            crate::logging::warn(format!(
+                "GPU unavailable, using CPU ({} failed: {reason})",
+                transcriber.backend().label()
+            ));
             emit(Event::Log {
                 message: format!(
                     "GPU unavailable, using CPU ({} failed: {reason})",
@@ -807,6 +823,11 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
         });
     }
 
+    crate::logging::info(format!(
+        "done: {} file(s) in {:.1}s",
+        opts.inputs.len(),
+        run_start.elapsed().as_secs_f64()
+    ));
     emit(Event::AllDone);
 }
 

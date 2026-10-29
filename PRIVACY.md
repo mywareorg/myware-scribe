@@ -27,6 +27,12 @@ the network.
 - **Entitlement** — a Pro purchase writes the tier and the last verified state to
   `license.json` beside the settings. It holds no audio, no transcript and no
   file metadata.
+- **Logs** — the last five runs write a local log (`%LOCALAPPDATA%\hippo-transcribe\logs`
+  on Windows) recording app events: the version, which model was used, whether the
+  GPU or CPU backend was chosen, counts of files processed, and error messages.
+  Crashes add a report with a stack trace. Logs never contain audio, transcript
+  text or file paths beyond the counts, and are never sent anywhere; deleting them
+  is safe.
 
 Nothing is stored in a remote account. A Pro purchase is recorded by the store
 against the buyer's store account; that record is a purchase, not a transcript.

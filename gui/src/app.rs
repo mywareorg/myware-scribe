@@ -328,6 +328,8 @@ pub enum Message {
     OpenSummary,
     SmsToggled(bool),
     NotificationsToggled(bool),
+    /// Open the folder holding the log files in Explorer.
+    OpenLogFolder,
     TimestampsToggled(bool),
     SpeakerCountChanged(SpeakerOpt),
     LanguageChanged(LanguageOpt),
@@ -1564,6 +1566,16 @@ impl App {
             Message::NotificationsToggled(value) => {
                 self.notifications = value;
                 self.save_settings();
+                Task::none()
+            }
+            Message::OpenLogFolder => {
+                let dir = hippo_transcribe_core::logging::log_dir();
+                let _ = std::fs::create_dir_all(&dir);
+                // Failures here are cosmetic: the path is still shown in help.
+                #[cfg(windows)]
+                let _ = std::process::Command::new("explorer.exe").arg(&dir).spawn();
+                #[cfg(not(windows))]
+                let _ = std::process::Command::new("xdg-open").arg(&dir).spawn();
                 Task::none()
             }
             Message::TimestampsToggled(value) => {
@@ -6092,6 +6104,15 @@ impl App {
         body = body.push(settings_divider(scheme));
         body = body.push(settings_section_label("Models", scheme));
         body = body.push(models_row);
+        body = body.push(settings_divider(scheme));
+        body = body.push(settings_section_label("Diagnostics", scheme));
+        body = body.push(settings_row(
+            "Log files",
+            action_text("Open")
+                .on_press(Message::OpenLogFolder)
+                .style(pill_button_secondary),
+            scheme,
+        ));
 
         let height = (self.window_size.height * 0.46).clamp(300.0, 360.0);
         let scroll = scrollable(body)

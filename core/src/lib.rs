@@ -9,6 +9,7 @@ pub mod download;
 pub mod event;
 pub mod export;
 pub mod license;
+pub mod logging;
 pub mod models;
 pub mod pipeline;
 

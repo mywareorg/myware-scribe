@@ -283,6 +283,15 @@ built-in `curl.exe` (progress shows in the console). Then open a new terminal an
 run `hippo-transcribe`. `undeploy.bat` removes the install and shortcut
 (`/keepmodels` keeps the models).
 
+## Logs
+
+Each run appends to `%LOCALAPPDATA%\hippo-transcribe\logs\hippo.log`, keeping the last
+five files at 2 MB each; crashes write `crash-<timestamp>.txt` beside them with a
+backtrace and a message box pointing at the folder. Settings → Diagnostics → Open
+log folder opens it, so a user reporting a problem always has something to send.
+The log records the model, the chosen backend and its fallback reason, and error
+messages — never audio, transcript text or file paths.
+
 ## Privacy
 
 Audio, transcripts, diarization caches, models and settings stay on the machine

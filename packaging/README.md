@@ -74,6 +74,12 @@ generator exactly as the build does, which is the form to trust:
 
 Needs one real build to have run far enough to unpack whisper.cpp first.
 
+A successful compile is not a successful GPU path. Nothing in this repo has run
+the Vulkan backend on real hardware yet, so treat `-Gpu` packages as unverified
+until someone transcribes on a machine with a discrete GPU and the log reports
+`ASR backend: vulkan` rather than a CPU fallback. The CPU-only build needs no
+such caveat.
+
 ## Assets
 
 `assets/` is generated — do not hand-edit. Regenerate after changing the

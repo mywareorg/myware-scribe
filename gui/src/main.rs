@@ -71,9 +71,62 @@ fn attach_console() {
     }
 }
 
+/// Write a crash report and tell the user where it is. Without this the GUI
+/// binary dies silently: no console, no window, no clue.
+fn install_panic_hook(cli: bool) {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let location = info
+            .location()
+            .map(|place| format!("{}:{}:{}", place.file(), place.line(), place.column()))
+            .unwrap_or_else(|| "unknown location".to_string());
+        let message = if let Some(text) = info.payload().downcast_ref::<&str>() {
+            (*text).to_string()
+        } else if let Some(text) = info.payload().downcast_ref::<String>() {
+            text.clone()
+        } else {
+            "no message".to_string()
+        };
+        let report = format!(
+            "Hippo Transcribe {} stopped unexpectedly\n\
+             os: {} {}\n\
+             location: {location}\n\
+             message: {message}\n\n\
+             {}\n",
+            env!("CARGO_PKG_VERSION"),
+            std::env::consts::OS,
+            std::env::consts::ARCH,
+            std::backtrace::Backtrace::force_capture()
+        );
+        hippo_transcribe_core::logging::error(format!("panic at {location}: {message}"));
+        let saved = hippo_transcribe_core::logging::crash(&report);
+        previous(info);
+        if cli {
+            return;
+        }
+        let detail = match &saved {
+            Some(path) => format!(
+                "A report was saved to\n\n{}\n\nSend that file to the developer. The folder is also \
+                 available from Settings > Open log folder.",
+                path.display()
+            ),
+            None => "The log folder could not be written to.".to_string(),
+        };
+        rfd::MessageDialog::new()
+            .set_title("Hippo Transcribe stopped unexpectedly")
+            .set_description(detail)
+            .set_level(rfd::MessageLevel::Error)
+            .show();
+    }));
+}
+
 fn main() -> iced::Result {
     #[cfg(windows)]
     set_app_user_model_id();
+
+    let cli = std::env::args().nth(1).as_deref() == Some("--cli");
+    hippo_transcribe_core::logging::init();
+    install_panic_hook(cli);
 
     let args: Vec<String> = std::env::args().collect();
     if args.get(1).map(String::as_str) == Some("--cli") {

@@ -249,6 +249,12 @@ where
             });
             continue;
         }
+        crate::logging::info(format!(
+            "download: {} ({} bytes) from {}",
+            model.spec.id,
+            model.spec.size,
+            base.as_deref().unwrap_or("the compiled-in mirrors")
+        ));
         notify(DownloadEvent::Started {
             label: model.spec.id.as_str(),
         });
@@ -260,6 +266,9 @@ where
             })
         }) {
             let cancelled = cancel.load(Ordering::SeqCst);
+            if !cancelled {
+                crate::logging::error(format!("download failed for {}: {error}", model.spec.id));
+            }
             notify(DownloadEvent::Failed {
                 label: model.spec.id.as_str(),
                 message: if cancelled {
@@ -271,6 +280,7 @@ where
             notify(DownloadEvent::Finished { ok: false });
             return 1;
         }
+        crate::logging::info(format!("download finished: {}", model.spec.id));
         notify(DownloadEvent::Completed {
             label: model.spec.id.as_str(),
             path: model.install_path(),
