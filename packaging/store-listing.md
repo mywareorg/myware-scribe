@@ -96,14 +96,20 @@ Capture on the Windows VM at 1920x1080, window maximised, no personal file names
 in the queue, one shot in the dark theme. The Store needs at least one image and
 accepts up to ten, each at least 1366x768.
 
-1. The drop zone with a single file added and the Start button visible.
-2. A run in progress: stage label, progress bar, elapsed time.
-3. A finished multi-speaker transcript with speaker labels and timestamps.
-4. The transcript with the timestamp toggle off, to show the plain reading mode.
-5. Settings, Storage section: output folder and the open-folder button.
-6. Settings, Diagnostics: the Open log folder row.
-7. The About or Privacy panel, showing the offline statement.
-8. A second theme (dark) version of shot 2 or 3.
+The eight files in `packaging/screenshots/` are the listing set, in order:
+
+1. `01-drop.png` — the drop zone with a file added and Start visible.
+2. `02-running.png` — a run in progress: stage label, progress, elapsed time.
+3. `03-transcript.png` — a finished multi-speaker transcript with labels and timestamps.
+4. `04-summary.png` — the completion summary.
+5. `05-speakers.png` — speaker labels and renaming.
+6. `06-settings.png` — Settings: storage, models and the Diagnostics row.
+7. `07-sms.png` — the SMS/text-message output mode.
+8. `08-dark.png` — the dark theme.
+
+They were captured as partial window shots, so each was scaled with Lanczos to
+clear the 1366x768 minimum (factor `max(1366/width, 768/height)`, aspect
+preserved). Replace them with full-screen 1920x1080 captures when convenient.
 
 ## Before submitting
 
