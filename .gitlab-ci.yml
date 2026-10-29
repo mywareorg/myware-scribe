@@ -1,10 +1,67 @@
-# The Docker image that will be used to build your app
-image: alpine:3.22
-create-pages:
-  pages:
-    # The folder that contains the files to be exposed at the Page URL
-    publish: public
+stages: [build]
+
+windows-build:
+  stage: build
+  tags: [windows]
   rules:
-    # This ensures that only pushes to the default branch will trigger
-    # a pages deploy
-    - if: $CI_COMMIT_REF_NAME == $CI_DEFAULT_BRANCH
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == "main" || $CI_COMMIT_BRANCH == "dev"
+  script:
+    - powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/build-windows.ps1 -SkipTests
+  artifacts:
+    when: always
+    expire_in: 1 week
+    paths:
+      - dist/*.zip
+      - dist/*.sha256
+      - build-windows.log
+
+# Publish the on-demand accuracy model to the Generic Package Registry.
+#
+# GitLab does not count the package registry against the repository/LFS quota,
+# so the 574 MB file never enters git history. The resulting URL is:
+#   $CI_API_V4_URL/projects/$MODELS_PROJECT_ID/packages/generic/hippo-models/<version>/<file>
+#
+# Set MODELS_PROJECT_ID (defaults to this project) and MODELS_UPLOAD_TOKEN (a
+# personal access token with `api` scope, masked). The package project must be
+# public if the app downloads it without credentials; otherwise point
+# HIPPO_TRANSCRIBE_MODEL_MIRROR at a public mirror instead.
+publish-models:
+  stage: build
+  when: manual
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main" || $CI_COMMIT_BRANCH == "dev"
+  variables:
+    MODELS_PACKAGE_VERSION: "1.0.0"
+  script:
+    - test -n "$MODELS_UPLOAD_TOKEN" || { echo "MODELS_UPLOAD_TOKEN is not set"; exit 1; }
+    - scripts/fetch-models.sh --all
+    - |
+      project_id="${MODELS_PROJECT_ID:-$CI_PROJECT_ID}"
+      for file in vendor/models/*/ggml-large-v3-turbo-q5_0.bin; do
+        echo "uploading $(basename "$file") ($(wc -c < "$file") bytes)"
+        curl --fail --show-error --upload-file "$file" \
+          --header "PRIVATE-TOKEN: $MODELS_UPLOAD_TOKEN" \
+          "$CI_API_V4_URL/projects/$project_id/packages/generic/hippo-models/$MODELS_PACKAGE_VERSION/$(basename "$file")"
+      done
+
+# Serve PRIVACY.md as the Store listing's privacy policy URL.
+#
+# The wizard that created this file left a job with no script, which is why the
+# pipeline failed. Pages only needs the rendered files in the published folder;
+# there is nothing to build or install.
+pages:
+  stage: build
+  image: alpine:3.22
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+  script:
+    - mkdir -p public
+    - printf '<!doctype html><meta charset="utf-8"><title>Hippo Transcribe privacy policy</title><pre>\n' > public/privacy.html
+    - sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g' PRIVACY.md >> public/privacy.html
+    - cp public/privacy.html public/index.html
+  pages:
+    publish: public
+  artifacts:
+    paths:
+      - public
