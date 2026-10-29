@@ -30,6 +30,12 @@
     Keep the scratch build directory instead of deleting it first, which
     preserves CMakeCache.txt between runs.
 
+.PARAMETER BuildDir
+    Configure into this directory instead of the scratch one. Point it at the
+    deep path ggml uses inside the real build to reproduce a failure that only
+    happens there, for example
+    target\release\build\whisper-rs-sys-*\out\build\ggml\src\ggml-vulkan\vulkan-shaders-gen-prefix\src\vulkan-shaders-gen-build
+
 .PARAMETER NoSetup
     Do not touch the environment; use the one this process inherited. Used by
     build-windows.ps1 -Probe, which has already set it up.
@@ -43,6 +49,7 @@
 [CmdletBinding()]
 param(
     [string[]]$Define = @(),
+    [string]$BuildDir = "",
     [switch]$Keep,
     [switch]$NoSetup
 )
@@ -108,7 +115,7 @@ if ($candidates.Count -eq 0) {
 $source = Join-Path $candidates[0].FullName "out\whisper.cpp\ggml\src\ggml-vulkan\vulkan-shaders"
 Add-Line ("source: " + $source)
 
-$buildDir = Join-Path $outRoot "build"
+$buildDir = if ($BuildDir) { $BuildDir } else { Join-Path $outRoot "build" }
 if (-not $Keep -and (Test-Path $buildDir)) {
     Remove-DirectoryTree -Path $buildDir
 }
@@ -127,6 +134,11 @@ $cmakeArgs = @(
     "-B", $buildDir
 )
 foreach ($item in $Define) { $cmakeArgs += @("-D" + $item) }
+
+Add-Line ("build : " + $buildDir)
+# cl silently misbehaves past MAX_PATH (260) on Windows unless long paths are
+# enabled; a deep ExternalProject prefix is how that gets reached.
+Add-Line ("length: " + $buildDir.Length + " characters (+ \CMakeFiles\cmTC_xxxxxx.dir\ is " + ($buildDir.Length + 27) + ")")
 
 Add-Section "Command"
 Add-Line ($cmakeCommand.Source + " " + ($cmakeArgs -join " "))
