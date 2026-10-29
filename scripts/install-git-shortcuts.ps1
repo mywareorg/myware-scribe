@@ -34,8 +34,9 @@ $markerStart = "# >>> hippo-transcribe git shortcuts >>>"
 $markerEnd = "# <<< hippo-transcribe git shortcuts <<<"
 
 function Get-DefaultProfilePath {
-    # Windows PowerShell 5.1 keeps its profile under WindowsPowerShell; PowerShell
-    # 7 uses PowerShell. Pick the one that matches the running edition.
+    # $PROFILE is the path this host actually loads, so prefer it: Documents may
+    # be redirected into OneDrive, and the edition decides the folder name.
+    if ($PROFILE) { return $PROFILE }
     $documents = [Environment]::GetFolderPath("MyDocuments")
     if ($PSVersionTable.PSEdition -eq "Core") {
         return Join-Path $documents "PowerShell\profile.ps1"
@@ -106,3 +107,10 @@ Write-Host "  gph              git push origin main" -ForegroundColor DarkGray
 Write-Host "  gpl              git pull --rebase origin main" -ForegroundColor DarkGray
 Write-Host "  gcm <message>    git commit -m <message>" -ForegroundColor DarkGray
 Write-Host "Open a new terminal, or run: . `$PROFILE" -ForegroundColor DarkGray
+if ($PROFILE) {
+    Write-Host ("This host loads: " + $PROFILE) -ForegroundColor DarkGray
+}
+$resolvedProfile = if ($PROFILE) { $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($PROFILE) } else { "" }
+if ($resolvedProfile -and ($target -ne $resolvedProfile)) {
+    Write-Host "That is not the profile this host loads; start a new terminal before testing." -ForegroundColor Yellow
+}
