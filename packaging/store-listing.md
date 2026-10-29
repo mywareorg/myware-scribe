@@ -85,7 +85,7 @@ counts in mind, they are the limits the form enforces.
 
 - Support contact: the address registered in Partner Center.
 - Website: optional, leave blank.
-- Privacy policy URL: `https://librewarelive.gitlab.io/hippo-transcribe/privacy`
+- Privacy policy URL: `https://librewarelive.gitlab.io/hippo-transcribe/` (live; serves the generated privacy page)
   (the `pages` job in `.gitlab-ci.yml` publishes `PRIVACY.md` there on every push
   to `main`; confirm Pages is enabled for the project).
 - Copyright: `(c) 2026 Sean Wu`.
