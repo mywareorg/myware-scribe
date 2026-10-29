@@ -91,6 +91,10 @@ optional: without libclang, whisper uses its bundled bindings (`-SkipBindgen`
 forces that). Pass `-SkipTests`, `-SkipBindgen`, `-Diagnose`, `-Clean`, `-NoZip`,
 `-Version 0.2.0`, or `-OutDir C:\builds` as needed.
 
+If that build machine is also where you push from, `scripts/install-git-shortcuts.ps1`
+adds `gph` (`git push origin main`), `gpl` (`git pull --rebase origin main`) and
+`gcm <message>` (`git commit -m <message>`) to your PowerShell profile.
+
 ## Models
 
 Models are non-gated and installed into `%LOCALAPPDATA%\hippo-transcribe\models`
