@@ -38,8 +38,8 @@ counts in mind, they are the limits the form enforces.
     - Speaker labels such as SPEAKER 1 and SPEAKER 2.
     - A queue, so a folder of recordings can be left to run.
     - Progress for each file, and a desktop notification when the batch is done.
-    - No telemetry. The only network use is the one-time model download, plus a
-      Store licence check if you buy the optional Pro upgrade.
+    - No telemetry. The only network use is the one-time model download. (1.1
+      adds a Store licence check when Pro can actually be purchased.)
 
     Models are around 2 GB in total and are downloaded on first use, so the
     first run needs an internet connection. Long recordings take time on a CPU;
@@ -47,7 +47,8 @@ counts in mind, they are the limits the form enforces.
 
     The free version handles any number of files, one speaker at a time, with
     the Balanced model. Pro adds the Speed and Accuracy models, speaker labels,
-    batch runs, transcript editing and playback scrubbing.
+    batch runs, transcript editing and playback scrubbing; it arrives in 1.1,
+    and until then the 7-day trial inside the app shows what it adds.
 
 ## Feature bullets
 
@@ -112,11 +113,13 @@ accepts up to ten, each at least 1366x768.
 - [ ] Confirm `packaging/identity.json` still matches Partner Center character
       for character. Current values are `SeanWu.HippoTranscribe`,
       `CN=6862352A-51D9-40F2-9242-0F769B2F87AB`, display name `Sean Wu`.
-- [ ] Decide the paywall question before upload. With no Store entitlement
-      provider, the Pro dialog says purchasing is not available in this build,
-      so either hide the Pro surfaces for this release or ship the durable add-on
-      first. Advertising Pro in the listing while it cannot be bought is the
-      case Microsoft rejects.
+- [ ] Paywall: 1.0 ships as a preview. The Pro surfaces stay visible (header
+      chip, locked-feature toasts, the nudge after a Free run) and the dialog
+      offers the 7-day trial, but no "Buy Pro" button is shown because there is
+      no Store entitlement provider yet; the copy says Pro arrives in 1.1. The
+      listing must therefore promise a trial and features, not a purchase — do
+      not add a price, a "buy" call to action or a Pro price to the listing
+      until 1.1 lands with the durable add-on.
 - [ ] Complete the IARC questionnaire, the age-rating section and the system
       requirements block.
 - [ ] Upload the `.msix`, then submit for certification.

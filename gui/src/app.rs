@@ -1364,8 +1364,10 @@ impl App {
             }
 
             if self.provider.name() == "none" {
+                // Store purchasing arrives in 1.1. Say what Pro is and let the
+                // trial do the selling, instead of apologising for a dead button.
                 actions = actions.push(
-                    text("Purchasing is not available in this build yet.")
+                    text("Pro arrives in 1.1. The 7-day trial shows what it adds.")
                         .size(theme::TEXT_XS)
                         .color(scheme.muted),
                 );
@@ -2129,7 +2131,7 @@ impl App {
                     }
                     license::PurchaseState::Unavailable => {
                         self.toast = Some((
-                            "Purchasing is not available in this build yet".to_string(),
+                            "The Store purchase arrives in 1.1; the trial is open now".to_string(),
                             Instant::now(),
                         ));
                     }

@@ -237,9 +237,13 @@ never used to delete transcripts or queue items; a lapsed license simply falls
 back to the free tier. Store receipt checks survive 30 days offline, then
 re-verify.
 
-`HIPPO_TRANSCRIBE_TIER=pro` (or `free`) forces the tier for development. The
-store clients are not built yet, so packaged builds report no store and rely on
-the trial.
+1.0 ships as a preview: the Pro surfaces (header chip, locked-feature toasts, the
+nudge after a free run) are visible, the paywall offers the trial, and no purchase
+button is shown because no store client is built yet. Purchasing lands in 1.1 with
+the durable add-on, which is also the first point at which it can be tested —
+the Store does not resolve an add-on for an app that is not yet published.
+
+`HIPPO_TRANSCRIBE_TIER=pro` (or `free`) forces the tier for development.
 
 ## GUI
 
