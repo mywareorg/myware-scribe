@@ -50,16 +50,16 @@ publish-models:
 # The wizard that created this file left a job with no script, which is why the
 # pipeline failed. Pages only needs the rendered files in the published folder;
 # there is nothing to build or install.
+# The pages themselves are committed under public/, so publishing needs no
+# shell utilities: a shell executor ignores `image:` and would run this in
+# PowerShell, where printf/sed do not exist. Regenerate the HTML with
+# scripts/make-privacy-page.py after editing PRIVACY.md.
 pages:
   stage: build
-  image: alpine:3.22
   rules:
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
   script:
-    - mkdir -p public
-    - printf '<!doctype html><meta charset="utf-8"><title>Hippo Transcribe privacy policy</title><pre>\n' > public/privacy.html
-    - sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g' PRIVACY.md >> public/privacy.html
-    - cp public/privacy.html public/index.html
+    - echo "publishing public/"
   artifacts:
     paths:
       - public
