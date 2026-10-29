@@ -98,7 +98,10 @@ function Remove-DirectoryTree {
 function Reset-CmakeGenerator {
     param(
         [Parameter(Mandatory = $true)][string]$Root,
-        [Parameter(Mandatory = $true)][string]$Generator
+        [Parameter(Mandatory = $true)][string]$Generator,
+        # Where cargo keeps release build output. Defaults to <Root>\target;
+        # overridden when CARGO_TARGET_DIR points somewhere shorter.
+        [string]$TargetRoot = ""
     )
 
     # CMake refuses to reuse a build directory that was configured with another
@@ -107,7 +110,8 @@ function Reset-CmakeGenerator {
     #
     # Deleting the build directory alone is not enough: cargo's fingerprint would
     # still say the build script is up to date and it would never run again.
-    $buildRoot = Join-Path $Root "target\release\build"
+    $targetRoot = if ($TargetRoot) { $TargetRoot } else { Join-Path $Root "target" }
+    $buildRoot = Join-Path $targetRoot "release\build"
     if (-not (Test-Path $buildRoot)) { return }
 
     $stale = @()
@@ -126,7 +130,7 @@ function Reset-CmakeGenerator {
     }
 
     if ($stale.Count -gt 0) {
-        $fingerprints = Join-Path $Root "target\release\.fingerprint"
+        $fingerprints = Join-Path $targetRoot "release\.fingerprint"
         foreach ($entry in (Get-ChildItem -Path $fingerprints -Directory -Filter "whisper-rs-sys-*" -ErrorAction SilentlyContinue)) {
             Remove-DirectoryTree -Path $entry.FullName
         }

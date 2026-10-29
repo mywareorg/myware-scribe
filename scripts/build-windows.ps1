@@ -137,7 +137,8 @@ trap {
             Add-Content -Path $logPath -Value ($consoleTail -join "`r`n") -Encoding UTF8
         }
 
-        $configured = Get-ChildItem -Path (Join-Path $repo "target\release\build") -Recurse -Filter "CMakeCache.txt" -ErrorAction SilentlyContinue |
+        $reportTarget = if ($env:CARGO_TARGET_DIR) { $env:CARGO_TARGET_DIR } else { Join-Path $repo "target" }
+        $configured = Get-ChildItem -Path (Join-Path $reportTarget "release\build") -Recurse -Filter "CMakeCache.txt" -ErrorAction SilentlyContinue |
             Where-Object { $_.FullName -match "whisper-rs-sys" }
         if ($configured) {
             $cacheLines = @("", "=== configure state ===")
@@ -351,7 +352,16 @@ if ($useGpu) {
         Write-Warn "No CMake under the Visual Studio install; using the one on PATH."
     }
 
-    Reset-CmakeGenerator -Root $root -Generator "Ninja"
+    # ggml's shader project writes its object files about 180 characters deep in
+    # a default checkout, and cmake refuses to place them past CMAKE_OBJECT_PATH_MAX
+    # (250): "cannot be safely placed under this directory". cl.exe then fails with
+    # "Cannot open compiler generated file: ''". A target directory near the profile
+    # root keeps the nested path clear of the limit.
+    if (-not $TargetDir) {
+        $TargetDir = Join-Path $env:USERPROFILE "hb"
+        Write-Step "Building in $TargetDir so the ggml paths stay under MAX_PATH"
+    }
+    Reset-CmakeGenerator -Root $root -Generator "Ninja" -TargetRoot $TargetDir
 }
 
 Push-Location $root

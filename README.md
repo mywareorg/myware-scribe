@@ -89,7 +89,11 @@ C++" workload, Rust stable MSVC (`rustup default stable-x86_64-pc-windows-msvc`)
 and CMake (included with the workload or `winget install Kitware.CMake`). LLVM is
 optional: without libclang, whisper uses its bundled bindings (`-SkipBindgen`
 forces that). Pass `-SkipTests`, `-SkipBindgen`, `-Diagnose`, `-Clean`, `-NoZip`,
-`-Version 0.2.0`, or `-OutDir C:\builds` as needed.
+`-Version 0.2.0`, or `-OutDir C:\builds` as needed. Vulkan builds default to
+`%USERPROFILE%\hb` as the target directory: ggml's nested shader project generates
+paths that exceed cmake's 250-character object path limit inside a deep checkout,
+and cl then fails with `Cannot open compiler generated file: ''`. Pass `-TargetDir`
+if you want one somewhere else, but keep it short.
 
 If that build machine is also where you push from, `scripts/install-git-shortcuts.ps1`
 adds `ga` (`git add`), `gph` (`git push origin main`), `gpl` (`git pull --rebase origin main`) and
