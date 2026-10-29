@@ -1,0 +1,42 @@
+﻿=== Shader probe 2026-10-29 12:16:41 ===
+cl    : C:\Program Files\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.51.36231\bin\HostX64\x64\cl.exe
+cmake : C:\Program Files\Microsoft Visual Studio\18\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe
+ninja : C:\Program Files\Microsoft Visual Studio\18\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\Ninja\ninja.exe
+generator : Ninja
+source: C:\Users\wuphy\Documents\hippo-transcribe\target\release\build\whisper-rs-sys-a4a4abcf5807047e\out\whisper.cpp\ggml\src\ggml-vulkan\vulkan-shaders
+
+=== Command ===
+C:\Program Files\Microsoft Visual Studio\18\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe -DCMAKE_INSTALL_PREFIX=C:\Users\wuphy\Documents\hippo-transcribe\dist\probe-shaders\install -DCMAKE_INSTALL_BINDIR=. -DCMAKE_BUILD_TYPE=Release -DGGML_VULKAN_COOPMAT_GLSLC_SUPPORT=ON -DGGML_VULKAN_COOPMAT2_GLSLC_SUPPORT=ON -DGGML_VULKAN_INTEGER_DOT_GLSLC_SUPPORT=ON -DGGML_VULKAN_BFLOAT16_GLSLC_SUPPORT=ON -GNinja -S C:\Users\wuphy\Documents\hippo-transcribe\target\release\build\whisper-rs-sys-a4a4abcf5807047e\out\whisper.cpp\ggml\src\ggml-vulkan\vulkan-shaders -B C:\Users\wuphy\Documents\hippo-transcribe\dist\probe-shaders\build
+
+=== Output ===
+-- The C compiler identification is MSVC 19.51.36260.0
+-- The CXX compiler identification is MSVC 19.51.36260.0
+-- Detecting C compiler ABI info
+-- Detecting C compiler ABI info - done
+-- Check for working C compiler: C:/Program Files/Microsoft Visual Studio/18/Community/VC/Tools/MSVC/14.51.36231/bin/Hostx64/x64/cl.exe - skipped
+-- Detecting C compile features
+-- Detecting C compile features - done
+-- Detecting CXX compiler ABI info
+-- Detecting CXX compiler ABI info - done
+-- Check for working CXX compiler: C:/Program Files/Microsoft Visual Studio/18/Community/VC/Tools/MSVC/14.51.36231/bin/Hostx64/x64/cl.exe - skipped
+-- Detecting CXX compile features
+-- Detecting CXX compile features - done
+-- Performing Test CMAKE_HAVE_LIBC_PTHREAD
+-- Performing Test CMAKE_HAVE_LIBC_PTHREAD - Failed
+-- Looking for pthread_create in pthreads
+-- Looking for pthread_create in pthreads - not found
+-- Looking for pthread_create in pthread
+-- Looking for pthread_create in pthread - not found
+-- Found Threads: TRUE
+-- Enabling coopmat glslc support
+-- Enabling coopmat2 glslc support
+-- Enabling dot glslc support
+-- Enabling bfloat16 glslc support
+-- Configuring done (3.5s)
+-- Generating done (0.0s)
+-- Build files have been written to: C:/Users/wuphy/Documents/hippo-transcribe/dist/probe-shaders/build
+
+=== Verdict ===
+exit code: 0
+Compiler identification succeeded: cmake accepted the toolchain.
+The nested configure passes here. A build failure elsewhere is not this step.
