@@ -7098,10 +7098,9 @@ impl Player {
 fn logo_handle() -> iced::widget::image::Handle {
     static LOGO: OnceLock<iced::widget::image::Handle> = OnceLock::new();
     LOGO.get_or_init(|| {
-        let image =
-            image::load_from_memory(include_bytes!("../../icons/hippo-mirror-square.png"))
-                .expect("bundled Hippo Transcribe logo")
-                .into_rgba8();
+        let image = image::load_from_memory(include_bytes!("../assets/logo.png"))
+            .expect("bundled Hippo Transcribe logo")
+            .into_rgba8();
         let (width, height) = image.dimensions();
         iced::widget::image::Handle::from_rgba(width, height, image.into_raw())
     })
