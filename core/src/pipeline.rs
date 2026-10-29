@@ -46,6 +46,13 @@ impl PipelineMode {
 
 /// Pick the internal pipeline for a run. A single speaker never needs the
 /// diarization stage, so it takes the fastest path regardless of preset.
+/// Report an error to the window and to the log. Without the second half a
+/// failure that the user closes leaves nothing behind to diagnose.
+fn fail(emit: &mut dyn FnMut(Event), message: String) {
+    crate::logging::error(&message);
+    emit(Event::Error { message });
+}
+
 pub fn route(num_speakers: Option<i32>) -> PipelineMode {
     if num_speakers == Some(1) {
         PipelineMode::AsrOnly
@@ -278,7 +285,7 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
 
     if diarized {
         if let Err(message) = diarize::ensure_available() {
-            emit(Event::Error { message });
+            fail(emit, message);
             return;
         }
     }
@@ -303,9 +310,7 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
             emit(Event::Log {
                 message: format!("{message} (expected at {})", whisper.display()),
             });
-            emit(Event::Error {
-                message: format!("{name} model unavailable — {hint}"),
-            });
+            fail(emit, format!("{name} model unavailable — {hint}"));
             return;
         }
     };
@@ -386,7 +391,7 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
         let (samples, rate) = match decoded {
             Ok(value) => value,
             Err(message) => {
-                emit(Event::Error { message });
+                fail(emit, message);
                 continue;
             }
         };
@@ -501,13 +506,11 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
                             turns
                         }
                         Ok(Err(message)) => {
-                            emit(Event::Error { message });
+                            fail(emit, message);
                             continue;
                         }
                         Err(_) => {
-                            emit(Event::Error {
-                                message: "diarization thread panicked".to_string(),
-                            });
+                            fail(emit, "diarization thread panicked".to_string());
                             continue;
                         }
                     }
