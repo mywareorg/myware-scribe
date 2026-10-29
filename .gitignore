@@ -28,3 +28,4 @@ dist/build-failure.txt
 __pycache__/
 build-console.txt
 dist/env-diagnose.txt
+dist/build-windows.log

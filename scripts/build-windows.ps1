@@ -115,6 +115,14 @@ trap {
         }
 
         # The step names matter as much as the error: they show which stage ran.
+        # CMake's own warnings explain most configure failures and sit far earlier
+        # in the log than the error does, so keep the log with the report.
+        $logCopy = Join-Path $repo "dist\build-windows.log"
+        if (Test-Path $buildLog) {
+            New-Item -ItemType Directory -Path (Split-Path -Parent $logCopy) -Force | Out-Null
+            Copy-Item -Path $buildLog -Destination $logCopy -Force
+        }
+
         $console = Join-Path $repo "build-console.txt"
         if (Test-Path $console) {
             $consoleTail = @("", "=== console ===")
@@ -322,14 +330,19 @@ if ($useGpu) {
     $env:CMAKE_GENERATOR = "Ninja"
     Write-Host "  CMAKE_GENERATOR=$env:CMAKE_GENERATOR" -ForegroundColor DarkGray
 
-    # ggml builds its Vulkan shader generator as a nested CMake project. On this
-    # toolchain the compiler identification step inside that project emits an
-    # /Fd with an empty file name, and cl rejects it with "Cannot open compiler
-    # generated file: ''". Emptying the debug flag sets keeps /Zi and /Fd out of
-    # that try-compile; nothing here is built as Debug.
-    $env:CMAKE_C_FLAGS_DEBUG = ""
-    $env:CMAKE_CXX_FLAGS_DEBUG = ""
-    $env:CMAKE_EXE_LINKER_FLAGS_DEBUG = ""
+    # ggml builds its Vulkan shader generator with ExternalProject_Add, so it is
+    # configured by a second cmake process that only inherits the environment.
+    # whisper-rs-sys turns every CMAKE_* variable into -D for the parent, which
+    # means flags cannot be injected that way; the toolchain has to be one that
+    # ggml works with. Prefer the CMake that ships with Visual Studio, next to the
+    # Ninja that ships with it, over a standalone install on PATH.
+    $vsCmake = Join-Path (Get-VsInstallPath) "Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin"
+    if (Test-Path (Join-Path $vsCmake "cmake.exe")) {
+        $env:PATH = $vsCmake + ";" + $env:PATH
+        Write-Host "  Using the Visual Studio CMake at $vsCmake" -ForegroundColor DarkGray
+    } else {
+        Write-Warn "No CMake under the Visual Studio install; using the one on PATH."
+    }
 
     Reset-CmakeGenerator -Root $root -Generator "Ninja"
 }
