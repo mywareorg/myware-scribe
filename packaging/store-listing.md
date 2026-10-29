@@ -1,0 +1,130 @@
+# Store listing copy
+
+Paste these into Partner Center > Hippo Transcribe > Store listing. The Store
+renders plain text only: no markdown, no tables, no emoji. Keep the character
+counts in mind, they are the limits the form enforces.
+
+## Product title
+
+    Hippo Transcribe
+
+## Short description (under 200 characters)
+
+    Turn recordings into speaker-labelled transcripts on your own PC. No account, no uploads, no audio leaving the machine.
+
+## Long description
+
+    Hippo Transcribe turns interviews, meetings and voice notes into readable
+    transcripts without sending anything to a server.
+
+    Drop in an audio or video file and it produces a transcript labelled by
+    speaker, with timestamps you can turn off. Everything runs on your own
+    computer: model files are downloaded once, and after that the app works with
+    the network disconnected. There is no account to create and no usage data to
+    opt out of.
+
+    It is built for the recordings people actually have: interviews, panel
+    discussions, lectures, calls recorded on a phone. Speech recognition and
+    speaker separation run locally on the CPU, so it works on an ordinary
+    laptop without a graphics card.
+
+    A single-speaker recording is transcribed in one pass. A recording with two
+    or more speakers is split into turns first, then transcribed, so each line
+    carries the right speaker.
+
+    What you get:
+    - A .txt transcript, with or without timestamps, saved beside the audio or
+      in a folder you choose.
+    - Speaker labels such as SPEAKER 1 and SPEAKER 2.
+    - A queue, so a folder of recordings can be left to run.
+    - Progress for each file, and a desktop notification when the batch is done.
+    - No telemetry. The only network use is the one-time model download, plus a
+      Store licence check if you buy the optional Pro upgrade.
+
+    Models are around 2 GB in total and are downloaded on first use, so the
+    first run needs an internet connection. Long recordings take time on a CPU;
+    expect roughly the length of the recording again for an hour of audio.
+
+    The free version handles any number of files, one speaker at a time, with
+    the Balanced model. Pro adds the Speed and Accuracy models, speaker labels,
+    batch runs, transcript editing and playback scrubbing.
+
+## Feature bullets
+
+    - Speaker-labelled transcripts from interviews, meetings and notes
+    - Runs offline once the models are downloaded
+    - No account, no sign-in, no telemetry
+    - Automatic language detection, or pin a language
+    - Timestamps on or off, per export
+    - Batch queue for whole folders of recordings
+    - Transcript saved as .txt beside the audio or in a chosen folder
+    - Re-runs reuse cached results for unchanged audio
+    - Desktop notification when a run finishes
+    - Logs stay on the machine, and the folder opens from Settings
+
+## Search terms (seven, one per line)
+
+    offline transcription
+    speech to text
+    speaker diarization
+    interview transcript
+    meeting notes
+    private transcription
+    audio to text
+
+## System requirements
+
+- OS: Windows 10 version 1809 (build 17763) or later, Windows 11.
+- Architecture: x64.
+- Memory: 4 GB minimum, 8 GB recommended.
+- Disk: about 2 GB for models, plus room for transcripts.
+- Graphics: not required; this release runs inference on the CPU.
+
+## Support and policy
+
+- Support contact: the address registered in Partner Center.
+- Website: optional, leave blank.
+- Privacy policy URL: `https://librewarelive.gitlab.io/hippo-transcribe/privacy`
+  (the `pages` job in `.gitlab-ci.yml` publishes `PRIVACY.md` there on every push
+  to `main`; confirm Pages is enabled for the project).
+- Copyright: `(c) 2026 Sean Wu`.
+
+## Screenshot shot list
+
+Capture on the Windows VM at 1920x1080, window maximised, no personal file names
+in the queue, one shot in the dark theme. The Store needs at least one image and
+accepts up to ten, each at least 1366x768.
+
+1. The drop zone with a single file added and the Start button visible.
+2. A run in progress: stage label, progress bar, elapsed time.
+3. A finished multi-speaker transcript with speaker labels and timestamps.
+4. The transcript with the timestamp toggle off, to show the plain reading mode.
+5. Settings, Storage section: output folder and the open-folder button.
+6. Settings, Diagnostics: the Open log folder row.
+7. The About or Privacy panel, showing the offline statement.
+8. A second theme (dark) version of shot 2 or 3.
+
+## Before submitting
+
+- [ ] Pass `-Version` so the package reports a four-part version, for example
+      `-Version 1.0.0` renders `1.0.0.0`. Every later submission must be higher.
+- [ ] Build without `-Sign`: the Store re-signs. `-Sign` is only for sideloading.
+- [ ] Confirm `packaging/identity.json` still matches Partner Center character
+      for character. Current values are `SeanWu.HippoTranscribe`,
+      `CN=6862352A-51D9-40F2-9242-0F769B2F87AB`, display name `Sean Wu`.
+- [ ] Decide the paywall question before upload. With no Store entitlement
+      provider, the Pro dialog says purchasing is not available in this build,
+      so either hide the Pro surfaces for this release or ship the durable add-on
+      first. Advertising Pro in the listing while it cannot be bought is the
+      case Microsoft rejects.
+- [ ] Complete the IARC questionnaire, the age-rating section and the system
+      requirements block.
+- [ ] Upload the `.msix`, then submit for certification.
+
+## Notes on wording
+
+`docs/brand.md` bans absolute offline claims. "Runs offline once the models are
+downloaded" is accurate: model download is the only automatic network use, and
+the Store licence check happens only when someone buys or restores Pro. Do not
+use "never phones home", "100% offline" or "HIPAA compliant" anywhere in the
+listing; the privacy policy says "HIPAA inspired" instead.
