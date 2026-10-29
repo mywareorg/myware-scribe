@@ -205,11 +205,11 @@ whisper.cpp uses the fastest backend the build provides:
 - **macOS** — Metal on every build. `--features coreml` additionally offloads
   the encoder to Core ML, which requires a converted `*-encoder.mlmodelc` beside
   the model; without one Metal is used.
-- **Windows/Linux** — Vulkan + OpenMP when built with `--features gpu`. The
-  Windows script enables it when the Vulkan SDK is present, warns when it is
-  not, and takes `-Gpu` to require the SDK or `-Cpu` to force the slow build.
-  Store packages use the same rule: the SDK is only needed to compile, because
-  ggml loads `vulkan-1.dll` from the driver at run time.
+- **Windows/Linux** — Vulkan + OpenMP with `--features gpu`. Opt-in: the Windows
+  script builds CPU-only unless you pass `-Gpu`, which requires the Vulkan SDK.
+  An installed SDK does not switch the backend on by itself. The SDK is only
+  needed to compile — ggml loads `vulkan-1.dll` from the driver at run time.
+  This path has never been run on real hardware, so treat it as experimental.
 - **CPU fallback** — if GPU context creation fails, the run continues on the CPU
   and the console reports why. `HIPPO_TRANSCRIBE_ACCEL=cpu` forces CPU.
 

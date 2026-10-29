@@ -169,8 +169,11 @@ if (Test-Path variable:PSNativeCommandUseErrorActionPreference) {
 
 # The gpu feature compiles whisper against Vulkan. The SDK is only needed to
 # compile: at run time ggml loads vulkan-1.dll from the graphics driver and
-# falls back to the CPU when no Vulkan device exists, so the Store package can
-# carry the same accelerated build as a local one.
+# falls back to the CPU when no Vulkan device exists.
+#
+# Acceleration is opt-in. An installed SDK does not turn it on: the accelerated
+# build has never been exercised on real hardware, and a build that changes
+# backend because of what happens to be installed is not reproducible.
 $gpuExplicit = $PSBoundParameters.ContainsKey("Gpu")
 $cpuExplicit = $PSBoundParameters.ContainsKey("Cpu")
 if ($gpuExplicit -and $cpuExplicit) {
@@ -180,17 +183,16 @@ if ($gpuExplicit -and $cpuExplicit) {
 $useGpu = $false
 if ($cpuExplicit) {
     Write-Step "Building the CPU-only backend (-Cpu)"
-} else {
+} elseif ($gpuExplicit) {
     $vulkanSdk = Resolve-VulkanSdk
-    if ($vulkanSdk) {
-        $env:VULKAN_SDK = $vulkanSdk
-        $useGpu = $true
-        Write-Step "Vulkan SDK at $vulkanSdk"
-    } elseif ($gpuExplicit) {
-        throw "-Gpu needs the Vulkan SDK (VULKAN_SDK). Install it from LunarG, or pass -Cpu for a CPU-only build."
-    } else {
-        Write-Warn "Vulkan SDK not found; building CPU-only. Install it for GPU inference, or pass -Gpu to require it."
+    if (-not $vulkanSdk) {
+        throw "-Gpu needs the Vulkan SDK (VULKAN_SDK). Install it from LunarG, or drop -Gpu for a CPU-only build."
     }
+    $env:VULKAN_SDK = $vulkanSdk
+    $useGpu = $true
+    Write-Step "Vulkan SDK at $vulkanSdk"
+} else {
+    Write-Step "Building the CPU-only backend (pass -Gpu for the Vulkan build)"
 }
 if ($useGpu -and $Msix) {
     Write-Step "Packaging for the Store with Vulkan; machines without a Vulkan driver fall back to the CPU"
