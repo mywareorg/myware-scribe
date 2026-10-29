@@ -39,6 +39,10 @@ powershell -ExecutionPolicy Bypass -File .\scripts\build-windows.ps1
 
 .EXAMPLE
 .\scripts\build-windows.ps1 -SkipTests -Msix -Sign -CertificatePath C:\keys\hippo-test.pfx -CertificatePassword hunter2
+
+.EXAMPLE
+# Iterate on the step a Vulkan build usually fails in, without compiling.
+.\scripts\build-windows.ps1 -Probe
 #>
 [CmdletBinding()]
 param(
@@ -68,7 +72,10 @@ param(
     # SDK is installed; -Gpu requires the SDK and fails without it, -Cpu forces
     # the CPU-only build even on a machine that has the SDK.
     [switch]$Gpu,
-    [switch]$Cpu
+    [switch]$Cpu,
+    # Replay only ggml's nested Vulkan shader configure and exit. No cargo, no
+    # compiler work: the step the build usually fails in, in a few seconds.
+    [switch]$Probe
 )
 
 $ErrorActionPreference = "Stop"
@@ -372,6 +379,16 @@ try {
         if (-not (Get-Command $command -ErrorAction SilentlyContinue)) {
             throw "$command was not found. Use a machine with the Visual Studio C++ workload and the Rust MSVC toolchain."
         }
+    }
+
+    if ($Probe) {
+        # The environment above is exactly what the build hands to ggml, so run
+        # the nested shader configure in it and stop. Iterating on that step
+        # otherwise costs a full cargo build per attempt.
+        Write-Step "Probing the nested shader configure (-Probe)"
+        $probeScript = Join-Path $PSScriptRoot "probe-shaders.ps1"
+        & $probeScript -NoSetup
+        exit $LASTEXITCODE
     }
     Write-Host ("  cl: " + $clPath) -ForegroundColor DarkGray
     Write-Host ("  cmake: " + (Get-Command cmake.exe).Source + " " + ((& cmake --version) | Select-Object -First 1)) -ForegroundColor DarkGray

@@ -58,6 +58,22 @@ manifest and makeappx errors can be reproduced without compiling anything:
 
     .\scripts\diagnose-msix.ps1 -Keep
 
+## Vulkan builds
+
+ggml's Vulkan shader generator is a nested CMake project, and it is where a
+Vulkan build usually fails. `scripts/probe-shaders.ps1` replays only that
+configure against the tree the last build produced — seconds instead of a full
+compile — and writes the complete output to `dist\probe-shaders.txt`:
+
+    .\scripts\probe-shaders.ps1
+
+`build-windows.ps1 -Probe` does the same after setting up the compiler and
+generator exactly as the build does, which is the form to trust:
+
+    .\scripts\build-windows.ps1 -Probe
+
+Needs one real build to have run far enough to unpack whisper.cpp first.
+
 ## Assets
 
 `assets/` is generated — do not hand-edit. Regenerate after changing the
