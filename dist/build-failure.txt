@@ -1,67 +1,54 @@
-﻿=== Build failed 2026-10-28 15:52:19 ===
+﻿=== Build failed 2026-10-28 17:14:35 ===
 At C:\Users\wuphy\Documents\hippo-transcribe\scripts\build-windows.ps1:235 char:9
 +         throw "$commandLine failed with exit code $exitCode (full out ...
 +         ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 Message: cargo build --release --locked --features gpu failed with exit code 101 (full output in C:\Users\wuphy\Documents\hippo-transcribe\build-windows.log)
 Stack:   at Invoke-Native, C:\Users\wuphy\Documents\hippo-transcribe\scripts\build-windows.ps1: line 235
-at <ScriptBlock>, C:\Users\wuphy\Documents\hippo-transcribe\scripts\build-windows.ps1: line 418
+at <ScriptBlock>, C:\Users\wuphy\Documents\hippo-transcribe\scripts\build-windows.ps1: line 430
 at <ScriptBlock>, <No file>: line 1
 
 === build-windows.log ===
-71: CMAKE_GENERATOR_x86_64-pc-windows-msvc = None
-72: CMAKE_GENERATOR_x86_64_pc_windows_msvc = None
-73: HOST_CMAKE_GENERATOR = None
-74: CMAKE_GENERATOR = Some("Ninja")
-87: [1]	C:/Program Files/CMake/share/cmake-4.4/Modules/CMakeDetermineCompilerId.cmake
-91: [1]	C:/Program Files/CMake/share/cmake-4.4/Modules/CMakeDetermineCompilerId.cmake
-183: -- CMAKE_GENERATOR_PLATFORM:
-327: Run Build Command(s): C:/PROGRA~1/MICROS~2/18/COMMUN~1/Common7/IDE/COMMON~1/MICROS~1/CMake/Ninja/ninja.exe -v -j 2 install
-329: [1/335] C:\Windows\system32\cmd.exe /C "cd /D C:\Users\wuphy\Documents\hippo-transcribe\target\release\build\whisper-rs-sys-a4a4abcf5807047e\out\build\ggml\src\ggml-vulkan && "C:\Program Files\CMake\bin\cmake.exe" -Dcfgdir= -P C:/Users/wuphy/Documents/hippo-transcribe/target/release/build/whisper-rs-sys-a4a4abcf5807047e/out/build/ggml/src/ggml-vulkan/vulkan-shaders-gen-prefix/tmp/vulkan-shaders-gen-mkdirs.cmake && "C:\Program Files\CMake\bin\cmake.exe" -E touch C:/Users/wuphy/Documents/hippo-transcribe/target/release/build/whisper-rs-sys-a4a4abcf5807047e/out/build/ggml/src/ggml-vulkan/vulkan-shaders-gen-prefix/src/vulkan-shaders-gen-stamp/vulkan-shaders-gen-mkdir"
-334: [4/335] C:\Windows\system32\cmd.exe /C "cd /D C:\Users\wuphy\Documents\hippo-transcribe\target\release\build\whisper-rs-sys-a4a4abcf5807047e\out\build\ggml\src\ggml-vulkan && "C:\Program Files\CMake\bin\cmake.exe" -E echo_append && "C:\Program Files\CMake\bin\cmake.exe" -E touch C:/Users/wuphy/Documents/hippo-transcribe/target/release/build/whisper-rs-sys-a4a4abcf5807047e/out/build/ggml/src/ggml-vulkan/vulkan-shaders-gen-prefix/src/vulkan-shaders-gen-stamp/vulkan-shaders-gen-download"
-339: [7/335] C:\Windows\system32\cmd.exe /C "cd /D C:\Users\wuphy\Documents\hippo-transcribe\target\release\build\whisper-rs-sys-a4a4abcf5807047e\out\build\ggml\src\ggml-vulkan && "C:\Program Files\CMake\bin\cmake.exe" -E echo_append && "C:\Program Files\CMake\bin\cmake.exe" -E touch C:/Users/wuphy/Documents/hippo-transcribe/target/release/build/whisper-rs-sys-a4a4abcf5807047e/out/build/ggml/src/ggml-vulkan/vulkan-shaders-gen-prefix/src/vulkan-shaders-gen-stamp/vulkan-shaders-gen-update"
-359: [10/335] C:\Windows\system32\cmd.exe /C "cd /D C:\Users\wuphy\Documents\hippo-transcribe\target\release\build\whisper-rs-sys-a4a4abcf5807047e\out\build\ggml\src\ggml-vulkan && "C:\Program Files\CMake\bin\cmake.exe" -E echo_append && "C:\Program Files\CMake\bin\cmake.exe" -E touch C:/Users/wuphy/Documents/hippo-transcribe/target/release/build/whisper-rs-sys-a4a4abcf5807047e/out/build/ggml/src/ggml-vulkan/vulkan-shaders-gen-prefix/src/vulkan-shaders-gen-stamp/vulkan-shaders-gen-patch"
-385: [15/335] C:\Windows\system32\cmd.exe /C "cd /D C:\Users\wuphy\Documents\hippo-transcribe\target\release\build\whisper-rs-sys-a4a4abcf5807047e\out\build\ggml\src\ggml-vulkan\vulkan-shaders-gen-prefix\src\vulkan-shaders-gen-build && "C:\Program Files\CMake\bin\cmake.exe" -DCMAKE_INSTALL_PREFIX=C:/Users/wuphy/Documents/hippo-transcribe/target/release/build/whisper-rs-sys-a4a4abcf5807047e/out/build/Release -DCMAKE_INSTALL_BINDIR=. -DCMAKE_BUILD_TYPE=Release -DGGML_VULKAN_COOPMAT_GLSLC_SUPPORT=ON -DGGML_VULKAN_COOPMAT2_GLSLC_SUPPORT=ON -DGGML_VULKAN_INTEGER_DOT_GLSLC_SUPPORT=ON -DGGML_VULKAN_BFLOAT16_GLSLC_SUPPORT=ON -GNinja -S C:/Users/wuphy/Documents/hippo-transcribe/target/release/build/whisper-rs-sys-a4a4abcf5807047e/out/whisper.cpp/ggml/src/ggml-vulkan/vulkan-shaders -B C:/Users/wuphy/Documents/hippo-transcribe/target/release/build/whisper-rs-sys-a4a4abcf5807047e/out/build/ggml/src/ggml-vulkan/vulkan-shaders-gen-prefix/src/vulkan-shaders-gen-build && "C:\Program Files\CMake\bin\cmake.exe" -E touch C:/Users/wuphy/Documents/hippo-transcribe/target/release/build/whisper-rs-sys-a4a4abcf5807047e/out/build/ggml/src/ggml-vulkan/vulkan-shaders-gen-prefix/src/vulkan-shaders-gen-stamp/vulkan-shaders-gen-configure"
-386: FAILED: [code=1] ggml/src/ggml-vulkan/vulkan-shaders-gen-prefix/src/vulkan-shaders-gen-stamp/vulkan-shaders-gen-configure C:/Users/wuphy/Documents/hippo-transcribe/target/release/build/whisper-rs-sys-a4a4abcf5807047e/out/build/ggml/src/ggml-vulkan/vulkan-shaders-gen-prefix/src/vulkan-shaders-gen-stamp/vulkan-shaders-gen-configure
-387: C:\Windows\system32\cmd.exe /C "cd /D C:\Users\wuphy\Documents\hippo-transcribe\target\release\build\whisper-rs-sys-a4a4abcf5807047e\out\build\ggml\src\ggml-vulkan\vulkan-shaders-gen-prefix\src\vulkan-shaders-gen-build && "C:\Program Files\CMake\bin\cmake.exe" -DCMAKE_INSTALL_PREFIX=C:/Users/wuphy/Documents/hippo-transcribe/target/release/build/whisper-rs-sys-a4a4abcf5807047e/out/build/Release -DCMAKE_INSTALL_BINDIR=. -DCMAKE_BUILD_TYPE=Release -DGGML_VULKAN_COOPMAT_GLSLC_SUPPORT=ON -DGGML_VULKAN_COOPMAT2_GLSLC_SUPPORT=ON -DGGML_VULKAN_INTEGER_DOT_GLSLC_SUPPORT=ON -DGGML_VULKAN_BFLOAT16_GLSLC_SUPPORT=ON -GNinja -S C:/Users/wuphy/Documents/hippo-transcribe/target/release/build/whisper-rs-sys-a4a4abcf5807047e/out/whisper.cpp/ggml/src/ggml-vulkan/vulkan-shaders -B C:/Users/wuphy/Documents/hippo-transcribe/target/release/build/whisper-rs-sys-a4a4abcf5807047e/out/build/ggml/src/ggml-vulkan/vulkan-shaders-gen-prefix/src/vulkan-shaders-gen-build && "C:\Program Files\CMake\bin\cmake.exe" -E touch C:/Users/wuphy/Documents/hippo-transcribe/target/release/build/whisper-rs-sys-a4a4abcf5807047e/out/build/ggml/src/ggml-vulkan/vulkan-shaders-gen-prefix/src/vulkan-shaders-gen-stamp/vulkan-shaders-gen-configure"
-391: CMake Warning in C:/Users/wuphy/Documents/hippo-transcribe/target/release/build/whisper-rs-sys-a4a4abcf5807047e/out/build/ggml/src/ggml-vulkan/vulkan-shaders-gen-prefix/src/vulkan-shaders-gen-build/CMakeFiles/CMakeScratch/TryCompile-fh882q/CMakeLists.txt:
-394: C:/Users/wuphy/Documents/hippo-transcribe/target/release/build/whisper-rs-sys-a4a4abcf5807047e/out/build/ggml/src/ggml-vulkan/vulkan-shaders-gen-prefix/src/vulkan-shaders-gen-build/CMakeFiles/CMakeScratch/TryCompile-fh882q/CMakeFiles/cmTC_f4a76.dir/./
-407: CMake Warning in C:/Users/wuphy/Documents/hippo-transcribe/target/release/build/whisper-rs-sys-a4a4abcf5807047e/out/build/ggml/src/ggml-vulkan/vulkan-shaders-gen-prefix/src/vulkan-shaders-gen-build/CMakeFiles/CMakeScratch/TryCompile-zlbalq/CMakeLists.txt:
-410: C:/Users/wuphy/Documents/hippo-transcribe/target/release/build/whisper-rs-sys-a4a4abcf5807047e/out/build/ggml/src/ggml-vulkan/vulkan-shaders-gen-prefix/src/vulkan-shaders-gen-build/CMakeFiles/CMakeScratch/TryCompile-zlbalq/CMakeFiles/cmTC_bf763.dir/./
-422: CMake Error at C:/Program Files/CMake/share/cmake-4.4/Modules/CMakeTestCCompiler.cmake:65 (message):
-431: Change Dir: 'C:/Users/wuphy/Documents/hippo-transcribe/target/release/build/whisper-rs-sys-a4a4abcf5807047e/out/build/ggml/src/ggml-vulkan/vulkan-shaders-gen-prefix/src/vulkan-shaders-gen-build/CMakeFiles/CMakeScratch/TryCompile-zlbalq'
-433: Run Build Command(s): C:/PROGRA~1/MICROS~2/18/COMMUN~1/Common7/IDE/COMMON~1/MICROS~1/CMake/Ninja/ninja.exe -v cmTC_bf763
-434: [1/2] "C:\Program Files\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.51.36231\bin\Hostx64\x64\cl.exe"  /nologo -D_MBCS  /DWIN32 /D_WINDOWS  /Zi /Ob0 /Od /RTC1 -MDd /showIncludes /FoCMakeFiles\cmTC_bf763.dir\testCCompiler.c.obj /FdCMakeFiles\cmTC_bf763.dir\ /FS -c C:\Users\wuphy\Documents\hippo-transcribe\target\release\build\whisper-rs-sys-a4a4abcf5807047e\out\build\ggml\src\ggml-vulkan\vulkan-shaders-gen-prefix\src\vulkan-shaders-gen-build\CMakeFiles\CMakeScratch\TryCompile-zlbalq\testCCompiler.c
-436: "C:\Program Files\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.51.36231\bin\Hostx64\x64\cl.exe"  /nologo -D_MBCS  /DWIN32 /D_WINDOWS  /Zi /Ob0 /Od /RTC1 -MDd /showIncludes /FoCMakeFiles\cmTC_bf763.dir\testCCompiler.c.obj /FdCMakeFiles\cmTC_bf763.dir\ /FS -c C:\Users\wuphy\Documents\hippo-transcribe\target\release\build\whisper-rs-sys-a4a4abcf5807047e\out\build\ggml\src\ggml-vulkan\vulkan-shaders-gen-prefix\src\vulkan-shaders-gen-build\CMakeFiles\CMakeScratch\TryCompile-zlbalq\testCCompiler.c
-437: C:\Users\wuphy\Documents\hippo-transcribe\target\release\build\whisper-rs-sys-a4a4abcf5807047e\out\build\ggml\src\ggml-vulkan\vulkan-shaders-gen-prefix\src\vulkan-shaders-gen-build\CMakeFiles\CMakeScratch\TryCompile-zlbalq\testCCompiler.c : fatal error C1083: Cannot open compiler generated file: '': Invalid argument
-438: ninja: build stopped: subcommand failed.
-452: ninja: build stopped: subcommand failed.
-456: running: "cmake" "-Wdev" "--debug-output" "C:\\Users\\wuphy\\Documents\\hippo-transcribe\\target\\release\\build\\whisper-rs-sys-a4a4abcf5807047e\\out\\whisper.cpp" "-B" "C:\\Users\\wuphy\\Documents\\hippo-transcribe\\target\\release\\build\\whisper-rs-sys-a4a4abcf5807047e\\out\\build" "-G" "Ninja" "-DBUILD_SHARED_LIBS=OFF" "-DWHISPER_ALL_WARNINGS=OFF" "-DWHISPER_ALL_WARNINGS_3RD_PARTY=OFF" "-DWHISPER_BUILD_TESTS=OFF" "-DWHISPER_BUILD_EXAMPLES=OFF" "-DGGML_VULKAN=ON" "-DGGML_METAL=OFF" "-DCMAKE_BUILD_TYPE=Release" "-DCMAKE_GENERATOR=Ninja" "-DCMAKE_INSTALL_PREFIX=C:\\Users\\wuphy\\Documents\\hippo-transcribe\\target\\release\\build\\whisper-rs-sys-a4a4abcf5807047e\\out" "-DCMAKE_C_FLAGS= -nologo -MT -Brepro -W0" "-DCMAKE_C_COMPILER=C:/Program Files/Microsoft Visual Studio/18/Community/VC/Tools/MSVC/14.51.36231/bin/HostX64/x64/cl.exe" "-DCMAKE_CXX_FLAGS= /utf-8 -nologo -MT -Brepro -W0" "-DCMAKE_CXX_COMPILER=C:/Program Files/Microsoft Visual Studio/18/Community/VC/Tools/MSVC/14.51.36231/bin/HostX64/x64/cl.exe" "-DCMAKE_ASM_FLAGS= -nologo -MT -Brepro -W0" "-DCMAKE_ASM_COMPILER=C:/Program Files/Microsoft Visual Studio/18/Community/VC/Tools/MSVC/14.51.36231/bin/HostX64/x64/cl.exe" "-DCMAKE_VERBOSE_MAKEFILE:BOOL=ON"
-458: CMake Warning (deprecated) at CMakeLists.txt:1 (cmake_minimum_required):
-469: CMake Warning (policy) at C:/Program Files/CMake/share/cmake-4.4/Modules/CMakeDetermineCompiler.cmake:127 (set):
-475: "CMAKE_C_COMPILER" will be removed from the current scope.
-485: CMake Warning (policy) at C:/Program Files/CMake/share/cmake-4.4/Modules/CMakeDetermineCompiler.cmake:127 (set):
-491: "CMAKE_CXX_COMPILER" will be removed from the current scope.
-501: CMake Warning (policy) at C:/Program Files/CMake/share/cmake-4.4/Modules/CMakeDetermineCompilerABI.cmake:123 (try_compile):
-519: CMake Warning (policy) at C:/Program Files/CMake/share/cmake-4.4/Modules/CMakeDetermineCompilerABI.cmake:123 (try_compile):
-539: CMake Warning (policy) at C:/Program Files/CMake/share/cmake-4.4/Modules/CMakeDetermineCompiler.cmake:127 (set):
-555: CMake Warning (policy) at C:/Program Files/CMake/share/cmake-4.4/Modules/CMakeDetermineASMCompiler.cmake:237 (cmake_policy):
-588: CMake Warning (policy) in ggml/CMakeLists.txt:
-600: CMake Warning (policy) in ggml/src/CMakeLists.txt:
-612: CMake Warning (policy) in ggml/src/CMakeLists.txt:
-624: CMake Warning (policy) in ggml/src/ggml-vulkan/CMakeLists.txt:
-636: CMake Warning (policy) in src/CMakeLists.txt:
-648: CMake Warning (policy) in CMakeLists.txt:
-657: CMake Warning (policy) at ggml/src/CMakeLists.txt:192 (add_library):
-668: CMake Warning (policy) at ggml/src/CMakeLists.txt:224 (add_library):
-679: CMake Warning (policy) in ggml/src/ggml-vulkan/CMakeLists.txt:
-692: CMake Warning (policy) at ggml/src/CMakeLists.txt:259 (add_library):
-706: CMake Warning (policy) at ggml/src/CMakeLists.txt:259 (add_library):
-719: CMake Warning (policy) in ggml/src/ggml-vulkan/CMakeLists.txt:
-732: CMake Warning (policy) in src/CMakeLists.txt:
-743: CMake Warning (policy) at src/CMakeLists.txt:106 (add_library):
-754: CMake Warning (policy) in ggml/src/ggml-vulkan/CMakeLists.txt:
+69: CMAKE_GENERATOR_x86_64-pc-windows-msvc = None
+70: CMAKE_GENERATOR_x86_64_pc_windows_msvc = None
+71: HOST_CMAKE_GENERATOR = None
+72: CMAKE_GENERATOR = Some("Ninja")
+86: -- CMAKE_GENERATOR_PLATFORM:
+137: Run Build Command(s): C:/PROGRA~1/MICROS~2/18/COMMUN~1/Common7/IDE/COMMON~1/MICROS~1/CMake/Ninja/ninja.exe -v -j 2 install
+164: [6/329] C:\Windows\system32\cmd.exe /C "cd /D C:\Users\wuphy\Documents\hippo-transcribe\target\release\build\whisper-rs-sys-a4a4abcf5807047e\out\build\ggml\src\ggml-vulkan\vulkan-shaders-gen-prefix\src\vulkan-shaders-gen-build && "C:\Program Files\CMake\bin\cmake.exe" -DCMAKE_INSTALL_PREFIX=C:/Users/wuphy/Documents/hippo-transcribe/target/release/build/whisper-rs-sys-a4a4abcf5807047e/out/build/Release -DCMAKE_INSTALL_BINDIR=. -DCMAKE_BUILD_TYPE=Release -DGGML_VULKAN_COOPMAT_GLSLC_SUPPORT=ON -DGGML_VULKAN_COOPMAT2_GLSLC_SUPPORT=ON -DGGML_VULKAN_INTEGER_DOT_GLSLC_SUPPORT=ON -DGGML_VULKAN_BFLOAT16_GLSLC_SUPPORT=ON -GNinja -S C:/Users/wuphy/Documents/hippo-transcribe/target/release/build/whisper-rs-sys-a4a4abcf5807047e/out/whisper.cpp/ggml/src/ggml-vulkan/vulkan-shaders -B C:/Users/wuphy/Documents/hippo-transcribe/target/release/build/whisper-rs-sys-a4a4abcf5807047e/out/build/ggml/src/ggml-vulkan/vulkan-shaders-gen-prefix/src/vulkan-shaders-gen-build && "C:\Program Files\CMake\bin\cmake.exe" -E touch C:/Users/wuphy/Documents/hippo-transcribe/target/release/build/whisper-rs-sys-a4a4abcf5807047e/out/build/ggml/src/ggml-vulkan/vulkan-shaders-gen-prefix/src/vulkan-shaders-gen-stamp/vulkan-shaders-gen-configure"
+165: FAILED: [code=1] ggml/src/ggml-vulkan/vulkan-shaders-gen-prefix/src/vulkan-shaders-gen-stamp/vulkan-shaders-gen-configure C:/Users/wuphy/Documents/hippo-transcribe/target/release/build/whisper-rs-sys-a4a4abcf5807047e/out/build/ggml/src/ggml-vulkan/vulkan-shaders-gen-prefix/src/vulkan-shaders-gen-stamp/vulkan-shaders-gen-configure
+166: C:\Windows\system32\cmd.exe /C "cd /D C:\Users\wuphy\Documents\hippo-transcribe\target\release\build\whisper-rs-sys-a4a4abcf5807047e\out\build\ggml\src\ggml-vulkan\vulkan-shaders-gen-prefix\src\vulkan-shaders-gen-build && "C:\Program Files\CMake\bin\cmake.exe" -DCMAKE_INSTALL_PREFIX=C:/Users/wuphy/Documents/hippo-transcribe/target/release/build/whisper-rs-sys-a4a4abcf5807047e/out/build/Release -DCMAKE_INSTALL_BINDIR=. -DCMAKE_BUILD_TYPE=Release -DGGML_VULKAN_COOPMAT_GLSLC_SUPPORT=ON -DGGML_VULKAN_COOPMAT2_GLSLC_SUPPORT=ON -DGGML_VULKAN_INTEGER_DOT_GLSLC_SUPPORT=ON -DGGML_VULKAN_BFLOAT16_GLSLC_SUPPORT=ON -GNinja -S C:/Users/wuphy/Documents/hippo-transcribe/target/release/build/whisper-rs-sys-a4a4abcf5807047e/out/whisper.cpp/ggml/src/ggml-vulkan/vulkan-shaders -B C:/Users/wuphy/Documents/hippo-transcribe/target/release/build/whisper-rs-sys-a4a4abcf5807047e/out/build/ggml/src/ggml-vulkan/vulkan-shaders-gen-prefix/src/vulkan-shaders-gen-build && "C:\Program Files\CMake\bin\cmake.exe" -E touch C:/Users/wuphy/Documents/hippo-transcribe/target/release/build/whisper-rs-sys-a4a4abcf5807047e/out/build/ggml/src/ggml-vulkan/vulkan-shaders-gen-prefix/src/vulkan-shaders-gen-stamp/vulkan-shaders-gen-configure"
+170: CMake Warning in C:/Users/wuphy/Documents/hippo-transcribe/target/release/build/whisper-rs-sys-a4a4abcf5807047e/out/build/ggml/src/ggml-vulkan/vulkan-shaders-gen-prefix/src/vulkan-shaders-gen-build/CMakeFiles/CMakeScratch/TryCompile-loxyrp/CMakeLists.txt:
+173: C:/Users/wuphy/Documents/hippo-transcribe/target/release/build/whisper-rs-sys-a4a4abcf5807047e/out/build/ggml/src/ggml-vulkan/vulkan-shaders-gen-prefix/src/vulkan-shaders-gen-build/CMakeFiles/CMakeScratch/TryCompile-loxyrp/CMakeFiles/cmTC_65091.dir/./
+186: CMake Warning in C:/Users/wuphy/Documents/hippo-transcribe/target/release/build/whisper-rs-sys-a4a4abcf5807047e/out/build/ggml/src/ggml-vulkan/vulkan-shaders-gen-prefix/src/vulkan-shaders-gen-build/CMakeFiles/CMakeScratch/TryCompile-iw9hss/CMakeLists.txt:
+189: C:/Users/wuphy/Documents/hippo-transcribe/target/release/build/whisper-rs-sys-a4a4abcf5807047e/out/build/ggml/src/ggml-vulkan/vulkan-shaders-gen-prefix/src/vulkan-shaders-gen-build/CMakeFiles/CMakeScratch/TryCompile-iw9hss/CMakeFiles/cmTC_d4116.dir/./
+201: CMake Error at C:/Program Files/CMake/share/cmake-4.4/Modules/CMakeTestCCompiler.cmake:65 (message):
+210: Change Dir: 'C:/Users/wuphy/Documents/hippo-transcribe/target/release/build/whisper-rs-sys-a4a4abcf5807047e/out/build/ggml/src/ggml-vulkan/vulkan-shaders-gen-prefix/src/vulkan-shaders-gen-build/CMakeFiles/CMakeScratch/TryCompile-iw9hss'
+212: Run Build Command(s): C:/PROGRA~1/MICROS~2/18/COMMUN~1/Common7/IDE/COMMON~1/MICROS~1/CMake/Ninja/ninja.exe -v cmTC_d4116
+213: [1/2] "C:\Program Files\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.51.36231\bin\Hostx64\x64\cl.exe"  /nologo -D_MBCS  /DWIN32 /D_WINDOWS  /Zi /Ob0 /Od /RTC1 -MDd /showIncludes /FoCMakeFiles\cmTC_d4116.dir\testCCompiler.c.obj /FdCMakeFiles\cmTC_d4116.dir\ /FS -c C:\Users\wuphy\Documents\hippo-transcribe\target\release\build\whisper-rs-sys-a4a4abcf5807047e\out\build\ggml\src\ggml-vulkan\vulkan-shaders-gen-prefix\src\vulkan-shaders-gen-build\CMakeFiles\CMakeScratch\TryCompile-iw9hss\testCCompiler.c
+215: "C:\Program Files\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.51.36231\bin\Hostx64\x64\cl.exe"  /nologo -D_MBCS  /DWIN32 /D_WINDOWS  /Zi /Ob0 /Od /RTC1 -MDd /showIncludes /FoCMakeFiles\cmTC_d4116.dir\testCCompiler.c.obj /FdCMakeFiles\cmTC_d4116.dir\ /FS -c C:\Users\wuphy\Documents\hippo-transcribe\target\release\build\whisper-rs-sys-a4a4abcf5807047e\out\build\ggml\src\ggml-vulkan\vulkan-shaders-gen-prefix\src\vulkan-shaders-gen-build\CMakeFiles\CMakeScratch\TryCompile-iw9hss\testCCompiler.c
+216: C:\Users\wuphy\Documents\hippo-transcribe\target\release\build\whisper-rs-sys-a4a4abcf5807047e\out\build\ggml\src\ggml-vulkan\vulkan-shaders-gen-prefix\src\vulkan-shaders-gen-build\CMakeFiles\CMakeScratch\TryCompile-iw9hss\testCCompiler.c : fatal error C1083: Cannot open compiler generated file: '': Invalid argument
+217: ninja: build stopped: subcommand failed.
+231: ninja: build stopped: subcommand failed.
+235: running: "cmake" "-Wdev" "--debug-output" "C:\\Users\\wuphy\\Documents\\hippo-transcribe\\target\\release\\build\\whisper-rs-sys-a4a4abcf5807047e\\out\\whisper.cpp" "-B" "C:\\Users\\wuphy\\Documents\\hippo-transcribe\\target\\release\\build\\whisper-rs-sys-a4a4abcf5807047e\\out\\build" "-G" "Ninja" "-DBUILD_SHARED_LIBS=OFF" "-DWHISPER_ALL_WARNINGS=OFF" "-DWHISPER_ALL_WARNINGS_3RD_PARTY=OFF" "-DWHISPER_BUILD_TESTS=OFF" "-DWHISPER_BUILD_EXAMPLES=OFF" "-DGGML_VULKAN=ON" "-DGGML_METAL=OFF" "-DCMAKE_BUILD_TYPE=Release" "-DCMAKE_GENERATOR=Ninja" "-DCMAKE_INSTALL_PREFIX=C:\\Users\\wuphy\\Documents\\hippo-transcribe\\target\\release\\build\\whisper-rs-sys-a4a4abcf5807047e\\out" "-DCMAKE_C_FLAGS= -nologo -MT -Brepro -W0" "-DCMAKE_C_COMPILER=C:/Program Files/Microsoft Visual Studio/18/Community/VC/Tools/MSVC/14.51.36231/bin/HostX64/x64/cl.exe" "-DCMAKE_CXX_FLAGS= /utf-8 -nologo -MT -Brepro -W0" "-DCMAKE_CXX_COMPILER=C:/Program Files/Microsoft Visual Studio/18/Community/VC/Tools/MSVC/14.51.36231/bin/HostX64/x64/cl.exe" "-DCMAKE_ASM_FLAGS= -nologo -MT -Brepro -W0" "-DCMAKE_ASM_COMPILER=C:/Program Files/Microsoft Visual Studio/18/Community/VC/Tools/MSVC/14.51.36231/bin/HostX64/x64/cl.exe" "-DCMAKE_VERBOSE_MAKEFILE:BOOL=ON"
+237: CMake Warning (deprecated) at CMakeLists.txt:1 (cmake_minimum_required):
+272: CMake Warning (policy) in ggml/CMakeLists.txt:
+284: CMake Warning (policy) in ggml/src/CMakeLists.txt:
+296: CMake Warning (policy) in ggml/src/CMakeLists.txt:
+308: CMake Warning (policy) in ggml/src/ggml-vulkan/CMakeLists.txt:
+320: CMake Warning (policy) in src/CMakeLists.txt:
+332: CMake Warning (policy) in CMakeLists.txt:
+341: CMake Warning (policy) at ggml/src/CMakeLists.txt:192 (add_library):
+352: CMake Warning (policy) at ggml/src/CMakeLists.txt:224 (add_library):
+363: CMake Warning (policy) in ggml/src/ggml-vulkan/CMakeLists.txt:
+376: CMake Warning (policy) at ggml/src/CMakeLists.txt:259 (add_library):
+390: CMake Warning (policy) at ggml/src/CMakeLists.txt:259 (add_library):
+403: CMake Warning (policy) in ggml/src/ggml-vulkan/CMakeLists.txt:
+416: CMake Warning (policy) in src/CMakeLists.txt:
+427: CMake Warning (policy) at src/CMakeLists.txt:106 (add_library):
+438: CMake Warning (policy) in ggml/src/ggml-vulkan/CMakeLists.txt:
 
 === last 40 lines ===
+    the cmake_policy command to set the policy and suppress this warning.
 
     For compatibility with older versions of CMake, compiler extensions won't
     be enabled.
@@ -95,29 +82,29 @@ at <ScriptBlock>, <No file>: line 1
      Called from: [1]	C:/Users/wuphy/Documents/hippo-transcribe/target/release/build/whisper-rs-sys-a4a4abcf5807047e/out/whisper.cpp/src/CMakeLists.txt
   running: "cmake" "--build" "C:\\Users\\wuphy\\Documents\\hippo-transcribe\\target\\release\\build\\whisper-rs-sys-a4a4abcf5807047e\\out\\build" "--target" "install" "--config" "Release" "--parallel" "2"
 
-  thread 'main' (1468) panicked at C:\Users\wuphy\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\cmake-0.1.58\src\lib.rs:1132:5:
+  thread 'main' (6248) panicked at C:\Users\wuphy\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\cmake-0.1.58\src\lib.rs:1132:5:
 
   command did not execute successfully, got: exit code: 1
 
   build script failed, must exit now
   note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
-warning: build failed, waiting for other jobs to finish...
 
 === console ===
+  This warning is for project developers.  Use -Wno-author or -Wno-policy to
   suppress it.
 
      Called from: [1]	C:/Users/wuphy/Documents/hippo-transcribe/target/release/build/whisper-rs-sys-a4a4abcf5807047e/out/whisper.cpp/src/CMakeLists.txt
   running: "cmake" "--build" "C:\\Users\\wuphy\\Documents\\hippo-transcribe\\target\\release\\build\\whisper-rs-sys-a4a4abcf5807047e\\out\\build" "--target" "install" "--config" "Release" "--parallel" "2"
 
-  thread 'main' (1468) panicked at C:\Users\wuphy\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\cmake-0.1.58\src\lib.rs:1132:5:
+  thread 'main' (6248) panicked at C:\Users\wuphy\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\cmake-0.1.58\src\lib.rs:1132:5:
 
   command did not execute successfully, got: exit code: 1
 
   build script failed, must exit now
   note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
-warning: build failed, waiting for other jobs to finish...
 
 Last lines of C:\Users\wuphy\Documents\hippo-transcribe\build-windows.log:
+      This warning is for project developers.  Use -Wno-author or -Wno-policy to
       suppress it.
 
          Called from: [1]	C:/Users/wuphy/Documents/hippo-transcribe/target/release/build/whisper-rs-sys-a4a4abcf5807047e/out/whisper.cpp/ggml/src/ggml-vulkan/CMakeLists.txt
@@ -171,18 +158,17 @@ Last lines of C:\Users\wuphy\Documents\hippo-transcribe\build-windows.log:
          Called from: [1]	C:/Users/wuphy/Documents/hippo-transcribe/target/release/build/whisper-rs-sys-a4a4abcf5807047e/out/whisper.cpp/src/CMakeLists.txt
       running: "cmake" "--build" "C:\\Users\\wuphy\\Documents\\hippo-transcribe\\target\\release\\build\\whisper-rs-sys-a4a4abcf5807047e\\out\\build" "--target" "install" "--config" "Release" "--parallel" "2"
 
-      thread 'main' (1468) panicked at C:\Users\wuphy\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\cmake-0.1.58\src\lib.rs:1132:5:
+      thread 'main' (6248) panicked at C:\Users\wuphy\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\cmake-0.1.58\src\lib.rs:1132:5:
 
       command did not execute successfully, got: exit code: 1
 
       build script failed, must exit now
       note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
-    warning: build failed, waiting for other jobs to finish...
 
 PS>TerminatingError(): "cargo build --release --locked --features gpu failed with exit code 101 (full output in C:\Users\wuphy\Documents\hippo-transcribe\build-windows.log)"
 **********************
 Windows PowerShell transcript end
-End time: 20261028155219
+End time: 20261028171435
 **********************
 
 === configure state ===
