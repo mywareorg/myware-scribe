@@ -423,8 +423,10 @@ try {
         }
     }
 
-    # Keep the executable self-contained. sherpa-onnx and ONNX Runtime are
-    # loaded from DLLs at runtime, so no native static libraries are linked.
+    # Keep the executable self-contained by linking the static CRT. whisper-rs-sys
+    # compiles whisper.cpp and ggml through CMake, which has to be told the same
+    # thing: the C++ objects would otherwise import the DLL runtime while the Rust
+    # side pulls in libcmt, leaving every CRT symbol unresolved at link time.
     $rustFlags = @()
     if ($env:RUSTFLAGS) {
         # Preserve extra flags, but drop any existing crt-static selection so
@@ -443,9 +445,11 @@ try {
     }
     $rustFlags += @("-C", "target-feature=+crt-static")
     $env:RUSTFLAGS = $rustFlags -join " "
+    $env:CMAKE_MSVC_RUNTIME_LIBRARY = "MultiThreaded"
     if ($TargetDir) {
         $env:CARGO_TARGET_DIR = $TargetDir
     }
+    Reset-CmakeRuntime -Root $root -Runtime "MultiThreaded" -TargetRoot $TargetDir
 
     if ($Clean) {
         Write-Step "Cleaning previous build output"

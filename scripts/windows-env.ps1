@@ -137,6 +137,48 @@ function Reset-CmakeGenerator {
     }
 }
 
+function Reset-CmakeRuntime {
+    param(
+        [Parameter(Mandatory = $true)][string]$Root,
+        [Parameter(Mandatory = $true)][string]$Runtime,
+        # Where cargo keeps release build output. Defaults to <Root>\target;
+        # overridden when CARGO_TARGET_DIR points somewhere shorter.
+        [string]$TargetRoot = ""
+    )
+
+    # whisper-rs-sys builds whisper.cpp and ggml through CMake, which defaults to
+    # the DLL CRT. The Rust side is linked against the static one, and the two
+    # cannot be mixed: every CRT symbol the C++ objects import through the import
+    # library stays unresolved (LNK2019 __imp_* followed by LNK1120). Cargo does
+    # not watch this variable, so an existing configure has to be discarded or
+    # the new runtime never reaches the compiler.
+    $targetRoot = if ($TargetRoot) { $TargetRoot } else { Join-Path $Root "target" }
+    $buildRoot = Join-Path $targetRoot "release\build"
+    if (-not (Test-Path $buildRoot)) { return }
+
+    $stale = @()
+    foreach ($directory in (Get-ChildItem -Path $buildRoot -Directory -Filter "whisper-rs-sys-*" -ErrorAction SilentlyContinue)) {
+        $cache = Join-Path $directory.FullName "out\build\CMakeCache.txt"
+        if (-not (Test-Path -LiteralPath $cache)) { continue }
+        $line = Get-Content -LiteralPath $cache -ErrorAction SilentlyContinue |
+            Where-Object { $_ -like "CMAKE_MSVC_RUNTIME_LIBRARY:*" } |
+            Select-Object -First 1
+        # Absent means CMake's own default, MultiThreadedDLL.
+        $recorded = if ($line) { ($line -split "=", 2)[1] } else { "MultiThreadedDLL" }
+        if ($recorded -eq $Runtime) { continue }
+        Write-Step "Discarding the $recorded runtime in $($directory.Name)"
+        Remove-DirectoryTree -Path $directory.FullName
+        $stale += $directory.Name
+    }
+
+    if ($stale.Count -gt 0) {
+        $fingerprints = Join-Path $targetRoot "release\.fingerprint"
+        foreach ($entry in (Get-ChildItem -Path $fingerprints -Directory -Filter "whisper-rs-sys-*" -ErrorAction SilentlyContinue)) {
+            Remove-DirectoryTree -Path $entry.FullName
+        }
+    }
+}
+
 function Resolve-VulkanSdk {
     if ($env:VULKAN_SDK -and (Test-Path (Join-Path $env:VULKAN_SDK "Include\vulkan\vulkan.h"))) {
         return $env:VULKAN_SDK
