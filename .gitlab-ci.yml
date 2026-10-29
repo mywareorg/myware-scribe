@@ -46,14 +46,20 @@ publish-models:
       done
 
 # Serve PRIVACY.md as the Store listing's privacy policy URL.
+#
+# The wizard that created this file left a job with no script, which is why the
+# pipeline failed. Pages only needs the rendered files in the published folder;
+# there is nothing to build or install.
+# The pages themselves are committed under public/, so publishing needs no
+# shell utilities: a shell executor ignores `image:` and would run this in
+# PowerShell, where printf/sed do not exist. Regenerate the HTML with
+# scripts/make-privacy-page.py after editing PRIVACY.md.
 pages:
   stage: build
   rules:
-    - if: $CI_COMMIT_BRANCH == "main"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
   script:
-    - mkdir -p public
-    - cp PRIVACY.md public/index.md
-    - cp PRIVACY.md public/privacy.md
+    - echo "publishing public/"
   artifacts:
     paths:
       - public

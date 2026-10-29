@@ -24,6 +24,9 @@ from PIL import Image
 # large-icon view. Pillow writes PNG frames, which Vista and later accept.
 ICO_SIZES = (16, 24, 32, 48, 64, 128, 256)
 PNG_SIZE = 1024
+# The in-app header logo. Small enough to embed cheaply in the binary and to
+# stay sharp at the 67 px it is drawn at on a 4x display.
+LOGO_SIZE = 256
 
 
 def load_store_assets():
@@ -66,6 +69,10 @@ def main() -> None:
     png = render(badge, PNG_SIZE, fill)
     png.save(out / "icon.png")
     print(f"icon.png  {PNG_SIZE}x{PNG_SIZE}")
+
+    logo = render(badge, LOGO_SIZE, fill)
+    logo.save(out / "logo.png")
+    print(f"logo.png  {LOGO_SIZE}x{LOGO_SIZE}")
 
     frames = [render(badge, size, fill) for size in ICO_SIZES]
     # Pillow uses a supplied frame verbatim when its size matches, so each

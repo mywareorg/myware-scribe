@@ -296,6 +296,10 @@ log folder opens it, so a user reporting a problem always has something to send.
 The log records the model, the chosen backend and its fallback reason, and error
 messages — never audio, transcript text or file paths.
 
+The policy is also published as a page: `public/index.html` and `public/privacy.html`
+are committed so the GitLab Pages job only has to hand over the artifact. Regenerate
+them with `python3 scripts/make-privacy-page.py` after editing `PRIVACY.md`.
+
 ## Privacy
 
 Audio, transcripts, diarization caches, models and settings stay on the machine
