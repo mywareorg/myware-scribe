@@ -45,8 +45,11 @@ function Get-DefaultProfilePath {
 
 function Remove-Block {
     param(
-        [Parameter(Mandatory = $true)][string]$Text
+        # Not Mandatory: an empty string is a legitimate input (a profile that
+        # does not exist yet), and Mandatory rejects it at binding time.
+        [AllowEmptyString()][string]$Text = ""
     )
+    if (-not $Text) { return "" }
     $lines = $Text -split "`r?`n"
     $kept = New-Object System.Collections.Generic.List[string]
     $skipping = $false
@@ -61,7 +64,8 @@ function Remove-Block {
 $target = if ($ProfilePath) { $ProfilePath } else { Get-DefaultProfilePath }
 $target = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($target)
 
-New-Item -ItemType Directory -Path (Split-Path -Parent $target) -Force | Out-Null
+$parent = Split-Path -Parent $target
+if ($parent) { New-Item -ItemType Directory -Path $parent -Force | Out-Null }
 
 $existing = ""
 if (Test-Path $target) {
