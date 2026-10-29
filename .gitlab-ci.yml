@@ -60,8 +60,6 @@ pages:
     - printf '<!doctype html><meta charset="utf-8"><title>Hippo Transcribe privacy policy</title><pre>\n' > public/privacy.html
     - sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g' PRIVACY.md >> public/privacy.html
     - cp public/privacy.html public/index.html
-  pages:
-    publish: public
   artifacts:
     paths:
       - public
