@@ -8,7 +8,7 @@
 
       1. optionally pulls origin/main (skip with -NoPull),
       2. runs install-git-shortcuts.ps1,
-      3. reloads the profile and checks that gph, gpl and gcm are defined,
+      3. reloads the profile and checks that ga, gph, gpl and gcm are defined,
       4. writes dist\shortcuts-diagnose.txt and prints the same lines.
 
     Loading the profile here only proves it parses and defines the functions; it
@@ -105,7 +105,7 @@ if (-not $PROFILE) {
 Add-Line ""
 Add-Line "=== shortcuts ==="
 $missing = 0
-foreach ($name in @("gph", "gpl", "gcm")) {
+foreach ($name in @("ga", "gph", "gpl", "gcm")) {
     $command = Get-Command $name -ErrorAction SilentlyContinue
     if ($command) {
         Add-Line ("{0,-4} : ok" -f $name)

@@ -6,6 +6,7 @@
 .DESCRIPTION
     Adds three functions that make the round trip to the build machine shorter:
 
+        ga <paths>       git add <paths>
         gph              git push origin main
         gpl              git pull --rebase origin main
         gcm <message>    git commit -m <message>
@@ -86,9 +87,10 @@ if ($Uninstall) {
 
 $block = @(
     $markerStart,
-    "# gph / gpl / gcm - installed by scripts/install-git-shortcuts.ps1",
+    "# ga / gph / gpl / gcm - installed by scripts/install-git-shortcuts.ps1",
     "function gph { git push origin main @args }",
     "function gpl { git pull --rebase origin main @args }",
+    "function ga { git add @args }",
     "function gcm {",
     "    param(",
     "        [Parameter(Position = 0, Mandatory = `$true)][string]`$Message,",
@@ -103,6 +105,7 @@ $content = if ($body) { $body + "`r`n`r`n" + ($block -join "`r`n") } else { $blo
 Set-Content -Path $target -Value $content -Encoding UTF8
 
 Write-Host "Installed the git shortcuts in $target" -ForegroundColor Green
+Write-Host "  ga <paths>       git add <paths>" -ForegroundColor DarkGray
 Write-Host "  gph              git push origin main" -ForegroundColor DarkGray
 Write-Host "  gpl              git pull --rebase origin main" -ForegroundColor DarkGray
 Write-Host "  gcm <message>    git commit -m <message>" -ForegroundColor DarkGray

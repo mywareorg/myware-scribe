@@ -92,7 +92,7 @@ forces that). Pass `-SkipTests`, `-SkipBindgen`, `-Diagnose`, `-Clean`, `-NoZip`
 `-Version 0.2.0`, or `-OutDir C:\builds` as needed.
 
 If that build machine is also where you push from, `scripts/install-git-shortcuts.ps1`
-adds `gph` (`git push origin main`), `gpl` (`git pull --rebase origin main`) and
+adds `ga` (`git add`), `gph` (`git push origin main`), `gpl` (`git pull --rebase origin main`) and
 `gcm <message>` (`git commit -m <message>`) to your PowerShell profile. If the
 shortcuts do not appear, `scripts/fix-shortcuts.ps1` pulls, installs, reloads and
 reports what the profile actually contains to `dist\shortcuts-diagnose.txt`.
