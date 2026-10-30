@@ -228,7 +228,19 @@ function Invoke-Native {
         RedirectStandardOutput = $stdoutFile
         RedirectStandardError  = $stderrFile
     }
-    if ($Arguments.Count -gt 0) { $startArgs.ArgumentList = $Arguments }
+    if ($Arguments.Count -gt 0) {
+        # Start-Process joins an ArgumentList array with single spaces and does
+        # not quote entries. Quote paths/values that contain whitespace so
+        # staged directories with spaces survive the handoff.
+        $startArgs.ArgumentList = @($Arguments | ForEach-Object {
+            $argument = [string]$_
+            if ($argument -match '[\s"]') {
+                '"' + ($argument -replace '"', '\"') + '"'
+            } else {
+                $argument
+            }
+        })
+    }
 
     $process = Start-Process @startArgs
     $exitCode = $process.ExitCode
@@ -358,11 +370,9 @@ if ($useGpu) {
     # (250): "cannot be safely placed under this directory". cl.exe then fails with
     # "Cannot open compiler generated file: ''". A target directory near the profile
     # root keeps the nested path clear of the limit.
-    if (-not $TargetDir) {
-        $TargetDir = Join-Path $env:USERPROFILE "hb"
-        Write-Step "Building in $TargetDir so the ggml paths stay under MAX_PATH"
-    }
-    Reset-CmakeGenerator -Root $root -Generator "Ninja" -TargetRoot $TargetDir
+    $resolvedTarget = Resolve-TargetRoot -Root $root -TargetDir $TargetDir
+    Write-Step "Building in $resolvedTarget so the ggml paths stay under MAX_PATH"
+    Reset-CmakeGenerator -Root $root -Generator "Ninja" -TargetRoot $resolvedTarget
 }
 
 Push-Location $root
@@ -427,12 +437,23 @@ try {
     # whisper.cpp and ggml with CMake, and the two runtimes cannot be mixed
     # (LNK2019 __imp_* followed by LNK1120). The C++ runtime DLLs are staged
     # beside the executable instead, so nothing has to be installed first.
-    if ($TargetDir) {
-        $env:CARGO_TARGET_DIR = $TargetDir
+    $targetRoot = Resolve-TargetRoot -Root $root -TargetDir $TargetDir
+    $env:CARGO_TARGET_DIR = $targetRoot
+    Write-Step "Using cargo target directory $targetRoot"
+
+    if ($env:RUSTFLAGS -match '(^|\s)\+crt-static(\s|$)') {
+        throw "RUSTFLAGS requests +crt-static, but whisper.cpp/ggml are built with the DLL CRT. Remove +crt-static."
     }
-    # A configure left behind by an earlier static-CRT attempt still compiles the
-    # C++ side with /MT; discard it so CMake falls back to its DLL default.
-    Reset-CmakeRuntime -Root $root -Runtime "MultiThreadedDLL" -TargetRoot $TargetDir
+    $cargoConfig = Join-Path $root ".cargo\config.toml"
+    if ((Test-Path -LiteralPath $cargoConfig) -and
+        (Select-String -LiteralPath $cargoConfig -Pattern '\+crt-static' -Quiet)) {
+        throw "The cargo config requests +crt-static, but whisper.cpp/ggml are built with the DLL CRT. Remove +crt-static."
+    }
+
+    # Force CMake's DLL runtime for new configurations as well as discarding
+    # stale /MT caches from earlier attempts.
+    $env:CMAKE_MSVC_RUNTIME_LIBRARY = "MultiThreadedDLL"
+    Reset-CmakeRuntime -Root $root -Runtime "MultiThreadedDLL" -TargetRoot $targetRoot
 
     if ($Clean) {
         Write-Step "Cleaning previous build output"
@@ -478,10 +499,10 @@ try {
             throw "Release binary not found under $($metadata.target_directory)\release"
         }
     }
+    Assert-DllCrtArtifact -Binary $binary
 
-    # Nothing to verify with dumpbin: the C++ runtime DLLs are staged below and
-    # sherpa-onnx/ONNX Runtime are loaded through libloading, so no load-time
-    # dependency is missing from the bundle.
+    # The C++ runtime DLLs are staged below; sherpa-onnx/ONNX Runtime are
+    # loaded through libloading, so no load-time dependency is missing.
 
     $outRoot = if ([System.IO.Path]::IsPathRooted($OutDir)) {
         $OutDir
@@ -506,9 +527,14 @@ try {
     }
     $vcRuntime = Resolve-VcRuntime
     foreach ($dll in @("vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll")) {
+        if (-not $vcRuntime) {
+            Write-Warn "Skipping $dll; the Visual C++ runtime was not found."
+            continue
+        }
         $source = Join-Path $vcRuntime $dll
         if (-not (Test-Path $source)) {
-            throw "$dll was not found in $vcRuntime"
+            Write-Warn "$dll was not found in $vcRuntime; skipping it."
+            continue
         }
         Copy-Item $source (Join-Path $stage $dll)
     }

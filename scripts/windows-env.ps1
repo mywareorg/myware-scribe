@@ -11,6 +11,20 @@ function Write-Warn {
     Write-Warning $Message
 }
 
+function Resolve-TargetRoot {
+    # One value for cargo, the CMake generator reset, and the CMake runtime
+    # reset. An explicit -TargetDir wins, then CARGO_TARGET_DIR, then the
+    # short profile-root path needed by ggml's nested object files.
+    param(
+        [Parameter(Mandatory = $true)][string]$Root,
+        [string]$TargetDir = ""
+    )
+    if ($TargetDir) { return $TargetDir }
+    if ($env:CARGO_TARGET_DIR) { return $env:CARGO_TARGET_DIR }
+    if ($env:USERPROFILE) { return (Join-Path $env:USERPROFILE "hb") }
+    return (Join-Path $Root "target")
+}
+
 function Get-VsInstallPath {
     $base = ${env:ProgramFiles(x86)}
     if (-not $base) { $base = "C:\Program Files (x86)" }
@@ -184,10 +198,24 @@ function Resolve-VcRuntime {
     # to travel beside it: the Store certification machine and a fresh Windows
     # install cannot be assumed to have the Visual C++ redistributable. The
     # newest installed redist wins, matching the toolset that did the build.
+    # Build Tools installs often omit VC\Redist, so fall back to the toolset's
+    # own bin directory and warn instead of failing after a successful compile.
     $vs = Get-VsInstallPath
     $root = Join-Path $vs "VC\Redist\MSVC"
     if (-not (Test-Path -LiteralPath $root)) {
-        throw "The Visual C++ redistributable directory was not found under $root."
+        $toolset = Get-ChildItem -LiteralPath (Join-Path $vs "VC\Tools\MSVC") -Directory -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -as [version] } |
+            Sort-Object { [version]$_.Name } -Descending |
+            Select-Object -First 1
+        if ($toolset) {
+            $bin = Join-Path $toolset.FullName "bin\Hostx64\x64"
+            if (Test-Path -LiteralPath (Join-Path $bin "vcruntime140.dll")) {
+                Write-Warn "VC\Redist\MSVC is missing; staging the CRT from $bin."
+                return $bin
+            }
+        }
+        Write-Warn "VC\Redist\MSVC and the toolset CRT DLLs were not found under $vs; the staged app may need the Visual C++ redistributable."
+        return $null
     }
 
     $versions = Get-ChildItem -LiteralPath $root -Directory -ErrorAction SilentlyContinue |
@@ -202,7 +230,25 @@ function Resolve-VcRuntime {
         if ($crt) { return $crt.FullName }
     }
 
-    throw "No x64 Microsoft.VC*.CRT directory was found under $root."
+    Write-Warn "No x64 Microsoft.VC*.CRT directory was found under $root; the staged app may need the Visual C++ redistributable."
+    return $null
+}
+
+function Assert-DllCrtArtifact {
+    # Catch a static-CRT link before packaging: a /MT executable does not
+    # import vcruntime140.dll, so the runtime DLLs staged beside it are unused
+    # and the app still carries the CRT mismatch that caused LNK2019.
+    param([Parameter(Mandatory = $true)][string]$Binary)
+    $dumpbin = Get-Command dumpbin.exe -ErrorAction SilentlyContinue
+    if (-not $dumpbin) {
+        Write-Warn "dumpbin.exe was not found; skipping the DLL CRT dependency check."
+        return
+    }
+    $dependents = (& $dumpbin.Source /dependents $Binary 2>&1 | Out-String)
+    if ($dependents -notmatch 'vcruntime140\.dll') {
+        throw "$Binary does not import vcruntime140.dll; the build is not using the DLL CRT."
+    }
+    Write-Step "Verified the DLL CRT dependency of $(Split-Path -Leaf $Binary)"
 }
 
 function Resolve-VulkanSdk {

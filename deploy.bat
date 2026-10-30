@@ -68,11 +68,10 @@ if errorlevel 1 (
 echo Adding "%INSTALL_DIR%" to the user PATH
 powershell -NoProfile -ExecutionPolicy Bypass -Command "$dir='%INSTALL_DIR%'; $p=[Environment]::GetEnvironmentVariable('Path','User'); if ($null -eq $p) { $p='' }; $parts=@($p.Split(';') | Where-Object { $_ -ne '' -and ($_.TrimEnd('\') -ine $dir.TrimEnd('\')) }); [Environment]::SetEnvironmentVariable('Path', (@($parts + $dir) -join ';'), 'User'); Write-Host 'PATH updated'"
 
-echo Verifying models...
-"%INSTALL_DIR%\hippo-transcribe.exe" --cli models download --verify
+echo Checking bundled models...
+"%INSTALL_DIR%\hippo-transcribe.exe" --cli models
 if errorlevel 1 (
-  echo [!] model download failed.
-  exit /b 1
+  echo [!] Could not inspect bundled models. The app can download them on first launch.
 )
 
 echo.
