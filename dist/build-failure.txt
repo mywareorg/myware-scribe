@@ -1,140 +1,142 @@
-﻿=== Build failed 2026-10-29 15:41:32 ===
-At C:\Users\wuphy\Documents\hippo-transcribe\scripts\build-windows.ps1:253 char:9
-+         throw "$commandLine failed with exit code $exitCode (full out ...
-+         ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-Message: cargo build --release --locked failed with exit code 101 (full output in C:\Users\wuphy\Documents\hippo-transcribe\build-windows.log)
-Stack:   at Invoke-Native, C:\Users\wuphy\Documents\hippo-transcribe\scripts\build-windows.ps1: line 253
-at <ScriptBlock>, C:\Users\wuphy\Documents\hippo-transcribe\scripts\build-windows.ps1: line 476
+﻿=== Build failed 2026-10-30 13:47:24 ===
+At C:\Users\wuphy\Documents\hippo-transcribe\scripts\fetch-models.ps1:132 char:5
++     throw "$failed model file(s) could not be staged"
++     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Message: 3 model file(s) could not be staged
+Stack:   at <ScriptBlock>, C:\Users\wuphy\Documents\hippo-transcribe\scripts\fetch-models.ps1: line 132
+at <ScriptBlock>, C:\Users\wuphy\Documents\hippo-transcribe\scripts\build-windows.ps1: line 555
 at <ScriptBlock>, <No file>: line 1
 
 === build-windows.log ===
-5: = note: "C:\\Program Files\\Microsoft Visual Studio\\18\\Community\\VC\\Tools\\MSVC\\14.51.36231\\bin\\HostX64\\x64\\link.exe" "/NOLOGO" "<1 object files omitted>" "shell32.lib" "C:\\Users\\wuphy\\hb\\release\\deps\\rustcUIoHzU/{libwindows_version-47a4f2cc38cd3716,libwindows-9990dbfc281c3f60,libwindows_future-4b160391b937a888,libwindows_threading-47647442c5549e05,libwindows_core-ead86fc2c79e56a4,libwindows_strings-11c0e4f4091b0691,libwindows_result-46a42f5cbc64a576,libring-c9eaa864e61029a6,libwhisper_rs_sys-9bfa6dd7a82bbfb7,libwindows_sys-f0c122401bd2b808,liblibloading-6dad10652d064d8e,libparking_lot_core-5b09bf83f3c85d02,libstd-3854312d46c17a37}.rlib" "<sysroot>\\lib\\rustlib\\x86_64-pc-windows-msvc\\lib/libcompiler_builtins-*.rlib" "C:\\Users\\wuphy\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\windows_x86_64_msvc-0.52.6\\lib\\windows.0.52.0.lib" "bcrypt.lib" "advapi32.lib" "advapi32.lib" "C:\\Users\\wuphy\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\windows_x86_64_msvc-0.52.6\\lib\\windows.0.52.0.lib" "C:\\Users\\wuphy\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\windows_x86_64_msvc-0.52.6\\lib\\windows.0.52.0.lib" "C:\\Users\\wuphy\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\windows_x86_64_msvc-0.52.6\\lib\\windows.0.52.0.lib" "kernel32.lib" "user32.lib" "shell32.lib" "gdi32.lib" "advapi32.lib" "C:\\Users\\wuphy\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\windows_x86_64_msvc-0.52.6\\lib\\windows.0.52.0.lib" "kernel32.lib" "ole32.lib" "opengl32.lib" "C:\\Users\\wuphy\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\windows_x86_64_msvc-0.52.6\\lib\\windows.0.52.0.lib" "C:\\Users\\wuphy\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\windows_x86_64_msvc-0.52.6\\lib\\windows.0.52.0.lib" "advapi32.lib" "cfgmgr32.lib" "d2d1.lib" "d3d12.lib" "d3dcompiler.lib" "dcomp.lib" "dwrite.lib" "dxgi.lib" "gdi32.lib" "kernel32.lib" "msimg32.lib" "ole32.lib" "oleaut32.lib" "opengl32.lib" "synchronization.lib" "user32.lib" "windowscodecs.lib" "winspool.lib" "kernel32.lib" "kernel32.lib" "kernel32.lib" "ntdll.lib" "userenv.lib" "ws2_32.lib" "dbghelp.lib" "/defaultlib:libcmt" "/NXCOMPAT" "/LIBPATH:C:\\Users\\wuphy\\hb\\release\\build\\ring-8fff6ad63c4c3b1b\\out" "/LIBPATH:C:\\Users\\wuphy\\hb\\release\\build\\whisper-rs-sys-3b14f51bf6218bdc\\out\\build" "/LIBPATH:C:\\Users\\wuphy\\hb\\release\\build\\whisper-rs-sys-3b14f51bf6218bdc\\out\\build\\CMakeFiles" "/LIBPATH:C:\\Users\\wuphy\\hb\\release\\build\\whisper-rs-sys-3b14f51bf6218bdc\\out\\build\\CMakeFiles\\4.3.1-msvc1" "/LIBPATH:C:\\Users\\wuphy\\hb\\release\\build\\whisper-rs-sys-3b14f51bf6218bdc\\out\\build\\CMakeFiles\\4.3.1-msvc1\\CompilerIdASM" "/LIBPATH:C:\\Users\\wuphy\\hb\\release\\build\\whisper-rs-sys-3b14f51bf6218bdc\\out\\build\\CMakeFiles\\4.3.1-msvc1\\CompilerIdC" "/LIBPATH:C:\\Users\\wuphy\\hb\\release\\build\\whisper-rs-sys-3b14f51bf6218bdc\\out\\build\\CMakeFiles\\4.3.1-msvc1\\CompilerIdC\\tmp" "/LIBPATH:C:\\Users\\wuphy\\hb\\release\\build\\whisper-rs-sys-3b14f51bf6218bdc\\out\\build\\CMakeFiles\\4.3.1-msvc1\\CompilerIdCXX" "/LIBPATH:C:\\Users\\wuphy\\hb\\release\\build\\whisper-rs-sys-3b14f51bf6218bdc\\out\\build\\CMakeFiles\\4.3.1-msvc1\\CompilerIdCXX\\tmp" "/LIBPATH:C:\\Users\\wuphy\\hb\\release\\build\\whisper-rs-sys-3b14f51bf6218bdc\\out\\build\\CMakeFiles\\CMakeScratch" "/LIBPATH:C:\\Users\\wuphy\\hb\\release\\build\\whisper-rs-sys-3b14f51bf6218bdc\\out\\build\\CMakeFiles\\pkgRedirects" "/LIBPATH:C:\\Users\\wuphy\\hb\\release\\build\\whisper-rs-sys-3b14f51bf6218bdc\\out\\build\\CMakeFiles\\ShowIncludes" "/LIBPATH:C:\\Users\\wuphy\\hb\\release\\build\\whisper-rs-sys-3b14f51bf6218bdc\\out\\build\\ggml" "/LIBPATH:C:\\Users\\wuphy\\hb\\release\\build\\whisper-rs-sys-3b14f51bf6218bdc\\out\\build\\ggml\\CMakeFiles" "/LIBPATH:C:\\Users\\wuphy\\hb\\release\\build\\whisper-rs-sys-3b14f51bf6218bdc\\out\\build\\ggml\\src" "/LIBPATH:C:\\Users\\wuphy\\hb\\release\\build\\whisper-rs-sys-3b14f51bf6218bdc\\out\\build\\ggml\\src\\CMakeFiles" "/LIBPATH:C:\\Users\\wuphy\\hb\\release\\build\\whisper-rs-sys-3b14f51bf6218bdc\\out\\build\\ggml\\src\\CMakeFiles\\ggml-base.dir" "/LIBPATH:C:\\Users\\wuphy\\hb\\release\\build\\whisper-rs-sys-3b14f51bf6218bdc\\out\\build\\ggml\\src\\CMakeFiles\\ggml-cpu.dir" "/LIBPATH:C:\\Users\\wuphy\\hb\\release\\build\\whisper-rs-sys-3b14f51bf6218bdc\\out\\build\\ggml\\src\\CMakeFiles\\ggml-cpu.dir\\ggml-cpu" "/LIBPATH:C:\\Users\\wuphy\\hb\\release\\build\\whisper-rs-sys-3b14f51bf6218bdc\\out\\build\\ggml\\src\\CMakeFiles\\ggml-cpu.dir\\ggml-cpu\\amx" "/LIBPATH:C:\\Users\\wuphy\\hb\\release\\build\\whisper-rs-sys-3b14f51bf6218bdc\\out\\build\\ggml\\src\\CMakeFiles\\ggml-cpu.dir\\ggml-cpu\\arch" "/LIBPATH:C:\\Users\\wuphy\\hb\\release\\build\\whisper-rs-sys-3b14f51bf6218bdc\\out\\build\\ggml\\src\\CMakeFiles\\ggml-cpu.dir\\ggml-cpu\\arch\\x86" "/LIBPATH:C:\\Users\\wuphy\\hb\\release\\build\\whisper-rs-sys-3b14f51bf6218bdc\\out\\build\\ggml\\src\\CMakeFiles\\ggml.dir" "/LIBPATH:C:\\Users\\wuphy\\hb\\release\\build\\whisper-rs-sys-3b14f51bf6218bdc\\out\\build\\ggml\\src\\ggml-cpu" "/LIBPATH:C:\\Users\\wuphy\\hb\\release\\build\\whisper-rs-sys-3b14f51bf6218bdc\\out\\build\\ggml\\src\\ggml-cpu\\CMakeFiles" "/LIBPATH:C:\\Users\\wuphy\\hb\\release\\build\\whisper-rs-sys-3b14f51bf6218bdc\\out\\build\\src" "/LIBPATH:C:\\Users\\wuphy\\hb\\release\\build\\whisper-rs-sys-3b14f51bf6218bdc\\out\\build\\src\\CMakeFiles" "/LIBPATH:C:\\Users\\wuphy\\hb\\release\\build\\whisper-rs-sys-3b14f51bf6218bdc\\out\\build\\src\\CMakeFiles\\whisper.dir" "/LIBPATH:C:\\Users\\wuphy\\hb\\release\\build\\whisper-rs-sys-3b14f51bf6218bdc\\out" "/LIBPATH:C:\\Users\\wuphy\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\windows_x86_64_msvc-0.52.6\\lib" "/OUT:C:\\Users\\wuphy\\hb\\release\\deps\\hippo_transcribe.exe" "/SUBSYSTEM:windows" "/ENTRY:mainCRTStartup" "/OPT:REF,ICF" "/DEBUG" "/PDBALTPATH:%_PDB%" "/NATVIS:<sysroot>\\lib\\rustlib\\etc\\intrinsic.natvis" "/NATVIS:<sysroot>\\lib\\rustlib\\etc\\liballoc.natvis" "/NATVIS:<sysroot>\\lib\\rustlib\\etc\\libcore.natvis" "/NATVIS:<sysroot>\\lib\\rustlib\\etc\\libstd.natvis" "/NATVIS:C:\\Users\\wuphy\\hb\\release\\deps\\rustcUIoHzU\\hippo_transcribe-0.natvis" "/NATVIS:C:\\Users\\wuphy\\hb\\release\\deps\\rustcUIoHzU\\hippo_transcribe-1.natvis" "/NATVIS:C:\\Users\\wuphy\\hb\\release\\deps\\rustcUIoHzU\\hippo_transcribe-2.natvis" "C:\\Users\\wuphy\\hb\\release\\build\\hippo-transcribe-gui-902adefe5e59b0b7\\out\\main_res.res"
+83: Compiling gl_generator v0.14.0
 
 === last 40 lines ===
-          LINK : warning LNK4217: symbol 'roundf' defined in 'libucrt.lib(round.obj)' is imported by 'libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(ggml-quants.c.obj)' in function 'quantize_row_q8_0_ref'
-          LINK : warning LNK4286: symbol 'roundf' defined in 'libucrt.lib(round.obj)' is imported by 'libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(repack.cpp.obj)'
-          LINK : warning LNK4286: symbol 'roundf' defined in 'libucrt.lib(round.obj)' is imported by 'libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(unary-ops.cpp.obj)'
-          LINK : warning LNK4217: symbol 'qsort' defined in 'libucrt.lib(qsort.obj)' is imported by 'libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(ggml-quants.c.obj)' in function 'iq2xs_init_impl'
-          LINK : warning LNK4217: symbol 'truncf' defined in 'libucrt.lib(truncf.obj)' is imported by 'libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(unary-ops.cpp.obj)' in function '"void __cdecl apply_unary_op<&float __cdecl op_trunc(float),unsigned short,unsigned short>(struct ggml_compute_params const *,struct ggml_tensor *)" (??$apply_unary_op@$1?op_trunc@@YAMM@ZGG@@YAXPEBUggml_compute_params@@PEAUggml_tensor@@@Z)'
-          LINK : warning LNK4217: symbol '___lc_locale_name_func' defined in 'libucrt.lib(initctype.obj)' is imported by 'msvcprt.lib(regex.obj)' in function '__std_regex_transform_primary_char'
-          LINK : warning LNK4217: symbol '___lc_collate_cp_func' defined in 'libucrt.lib(initctype.obj)' is imported by 'msvcprt.lib(regex.obj)' in function '__std_regex_transform_primary_char'
-          LINK : warning LNK4217: symbol '___lc_codepage_func' defined in 'libucrt.lib(initctype.obj)' is imported by 'msvcprt.lib(filesystem.obj)' in function '__std_fs_code_page'
-          libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(whisper.cpp.obj) : error LNK2019: unresolved external symbol __imp_fgetc referenced in function "bool __cdecl std::_Fgetc<char>(char &,struct _iobuf *)" (??$_Fgetc@D@std@@YA_NAEADPEAU_iobuf@@@Z)
-          libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(whisper.cpp.obj) : error LNK2019: unresolved external symbol __imp_fgetpos referenced in function "protected: virtual class std::fpos<struct _Mbstatet> __cdecl std::basic_filebuf<char,struct std::char_traits<char> >::seekoff(__int64,int,int)" (?seekoff@?$basic_filebuf@DU?$char_traits@D@std@@@std@@MEAA?AV?$fpos@U_Mbstatet@@@2@_JHH@Z)
-          libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(whisper.cpp.obj) : error LNK2019: unresolved external symbol __imp_fputs referenced in function "void __cdecl whisper_log_callback_default(enum ggml_log_level,char const *,void *)" (?whisper_log_callback_default@@YAXW4ggml_log_level@@PEBDPEAX@Z)
-          libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(ggml.c.obj) : error LNK2001: unresolved external symbol __imp_fputs
-          libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(whisper.cpp.obj) : error LNK2019: unresolved external symbol __imp_fread referenced in function "protected: virtual __int64 __cdecl std::basic_filebuf<char,struct std::char_traits<char> >::xsgetn(char *,__int64)" (?xsgetn@?$basic_filebuf@DU?$char_traits@D@std@@@std@@MEAA_JPEAD_J@Z)
-          libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(whisper.cpp.obj) : error LNK2019: unresolved external symbol __imp_fsetpos referenced in function "protected: virtual class std::fpos<struct _Mbstatet> __cdecl std::basic_filebuf<char,struct std::char_traits<char> >::seekpos(class std::fpos<struct _Mbstatet>,int)" (?seekpos@?$basic_filebuf@DU?$char_traits@D@std@@@std@@MEAA?AV?$fpos@U_Mbstatet@@@2@V32@H@Z)
-          libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(whisper.cpp.obj) : error LNK2019: unresolved external symbol __imp__fseeki64 referenced in function "protected: virtual class std::fpos<struct _Mbstatet> __cdecl std::basic_filebuf<char,struct std::char_traits<char> >::seekoff(__int64,int,int)" (?seekoff@?$basic_filebuf@DU?$char_traits@D@std@@@std@@MEAA?AV?$fpos@U_Mbstatet@@@2@_JHH@Z)
-          libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(whisper.cpp.obj) : error LNK2019: unresolved external symbol __imp_fwrite referenced in function "protected: bool __cdecl std::basic_filebuf<char,struct std::char_traits<char> >::_Endwrite(void)" (?_Endwrite@?$basic_filebuf@DU?$char_traits@D@std@@@std@@IEAA_NXZ)
-          libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(whisper.cpp.obj) : error LNK2019: unresolved external symbol __imp_setvbuf referenced in function "protected: virtual class std::basic_streambuf<char,struct std::char_traits<char> > * __cdecl std::basic_filebuf<char,struct std::char_traits<char> >::setbuf(char *,__int64)" (?setbuf@?$basic_filebuf@DU?$char_traits@D@std@@@std@@MEAAPEAV?$basic_streambuf@DU?$char_traits@D@std@@@2@PEAD_J@Z)
-          libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(whisper.cpp.obj) : error LNK2019: unresolved external symbol __imp_ungetc referenced in function "bool __cdecl std::_Ungetc<char>(char const &,struct _iobuf *)" (??$_Ungetc@D@std@@YA_NAEBDPEAU_iobuf@@@Z)
-          libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(whisper.cpp.obj) : error LNK2019: unresolved external symbol __imp_realloc referenced in function "public: void __cdecl std::_Buf<char>::_Insert2<char const *>(char const *,char const *)" (??$_Insert2@PEBD@?$_Buf@D@std@@QEAAXPEBD0@Z)
-          libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(ggml-alloc.c.obj) : error LNK2001: unresolved external symbol __imp_realloc
-          libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(ggml-backend.cpp.obj) : error LNK2001: unresolved external symbol __imp_realloc
-          libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(whisper.cpp.obj) : error LNK2019: unresolved external symbol __imp_rand referenced in function "public: __cdecl <lambda_8af2dce33bc0acf83d1812eae579f0bc>::operator()(int)const " (??R<lambda_8af2dce33bc0acf83d1812eae579f0bc>@@QEBA@H@Z)
-          libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(whisper.cpp.obj) : error LNK2019: unresolved external symbol __imp__beginthreadex referenced in function "public: __cdecl std::thread::thread<int (__cdecl&)(struct whisper_context *,struct whisper_state *,struct whisper_full_params,float const *,int),struct whisper_context * &,struct whisper_state * &,struct whisper_full_params,float const *,int const &,0>(int (__cdecl&)(struct whisper_context *,struct whisper_state *,struct whisper_full_params,float const *,int),struct whisper_context * &,struct whisper_state * &,struct whisper_full_params &&,float const * &&,int const &)" (??$?0A6AHPEAUwhisper_context@@PEAUwhisper_state@@Uwhisper_full_params@@PEBMH@ZAEAPEAU0@AEAPEAU1@U2@PEBMAEBH$0A@@thread@std@@QEAA@A6AHPEAUwhisper_context@@PEAUwhisper_state@@Uwhisper_full_params@@PEBMH@ZAEAPEAU2@AEAPEAU3@$$QEAU4@$$QEAPEBMAEBH@Z)
-          libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(ggml.c.obj) : error LNK2019: unresolved external symbol __imp__wfopen referenced in function ggml_fopen
-          libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(ggml.c.obj) : error LNK2019: unresolved external symbol __imp__aligned_free referenced in function ggml_aligned_free
-          libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(ggml.c.obj) : error LNK2019: unresolved external symbol __imp__aligned_malloc referenced in function ggml_aligned_malloc
-          libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(ggml.c.obj) : error LNK2019: unresolved external symbol __imp_clock referenced in function ggml_cycles
-          libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(ggml-backend.cpp.obj) : error LNK2019: unresolved external symbol __imp_getenv referenced in function ggml_backend_sched_new
-          libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(ggml-backend-reg.cpp.obj) : error LNK2001: unresolved external symbol __imp_getenv
-          libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(ggml-backend-reg.cpp.obj) : error LNK2019: unresolved external symbol __imp_tolower referenced in function "bool __cdecl striequals(char const *,char const *)" (?striequals@@YA_NPEBD0@Z)
-          libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(ggml-quants.c.obj) : error LNK2019: unresolved external symbol __imp_lroundf referenced in function quantize_row_tq1_0_ref
-          libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(unary-ops.cpp.obj) : error LNK2019: unresolved external symbol __imp_expm1f referenced in function "void __cdecl apply_unary_op<&float __cdecl op_elu(float),unsigned short,unsigned short>(struct ggml_compute_params const *,struct ggml_tensor *)" (??$apply_unary_op@$1?op_elu@@YAMM@ZGG@@YAXPEBUggml_compute_params@@PEAUggml_tensor@@@Z)
-          libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(unary-ops.cpp.obj) : error LNK2019: unresolved external symbol __imp_fmaxf referenced in function "void __cdecl apply_unary_op<&float __cdecl op_hardsigmoid(float),unsigned short,unsigned short>(struct ggml_compute_params const *,struct ggml_tensor *)" (??$apply_unary_op@$1?op_hardsigmoid@@YAMM@ZGG@@YAXPEBUggml_compute_params@@PEAUggml_tensor@@@Z)
-          libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(ops.cpp.obj) : error LNK2001: unresolved external symbol __imp_fmaxf
-          libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(unary-ops.cpp.obj) : error LNK2019: unresolved external symbol __imp_fminf referenced in function "void __cdecl apply_unary_op<&float __cdecl op_hardsigmoid(float),unsigned short,unsigned short>(struct ggml_compute_params const *,struct ggml_tensor *)" (??$apply_unary_op@$1?op_hardsigmoid@@YAMM@ZGG@@YAXPEBUggml_compute_params@@PEAUggml_tensor@@@Z)
-          libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(ops.cpp.obj) : error LNK2019: unresolved external symbol __imp_erff referenced in function "void __cdecl ggml_compute_forward_geglu_erf_f16(struct ggml_compute_params const *,struct ggml_tensor *)" (?ggml_compute_forward_geglu_erf_f16@@YAXPEBUggml_compute_params@@PEAUggml_tensor@@@Z)
-          C:\Users\wuphy\hb\release\deps\hippo_transcribe.exe : fatal error LNK1120: 23 unresolved externals
-          
-
-error: could not compile `hippo-transcribe-gui` (bin "hippo-transcribe") due to 1 previous error
+   Compiling symphonia v0.5.5
+   Compiling webpki-roots v0.26.11
+   Compiling windows v0.62.2
+   Compiling digest v0.10.7
+   Compiling url v2.5.8
+   Compiling winresource v0.1.34
+   Compiling iced_renderer v0.13.0
+   Compiling realfft v3.5.0
+   Compiling windows v0.54.0
+   Compiling window_clipboard v0.4.1
+   Compiling ogg v0.8.0
+   Compiling windows-version v0.1.7
+   Compiling serde_derive v1.0.229
+   Compiling itoa v1.0.18
+   Compiling dasp_sample v0.11.0
+   Compiling cpufeatures v0.2.17
+   Compiling pxfm v0.1.30
+   Compiling rfd v0.15.4
+   Compiling base64 v0.22.1
+   Compiling ureq v2.12.1
+   Compiling moxcms v0.8.1
+   Compiling sha2 v0.10.9
+   Compiling tauri-winrt-notification v0.8.1
+   Compiling lewton v0.10.2
+   Compiling iced_winit v0.13.0
+   Compiling rubato v0.15.0
+   Compiling iced_widget v0.13.4
+   Compiling hippo-transcribe-gui v0.1.0 (C:\Users\wuphy\Documents\hippo-transcribe\gui)
+   Compiling png v0.18.1
+   Compiling windows-sys v0.59.0
+   Compiling byteorder-lite v0.1.0
+   Compiling hound v3.5.1
+   Compiling num_cpus v1.17.0
+   Compiling claxon v0.4.3
+   Compiling rodio v0.20.1
+   Compiling hippo-transcribe-core v0.1.0 (C:\Users\wuphy\Documents\hippo-transcribe\core)
+   Compiling image v0.25.10
+   Compiling iced v0.13.1
+   Compiling notify-rust v4.18.2
+    Finished `release` profile [optimized] target(s) in 7m 43s
 
 === console ===
-          libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(ggml-backend-reg.cpp.obj) : error LNK2001: unresolved external symbol __imp_getenv
-          libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(ggml-backend-reg.cpp.obj) : error LNK2019: unresolved external symbol __imp_tolower referenced in function "bool __cdecl striequals(char const *,char const *)" (?striequals@@YA_NPEBD0@Z)
-          libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(ggml-quants.c.obj) : error LNK2019: unresolved external symbol __imp_lroundf referenced in function quantize_row_tq1_0_ref
-          libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(unary-ops.cpp.obj) : error LNK2019: unresolved external symbol __imp_expm1f referenced in function "void __cdecl apply_unary_op<&float __cdecl op_elu(float),unsigned short,unsigned short>(struct ggml_compute_params const *,struct ggml_tensor *)" (??$apply_unary_op@$1?op_elu@@YAMM@ZGG@@YAXPEBUggml_compute_params@@PEAUggml_tensor@@@Z)
-          libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(unary-ops.cpp.obj) : error LNK2019: unresolved external symbol __imp_fmaxf referenced in function "void __cdecl apply_unary_op<&float __cdecl op_hardsigmoid(float),unsigned short,unsigned short>(struct ggml_compute_params const *,struct ggml_tensor *)" (??$apply_unary_op@$1?op_hardsigmoid@@YAMM@ZGG@@YAXPEBUggml_compute_params@@PEAUggml_tensor@@@Z)
-          libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(ops.cpp.obj) : error LNK2001: unresolved external symbol __imp_fmaxf
-          libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(unary-ops.cpp.obj) : error LNK2019: unresolved external symbol __imp_fminf referenced in function "void __cdecl apply_unary_op<&float __cdecl op_hardsigmoid(float),unsigned short,unsigned short>(struct ggml_compute_params const *,struct ggml_tensor *)" (??$apply_unary_op@$1?op_hardsigmoid@@YAMM@ZGG@@YAXPEBUggml_compute_params@@PEAUggml_tensor@@@Z)
-          libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(ops.cpp.obj) : error LNK2019: unresolved external symbol __imp_erff referenced in function "void __cdecl ggml_compute_forward_geglu_erf_f16(struct ggml_compute_params const *,struct ggml_tensor *)" (?ggml_compute_forward_geglu_erf_f16@@YAXPEBUggml_compute_params@@PEAUggml_tensor@@@Z)
-          C:\Users\wuphy\hb\release\deps\hippo_transcribe.exe : fatal error LNK1120: 23 unresolved externals
-
-
-error: could not compile `hippo-transcribe-gui` (bin "hippo-transcribe") due to 1 previous error
-
-Last lines of C:\Users\wuphy\Documents\hippo-transcribe\build-windows.log:
-              LINK : warning LNK4286: symbol 'free' defined in 'libucrt.lib(free.obj)' is imported by 'msvcprt.lib(regex.obj)'
-              LINK : warning LNK4286: symbol 'free' defined in 'libucrt.lib(free.obj)' is imported by 'msvcprt.lib(filesystem.obj)'
-              LINK : warning LNK4217: symbol 'free' defined in 'libucrt.lib(free.obj)' is imported by 'libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(whisper.cpp.obj)' in function '"public: __cdecl std::_Buf<char>::~_Buf<char>(void)" (??1?$_Buf@D@std@@QEAA@XZ)'
-              LINK : warning LNK4286: symbol 'free' defined in 'libucrt.lib(free.obj)' is imported by 'libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(ggml.c.obj)'
-              LINK : warning LNK4286: symbol 'free' defined in 'libucrt.lib(free.obj)' is imported by 'libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(ggml-alloc.c.obj)'
-              LINK : warning LNK4286: symbol 'free' defined in 'libucrt.lib(free.obj)' is imported by 'libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(ggml-backend.cpp.obj)'
-              LINK : warning LNK4286: symbol 'malloc' defined in 'libucrt.lib(malloc.obj)' is imported by 'libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(ggml-quants.c.obj)'
-              LINK : warning LNK4286: symbol 'malloc' defined in 'libucrt.lib(malloc.obj)' is imported by 'msvcprt.lib(locale0_implib.obj)'
-              LINK : warning LNK4286: symbol 'malloc' defined in 'libucrt.lib(malloc.obj)' is imported by 'msvcprt.lib(regex.obj)'
-              LINK : warning LNK4286: symbol 'malloc' defined in 'libucrt.lib(malloc.obj)' is imported by 'msvcprt.lib(filesystem.obj)'
-              LINK : warning LNK4217: symbol 'malloc' defined in 'libucrt.lib(malloc.obj)' is imported by 'libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(whisper.cpp.obj)' in function '"struct whisper_batch __cdecl whisper_batch_init(int,int)" (?whisper_batch_init@@YA?AUwhisper_batch@@HH@Z)'
-              LINK : warning LNK4286: symbol 'malloc' defined in 'libucrt.lib(malloc.obj)' is imported by 'libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(ggml.c.obj)'
-              LINK : warning LNK4286: symbol 'malloc' defined in 'libucrt.lib(malloc.obj)' is imported by 'libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(ggml-alloc.c.obj)'
-              LINK : warning LNK4286: symbol 'malloc' defined in 'libucrt.lib(malloc.obj)' is imported by 'libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(ggml-backend.cpp.obj)'
-              LINK : warning LNK4217: symbol 'abort' defined in 'libucrt.lib(abort.obj)' is imported by 'libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(whisper.cpp.obj)' in function '"struct ggml_tensor * __cdecl dtw_and_backtrace(struct ggml_context *,struct ggml_tensor *)" (?dtw_and_backtrace@@YAPEAUggml_tensor@@PEAUggml_context@@PEAU1@@Z)'
-              LINK : warning LNK4286: symbol 'abort' defined in 'libucrt.lib(abort.obj)' is imported by 'libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(ggml.c.obj)'
-              LINK : warning LNK4286: symbol 'abort' defined in 'libucrt.lib(abort.obj)' is imported by 'msvcprt.lib(filesystem.obj)'
-              LINK : warning LNK4217: symbol 'terminate' defined in 'libucrt.lib(terminate.obj)' is imported by 'libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(whisper.cpp.obj)' in function '"void __cdecl std::_Destroy_range<class std::allocator<class std::thread> >(class std::thread *,class std::thread * const,class std::allocator<class std::thread> &)" (??$_Destroy_range@V?$allocator@Vthread@std@@@std@@@std@@YAXPEAVthread@0@QEAV10@AEAV?$allocator@Vthread@std@@@0@@Z)'
-              LINK : warning LNK4217: symbol '_errno' defined in 'libucrt.lib(errno.obj)' is imported by 'libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(ggml.c.obj)' in function 'ggml_fopen'
-              LINK : warning LNK4217: symbol 'atoi' defined in 'libucrt.lib(atox.obj)' is imported by 'libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(ggml-backend.cpp.obj)' in function 'ggml_backend_sched_new'
-              LINK : warning LNK4217: symbol 'roundf' defined in 'libucrt.lib(round.obj)' is imported by 'libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(ggml-quants.c.obj)' in function 'quantize_row_q8_0_ref'
-              LINK : warning LNK4286: symbol 'roundf' defined in 'libucrt.lib(round.obj)' is imported by 'libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(repack.cpp.obj)'
-              LINK : warning LNK4286: symbol 'roundf' defined in 'libucrt.lib(round.obj)' is imported by 'libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(unary-ops.cpp.obj)'
-              LINK : warning LNK4217: symbol 'qsort' defined in 'libucrt.lib(qsort.obj)' is imported by 'libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(ggml-quants.c.obj)' in function 'iq2xs_init_impl'
-              LINK : warning LNK4217: symbol 'truncf' defined in 'libucrt.lib(truncf.obj)' is imported by 'libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(unary-ops.cpp.obj)' in function '"void __cdecl apply_unary_op<&float __cdecl op_trunc(float),unsigned short,unsigned short>(struct ggml_compute_params const *,struct ggml_tensor *)" (??$apply_unary_op@$1?op_trunc@@YAMM@ZGG@@YAXPEBUggml_compute_params@@PEAUggml_tensor@@@Z)'
-              LINK : warning LNK4217: symbol '___lc_locale_name_func' defined in 'libucrt.lib(initctype.obj)' is imported by 'msvcprt.lib(regex.obj)' in function '__std_regex_transform_primary_char'
-              LINK : warning LNK4217: symbol '___lc_collate_cp_func' defined in 'libucrt.lib(initctype.obj)' is imported by 'msvcprt.lib(regex.obj)' in function '__std_regex_transform_primary_char'
-              LINK : warning LNK4217: symbol '___lc_codepage_func' defined in 'libucrt.lib(initctype.obj)' is imported by 'msvcprt.lib(filesystem.obj)' in function '__std_fs_code_page'
-              libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(whisper.cpp.obj) : error LNK2019: unresolved external symbol __imp_fgetc referenced in function "bool __cdecl std::_Fgetc<char>(char &,struct _iobuf *)" (??$_Fgetc@D@std@@YA_NAEADPEAU_iobuf@@@Z)
-              libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(whisper.cpp.obj) : error LNK2019: unresolved external symbol __imp_fgetpos referenced in function "protected: virtual class std::fpos<struct _Mbstatet> __cdecl std::basic_filebuf<char,struct std::char_traits<char> >::seekoff(__int64,int,int)" (?seekoff@?$basic_filebuf@DU?$char_traits@D@std@@@std@@MEAA?AV?$fpos@U_Mbstatet@@@2@_JHH@Z)
-              libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(whisper.cpp.obj) : error LNK2019: unresolved external symbol __imp_fputs referenced in function "void __cdecl whisper_log_callback_default(enum ggml_log_level,char const *,void *)" (?whisper_log_callback_default@@YAXW4ggml_log_level@@PEBDPEAX@Z)
-              libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(ggml.c.obj) : error LNK2001: unresolved external symbol __imp_fputs
-              libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(whisper.cpp.obj) : error LNK2019: unresolved external symbol __imp_fread referenced in function "protected: virtual __int64 __cdecl std::basic_filebuf<char,struct std::char_traits<char> >::xsgetn(char *,__int64)" (?xsgetn@?$basic_filebuf@DU?$char_traits@D@std@@@std@@MEAA_JPEAD_J@Z)
-              libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(whisper.cpp.obj) : error LNK2019: unresolved external symbol __imp_fsetpos referenced in function "protected: virtual class std::fpos<struct _Mbstatet> __cdecl std::basic_filebuf<char,struct std::char_traits<char> >::seekpos(class std::fpos<struct _Mbstatet>,int)" (?seekpos@?$basic_filebuf@DU?$char_traits@D@std@@@std@@MEAA?AV?$fpos@U_Mbstatet@@@2@V32@H@Z)
-              libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(whisper.cpp.obj) : error LNK2019: unresolved external symbol __imp__fseeki64 referenced in function "protected: virtual class std::fpos<struct _Mbstatet> __cdecl std::basic_filebuf<char,struct std::char_traits<char> >::seekoff(__int64,int,int)" (?seekoff@?$basic_filebuf@DU?$char_traits@D@std@@@std@@MEAA?AV?$fpos@U_Mbstatet@@@2@_JHH@Z)
-              libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(whisper.cpp.obj) : error LNK2019: unresolved external symbol __imp_fwrite referenced in function "protected: bool __cdecl std::basic_filebuf<char,struct std::char_traits<char> >::_Endwrite(void)" (?_Endwrite@?$basic_filebuf@DU?$char_traits@D@std@@@std@@IEAA_NXZ)
-              libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(whisper.cpp.obj) : error LNK2019: unresolved external symbol __imp_setvbuf referenced in function "protected: virtual class std::basic_streambuf<char,struct std::char_traits<char> > * __cdecl std::basic_filebuf<char,struct std::char_traits<char> >::setbuf(char *,__int64)" (?setbuf@?$basic_filebuf@DU?$char_traits@D@std@@@std@@MEAAPEAV?$basic_streambuf@DU?$char_traits@D@std@@@2@PEAD_J@Z)
-              libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(whisper.cpp.obj) : error LNK2019: unresolved external symbol __imp_ungetc referenced in function "bool __cdecl std::_Ungetc<char>(char const &,struct _iobuf *)" (??$_Ungetc@D@std@@YA_NAEBDPEAU_iobuf@@@Z)
-              libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(whisper.cpp.obj) : error LNK2019: unresolved external symbol __imp_realloc referenced in function "public: void __cdecl std::_Buf<char>::_Insert2<char const *>(char const *,char const *)" (??$_Insert2@PEBD@?$_Buf@D@std@@QEAAXPEBD0@Z)
-              libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(ggml-alloc.c.obj) : error LNK2001: unresolved external symbol __imp_realloc
-              libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(ggml-backend.cpp.obj) : error LNK2001: unresolved external symbol __imp_realloc
-              libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(whisper.cpp.obj) : error LNK2019: unresolved external symbol __imp_rand referenced in function "public: __cdecl <lambda_8af2dce33bc0acf83d1812eae579f0bc>::operator()(int)const " (??R<lambda_8af2dce33bc0acf83d1812eae579f0bc>@@QEBA@H@Z)
-              libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(whisper.cpp.obj) : error LNK2019: unresolved external symbol __imp__beginthreadex referenced in function "public: __cdecl std::thread::thread<int (__cdecl&)(struct whisper_context *,struct whisper_state *,struct whisper_full_params,float const *,int),struct whisper_context * &,struct whisper_state * &,struct whisper_full_params,float const *,int const &,0>(int (__cdecl&)(struct whisper_context *,struct whisper_state *,struct whisper_full_params,float const *,int),struct whisper_context * &,struct whisper_state * &,struct whisper_full_params &&,float const * &&,int const &)" (??$?0A6AHPEAUwhisper_context@@PEAUwhisper_state@@Uwhisper_full_params@@PEBMH@ZAEAPEAU0@AEAPEAU1@U2@PEBMAEBH$0A@@thread@std@@QEAA@A6AHPEAUwhisper_context@@PEAUwhisper_state@@Uwhisper_full_params@@PEBMH@ZAEAPEAU2@AEAPEAU3@$$QEAU4@$$QEAPEBMAEBH@Z)
-              libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(ggml.c.obj) : error LNK2019: unresolved external symbol __imp__wfopen referenced in function ggml_fopen
-              libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(ggml.c.obj) : error LNK2019: unresolved external symbol __imp__aligned_free referenced in function ggml_aligned_free
-              libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(ggml.c.obj) : error LNK2019: unresolved external symbol __imp__aligned_malloc referenced in function ggml_aligned_malloc
-              libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(ggml.c.obj) : error LNK2019: unresolved external symbol __imp_clock referenced in function ggml_cycles
-              libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(ggml-backend.cpp.obj) : error LNK2019: unresolved external symbol __imp_getenv referenced in function ggml_backend_sched_new
-              libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(ggml-backend-reg.cpp.obj) : error LNK2001: unresolved external symbol __imp_getenv
-              libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(ggml-backend-reg.cpp.obj) : error LNK2019: unresolved external symbol __imp_tolower referenced in function "bool __cdecl striequals(char const *,char const *)" (?striequals@@YA_NPEBD0@Z)
-              libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(ggml-quants.c.obj) : error LNK2019: unresolved external symbol __imp_lroundf referenced in function quantize_row_tq1_0_ref
-              libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(unary-ops.cpp.obj) : error LNK2019: unresolved external symbol __imp_expm1f referenced in function "void __cdecl apply_unary_op<&float __cdecl op_elu(float),unsigned short,unsigned short>(struct ggml_compute_params const *,struct ggml_tensor *)" (??$apply_unary_op@$1?op_elu@@YAMM@ZGG@@YAXPEBUggml_compute_params@@PEAUggml_tensor@@@Z)
-              libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(unary-ops.cpp.obj) : error LNK2019: unresolved external symbol __imp_fmaxf referenced in function "void __cdecl apply_unary_op<&float __cdecl op_hardsigmoid(float),unsigned short,unsigned short>(struct ggml_compute_params const *,struct ggml_tensor *)" (??$apply_unary_op@$1?op_hardsigmoid@@YAMM@ZGG@@YAXPEBUggml_compute_params@@PEAUggml_tensor@@@Z)
-              libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(ops.cpp.obj) : error LNK2001: unresolved external symbol __imp_fmaxf
-              libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(unary-ops.cpp.obj) : error LNK2019: unresolved external symbol __imp_fminf referenced in function "void __cdecl apply_unary_op<&float __cdecl op_hardsigmoid(float),unsigned short,unsigned short>(struct ggml_compute_params const *,struct ggml_tensor *)" (??$apply_unary_op@$1?op_hardsigmoid@@YAMM@ZGG@@YAXPEBUggml_compute_params@@PEAUggml_tensor@@@Z)
-              libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(ops.cpp.obj) : error LNK2019: unresolved external symbol __imp_erff referenced in function "void __cdecl ggml_compute_forward_geglu_erf_f16(struct ggml_compute_params const *,struct ggml_tensor *)" (?ggml_compute_forward_geglu_erf_f16@@YAXPEBUggml_compute_params@@PEAUggml_tensor@@@Z)
-              C:\Users\wuphy\hb\release\deps\hippo_transcribe.exe : fatal error LNK1120: 23 unresolved externals
-
-
-    error: could not compile `hippo-transcribe-gui` (bin "hippo-transcribe") due to 1 previous error
-
-PS>TerminatingError(): "cargo build --release --locked failed with exit code 101 (full output in C:\Users\wuphy\Documents\hippo-transcribe\build-windows.log)"
+   Compiling symphonia-codec-pcm v0.5.5
+   Compiling symphonia-codec-adpcm v0.5.5
+   Compiling windows-sys v0.52.0
+   Compiling thiserror-impl v2.0.21
+   Compiling dpi v0.1.2
+   Compiling whisper-rs v0.16.0
+   Compiling cpal v0.15.3
+   Compiling serde_json v1.0.154
+   Compiling serde v1.0.229
+   Compiling subtle v2.6.1
+   Compiling cursor-icon v1.2.0
+   Compiling symphonia v0.5.5
+   Compiling webpki-roots v0.26.11
+   Compiling windows v0.62.2
+   Compiling digest v0.10.7
+   Compiling url v2.5.8
+   Compiling winresource v0.1.34
+   Compiling iced_renderer v0.13.0
+   Compiling realfft v3.5.0
+   Compiling windows v0.54.0
+   Compiling window_clipboard v0.4.1
+   Compiling ogg v0.8.0
+   Compiling windows-version v0.1.7
+   Compiling serde_derive v1.0.229
+   Compiling itoa v1.0.18
+   Compiling dasp_sample v0.11.0
+   Compiling cpufeatures v0.2.17
+   Compiling pxfm v0.1.30
+   Compiling rfd v0.15.4
+   Compiling base64 v0.22.1
+   Compiling ureq v2.12.1
+   Compiling moxcms v0.8.1
+   Compiling sha2 v0.10.9
+   Compiling tauri-winrt-notification v0.8.1
+   Compiling lewton v0.10.2
+   Compiling iced_winit v0.13.0
+   Compiling rubato v0.15.0
+   Compiling iced_widget v0.13.4
+   Compiling hippo-transcribe-gui v0.1.0 (C:\Users\wuphy\Documents\hippo-transcribe\gui)
+   Compiling png v0.18.1
+   Compiling windows-sys v0.59.0
+   Compiling byteorder-lite v0.1.0
+   Compiling hound v3.5.1
+   Compiling num_cpus v1.17.0
+   Compiling claxon v0.4.3
+   Compiling rodio v0.20.1
+   Compiling hippo-transcribe-core v0.1.0 (C:\Users\wuphy\Documents\hippo-transcribe\core)
+   Compiling image v0.25.10
+   Compiling iced v0.13.1
+   Compiling notify-rust v4.18.2
+    Finished `release` profile [optimized] target(s) in 7m 43s
+==> Verified the DLL CRT dependency of hippo-transcribe.exe
+==> Staging bundled models (models.lock.json)
+[get]  segmentation <- https://gitlab.com/api/v4/projects/librewarelive%2Fhippo-transcribe-models/packages/generic/hippo-models/1.0.0/model.onnx
+curl: (6) Could not resolve host: gitlab.com
+curl: (6) Could not resolve host: gitlab.com
+curl: (6) Could not resolve host: gitlab.com
+curl: (6) Could not resolve host: gitlab.com
+[warn] mirror failed: curl exited 6
+[fail] segmentation: every mirror failed
+[get]  embedding <- https://gitlab.com/api/v4/projects/librewarelive%2Fhippo-transcribe-models/packages/generic/hippo-models/1.0.0/wespeaker_en_voxceleb_resnet34_LM.onnx
+curl: (6) Could not resolve host: gitlab.com
+curl: (6) Could not resolve host: gitlab.com
+curl: (6) Could not resolve host: gitlab.com
+curl: (6) Could not resolve host: gitlab.com
+[warn] mirror failed: curl exited 6
+[fail] embedding: every mirror failed
+[get]  whisper-speed <- https://gitlab.com/api/v4/projects/librewarelive%2Fhippo-transcribe-models/packages/generic/hippo-models/1.0.0/ggml-tiny-q5_1.bin
+curl: (6) Could not resolve host: gitlab.com
+curl: (6) Could not resolve host: gitlab.com
+curl: (6) Could not resolve host: gitlab.com
+curl: (6) Could not resolve host: gitlab.com
+[warn] mirror failed: curl exited 6
+[fail] whisper-speed: every mirror failed
+model set v4: 0 ok, 3 failed (C:\Users\wuphy\Documents\hippo-transcribe\dist\hippo-transcribe-0.1.0-windows-x64\models)
+PS>TerminatingError(): "3 model file(s) could not be staged"
 **********************
 Windows PowerShell transcript end
-End time: 20261029154132
+End time: 20261030134724
 **********************
 
 === configure state ===
+C:\Users\wuphy\hb\release\build\whisper-rs-sys-248ef14cc20672fb\out\build\CMakeCache.txt
+    CMAKE_GENERATOR:INTERNAL=Visual Studio 18 2026
 C:\Users\wuphy\hb\release\build\whisper-rs-sys-3b14f51bf6218bdc\out\build\CMakeCache.txt
     CMAKE_GENERATOR:UNINITIALIZED=Ninja
 C:\Users\wuphy\hb\release\build\whisper-rs-sys-a4a4abcf5807047e\out\build\CMakeCache.txt
