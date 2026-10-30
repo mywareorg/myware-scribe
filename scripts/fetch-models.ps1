@@ -66,6 +66,29 @@ function Test-Model {
 $ok = 0
 $failed = 0
 
+# Reuse any already-verified copy before touching the network. This makes
+# repeat builds and offline VMs work after one successful fetch, and lets an
+# existing install seed a package.
+$seedDirs = @()
+$localModels = if ($env:LOCALAPPDATA) {
+    Join-Path $env:LOCALAPPDATA "hippo-transcribe\models"
+} else {
+    $null
+}
+foreach ($candidate in @(
+    (Join-Path $root "vendor\models\$($manifest.version)"),
+    $env:HIPPO_TRANSCRIBE_MODELS_DIR,
+    $env:TRANSIEL_MODELS_DIR,
+    $localModels
+)) {
+    if (-not $candidate) { continue }
+    $full = [System.IO.Path]::GetFullPath($candidate)
+    if ((Test-Path -LiteralPath $full) -and
+        ($full.TrimEnd('\') -ine ([System.IO.Path]::GetFullPath($Dest)).TrimEnd('\'))) {
+        $seedDirs += $full
+    }
+}
+
 foreach ($model in $manifest.models) {
     if (-not $All -and -not $model.bundled) {
         continue
@@ -80,6 +103,23 @@ foreach ($model in $manifest.models) {
         $ok++
         continue
     }
+
+    if (-not $Force) {
+        $seeded = $false
+        foreach ($seed in $seedDirs) {
+            $candidate = Join-Path $seed $relative
+            if (Test-Model -Path $candidate -Size $model.size -Sha256 $model.sha256) {
+                New-Item -ItemType Directory -Path (Split-Path $target -Parent) -Force | Out-Null
+                Copy-Item -LiteralPath $candidate -Destination $target -Force
+                Write-Host "[ok]   $($model.id) <- cached $candidate" -ForegroundColor Green
+                $ok++
+                $seeded = $true
+                break
+            }
+        }
+        if ($seeded) { continue }
+    }
+
     if ($VerifyOnly) {
         Write-Host "[bad]  $($model.id) -> $target" -ForegroundColor Red
         $failed++

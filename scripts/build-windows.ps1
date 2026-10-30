@@ -552,7 +552,16 @@ try {
 
     if (-not $SkipModels) {
         Write-Step "Staging bundled models (models.lock.json)"
-        & (Join-Path $PSScriptRoot "fetch-models.ps1") -Dest (Join-Path $stage "models")
+        try {
+            & (Join-Path $PSScriptRoot "fetch-models.ps1") -Dest (Join-Path $stage "models")
+        } catch {
+            # A build machine may be offline even when the release machine is
+            # not. Keep the artifact usable: the app downloads missing models
+            # on first launch, so a staging failure must not discard a good
+            # compile.
+            Write-Warn "Models could not be staged: $($_.Exception.Message)"
+            Write-Warn "The app will download missing models on first launch."
+        }
     }
 
     $zip = Join-Path $outRoot "$name.zip"
