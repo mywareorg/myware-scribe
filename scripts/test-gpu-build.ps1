@@ -183,7 +183,7 @@ function Invoke-BuildScript {
     param([string[]]$Arguments)
     $scriptPath = Join-Path $PSScriptRoot "build-windows.ps1"
     $all = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $scriptPath) + $Arguments
-    & powershell.exe @all
+    & powershell.exe @all | Out-Host
     return $LASTEXITCODE
 }
 
@@ -297,7 +297,7 @@ if ($caches.Count -eq 0) {
 
 if ($Probe) {
     Add-TestLine "Running the ggml Vulkan shader probe" "info"
-    $code = Invoke-BuildScript -Arguments @("-Probe")
+    $code = Invoke-BuildScript -Arguments @("-Gpu", "-Probe")
     if ($code -eq 0) {
         Add-TestLine "PASS shader probe completed" "pass"
     } else {

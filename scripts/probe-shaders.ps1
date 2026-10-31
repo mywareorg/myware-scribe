@@ -102,7 +102,8 @@ if (-not $clCommand) { throw "cl.exe is not on PATH; run this from a Developer P
 
 # The unpacked whisper.cpp from the last build. Newest wins; there are normally
 # two whisper-rs-sys directories, one configured with Vulkan on and one off.
-$buildRoot = Join-Path $root "target\release\build"
+$targetRoot = Resolve-TargetRoot -Root $root
+$buildRoot = Join-Path $targetRoot "release\build"
 $candidates = @()
 if (Test-Path $buildRoot) {
     $candidates = @(Get-ChildItem -Path $buildRoot -Directory -Filter "whisper-rs-sys-*" -ErrorAction SilentlyContinue |

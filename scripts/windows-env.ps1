@@ -253,6 +253,13 @@ function Resolve-VcOpenMp {
     $vs = Get-VsInstallPath
     $root = Join-Path $vs "VC\Redist\MSVC"
     if (Test-Path -LiteralPath $root) {
+        # Redist layouts differ: some toolsets put the OpenMP DLL under
+        # <version>\x64, others under <version>\onecore\x64. Search the tree and
+        # keep the x64 copy rather than assuming one layout.
+        $candidates += @(Get-ChildItem -LiteralPath $root -Recurse -Filter "vcomp140.dll" -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -match '\\x64\\' } |
+            Sort-Object LastWriteTime -Descending |
+            ForEach-Object { $_.FullName })
         $candidates += @(Get-ChildItem -LiteralPath $root -Directory -ErrorAction SilentlyContinue |
             Where-Object { $_.Name -as [version] } |
             Sort-Object { [version]$_.Name } -Descending |

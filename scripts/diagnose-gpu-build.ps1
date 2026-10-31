@@ -31,6 +31,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
+. (Join-Path $PSScriptRoot "windows-env.ps1")
 $outDir = Join-Path $root "dist"
 New-Item -ItemType Directory -Path $outDir -Force | Out-Null
 $out = Join-Path $outDir "gpu-diagnose.txt"
@@ -91,14 +92,15 @@ foreach ($sdk in @("C:\VulkanSDK", (Join-Path $env:ProgramFiles "VulkanSDK"))) {
 }
 
 Section "CMake caches"
-$buildRoot = Join-Path $root "target\release\build"
+$targetRoot = Resolve-TargetRoot -Root $root
+$buildRoot = Join-Path $targetRoot "release\build"
 $caches = @()
 if (Test-Path $buildRoot) {
     $caches = @(Get-ChildItem $buildRoot -Recurse -Filter "CMakeCache.txt" -ErrorAction SilentlyContinue |
         Where-Object { $_.FullName -match "whisper-rs-sys" })
 }
 if ($caches.Count -eq 0) {
-    Say "  none under target\release\build"
+    Say ("  none under " + $buildRoot)
 } else {
     $wanted = @("CMAKE_GENERATOR:", "CMAKE_C_COMPILER:", "CMAKE_CXX_COMPILER:",
                 "GGML_VULKAN:", "VULKAN_SDK:", "Vulkan_FOUND:", "GGML_NATIVE:")
@@ -170,7 +172,7 @@ if ($generators -match "Visual Studio") {
     Say "  Retry with Ninja, from a Visual Studio developer shell:"
     Say ""
     Say '    $env:CMAKE_GENERATOR = "Ninja"'
-    Say '    Remove-Item -Recurse -Force target\release\build\whisper-rs-sys-*'
+    Say ('    Remove-Item -Recurse -Force "' + $buildRoot + '\whisper-rs-sys-*"')
     Say '    .\scripts\build-windows.ps1 -SkipTests -SkipModels -NoZip -Msix -Sign -Gpu -CertificatePath C:\keys\hippo-test.pfx -CertificatePassword hippo-dev'
 } elseif ($generators.Count -gt 0) {
     Say ("  Generator: " + ($generators -join ", "))

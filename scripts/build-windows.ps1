@@ -399,6 +399,11 @@ try {
     }
     Add-CMakeIfNeeded
 
+    # The probe runs before the main build, so set the target root here as well;
+    # probe-shaders.ps1 resolves the same root to find cargo's unpacked whisper.cpp.
+    $targetRoot = Resolve-TargetRoot -Root $root -TargetDir $TargetDir
+    $env:CARGO_TARGET_DIR = $targetRoot
+
     foreach ($command in @("cl.exe", "rc.exe", "cmake.exe", "cargo.exe", "rustc.exe")) {
         if (-not (Get-Command $command -ErrorAction SilentlyContinue)) {
             throw "$command was not found. Use a machine with the Visual Studio C++ workload and the Rust MSVC toolchain."
@@ -440,8 +445,6 @@ try {
     # whisper.cpp and ggml with CMake, and the two runtimes cannot be mixed
     # (LNK2019 __imp_* followed by LNK1120). The C++ runtime DLLs are staged
     # beside the executable instead, so nothing has to be installed first.
-    $targetRoot = Resolve-TargetRoot -Root $root -TargetDir $TargetDir
-    $env:CARGO_TARGET_DIR = $targetRoot
     Write-Step "Using cargo target directory $targetRoot"
 
     if ($env:RUSTFLAGS -match '(^|\s)\+crt-static(\s|$)') {
