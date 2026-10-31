@@ -107,16 +107,19 @@ pub enum Feature {
     Editing,
     /// Audio playback and playhead seeking.
     Playback,
+    /// GPU-accelerated transcription.
+    GpuAcceleration,
 }
 
 impl Feature {
-    pub const ALL: [Feature; 6] = [
+    pub const ALL: [Feature; 7] = [
         Feature::SpeedPreset,
         Feature::AccuracyPreset,
         Feature::Diarization,
         Feature::Batch,
         Feature::Editing,
         Feature::Playback,
+        Feature::GpuAcceleration,
     ];
 
     /// Human-readable name used by the paywall and toasts.
@@ -128,6 +131,7 @@ impl Feature {
             Feature::Batch => "Batch transcription",
             Feature::Editing => "Transcript editing",
             Feature::Playback => "Audio playback",
+            Feature::GpuAcceleration => "GPU acceleration",
         }
     }
 }
@@ -140,7 +144,8 @@ pub fn tier_allows(tier: Tier, feature: Feature) -> bool {
         | Feature::Diarization
         | Feature::Batch
         | Feature::Editing
-        | Feature::Playback => tier == Tier::Pro,
+        | Feature::Playback
+        | Feature::GpuAcceleration => tier == Tier::Pro,
     }
 }
 

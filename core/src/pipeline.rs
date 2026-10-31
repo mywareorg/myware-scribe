@@ -317,6 +317,11 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
 
     if let Some(transcriber) = &transcriber {
         crate::logging::info(format!("ASR backend: {}", transcriber.backend().label()));
+        emit(Event::Backend {
+            backend: transcriber.backend().label().to_string(),
+            device: None,
+            fallback: transcriber.fallback_reason().map(str::to_string),
+        });
         emit(Event::Log {
             message: format!("ASR backend: {}", transcriber.backend().label()),
         });

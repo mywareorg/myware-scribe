@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """Render the Microsoft Store image assets from the source artwork.
 
-The artwork is a round badge on a flat grey field. Square assets keep the
-badge and drop the field so the icon sits on the Store's own surface and on
-the Windows tile colour; wide and splash assets fill their rectangle, so they
-composite onto the artwork's own background colour instead.
+Sources with an opaque corner are treated as a round badge on a flat field:
+square assets keep the badge and drop the field, while wide and splash assets
+use the artwork's background colour. Sources with transparent corners, such as
+the square pencil icon, are used as-is so the mark keeps its own silhouette.
 
 Usage:
     python3 scripts/make-store-assets.py
-    python3 scripts/make-store-assets.py --source icons/mic-hippo-final.png
+    python3 scripts/make-store-assets.py --source icons/simple-hippo-square-icon.png
 """
 
 import argparse
 from pathlib import Path
 
-from PIL import Image, ImageDraw
+from PIL import Image, ImageColor, ImageDraw
 
 # The badge's outer ring starts this many pixels from the edge of the 827 px
 # source. Scaled to keep the same margin at any size.
@@ -51,17 +51,27 @@ def save(image: Image.Image, width: int, height: int, path: Path, fill) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--source", default="icons/mic-hippo-final.png")
+    parser.add_argument("--source", default="icons/pencil-icon.png")
     parser.add_argument("--out", default="packaging/assets")
+    parser.add_argument(
+        "--background",
+        default="#C1CAD0",
+        help="tile/splash fill for transparent source artwork",
+    )
     args = parser.parse_args()
 
     source = Image.open(args.source).convert("RGBA")
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
 
-    background = source.getpixel((2, 2))
+    corner = source.getpixel((2, 2))
     transparent = (0, 0, 0, 0)
-    badge = disc(source)
+    if corner[3] == 0:
+        badge = source
+        background = ImageColor.getrgb(args.background) + (255,)
+    else:
+        badge = disc(source)
+        background = corner
 
     # Store listing logo and the Start menu / taskbar / tile assets. These are
     # transparent: Windows and the Store supply their own backdrop.

@@ -88,5 +88,6 @@ artwork:
     python3 scripts/make-store-assets.py
     python3 scripts/make-app-icons.py
 
-Square assets are masked to the round badge and left transparent; the wide
-tile and splash fill their rectangle with the artwork's background colour.
+Sources with transparent corners are used as-is and left transparent on square
+assets; wide and splash tiles fill their rectangle with the identity background
+colour (`#C1CAD0`). Opaque-corner artwork is still masked to its round badge.

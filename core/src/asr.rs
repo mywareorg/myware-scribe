@@ -48,6 +48,11 @@ pub fn preferred_backend() -> Backend {
     }
 }
 
+/// True when this binary contains a usable GPU backend.
+pub fn gpu_available() -> bool {
+    preferred_backend() != Backend::Cpu
+}
+
 /// `HIPPO_TRANSCRIBE_ACCEL=cpu` forces the CPU path for troubleshooting.
 fn force_cpu() -> bool {
     crate::env_compat("HIPPO_TRANSCRIBE_ACCEL", "TRANSIEL_ACCEL")
@@ -99,20 +104,61 @@ impl Transcriber {
                 }
                 Err(error) => return Err(format!("load whisper {}: {error}", model.display())),
             };
-        let threads = std::thread::available_parallelism()
-            .map(|n| n.get() as i32)
-            .unwrap_or(4);
         Ok(Self {
             ctx,
-            threads,
+            threads: Self::default_threads(),
             backend,
             fallback,
         })
     }
 
+    /// Load explicitly on the CPU, without a GPU fallback attempt.
+    pub fn load_cpu(model: &Path) -> Result<Self, String> {
+        Self::load_exact(model, false, Backend::Cpu)
+    }
+
+    /// Load explicitly on the GPU backend, without a CPU fallback.
+    ///
+    /// Used by calibration: a failure here means the GPU path is unavailable
+    /// for this model and should be reported instead of silently benchmarked
+    /// on the CPU.
+    pub fn load_gpu(model: &Path) -> Result<Self, String> {
+        let backend = preferred_backend();
+        if backend == Backend::Cpu {
+            return Err("This build has no GPU backend".to_string());
+        }
+        Self::load_exact(model, true, backend)
+    }
+
+    fn load_exact(model: &Path, use_gpu: bool, backend: Backend) -> Result<Self, String> {
+        if !model.is_file() {
+            return Err(format!("whisper model not found: {}", model.display()));
+        }
+        whisper_rs::install_logging_hooks();
+        let ctx = WhisperContext::new_with_params(model, context_params(use_gpu))
+            .map_err(|error| format!("load whisper {}: {error}", model.display()))?;
+        Ok(Self {
+            ctx,
+            threads: Self::default_threads(),
+            backend,
+            fallback: None,
+        })
+    }
+
+    fn default_threads() -> i32 {
+        std::thread::available_parallelism()
+            .map(|n| n.get() as i32)
+            .unwrap_or(4)
+    }
+
     /// Backend actually in use for this context.
     pub fn backend(&self) -> Backend {
         self.backend
+    }
+
+    /// Thread count this context was configured with.
+    pub fn threads(&self) -> i32 {
+        self.threads
     }
 
     /// Why the GPU path failed, when it did.

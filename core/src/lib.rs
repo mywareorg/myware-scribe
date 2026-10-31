@@ -2,6 +2,7 @@
 
 pub mod asr;
 pub mod audio;
+pub mod benchmark;
 pub mod cache;
 pub mod cli;
 pub mod diarize;

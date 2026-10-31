@@ -53,6 +53,13 @@ pub enum Event {
     },
     #[serde(rename = "done")]
     Done { txt: String, stats: Stats },
+    /// The ASR backend actually selected for this run.
+    #[serde(rename = "backend")]
+    Backend {
+        backend: String,
+        device: Option<String>,
+        fallback: Option<String>,
+    },
     #[serde(rename = "log")]
     Log { message: String },
     #[serde(rename = "error")]

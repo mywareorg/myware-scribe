@@ -1,5 +1,5 @@
 use std::cell::RefCell;
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -20,6 +20,8 @@ use serde::{Deserialize, Serialize};
 use crate::backend::{self, Event};
 use crate::theme::{self, AppTheme, Scheme};
 use crate::{documents::*, files::*, format::*, options::*};
+use hippo_transcribe_core::asr;
+use hippo_transcribe_core::benchmark::{self, BenchmarkEvent};
 use hippo_transcribe_core::download::{self, DownloadEvent, ModelStatus};
 use hippo_transcribe_core::license;
 use hippo_transcribe_core::models;
@@ -201,6 +203,69 @@ fn upsell_roll() -> bool {
     hash % UPSELL_SHOW_MOD == 0
 }
 
+/// Calibration result and selection for one preset.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct GpuProfile {
+    /// The preset has been offered calibration and either tested or skipped.
+    #[serde(default)]
+    tested: bool,
+    /// Measured CPU-time / GPU-time ratio.
+    #[serde(default)]
+    multiplier: Option<f32>,
+    /// Why the GPU path failed, if it did.
+    #[serde(default)]
+    gpu_error: Option<String>,
+    /// Whether this preset should start on the GPU.
+    #[serde(default)]
+    selected: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CalibrationPhase {
+    Offered,
+    TestingCpu,
+    TestingGpu,
+    Result,
+}
+
+struct Calibration {
+    preset: Preset,
+    phase: CalibrationPhase,
+    progress: f32,
+    cpu_seconds: Option<f64>,
+    gpu_seconds: Option<f64>,
+    multiplier: Option<f32>,
+    error: Option<String>,
+    /// True when calibration was opened by pressing Transcribe, so a choice
+    /// continues into the run instead of only updating the preference.
+    start_run: bool,
+    /// The result has already been persisted once.
+    recorded: bool,
+}
+
+impl Calibration {
+    fn new(preset: Preset, start_run: bool) -> Self {
+        Self {
+            preset,
+            phase: CalibrationPhase::Offered,
+            progress: 0.0,
+            cpu_seconds: None,
+            gpu_seconds: None,
+            multiplier: None,
+            error: None,
+            start_run,
+            recorded: false,
+        }
+    }
+
+    fn testing(&self) -> bool {
+        matches!(
+            self.phase,
+            CalibrationPhase::TestingCpu | CalibrationPhase::TestingGpu
+        )
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 struct Settings {
     preset: Option<String>,
@@ -212,7 +277,7 @@ struct Settings {
     #[serde(default = "notifications_default")]
     notifications: bool,
     #[serde(default)]
-    gpu_acceleration: Option<bool>,
+    gpu_profiles: HashMap<String, GpuProfile>,
     font_scale: Option<f32>,
     playback_speed: Option<f32>,
     waveform_zoom: Option<f32>,
@@ -242,7 +307,7 @@ impl Default for Settings {
             language: None,
             show_timestamps: true,
             notifications: true,
-            gpu_acceleration: None,
+            gpu_profiles: HashMap::new(),
             font_scale: None,
             playback_speed: None,
             waveform_zoom: None,
@@ -311,6 +376,7 @@ pub enum Message {
     ClosePaywall,
     LockedPreset,
     LockedSpeakers,
+    LockedGpu,
     LockedImport,
     LockedPlayer,
     LockedRename,
@@ -331,7 +397,12 @@ pub enum Message {
     OpenSummary,
     SmsToggled(bool),
     NotificationsToggled(bool),
-    GpuToggled(bool),
+    SetAcceleration(bool),
+    TestGpu,
+    UseCpuForRun,
+    UseGpuForRun,
+    RetestGpu,
+    CloseCalibration,
     /// Open the folder holding the log files in Explorer.
     OpenLogFolder,
     TimestampsToggled(bool),
@@ -431,7 +502,16 @@ pub struct App {
     rename_focus: usize,
     sms_mode: bool,
     notifications: bool,
-    gpu_acceleration: bool,
+    /// Calibration results and selected backend, keyed by preset arg.
+    gpu_profiles: HashMap<String, GpuProfile>,
+    /// Backend reported by the running pipeline.
+    gpu_actual: Option<String>,
+    /// Why the pipeline fell back to CPU.
+    gpu_fallback: Option<String>,
+    /// A GPU-backed run failed; retry the failed items once on CPU.
+    gpu_retry_pending: bool,
+    calibration: Option<Calibration>,
+    calibration_events: Arc<Mutex<VecDeque<BenchmarkEvent>>>,
     show_timestamps: bool,
     num_speakers: Option<i32>,
     language: Option<String>,
@@ -602,7 +682,12 @@ impl App {
             rename_focus: 0,
             sms_mode: settings.sms_mode.unwrap_or(false),
             notifications: settings.notifications,
-            gpu_acceleration: settings.gpu_acceleration.unwrap_or(true) && !gpu_crashed,
+            gpu_profiles: settings.gpu_profiles.clone(),
+            gpu_actual: None,
+            gpu_fallback: None,
+            gpu_retry_pending: false,
+            calibration: None,
+            calibration_events: Arc::new(Mutex::new(VecDeque::new())),
             show_timestamps: settings.show_timestamps,
             num_speakers: match settings.num_speakers {
                 Some(count) if count > 0 => Some(count),
@@ -665,7 +750,9 @@ impl App {
             drag_hover: false,
         };
         if gpu_crashed {
-            app.gpu_acceleration = false;
+            for profile in app.gpu_profiles.values_mut() {
+                profile.selected = false;
+            }
             app.save_settings();
             Self::clear_gpu_guard();
             app.console_lines.push(
@@ -760,7 +847,7 @@ impl App {
             num_speakers: Some(self.num_speakers.unwrap_or(2)),
             language: self.language.clone(),
             notifications: self.notifications,
-            gpu_acceleration: Some(self.gpu_acceleration),
+            gpu_profiles: self.gpu_profiles.clone(),
             show_timestamps: self.show_timestamps,
             font_scale: Some(self.font_scale),
             playback_speed: Some(self.playback_speed),
@@ -1217,9 +1304,11 @@ impl App {
     /// artwork that build.rs embeds into the executable, so the window, the
     /// taskbar and Explorer all agree.
     fn window_icon() -> Option<iced::window::Icon> {
-        let image = image::load_from_memory(include_bytes!("../assets/icon.png"))
-            .ok()?
-            .into_rgba8();
+        #[cfg(windows)]
+        const ICON: &[u8] = include_bytes!("../../icons/pencil-icon.png");
+        #[cfg(not(windows))]
+        const ICON: &[u8] = include_bytes!("../../icons/simple-hippo-square-icon.png");
+        let image = image::load_from_memory(ICON).ok()?.into_rgba8();
         let (width, height) = image.dimensions();
         iced::window::icon::from_rgba(image.into_raw(), width, height).ok()
     }
@@ -1248,6 +1337,187 @@ impl App {
     /// True when the effective tier unlocks `feature`.
     fn can(&self, feature: license::Feature) -> bool {
         license::tier_allows(self.license.access.tier, feature)
+    }
+
+    fn gpu_profile(&self) -> Option<&GpuProfile> {
+        self.gpu_profiles.get(self.preset.arg())
+    }
+
+    fn gpu_selected(&self) -> bool {
+        self.can(license::Feature::GpuAcceleration)
+            && asr::gpu_available()
+            && self.gpu_profile().is_some_and(|profile| profile.selected)
+    }
+
+    fn gpu_multiplier(&self) -> Option<f32> {
+        self.gpu_profile().and_then(|profile| profile.multiplier)
+    }
+
+    fn gpu_unavailable_reason(&self) -> Option<String> {
+        if !self.can(license::Feature::GpuAcceleration) {
+            return Some("GPU transcription is a Pro feature.".to_string());
+        }
+        if !asr::gpu_available() {
+            return Some("GPU unavailable in this build.".to_string());
+        }
+        self.gpu_profile()
+            .and_then(|profile| profile.gpu_error.clone())
+    }
+
+    /// A first run should offer calibration once per preset. CPU-only builds
+    /// and free users never see the modal.
+    fn calibration_needed(&self) -> bool {
+        self.can(license::Feature::GpuAcceleration)
+            && asr::gpu_available()
+            && !self.gpu_profile().is_some_and(|profile| profile.tested)
+    }
+
+    fn open_calibration(&mut self, start_run: bool) {
+        self.calibration = Some(Calibration::new(self.preset, start_run));
+        self.calibration_events.lock().unwrap().clear();
+    }
+
+    fn start_calibration_test(&mut self) {
+        let Some(calibration) = &mut self.calibration else {
+            return;
+        };
+        if calibration.testing() {
+            return;
+        }
+        calibration.phase = CalibrationPhase::TestingCpu;
+        calibration.progress = 0.02;
+        calibration.cpu_seconds = None;
+        calibration.gpu_seconds = None;
+        calibration.multiplier = None;
+        calibration.error = None;
+        let preset = calibration.preset;
+        let events = self.calibration_events.clone();
+        let Some(sample) = benchmark::sample_path() else {
+            self.calibration_events
+                .lock()
+                .unwrap()
+                .push_back(BenchmarkEvent::Failed {
+                    message: "The bundled calibration sample is missing.".to_string(),
+                });
+            return;
+        };
+        std::thread::spawn(move || {
+            let mut push = |event| {
+                events.lock().unwrap().push_back(event);
+            };
+            if let Err(message) = benchmark::run(preset.arg(), &sample, &mut push) {
+                push(BenchmarkEvent::Failed { message });
+            }
+        });
+    }
+
+    fn remember_skip(&mut self, preset: Preset) {
+        let entry = self
+            .gpu_profiles
+            .entry(preset.arg().to_string())
+            .or_default();
+        entry.tested = true;
+        entry.selected = false;
+        self.save_settings();
+    }
+
+    fn choose_gpu(&mut self, selected: bool) {
+        let Some(calibration) = &self.calibration else {
+            return;
+        };
+        let preset = calibration.preset;
+        let multiplier = calibration.multiplier;
+        let error = calibration.error.clone();
+        let entry = self
+            .gpu_profiles
+            .entry(preset.arg().to_string())
+            .or_default();
+        entry.tested = true;
+        entry.selected = selected && error.is_none();
+        if multiplier.is_some() {
+            entry.multiplier = multiplier;
+        }
+        if selected && error.is_none() {
+            entry.gpu_error = None;
+        } else if error.is_some() {
+            entry.gpu_error = error;
+        }
+        let run = calibration.start_run;
+        self.calibration = None;
+        self.save_settings();
+        if run {
+            self.begin_batch(false);
+        }
+    }
+
+    fn drain_calibration(&mut self) {
+        let events: Vec<BenchmarkEvent> = {
+            let mut queue = self.calibration_events.lock().unwrap();
+            queue.drain(..).collect()
+        };
+        for event in events {
+            let Some(calibration) = &mut self.calibration else {
+                continue;
+            };
+            match event {
+                BenchmarkEvent::CpuStarted => {
+                    calibration.phase = CalibrationPhase::TestingCpu;
+                    calibration.progress = calibration.progress.max(0.02);
+                }
+                BenchmarkEvent::CpuFinished { seconds } => {
+                    calibration.cpu_seconds = Some(seconds);
+                    calibration.progress = 0.5;
+                    calibration.phase = CalibrationPhase::TestingGpu;
+                }
+                BenchmarkEvent::GpuStarted => {
+                    calibration.phase = CalibrationPhase::TestingGpu;
+                    calibration.progress = calibration.progress.max(0.52);
+                }
+                BenchmarkEvent::GpuFinished { seconds } => {
+                    calibration.gpu_seconds = Some(seconds);
+                    calibration.progress = 1.0;
+                    calibration.phase = CalibrationPhase::Result;
+                    if let Some(cpu) = calibration.cpu_seconds {
+                        if seconds > 0.0 {
+                            calibration.multiplier = Some((cpu / seconds) as f32);
+                        }
+                    }
+                }
+                BenchmarkEvent::GpuFailed { message } => {
+                    calibration.error = Some(message);
+                    calibration.phase = CalibrationPhase::Result;
+                    calibration.progress = 1.0;
+                }
+                BenchmarkEvent::Failed { message } => {
+                    calibration.error = Some(message);
+                    calibration.phase = CalibrationPhase::Result;
+                    calibration.progress = 1.0;
+                }
+            }
+        }
+        if let Some(calibration) = &mut self.calibration {
+            if calibration.phase == CalibrationPhase::Result && !calibration.recorded {
+                calibration.recorded = true;
+                let preset = calibration.preset;
+                let multiplier = calibration.multiplier;
+                let error = calibration.error.clone();
+                let entry = self
+                    .gpu_profiles
+                    .entry(preset.arg().to_string())
+                    .or_default();
+                entry.tested = true;
+                if multiplier.is_some() {
+                    entry.multiplier = multiplier;
+                }
+                if let Some(message) = error {
+                    entry.selected = false;
+                    entry.gpu_error = Some(message);
+                } else {
+                    entry.gpu_error = None;
+                }
+                self.save_settings();
+            }
+        }
     }
 
     /// True when a UI element tagged for `audience` belongs on screen.
@@ -1605,15 +1875,94 @@ impl App {
                 self.save_settings();
                 Task::none()
             }
-            Message::GpuToggled(value) => {
+            Message::SetAcceleration(value) => {
                 if matches!(self.status, Status::Running) {
                     return Task::none();
                 }
-                self.gpu_acceleration = value;
                 if !value {
+                    let preset = self.preset.arg().to_string();
+                    let entry = self.gpu_profiles.entry(preset).or_default();
+                    entry.selected = false;
                     Self::clear_gpu_guard();
+                    self.save_settings();
+                    return Task::none();
                 }
+                if !self.can(license::Feature::GpuAcceleration) {
+                    self.paywall_open = true;
+                    return Task::none();
+                }
+                if !asr::gpu_available() {
+                    self.toast = Some((
+                        "GPU unavailable in this build".to_string(),
+                        Instant::now(),
+                    ));
+                    return Task::none();
+                }
+                let tested = self.gpu_profile().is_some_and(|profile| profile.tested);
+                let preset = self.preset.arg().to_string();
+                let entry = self.gpu_profiles.entry(preset).or_default();
+                entry.selected = true;
                 self.save_settings();
+                if !tested {
+                    self.open_calibration(false);
+                }
+                Task::none()
+            }
+            Message::TestGpu => {
+                self.start_calibration_test();
+                Task::none()
+            }
+            Message::UseCpuForRun => {
+                if let Some(calibration) = &self.calibration {
+                    let preset = calibration.preset;
+                    let run = calibration.start_run;
+                    self.calibration = None;
+                    self.remember_skip(preset);
+                    if run {
+                        self.begin_batch(false);
+                    }
+                }
+                Task::none()
+            }
+            Message::UseGpuForRun => {
+                self.choose_gpu(true);
+                Task::none()
+            }
+            Message::CloseCalibration => {
+                let Some(calibration) = &self.calibration else {
+                    return Task::none();
+                };
+                if calibration.testing() {
+                    return Task::none();
+                }
+                let preset = calibration.preset;
+                let run = calibration.start_run;
+                self.calibration = None;
+                self.remember_skip(preset);
+                if run {
+                    self.begin_batch(false);
+                }
+                Task::none()
+            }
+            Message::RetestGpu => {
+                if matches!(self.status, Status::Running) || !self.can(license::Feature::GpuAcceleration)
+                {
+                    return Task::none();
+                }
+                if !asr::gpu_available() {
+                    self.toast = Some((
+                        "GPU unavailable in this build".to_string(),
+                        Instant::now(),
+                    ));
+                    return Task::none();
+                }
+                self.gpu_profiles.remove(self.preset.arg());
+                self.open_calibration(false);
+                self.start_calibration_test();
+                Task::none()
+            }
+            Message::LockedGpu => {
+                self.paywall_open = true;
                 Task::none()
             }
             Message::OpenLogFolder => {
@@ -1661,20 +2010,19 @@ impl App {
                     .take()
                     .is_some_and(|target| (offset - target).abs() <= 6.0);
 
-                // Scrolling never disables follow; only the toggle does. With
-                // follow on, snap back to the followed line immediately. With
-                // it off, treat the scroll as a seek to the visible line.
-                if following {
+                // A user scroll disengages Follow instead of snapping the
+                // transcript back to the playhead. Programmatic scrolls from
+                // line selection or Follow tracking stay exempt.
+                if following && !programmatic {
                     if let Some(expected) = self.follow_offset {
-                        if !programmatic && (offset - expected).abs() > 6.0 {
-                            self.scroll_target = Some(expected);
-                            return scrollable::scroll_to(
-                                transcript_id(),
-                                scrollable::AbsoluteOffset {
-                                    x: 0.0,
-                                    y: expected,
-                                },
-                            );
+                        if (offset - expected).abs() > 6.0 {
+                            self.follow_playhead = false;
+                            self.follow_offset = None;
+                            self.scroll_target = None;
+                            self.scroll_seek = false;
+                            self.save_settings();
+                            self.seek_from_scroll(offset, viewport_h);
+                            return Task::none();
                         }
                     }
                 } else if !programmatic {
@@ -1942,7 +2290,10 @@ impl App {
                 Task::none()
             }
             Message::SelectRelative(delta) => {
-                if self.rename_open || self.line_edit.is_some() || self.settings_open {
+                if self.rename_open
+                    || self.line_edit.is_some()
+                    || self.settings_open
+                    || self.calibration.is_some() {
                     return Task::none();
                 }
                 Self::focus_probe()
@@ -1971,7 +2322,11 @@ impl App {
                 Task::batch([scroll, Task::done(Message::SelectLine(index))])
             }
             Message::EditActiveLine => {
-                if self.rename_open || self.settings_open || self.delete_confirm {
+                if self.rename_open
+                    || self.settings_open
+                    || self.delete_confirm
+                    || self.calibration.is_some()
+                {
                     return Task::none();
                 }
                 let index = self
@@ -2274,6 +2629,19 @@ impl App {
             }
             Message::Noop => Task::none(),
             Message::Escape => {
+                if let Some(calibration) = &self.calibration {
+                    if calibration.testing() {
+                        return Task::none();
+                    }
+                    let preset = calibration.preset;
+                    let run = calibration.start_run;
+                    self.calibration = None;
+                    self.remember_skip(preset);
+                    if run {
+                        self.begin_batch(false);
+                    }
+                    return Task::none();
+                }
                 if self.delete_confirm {
                     self.delete_confirm = false;
                 } else if self.line_edit.is_some() {
@@ -2299,26 +2667,39 @@ impl App {
                 Task::none()
             }
             Message::ShortcutPlay => {
-                if self.rename_open || self.line_edit.is_some() || self.settings_open {
+                if self.rename_open
+                    || self.line_edit.is_some()
+                    || self.settings_open
+                    || self.calibration.is_some() {
                     return Task::none();
                 }
                 Self::focus_probe().map(Message::ShortcutPlayChecked)
             }
             Message::ShortcutPlayChecked(focused) => {
-                if !focused && !self.rename_open && self.line_edit.is_none() && !self.settings_open
+                if !focused
+                    && !self.rename_open
+                    && self.line_edit.is_none()
+                    && !self.settings_open
+                    && self.calibration.is_none()
                 {
                     self.toggle_playback();
                 }
                 Task::none()
             }
             Message::SeekBy(delta) => {
-                if self.rename_open || self.line_edit.is_some() || self.settings_open {
+                if self.rename_open
+                    || self.line_edit.is_some()
+                    || self.settings_open
+                    || self.calibration.is_some() {
                     return Task::none();
                 }
                 Self::focus_probe().map(move |focused| Message::SeekByChecked(delta, focused))
             }
             Message::SeekByChecked(delta, focused) => {
-                if focused || self.rename_open || self.line_edit.is_some() || self.settings_open {
+                if focused || self.rename_open
+                    || self.line_edit.is_some()
+                    || self.settings_open
+                    || self.calibration.is_some() {
                     return Task::none();
                 }
                 if self.shown_duration().is_some() {
@@ -2532,6 +2913,7 @@ impl App {
                     // "Clear" is a full reset: queue, transcript and run state.
                     self.queue.clear();
                     self.batch_paths.clear();
+                    self.gpu_retry_pending = false;
                     self.current = None;
                     self.current_index = None;
                     self.transcript.clear();
@@ -2816,7 +3198,7 @@ impl App {
                 Task::none()
             }
             Message::Start => {
-                if !self.settings_open {
+                if !self.settings_open && self.calibration.is_none() {
                     self.start();
                 }
                 Task::none()
@@ -2836,6 +3218,17 @@ impl App {
                 }
                 let mut tasks = vec![self.drain_events()];
                 self.drain_model_download();
+                self.drain_calibration();
+                if let Some(calibration) = &mut self.calibration {
+                    if calibration.testing() {
+                        let target = if calibration.phase == CalibrationPhase::TestingCpu {
+                            0.47
+                        } else {
+                            0.97
+                        };
+                        calibration.progress += (target - calibration.progress) * 0.02;
+                    }
+                }
                 if self.model_download.is_none()
                     && self
                         .last_model_check
@@ -3305,6 +3698,10 @@ impl App {
             self.invalidate_derived();
             self.save_queue();
         }
+        if self.calibration_needed() {
+            self.open_calibration(true);
+            return;
+        }
         self.begin_batch(false);
     }
 
@@ -3312,10 +3709,13 @@ impl App {
     /// trap the next attempt in the same backend.
     fn disable_gpu_after_failure(&mut self, reason: &str) {
         Self::clear_gpu_guard();
-        if !self.gpu_acceleration {
+        if !self.gpu_profile().is_some_and(|profile| profile.selected) {
             return;
         }
-        self.gpu_acceleration = false;
+        let preset = self.preset.arg().to_string();
+        let entry = self.gpu_profiles.entry(preset).or_default();
+        entry.selected = false;
+        entry.gpu_error = Some(reason.to_string());
         self.save_settings();
         self.console_lines.push(format!(
             "GPU acceleration disabled after a transcription failure: {reason}"
@@ -3331,6 +3731,7 @@ impl App {
     /// keeps a completed transcript (and its playback) visible across an
     /// automatic follow-up pass; explicit starts always return to live.
     fn begin_batch(&mut self, preserve_view: bool) {
+        self.gpu_retry_pending = false;
         if !self.models_ready() {
             self.status = Status::Error("transcription models are missing".to_string());
             self.toast = Some((
@@ -3425,7 +3826,10 @@ impl App {
             self.view_error = None;
         }
         self.cancelled.store(false, Ordering::SeqCst);
-        if self.gpu_acceleration && cfg!(feature = "gpu") {
+        let use_gpu = self.gpu_selected();
+        self.gpu_actual = None;
+        self.gpu_fallback = None;
+        if use_gpu {
             if let Some(path) = Self::gpu_guard_path() {
                 if let Some(parent) = path.parent() {
                     let _ = std::fs::create_dir_all(parent);
@@ -3442,7 +3846,7 @@ impl App {
             self.preset.arg(),
             self.num_speakers,
             self.language.clone(),
-            self.gpu_acceleration,
+            use_gpu,
             true, // diarization cache is always on
             self.pipelines_diarize(),
             self.events.clone(),
@@ -3466,6 +3870,7 @@ impl App {
     }
 
     fn cancel(&mut self) {
+        self.gpu_retry_pending = false;
         let pid = self.pid.load(Ordering::SeqCst);
         if pid != 0 {
             backend::kill(pid);
@@ -3788,6 +4193,21 @@ impl App {
                     self.stage = if label.is_empty() { stage } else { label };
                     self.progress = progress.clamp(0.0, 1.0);
                 }
+                Event::Backend {
+                    backend,
+                    device,
+                    fallback,
+                } => {
+                    self.gpu_actual = Some(match device {
+                        Some(device) if !device.is_empty() => format!("{backend} · {device}"),
+                        _ => backend,
+                    });
+                    let fallback = fallback;
+                    self.gpu_fallback = fallback.clone();
+                    if let Some(reason) = fallback {
+                        self.disable_gpu_after_failure(&reason);
+                    }
+                }
                 Event::Log { message } => {
                     self.console_lines.push(message);
                     if self.console_lines.len() > 500 {
@@ -3914,7 +4334,9 @@ impl App {
                     self.save_queue();
                 }
                 Event::Error { message } => {
+                    let was_gpu = self.gpu_selected();
                     self.disable_gpu_after_failure(&message);
+                    self.gpu_retry_pending = was_gpu;
                     self.stage = "error".to_string();
                     let had_current = self.current.is_some();
                     if let Some(index) = self.current.take() {
@@ -3940,6 +4362,27 @@ impl App {
                 }
                 Event::AllDone => {
                     Self::clear_gpu_guard();
+                    let retry_on_cpu = std::mem::take(&mut self.gpu_retry_pending);
+                    if retry_on_cpu
+                        && self
+                            .queue
+                            .iter()
+                            .any(|item| matches!(item.status, ItemStatus::Failed(_)))
+                    {
+                        for item in &mut self.queue {
+                            if matches!(item.status, ItemStatus::Failed(_)) {
+                                item.status = ItemStatus::Pending;
+                                item.transcript = None;
+                                item.stats = None;
+                                item.turns.clear();
+                                item.peaks = Arc::new(Vec::new());
+                            }
+                        }
+                        self.invalidate_derived();
+                        self.save_queue();
+                        self.begin_batch(true);
+                        return Task::batch(tasks);
+                    }
                     self.batch = false;
                     self.current = None;
                     self.stage = "done".to_string();
@@ -4548,6 +4991,129 @@ impl App {
 
     /// The queue card in the left panel: header, add/import toolbar, list and
     /// run controls.
+    fn acceleration_row(&self, scheme: &Scheme) -> Element<'_, Message> {
+        let scheme = *scheme;
+        let running = matches!(self.status, Status::Running);
+        let selected = self.gpu_selected();
+        let reason = self.gpu_unavailable_reason();
+        let multiplier = self.gpu_multiplier();
+        let gpu_label = multiplier
+            .map(|value| format!("GPU {value:.1}\u{00d7}"))
+            .unwrap_or_else(|| "GPU".to_string());
+        let gpu_label = if reason.is_none() {
+            gpu_label
+        } else {
+            "GPU".to_string()
+        };
+
+        let cpu_button = action_text("CPU 1\u{00d7}")
+            .on_press_maybe((!running && selected).then_some(Message::SetAcceleration(false)))
+            .style(if selected {
+                pill_button_secondary
+            } else {
+                pill_button_active
+            });
+
+        let gpu_button = if reason.is_some() {
+            let message = if self.can(license::Feature::GpuAcceleration) {
+                None
+            } else {
+                Some(Message::LockedGpu)
+            };
+            action_owned(gpu_label.clone())
+                .on_press_maybe((!running).then_some(message).flatten())
+                .style(greyed_button(scheme))
+                .into()
+        } else {
+            action_owned(gpu_label)
+                .on_press_maybe((!running && !selected).then_some(Message::SetAcceleration(true)))
+                .style(if selected {
+                    pill_button_active
+                } else {
+                    pill_button_secondary
+                })
+                .into()
+        };
+        let gpu_button = if let Some(reason) = &reason {
+            self.tip(gpu_button, reason.as_str(), &scheme)
+        } else {
+            gpu_button
+        };
+
+        let retest = self.tip(
+            action(icon(ICON_REFRESH, 13.0))
+                .on_press_maybe(
+                    (!running
+                        && self.can(license::Feature::GpuAcceleration)
+                        && asr::gpu_available())
+                    .then_some(Message::RetestGpu),
+                )
+                .style(subtle_icon_button),
+            "Retest GPU with the current preset",
+            &scheme,
+        );
+
+        let actual = self.gpu_actual.as_deref();
+        let now = match actual {
+            Some(backend) if backend.eq_ignore_ascii_case("cpu") => {
+                if self.gpu_fallback.is_some() {
+                    "Now: CPU \u{00b7} GPU failed".to_string()
+                } else {
+                    "Now: CPU".to_string()
+                }
+            }
+            Some(backend) => {
+                let name = if backend.eq_ignore_ascii_case("vulkan") {
+                    "Vulkan"
+                } else if backend.eq_ignore_ascii_case("metal") {
+                    "Metal"
+                } else if backend.eq_ignore_ascii_case("coreml") {
+                    "Core ML"
+                } else {
+                    backend
+                };
+                format!("Now: GPU \u{00b7} {name}")
+            }
+            None => "Now: CPU".to_string(),
+        };
+        let now_tip = self.gpu_fallback.clone().unwrap_or_else(|| {
+            "Actual backend reported by the transcription pipeline.".to_string()
+        });
+        let now = self.tip(
+            text(now)
+                .size(11)
+                .wrapping(NO_WRAP)
+                .color(if actual.is_some_and(|value| !value.eq_ignore_ascii_case("cpu")) {
+                    scheme.green
+                } else {
+                    scheme.muted
+                }),
+            now_tip,
+            &scheme,
+        );
+
+        let label = row![
+            text("Acceleration")
+                .size(11)
+                .wrapping(NO_WRAP)
+                .color(scheme.muted),
+            horizontal_space(),
+            retest,
+        ]
+        .spacing(4)
+        .align_y(iced::Alignment::Center);
+
+        column![
+            label,
+            row![cpu_button, gpu_button]
+                .spacing(4)
+                .align_y(iced::Alignment::Center),
+            now,
+        ]
+        .spacing(4)
+        .into()
+    }
+
     fn queue_panel(&self, scheme: &Scheme, width: f32) -> Element<'_, Message> {
         let scheme = *scheme;
         let running = matches!(self.status, Status::Running);
@@ -4789,6 +5355,7 @@ impl App {
         let controls = column![
             output_row,
             options,
+            self.acceleration_row(&scheme),
             row![
                 action_text("Transcribe")
                     .on_press_maybe(can_start.then_some(Message::Start))
@@ -5685,16 +6252,18 @@ impl App {
             || self.rename_open
             || self.line_edit.is_some()
             || self.delete_confirm
+            || self.calibration.is_some()
     }
 
     /// Wrap `content` with a tooltip, unless a dialog is open.
     fn tip<'a>(
         &self,
         content: impl Into<Element<'a, Message>>,
-        label: &'static str,
+        label: impl Into<String>,
         scheme: &Scheme,
     ) -> Element<'a, Message> {
         let content = content.into();
+        let label = label.into();
         // A tooltip on the page underneath must not paint over a dialog.
         if self.popup_open() {
             return content;
@@ -5864,6 +6433,160 @@ impl App {
                 })
                 .into(),
         )
+    }
+
+    fn calibration_dialog(&self, scheme: &Scheme) -> Element<'_, Message> {
+        let scheme = *scheme;
+        let Some(calibration) = &self.calibration else {
+            return container(horizontal_space()).into();
+        };
+        let preset = calibration.preset.label();
+        let testing = calibration.testing();
+        let close = action(icon(ICON_X, 14.0))
+            .on_press_maybe((!testing).then_some(Message::CloseCalibration))
+            .style(subtle_icon_button);
+        let header = row![
+            text("GPU Calibration").size(theme::TEXT_LG),
+            horizontal_space(),
+            close,
+        ]
+        .spacing(8)
+        .align_y(iced::Alignment::Center);
+
+        let mut body = column![header].spacing(10);
+
+        match calibration.phase {
+            CalibrationPhase::Offered => {
+                body = body.push(
+                    text(format!("Test GPU acceleration for the {preset} model?"))
+                        .size(theme::TEXT_MD)
+                        .color(scheme.text),
+                );
+                body = body.push(
+                    text(
+                        "Compares the CPU and GPU on this PC. About 20\u{2013}40 seconds. \
+                         Uses a bundled sample, not your audio.",
+                    )
+                    .size(theme::TEXT_SM)
+                    .color(scheme.muted),
+                );
+                body = body.push(
+                    row![
+                        horizontal_space(),
+                        action_text("Use CPU")
+                            .on_press(Message::UseCpuForRun)
+                            .style(pill_button_secondary),
+                        action_text("Test GPU")
+                            .on_press(Message::TestGpu)
+                            .style(color_button(scheme.blue, scheme.on_accent)),
+                    ]
+                    .spacing(8),
+                );
+            }
+            CalibrationPhase::TestingCpu | CalibrationPhase::TestingGpu => {
+                let phase = if calibration.phase == CalibrationPhase::TestingCpu {
+                    "Testing CPU"
+                } else {
+                    "Testing GPU"
+                };
+                body = body.push(
+                    text(format!("{phase} \u{00b7} {preset}"))
+                        .size(theme::TEXT_MD)
+                        .color(scheme.text),
+                );
+                body = body.push(
+                    progress_bar(0.0..=1.0, calibration.progress)
+                        .width(Length::Fill)
+                        .height(Length::Fixed(10.0))
+                        .style(move |_theme: &Theme| progress_bar::Style {
+                            background: scheme.bar_track.into(),
+                            bar: scheme.blue.into(),
+                            border: iced::border::rounded(5.0),
+                        }),
+                );
+                body = body.push(
+                    text(format!("{:.0}%", calibration.progress * 100.0))
+                        .size(theme::TEXT_XS)
+                        .color(scheme.muted),
+                );
+                body = body.push(
+                    text("This compares the model on both backends before your run starts.")
+                        .size(theme::TEXT_XS)
+                        .color(scheme.muted),
+                );
+            }
+            CalibrationPhase::Result => {
+                if let Some(error) = &calibration.error {
+                    body = body.push(
+                        text("GPU unavailable")
+                            .size(theme::TEXT_MD)
+                            .color(scheme.danger),
+                    );
+                    body = body.push(
+                        text(error)
+                            .size(theme::TEXT_SM)
+                            .color(scheme.muted)
+                            .width(Length::Fill),
+                    );
+                    body = body.push(
+                        row![
+                            horizontal_space(),
+                            action_text("Continue on CPU")
+                                .on_press(Message::UseCpuForRun)
+                                .style(color_button(scheme.blue, scheme.on_accent)),
+                        ]
+                        .spacing(8),
+                    );
+                } else {
+                    let multiplier = calibration.multiplier.unwrap_or(1.0);
+                    let faster = multiplier >= 1.0;
+                    body = body.push(
+                        row![
+                            text("CPU 1\u{00d7}")
+                                .size(theme::TEXT_SM)
+                                .color(scheme.muted),
+                            text(format!("GPU {multiplier:.1}\u{00d7}"))
+                                .size(theme::TEXT_SM)
+                                .color(if faster { scheme.green } else { scheme.muted }),
+                        ]
+                        .spacing(16),
+                    );
+                    body = body.push(
+                        text(if faster {
+                            format!(
+                                "GPU is {multiplier:.1}\u{00d7} CPU. Use GPU for this run \
+                                 and make it the default?"
+                            )
+                        } else {
+                            format!(
+                                "GPU is {multiplier:.1}\u{00d7} CPU. Keep CPU?"
+                            )
+                        })
+                        .size(theme::TEXT_SM)
+                        .color(scheme.text),
+                    );
+                    let keep = action_text("Keep CPU").on_press(Message::UseCpuForRun);
+                    let gpu = action_text(if faster { "Use GPU" } else { "Use GPU anyway" })
+                        .on_press(Message::UseGpuForRun);
+                    let (keep, gpu) = if faster {
+                        (
+                            keep.style(pill_button_secondary),
+                            gpu.style(color_button(scheme.blue, scheme.on_accent)),
+                        )
+                    } else {
+                        (
+                            keep.style(color_button(scheme.blue, scheme.on_accent)),
+                            gpu.style(pill_button_secondary),
+                        )
+                    };
+                    body = body.push(
+                        row![horizontal_space(), keep, gpu].spacing(8),
+                    );
+                }
+            }
+        }
+
+        modal_card(body, 460.0, scheme)
     }
 
     fn settings_dialog(&self, scheme: &Scheme) -> Element<'_, Message> {
@@ -6038,51 +6761,6 @@ impl App {
                 .width(Length::Fixed(64.0)),
         );
 
-        let gpu_available = cfg!(feature = "gpu");
-        let gpu_on = self.gpu_acceleration && gpu_available;
-        let gpu_hint = if !gpu_available {
-            "Not included in this build"
-        } else if running {
-            "Locked while transcribing"
-        } else {
-            "Vulkan, CPU fallback"
-        };
-        let gpu_toggle = settings_control(
-            action(text(if gpu_on { "On" } else { "Off" }).size(theme::TEXT_XS))
-                .on_press_maybe((gpu_available && !running).then_some(Message::GpuToggled(!gpu_on)))
-                .style(move |theme, status| {
-                    if gpu_on {
-                        pill_button_active(theme, status)
-                    } else {
-                        pill_button_secondary(theme, status)
-                    }
-                })
-                .width(Length::Fixed(64.0)),
-        );
-        let gpu_row = row![
-            column![
-                row![
-                    text("GPU acceleration")
-                        .size(theme::TEXT_SM)
-                        .wrapping(NO_WRAP)
-                        .color(scheme.text),
-                    text("Experimental").size(10).color(scheme.muted),
-                ]
-                .spacing(6)
-                .align_y(iced::Alignment::Center),
-                text(gpu_hint)
-                    .size(11)
-                    .wrapping(NO_WRAP)
-                    .color(scheme.muted),
-            ]
-            .spacing(1)
-            .width(Length::Fill),
-            gpu_toggle,
-        ]
-        .spacing(theme::SPACE_LG)
-        .align_y(iced::Alignment::Center)
-        .width(Length::Fill);
-
         let location = self
             .output_dir
             .as_ref()
@@ -6210,7 +6888,6 @@ impl App {
         body = body.push(settings_row("Speakers", speakers, scheme));
         body = body.push(settings_row("Language", language, scheme));
         body = body.push(settings_row("Show timestamps", timestamps, scheme));
-        body = body.push(gpu_row);
         body = body.push(settings_divider(scheme));
         if self.can(license::Feature::Playback) {
             body = body.push(settings_section_label("Playback", scheme));
@@ -6533,7 +7210,7 @@ impl App {
         };
 
         let mut header = row![
-            iced::widget::image(logo_handle())
+            iced::widget::image(header_logo_handle())
                 .width(Length::Fixed(67.0))
                 .height(Length::Fixed(67.0)),
             column![
@@ -6773,6 +7450,11 @@ impl App {
             .spacing(8);
 
             let dialog = modal_card(col, 460.0, scheme);
+            return self.with_toast(modal_overlay(base, dialog, scheme), scheme);
+        }
+
+        if self.calibration.is_some() {
+            let dialog = self.calibration_dialog(&scheme);
             return self.with_toast(modal_overlay(base, dialog, scheme), scheme);
         }
 
@@ -7216,6 +7898,20 @@ impl Player {
     fn set_speed(&self, factor: f32) {
         self.sink.set_speed(factor.max(0.1));
     }
+}
+
+/// Square brand mark used in the header and window chrome.
+fn header_logo_handle() -> iced::widget::image::Handle {
+    static LOGO: OnceLock<iced::widget::image::Handle> = OnceLock::new();
+    LOGO.get_or_init(|| {
+        let image =
+            image::load_from_memory(include_bytes!("../../icons/simple-hippo-square-icon.png"))
+                .expect("bundled header icon")
+                .into_rgba8();
+        let (width, height) = image.dimensions();
+        iced::widget::image::Handle::from_rgba(width, height, image.into_raw())
+    })
+    .clone()
 }
 
 /// Bundled brand mark, decoded once and shared with the image widget.
@@ -7780,6 +8476,7 @@ const ICON_PLAY: char = '\u{f4f4}';
 const ICON_PAUSE: char = '\u{f4c3}';
 const ICON_REWIND: char = '\u{f818}';
 const ICON_FORWARD: char = '\u{f7f3}';
+const ICON_REFRESH: char = '\u{f116}';
 const ICON_ARROW_UP: char = '\u{f148}';
 const ICON_ARROW_DOWN: char = '\u{f128}';
 const ICON_CIRCLE: char = '\u{f28a}';
@@ -8273,6 +8970,10 @@ fn action<'a>(content: impl Into<Element<'a, Message>>) -> iced::widget::Button<
 
 /// A button with a single-line text label.
 fn action_text<'a>(label: &'a str) -> iced::widget::Button<'a, Message> {
+    action(text(label).wrapping(NO_WRAP))
+}
+
+fn action_owned(label: String) -> iced::widget::Button<'static, Message> {
     action(text(label).wrapping(NO_WRAP))
 }
 
@@ -9293,7 +9994,16 @@ mod tests {
         let _guard = env_lock();
         let _config = ConfigEnv::new("gpu-failure");
         let mut app = pro_app();
-        assert!(app.gpu_acceleration);
+        let preset = app.preset.arg().to_string();
+        app.gpu_profiles.insert(
+            preset,
+            GpuProfile {
+                tested: true,
+                selected: true,
+                ..GpuProfile::default()
+            },
+        );
+        app.save_settings();
 
         let marker = App::gpu_guard_path().expect("config dir");
         std::fs::write(&marker, "123").unwrap();
@@ -9302,7 +10012,7 @@ mod tests {
         });
         let _ = app.drain_events();
 
-        assert!(!app.gpu_acceleration);
+        assert!(!app.gpu_profile().unwrap().selected);
         assert!(!marker.exists());
         assert!(app
             .console_lines
@@ -9311,7 +10021,115 @@ mod tests {
         assert!(app.toast.is_some());
 
         let reloaded = pro_app();
-        assert!(!reloaded.gpu_acceleration);
+        assert!(!reloaded.gpu_profile().unwrap().selected);
+    }
+
+    #[test]
+    fn calibration_events_store_a_per_preset_multiplier() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("gpu-calibration");
+        let mut app = pro_app();
+        app.preset = Preset::Accuracy;
+        app.calibration = Some(Calibration::new(Preset::Accuracy, false));
+
+        app.calibration_events
+            .lock()
+            .unwrap()
+            .push_back(BenchmarkEvent::CpuFinished { seconds: 2.0 });
+        app.drain_calibration();
+        assert_eq!(
+            app.calibration.as_ref().unwrap().phase,
+            CalibrationPhase::TestingGpu
+        );
+
+        app.calibration_events
+            .lock()
+            .unwrap()
+            .push_back(BenchmarkEvent::GpuFinished { seconds: 1.0 });
+        app.drain_calibration();
+        assert_eq!(app.calibration.as_ref().unwrap().multiplier, Some(2.0));
+        let profile = app.gpu_profile().expect("calibration profile");
+        assert!(profile.tested);
+        assert_eq!(profile.multiplier, Some(2.0));
+        assert!(!profile.selected);
+
+        app.choose_gpu(true);
+        assert!(app.calibration.is_none());
+        let reloaded = pro_app();
+        let profile = reloaded
+            .gpu_profiles
+            .get("accuracy")
+            .expect("persisted profile");
+        assert!(profile.selected);
+        assert_eq!(profile.multiplier, Some(2.0));
+    }
+
+    #[test]
+    fn acceleration_selection_is_per_preset() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("gpu-presets");
+        let mut app = pro_app();
+        app.gpu_profiles.insert(
+            "speed".to_string(),
+            GpuProfile {
+                tested: true,
+                selected: true,
+                multiplier: Some(2.3),
+                ..GpuProfile::default()
+            },
+        );
+        app.gpu_profiles.insert(
+            "balanced".to_string(),
+            GpuProfile {
+                tested: true,
+                selected: false,
+                ..GpuProfile::default()
+            },
+        );
+        app.save_settings();
+
+        app.preset = Preset::Speed;
+        assert_eq!(app.gpu_multiplier(), Some(2.3));
+        assert!(app.gpu_profile().unwrap().selected);
+
+        app.preset = Preset::Balanced;
+        assert!(!app.gpu_profile().unwrap().selected);
+
+        let reloaded = pro_app();
+        assert!(reloaded.gpu_profiles["speed"].selected);
+        assert!(!reloaded.gpu_profiles["balanced"].selected);
+    }
+
+    #[test]
+    fn calibration_dialog_renders_offer_progress_result_and_error() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("gpu-dialog");
+        let mut app = pro_app();
+        app.preset = Preset::Accuracy;
+
+        app.calibration = Some(Calibration::new(Preset::Accuracy, true));
+        let _ = app.view();
+
+        {
+            let calibration = app.calibration.as_mut().unwrap();
+            calibration.phase = CalibrationPhase::TestingCpu;
+            calibration.progress = 0.25;
+        }
+        let _ = app.view();
+
+        {
+            let calibration = app.calibration.as_mut().unwrap();
+            calibration.phase = CalibrationPhase::Result;
+            calibration.progress = 1.0;
+            calibration.multiplier = Some(2.3);
+        }
+        let _ = app.view();
+
+        {
+            let calibration = app.calibration.as_mut().unwrap();
+            calibration.error = Some("Vulkan device lost".to_string());
+        }
+        let _ = app.view();
     }
 
     #[test]
@@ -9319,14 +10137,22 @@ mod tests {
         let _guard = env_lock();
         let _config = ConfigEnv::new("gpu-crash");
         let mut app = pro_app();
-        app.gpu_acceleration = true;
+        let preset = app.preset.arg().to_string();
+        app.gpu_profiles.insert(
+            preset,
+            GpuProfile {
+                tested: true,
+                selected: true,
+                ..GpuProfile::default()
+            },
+        );
         app.save_settings();
 
         let marker = App::gpu_guard_path().expect("config dir");
         std::fs::write(&marker, "123").unwrap();
 
         let restarted = App::new();
-        assert!(!restarted.gpu_acceleration);
+        assert!(!restarted.gpu_profile().unwrap().selected);
         assert!(!marker.exists());
         assert!(restarted.toast.is_some());
     }
@@ -9338,7 +10164,6 @@ mod tests {
 
         let mut app = pro_app();
         assert!(!app.settings_open);
-        assert!(app.gpu_acceleration);
 
         let _ = app.update(Message::OpenSettings);
         assert!(app.settings_open);
@@ -9354,7 +10179,6 @@ mod tests {
         let _ = app.update(Message::ZoomIn);
         let _ = app.update(Message::ToggleFollowPlayhead);
         let _ = app.update(Message::NotificationsToggled(false));
-        let _ = app.update(Message::GpuToggled(false));
         let _ = app.update(Message::CloseSettings);
         assert!(!app.settings_open);
 
@@ -9364,7 +10188,6 @@ mod tests {
         assert!((reloaded.font_scale - 1.1).abs() < 0.001);
         assert!(!reloaded.follow_playhead);
         assert!(!reloaded.notifications);
-        assert!(!reloaded.gpu_acceleration);
     }
 
     #[test]

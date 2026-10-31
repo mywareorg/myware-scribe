@@ -253,44 +253,47 @@ impl Scheme {
     }
 
     pub fn dark() -> Scheme {
+        // IBM Carbon Gray 100. One neutral ramp, one blue accent, and
+        // semantic support colours; this keeps panels, fields, and speaker
+        // chips from competing with each other.
         Scheme {
-            bg: Color::from_rgb(0.043, 0.047, 0.055),
-            panel_bg: Color::from_rgb(0.082, 0.090, 0.106),
-            dialog_bg: Color::from_rgb(0.114, 0.124, 0.145),
-            track: Color::from_rgb(0.165, 0.176, 0.200),
-            bar_track: Color::from_rgb(0.165, 0.176, 0.200),
-            progress: Color::from_rgb(0.286, 0.416, 0.529),
-            timeline_bg: Color::from_rgb(0.106, 0.114, 0.129),
-            border: Color::from_rgb(0.243, 0.255, 0.282),
-            blue: Color::from_rgb(0.431, 0.686, 0.855),
-            pink: Color::from_rgb(0.784, 0.573, 0.651),
-            green: Color::from_rgb(0.302, 0.741, 0.475),
-            danger: Color::from_rgb(0.898, 0.353, 0.396),
-            ink: Color::from_rgb(0.890, 0.902, 0.925),
-            text: Color::from_rgb(0.890, 0.902, 0.925),
-            muted: Color::from_rgb(0.576, 0.600, 0.647),
-            on_accent: Color::from_rgb(0.059, 0.071, 0.090),
+            bg: Color::from_rgb(0.086, 0.086, 0.086),          // Gray 100 #161616
+            panel_bg: Color::from_rgb(0.149, 0.149, 0.149),    // Gray 90  #262626
+            dialog_bg: Color::from_rgb(0.224, 0.224, 0.224),   // Gray 80  #393939
+            track: Color::from_rgb(0.224, 0.224, 0.224),       // Gray 80
+            bar_track: Color::from_rgb(0.224, 0.224, 0.224),   // Gray 80
+            progress: Color::from_rgb(0.471, 0.663, 1.0),      // Blue 40  #78a9ff
+            timeline_bg: Color::from_rgb(0.149, 0.149, 0.149), // Gray 90
+            border: Color::from_rgb(0.322, 0.322, 0.322),      // Gray 70  #525252
+            blue: Color::from_rgb(0.471, 0.663, 1.0),          // Blue 40
+            pink: Color::from_rgb(1.0, 0.494, 0.714),          // Magenta 40
+            green: Color::from_rgb(0.259, 0.745, 0.396),       // Green 40 #42be65
+            danger: Color::from_rgb(0.980, 0.302, 0.337),      // Red 50   #fa4d56
+            ink: Color::from_rgb(0.957, 0.957, 0.957),         // Gray 10  #f4f4f4
+            text: Color::from_rgb(0.957, 0.957, 0.957),        // Gray 10
+            muted: Color::from_rgb(0.659, 0.659, 0.659),       // Gray 40  #a8a8a8
+            on_accent: Color::from_rgb(0.086, 0.086, 0.086),   // Gray 100
             speaker_colors: [
-                Color::from_rgb(0.184, 0.392, 0.478), // blue
-                Color::from_rgb(0.463, 0.286, 0.357), // pink
-                Color::from_rgb(0.345, 0.318, 0.541), // violet
-                Color::from_rgb(0.263, 0.431, 0.333), // green
-                Color::from_rgb(0.494, 0.412, 0.239), // amber
-                Color::from_rgb(0.208, 0.416, 0.424), // teal
-                Color::from_rgb(0.490, 0.322, 0.243), // coral
-                Color::from_rgb(0.306, 0.365, 0.541), // periwinkle
-                Color::from_rgb(0.384, 0.439, 0.251), // lime
-                Color::from_rgb(0.427, 0.318, 0.478), // lavender
+                Color::from_rgb(0.0, 0.263, 0.808),   // Blue 70
+                Color::from_rgb(0.624, 0.094, 0.325), // Magenta 70
+                Color::from_rgb(0.412, 0.161, 0.769), // Purple 70
+                Color::from_rgb(0.055, 0.376, 0.153), // Green 60
+                Color::from_rgb(0.557, 0.416, 0.0),   // Yellow 60
+                Color::from_rgb(0.0, 0.365, 0.365),   // Teal 70
+                Color::from_rgb(0.541, 0.220, 0.0),   // Orange 70
+                Color::from_rgb(0.0, 0.326, 0.604),   // Cyan 60
+                Color::from_rgb(0.098, 0.502, 0.220), // Green 50
+                Color::from_rgb(0.541, 0.247, 0.988), // Purple 60
             ],
-            sms0: Color::from_rgb(0.184, 0.392, 0.478),
-            sms1: Color::from_rgb(0.463, 0.286, 0.357),
-            warn_tint: Color::from_rgba(0.431, 0.686, 0.855, 0.18),
-            search_hl: Color::from_rgba(0.890, 0.710, 0.353, 0.38),
-            search_active: Color::from_rgba(0.890, 0.710, 0.353, 0.70),
-            tip_bg: Color::from_rgb(0.114, 0.124, 0.145),
-            tip_text: Color::from_rgb(0.890, 0.902, 0.925),
-            toast_bg: Color::from_rgb(0.302, 0.741, 0.475),
-            toast_text: Color::from_rgb(0.059, 0.071, 0.090),
+            sms0: Color::from_rgb(0.0, 0.263, 0.808),
+            sms1: Color::from_rgb(0.624, 0.094, 0.325),
+            warn_tint: Color::from_rgba(0.471, 0.663, 1.0, 0.18),
+            search_hl: Color::from_rgba(0.945, 0.761, 0.106, 0.35),
+            search_active: Color::from_rgba(0.945, 0.761, 0.106, 0.65),
+            tip_bg: Color::from_rgb(0.224, 0.224, 0.224), // Gray 80
+            tip_text: Color::from_rgb(0.957, 0.957, 0.957),
+            toast_bg: Color::from_rgb(0.098, 0.502, 0.220), // Green 50
+            toast_text: Color::from_rgb(0.957, 0.957, 0.957),
             scrim: Color::from_rgba(0.0, 0.0, 0.0, 0.64),
         }
     }
