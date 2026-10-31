@@ -84,6 +84,12 @@ incremental) and stages the DLLs beside the development binary. The same
 profile is available as `cargo run-fast` if you are already in a Visual Studio
 developer prompt. Use the full build script for the final release.
 
+For the GPU edit/run loop, use `scripts\run-gpu.ps1`. It selects the Vulkan
+SDK, Ninja, and the DLL CRT, stages the sherpa/ONNX/OpenMP runtime DLLs, and
+runs `cargo run --profile release-fast --features gpu`. It sets
+`HIPPO_TRANSCRIBE_TIER=pro` so GPU calibration is visible; pass `-Free` to test
+the free-tier lock.
+
 Prerequisites: Visual Studio 2022 Build Tools with the "Desktop development with
 C++" workload, Rust stable MSVC (`rustup default stable-x86_64-pc-windows-msvc`),
 and CMake (included with the workload or `winget install Kitware.CMake`). LLVM is
