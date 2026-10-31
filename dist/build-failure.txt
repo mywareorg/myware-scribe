@@ -1,25 +1,28 @@
-﻿=== Build failed 2026-10-30 17:19:47 ===
-At C:\Users\wuphy\Documents\hippo-transcribe\scripts\build-windows.ps1:264 char:9
+﻿=== Build failed 2026-10-30 17:21:22 ===
+At C:\Users\wuphy\Documents\hippo-transcribe\scripts\build-windows.ps1:267 char:9
 +         throw "$commandLine failed with exit code $exitCode (full out ...
 +         ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 Message: cargo test --workspace --release failed with exit code 101 (full output in C:\Users\wuphy\Documents\hippo-transcribe\build-windows.log)
-Stack:   at Invoke-Native, C:\Users\wuphy\Documents\hippo-transcribe\scripts\build-windows.ps1: line 264
-at <ScriptBlock>, C:\Users\wuphy\Documents\hippo-transcribe\scripts\build-windows.ps1: line 465
+Stack:   at Invoke-Native, C:\Users\wuphy\Documents\hippo-transcribe\scripts\build-windows.ps1: line 267
+at <ScriptBlock>, C:\Users\wuphy\Documents\hippo-transcribe\scripts\build-windows.ps1: line 468
 at <ScriptBlock>, <No file>: line 1
 
 === build-windows.log ===
 
 === last 40 lines ===
+test export::tests::srt_uses_next_start_and_final_duration ... ok
 test export::tests::txt_is_unchanged ... ok
+test export::tests::json_matches_the_import_shape ... ok
 test license::tests::a_local_opt_out_beats_an_active_trial ... ok
-test license::tests::audiences_map_to_tiers ... ok
 test export::tests::vtt_has_header_and_dot_timestamps ... ok
+test license::tests::audiences_map_to_tiers ... ok
 test license::tests::dev_override_wins_over_the_record ... ok
 test license::tests::free_tier_unlocks_nothing_paid ... ok
 test license::tests::paid_entitlement_survives_grace_then_expires ... ok
 test license::tests::trial_can_only_start_once ... ok
 test license::tests::trial_runs_for_seven_days ... ok
 test logging::tests::timestamp_is_a_calendar_date ... FAILED
+test license::tests::state_round_trips_through_disk ... ok
 test models::tests::bundled_models_fit_the_release_budget ... ok
 test models::tests::every_model_prefers_the_backed_up_mirror ... ok
 test models::tests::manifest_parses_and_is_internally_consistent ... ok
@@ -27,14 +30,13 @@ test models::tests::presets_map_to_multilingual_models ... ok
 test pipeline::tests::output_name_includes_the_preset ... ok
 test pipeline::tests::routing_skips_diarization_for_one_speaker ... ok
 test sherpa_dynamic::tests::layout_matches_the_c_header ... ok
-test license::tests::state_round_trips_through_disk ... ok
 
 failures:
 
 ---- logging::tests::timestamp_is_a_calendar_date stdout ----
 
-thread 'logging::tests::timestamp_is_a_calendar_date' (9496) panicked at core\src\logging.rs:193:9:
-assertion `left == right` failed: 2026-10-31 00:04:46Z
+thread 'logging::tests::timestamp_is_a_calendar_date' (6132) panicked at core\src\logging.rs:193:9:
+assertion `left == right` failed: 2026-10-31 00:21:22Z
   left: 20
  right: 21
 note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
@@ -43,20 +45,22 @@ note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
 failures:
     logging::tests::timestamp_is_a_calendar_date
 
-test result: FAILED. 27 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+test result: FAILED. 27 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
 
-   Compiling hippo-transcribe-gui v0.1.0 (C:\Users\wuphy\Documents\hippo-transcribe\gui)
-   Compiling hippo-transcribe-core v0.1.0 (C:\Users\wuphy\Documents\hippo-transcribe\core)
-    Finished `release` profile [optimized] target(s) in 1m 36s
+    Finished `release` profile [optimized] target(s) in 0.63s
      Running unittests src\lib.rs (C:\Users\wuphy\hb\release\deps\hippo_transcribe_core-0730e1115eb6dbaa.exe)
 error: test failed, to rerun pass `-p hippo-transcribe-core --lib`
 
 === console ===
+test pipeline::tests::routing_skips_diarization_for_one_speaker ... ok
+test sherpa_dynamic::tests::layout_matches_the_c_header ... ok
+
+failures:
 
 ---- logging::tests::timestamp_is_a_calendar_date stdout ----
 
-thread 'logging::tests::timestamp_is_a_calendar_date' (9496) panicked at core\src\logging.rs:193:9:
-assertion `left == right` failed: 2026-10-31 00:04:46Z
+thread 'logging::tests::timestamp_is_a_calendar_date' (6132) panicked at core\src\logging.rs:193:9:
+assertion `left == right` failed: 2026-10-31 00:21:22Z
   left: 20
  right: 21
 note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
@@ -65,37 +69,36 @@ note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
 failures:
     logging::tests::timestamp_is_a_calendar_date
 
-test result: FAILED. 27 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+test result: FAILED. 27 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
 
-   Compiling hippo-transcribe-gui v0.1.0 (C:\Users\wuphy\Documents\hippo-transcribe\gui)
-   Compiling hippo-transcribe-core v0.1.0 (C:\Users\wuphy\Documents\hippo-transcribe\core)
-    Finished `release` profile [optimized] target(s) in 1m 36s
+    Finished `release` profile [optimized] target(s) in 0.63s
      Running unittests src\lib.rs (C:\Users\wuphy\hb\release\deps\hippo_transcribe_core-0730e1115eb6dbaa.exe)
 error: test failed, to rerun pass `-p hippo-transcribe-core --lib`
 
 Last lines of C:\Users\wuphy\Documents\hippo-transcribe\build-windows.log:
 
     running 28 tests
-    test download::tests::mirror_file_names_drop_the_relative_directory ... ok
     test download::tests::mirrors_put_the_configured_base_first ... ok
+    test download::tests::mirror_file_names_drop_the_relative_directory ... ok
     test download::tests::mirrors_without_a_base_are_the_pinned_upstream_list ... ok
     test download::tests::notice_lists_every_model_with_its_license ... ok
     test download::tests::required_files_match_the_preset ... ok
     test download::tests::sha256_of_known_content ... ok
     test export::tests::json_keeps_mm_ss_for_short_recordings ... ok
     test export::tests::parses_mm_ss_and_hh_mm_ss_with_colons_in_text ... ok
-    test export::tests::json_matches_the_import_shape ... ok
     test export::tests::srt_uses_next_start_and_final_duration ... ok
     test export::tests::txt_is_unchanged ... ok
+    test export::tests::json_matches_the_import_shape ... ok
     test license::tests::a_local_opt_out_beats_an_active_trial ... ok
-    test license::tests::audiences_map_to_tiers ... ok
     test export::tests::vtt_has_header_and_dot_timestamps ... ok
+    test license::tests::audiences_map_to_tiers ... ok
     test license::tests::dev_override_wins_over_the_record ... ok
     test license::tests::free_tier_unlocks_nothing_paid ... ok
     test license::tests::paid_entitlement_survives_grace_then_expires ... ok
     test license::tests::trial_can_only_start_once ... ok
     test license::tests::trial_runs_for_seven_days ... ok
     test logging::tests::timestamp_is_a_calendar_date ... FAILED
+    test license::tests::state_round_trips_through_disk ... ok
     test models::tests::bundled_models_fit_the_release_budget ... ok
     test models::tests::every_model_prefers_the_backed_up_mirror ... ok
     test models::tests::manifest_parses_and_is_internally_consistent ... ok
@@ -103,14 +106,13 @@ Last lines of C:\Users\wuphy\Documents\hippo-transcribe\build-windows.log:
     test pipeline::tests::output_name_includes_the_preset ... ok
     test pipeline::tests::routing_skips_diarization_for_one_speaker ... ok
     test sherpa_dynamic::tests::layout_matches_the_c_header ... ok
-    test license::tests::state_round_trips_through_disk ... ok
 
     failures:
 
     ---- logging::tests::timestamp_is_a_calendar_date stdout ----
 
-    thread 'logging::tests::timestamp_is_a_calendar_date' (9496) panicked at core\src\logging.rs:193:9:
-    assertion `left == right` failed: 2026-10-31 00:04:46Z
+    thread 'logging::tests::timestamp_is_a_calendar_date' (6132) panicked at core\src\logging.rs:193:9:
+    assertion `left == right` failed: 2026-10-31 00:21:22Z
       left: 20
      right: 21
     note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
@@ -119,18 +121,16 @@ Last lines of C:\Users\wuphy\Documents\hippo-transcribe\build-windows.log:
     failures:
         logging::tests::timestamp_is_a_calendar_date
 
-    test result: FAILED. 27 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+    test result: FAILED. 27 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
 
-       Compiling hippo-transcribe-gui v0.1.0 (C:\Users\wuphy\Documents\hippo-transcribe\gui)
-       Compiling hippo-transcribe-core v0.1.0 (C:\Users\wuphy\Documents\hippo-transcribe\core)
-        Finished `release` profile [optimized] target(s) in 1m 36s
+        Finished `release` profile [optimized] target(s) in 0.63s
          Running unittests src\lib.rs (C:\Users\wuphy\hb\release\deps\hippo_transcribe_core-0730e1115eb6dbaa.exe)
     error: test failed, to rerun pass `-p hippo-transcribe-core --lib`
 
 PS>TerminatingError(): "cargo test --workspace --release failed with exit code 101 (full output in C:\Users\wuphy\Documents\hippo-transcribe\build-windows.log)"
 **********************
 Windows PowerShell transcript end
-End time: 20261030171946
+End time: 20261030172122
 **********************
 
 === configure state ===
