@@ -20,16 +20,24 @@ powershell -ExecutionPolicy Bypass -File .\scripts\run-gpu.ps1
 
 .EXAMPLE
 powershell -ExecutionPolicy Bypass -File .\scripts\run-gpu.ps1 -Free
+
+.EXAMPLE
+powershell -ExecutionPolicy Bypass -File .\scripts\run-gpu.ps1 -Pro
 #>
 [CmdletBinding()]
 param(
     [string]$Profile = "release-fast",
     [string]$TargetDir,
-    [switch]$Free
+    [switch]$Free,
+    [switch]$Pro
 )
 
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
+
+if ($Free -and $Pro) {
+    throw "Choose either -Free or -Pro, not both."
+}
 
 . (Join-Path $PSScriptRoot "windows-env.ps1")
 

@@ -82,13 +82,14 @@ powershell -ExecutionPolicy Bypass -File .\scripts\run-windows.ps1
 That runs `cargo run --profile release-fast` (no LTO, parallel codegen,
 incremental) and stages the DLLs beside the development binary. The same
 profile is available as `cargo run-fast` if you are already in a Visual Studio
-developer prompt. Use the full build script for the final release.
+developer prompt. Use the full build script for the final release. Pass
+`-Free` or `-Pro` to force the entitlement for that run.
 
 For the GPU edit/run loop, use `scripts\run-gpu.ps1`. It selects the Vulkan
 SDK, Ninja, and the DLL CRT, stages the sherpa/ONNX/OpenMP runtime DLLs, and
-runs `cargo run --profile release-fast --features gpu`. It sets
+runs `cargo run --profile release-fast --features gpu`. It defaults to
 `HIPPO_TRANSCRIBE_TIER=pro` so GPU calibration is visible; pass `-Free` to test
-the free-tier lock.
+the free-tier lock or `-Pro` to make it explicit.
 
 Prerequisites: Visual Studio 2022 Build Tools with the "Desktop development with
 C++" workload, Rust stable MSVC (`rustup default stable-x86_64-pc-windows-msvc`),

@@ -10,22 +10,45 @@ LLVM, and runs `cargo run --profile release-fast`.
 Use this for the edit/run loop. Use `scripts/build-windows.ps1` for the final
 LTO release and zip.
 
+Pass -Free or -Pro to force the entitlement for this run. Without either
+switch the persisted license/trial decides the tier.
+
 .EXAMPLE
 powershell -ExecutionPolicy Bypass -File .\scripts\run-windows.ps1
+
+.EXAMPLE
+powershell -ExecutionPolicy Bypass -File .\scripts\run-windows.ps1 -Free
+
+.EXAMPLE
+powershell -ExecutionPolicy Bypass -File .\scripts\run-windows.ps1 -Pro
 #>
 [CmdletBinding()]
 param(
-    [string]$Profile = "release-fast"
+    [string]$Profile = "release-fast",
+    [switch]$Free,
+    [switch]$Pro
 )
 
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
+
+if ($Free -and $Pro) {
+    throw "Choose either -Free or -Pro, not both."
+}
 
 . (Join-Path $PSScriptRoot "windows-env.ps1")
 
 $root = Split-Path -Parent $PSScriptRoot
 Push-Location $root
 try {
+    if ($Free) {
+        $env:HIPPO_TRANSCRIBE_TIER = "free"
+        Write-Step "Testing the Free tier"
+    } elseif ($Pro) {
+        $env:HIPPO_TRANSCRIBE_TIER = "pro"
+        Write-Step "Testing the Pro tier"
+    }
+
     if (-not (Get-Command cl.exe -ErrorAction SilentlyContinue)) {
         Enter-DevEnvironment
     }
