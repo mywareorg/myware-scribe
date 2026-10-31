@@ -8564,8 +8564,14 @@ mod tests {
 
     /// App with Pro entitlements so feature-gated tests exercise their feature.
     fn pro_app() -> App {
+        let now = std::time::SystemTime::now();
+        if let Some(path) = App::license_path() {
+            let mut state = license::State::load(&path, now);
+            state.grant_pro(now);
+            state.save(&path);
+        }
         let mut app = App::new();
-        app.license.grant_pro(std::time::SystemTime::now());
+        app.license.grant_pro(now);
         app
     }
 
