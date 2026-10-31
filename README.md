@@ -209,9 +209,15 @@ whisper.cpp uses the fastest backend the build provides:
   script builds CPU-only unless you pass `-Gpu`, which requires the Vulkan SDK.
   An installed SDK does not switch the backend on by itself. The SDK is only
   needed to compile — ggml loads `vulkan-1.dll` from the driver at run time.
+  The Windows GPU build also stages the Visual C++ OpenMP runtime
+  (`vcomp140.dll`) beside the executable.
   This path has never been run on real hardware, so treat it as experimental.
 - **CPU fallback** — if GPU context creation fails, the run continues on the CPU
   and the console reports why. `HIPPO_TRANSCRIBE_ACCEL=cpu` forces CPU.
+- **Windows GPU troubleshooting** — run `.\scripts\test-gpu-build.ps1` before a
+  build; `-Probe` isolates the ggml shader configure, `-Build` performs the GPU
+  build, and `-Artifact` checks the finished executable's runtime DLLs. The
+  report is written to `dist\gpu-test.txt`.
 
 Every preset routes internally: one speaker skips diarization entirely and
 transcribes in one pass; two or more speakers run diarization and then

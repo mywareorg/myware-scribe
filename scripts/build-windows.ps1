@@ -541,6 +541,19 @@ try {
         }
         Copy-Item $source (Join-Path $stage $dll)
     }
+    if ($useGpu) {
+        $openMpRuntime = Resolve-VcOpenMp -VcRuntime $vcRuntime
+        if ($openMpRuntime) {
+            $source = Join-Path $openMpRuntime "vcomp140.dll"
+            if (Test-Path -LiteralPath $source) {
+                Copy-Item $source (Join-Path $stage "vcomp140.dll")
+            } else {
+                Write-Warn "vcomp140.dll was not found in $openMpRuntime; the GPU build may need the OpenMP runtime."
+            }
+        } else {
+            Write-Warn "vcomp140.dll was not found; the GPU build may need the Visual C++ OpenMP runtime."
+        }
+    }
 
     foreach ($file in @("deploy.bat", "undeploy.bat", "README.md", "PRIVACY.md", "LICENSE")) {
         $source = Join-Path $root $file

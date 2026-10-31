@@ -235,3 +235,48 @@ impl Transcriber {
         Ok(segments)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn preferred_backend_matches_the_compiled_features() {
+        #[cfg(target_os = "macos")]
+        {
+            if cfg!(feature = "coreml") {
+                assert_eq!(preferred_backend(), Backend::CoreMl);
+            } else {
+                assert_eq!(preferred_backend(), Backend::Metal);
+            }
+        }
+
+        #[cfg(not(target_os = "macos"))]
+        {
+            if cfg!(feature = "gpu") {
+                assert_eq!(preferred_backend(), Backend::Vulkan);
+            } else {
+                assert_eq!(preferred_backend(), Backend::Cpu);
+            }
+        }
+    }
+
+    #[test]
+    fn gpu_context_enables_gpu_and_flash_attention() {
+        let gpu = context_params(true);
+        assert!(gpu.use_gpu);
+        assert!(gpu.flash_attn);
+
+        let cpu = context_params(false);
+        assert!(!cpu.use_gpu);
+        assert!(!cpu.flash_attn);
+    }
+
+    #[test]
+    fn backend_labels_are_stable() {
+        assert_eq!(Backend::Cpu.label(), "cpu");
+        assert_eq!(Backend::Metal.label(), "metal");
+        assert_eq!(Backend::CoreMl.label(), "coreml");
+        assert_eq!(Backend::Vulkan.label(), "vulkan");
+    }
+}

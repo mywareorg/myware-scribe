@@ -234,6 +234,52 @@ function Resolve-VcRuntime {
     return $null
 }
 
+function Resolve-VcOpenMp {
+    # whisper.cpp's OpenMP backend links vcomp140.dll. It lives in a separate
+    # Microsoft.VC*.OpenMP redist directory, not in the CRT directory that
+    # Resolve-VcRuntime returns, so the GPU build has to stage it explicitly.
+    param([string]$VcRuntime = "")
+    $candidates = @()
+
+    if ($VcRuntime) {
+        $x64 = Split-Path -Parent $VcRuntime
+        if ($x64) {
+            $candidates += @(Get-ChildItem -LiteralPath $x64 -Directory -Filter "Microsoft.VC*.OpenMP" -ErrorAction SilentlyContinue |
+                Sort-Object Name -Descending |
+                ForEach-Object { Join-Path $_.FullName "vcomp140.dll" })
+        }
+    }
+
+    $vs = Get-VsInstallPath
+    $root = Join-Path $vs "VC\Redist\MSVC"
+    if (Test-Path -LiteralPath $root) {
+        $candidates += @(Get-ChildItem -LiteralPath $root -Directory -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -as [version] } |
+            Sort-Object { [version]$_.Name } -Descending |
+            ForEach-Object { Join-Path $_.FullName "x64" } |
+            Where-Object { Test-Path -LiteralPath $_ } |
+            ForEach-Object {
+                Get-ChildItem -LiteralPath $_ -Directory -Filter "Microsoft.VC*.OpenMP" -ErrorAction SilentlyContinue |
+                    ForEach-Object { Join-Path $_.FullName "vcomp140.dll" }
+            })
+    }
+
+    $toolset = Get-ChildItem -LiteralPath (Join-Path $vs "VC\Tools\MSVC") -Directory -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -as [version] } |
+        Sort-Object { [version]$_.Name } -Descending |
+        Select-Object -First 1
+    if ($toolset) {
+        $candidates += Join-Path $toolset.FullName "bin\Hostx64\x64\vcomp140.dll"
+    }
+
+    foreach ($candidate in $candidates) {
+        if ($candidate -and (Test-Path -LiteralPath $candidate)) {
+            return (Split-Path -Parent $candidate)
+        }
+    }
+    return $null
+}
+
 function Assert-DllCrtArtifact {
     # Catch a static-CRT link before packaging: a /MT executable does not
     # import vcruntime140.dll, so the runtime DLLs staged beside it are unused

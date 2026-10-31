@@ -211,6 +211,8 @@ struct Settings {
     show_timestamps: bool,
     #[serde(default = "notifications_default")]
     notifications: bool,
+    #[serde(default)]
+    gpu_acceleration: Option<bool>,
     font_scale: Option<f32>,
     playback_speed: Option<f32>,
     waveform_zoom: Option<f32>,
@@ -240,6 +242,7 @@ impl Default for Settings {
             language: None,
             show_timestamps: true,
             notifications: true,
+            gpu_acceleration: None,
             font_scale: None,
             playback_speed: None,
             waveform_zoom: None,
@@ -328,6 +331,7 @@ pub enum Message {
     OpenSummary,
     SmsToggled(bool),
     NotificationsToggled(bool),
+    GpuToggled(bool),
     /// Open the folder holding the log files in Explorer.
     OpenLogFolder,
     TimestampsToggled(bool),
