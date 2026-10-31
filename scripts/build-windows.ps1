@@ -54,6 +54,9 @@ param(
     [switch]$Clean,
     [switch]$NoZip,
     [switch]$SkipModels,
+    # Keep the persisted queue from earlier runs. By default the build clears
+    # it so the freshly compiled app starts empty.
+    [switch]$KeepQueue,
     # Microsoft Store packaging. Off by default so the portable zip build is
     # unchanged.
     [switch]$Msix,
@@ -561,6 +564,18 @@ try {
             # compile.
             Write-Warn "Models could not be staged: $($_.Exception.Message)"
             Write-Warn "The app will download missing models on first launch."
+        }
+    }
+
+    if (-not $KeepQueue -and $env:APPDATA) {
+        foreach ($queueFile in @(
+            (Join-Path $env:APPDATA "hippo-transcribe\queue.json"),
+            (Join-Path $env:APPDATA "transiel\queue.json")
+        )) {
+            if (Test-Path -LiteralPath $queueFile) {
+                Remove-Item -LiteralPath $queueFile -Force
+                Write-Step "Cleared persisted queue $queueFile"
+            }
         }
     }
 
