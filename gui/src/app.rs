@@ -6990,7 +6990,8 @@ impl App {
             return base;
         };
         let toast = mouse_area(
-            container(text(message.clone()).size(13))
+            // Larger than the default button text used by "Get Pro".
+            container(text(message.clone()).size(18))
                 // 44 px is roughly 50% taller than the old padded text row.
                 // The top padding below centres it on the header button line.
                 .height(Length::Fixed(44.0))
@@ -8388,6 +8389,7 @@ fn feature_vignette_local(scheme: Scheme) -> Element<'static, Message> {
     )
     .width(Length::Fill)
     .height(Length::Fill)
+    .center_x(Length::Fill)
     .center_y(Length::Fill)
     .into()
 }
