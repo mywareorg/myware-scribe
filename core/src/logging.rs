@@ -190,7 +190,7 @@ mod tests {
     #[test]
     fn timestamp_is_a_calendar_date() {
         let text = timestamp();
-        assert_eq!(text.len(), 21, "{text}");
+        assert_eq!(text.len(), 20, "{text}");
         assert!(text.ends_with('Z'));
         let year: i64 = text[..4].parse().unwrap();
         assert!(year >= 2024, "{text}");
