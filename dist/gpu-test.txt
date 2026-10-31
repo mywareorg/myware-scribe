@@ -1,0 +1,22 @@
+﻿GPU build readiness 2026-10-31 10:58:50
+PASS running on Windows
+PASS Visual Studio at C:\Program Files\Microsoft Visual Studio\18\Community
+PASS cl.exe -> C:\Program Files\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.51.36231\bin\HostX64\x64\cl.exe
+PASS cl.exe is the x64-hosted compiler
+PASS rc.exe -> C:\Program Files (x86)\Windows Kits\10\bin\10.0.28000.0\\x64\rc.exe
+PASS cargo.exe -> C:\Users\wuphy\.cargo\bin\cargo.exe
+PASS rustc.exe -> C:\Users\wuphy\.cargo\bin\rustc.exe
+PASS rustc host is x86_64-pc-windows-msvc
+PASS cmake -> C:\Program Files\CMake\bin\cmake.exe
+PASS ninja -> C:\Program Files\Microsoft Visual Studio\18\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\Ninja\ninja.exe
+PASS Vulkan SDK at C:\VulkanSDK\1.4.363.0
+PASS Include\vulkan\vulkan.h
+PASS Lib\vulkan-1.lib
+PASS Bin\glslc.exe
+PASS vcomp140.dll -> C:\Program Files\Microsoft Visual Studio\18\Community\VC\Redist\MSVC\14.16.27012\onecore\x64\Microsoft.VC141.OpenMP\vcomp140.dll
+PASS vulkan-1.dll is installed by the graphics driver
+WARN stale Visual Studio cache in C:\Users\wuphy\hb\release\build\whisper-rs-sys-248ef14cc20672fb\out\build\CMakeCache.txt; the build script discards it for GPU builds
+PASS CMake generator Ninja in C:\Users\wuphy\hb\release\build\whisper-rs-sys-3b14f51bf6218bdc\out\build\CMakeCache.txt
+PASS CMake generator Ninja in C:\Users\wuphy\hb\release\build\whisper-rs-sys-a4a4abcf5807047e\out\build\CMakeCache.txt
+Running the ggml Vulkan shader probe
+FAIL shader probe exited ==> Building the CPU-only backend (pass -Gpu for the Vulkan build) ==> Probing the nested shader configure (-Probe)   Report: C:\Users\wuphy\Documents\hippo-transcribe\dist\probe-shaders.txt  Build failed: At C:\Users\wuphy\Documents\hippo-transcribe\scripts\probe-shaders.ps1:113 char:5 +     throw "No unpacked whisper.cpp under $buildRoot. Run the build on ... +     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~   Message: No unpacked whisper.cpp under C:\Users\wuphy\Documents\hippo-transcribe\target\release\build. Run the build once so cargo unpacks it; the shader configure happens before the failure.   Stack:   at <ScriptBlock>, C:\Users\wuphy\Documents\hippo-transcribe\scripts\probe-shaders.ps1: line 113 | at <ScriptBlock>, C:\Users\wuphy\Documents\hippo-transcribe\scripts\build-windows.ps1: line 414   Logged to: C:\Users\wuphy\Documents\hippo-transcribe\dist\build-failure.txt 1; run scripts\diagnose-gpu-build.ps1
