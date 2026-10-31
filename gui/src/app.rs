@@ -622,7 +622,15 @@ fn aspect_clamp(requested: Size, last: Size) -> Size {
 impl App {
     pub fn new() -> Self {
         let settings = Self::load_settings();
-        let (queue, batch_paths) = Self::load_queue_and_batch();
+        let first_run = Self::is_first_run();
+        let (queue, batch_paths) = if first_run {
+            // Never restore a queue left behind by an older install or a
+            // previous build. The first launch of the app starts clean.
+            Self::clear_queue_files();
+            (Vec::new(), Vec::new())
+        } else {
+            Self::load_queue_and_batch()
+        };
         let now = SystemTime::now();
         let provider = license::provider();
         let pro_override = provider.override_tier();
@@ -749,6 +757,11 @@ impl App {
             last_model_check: Some(Instant::now()),
             drag_hover: false,
         };
+        if first_run {
+            // Establish the settings marker so the next launch restores the
+            // queue instead of treating every launch as a first run.
+            app.save_settings();
+        }
         if gpu_crashed {
             for profile in app.gpu_profiles.values_mut() {
                 profile.selected = false;
@@ -875,6 +888,24 @@ impl App {
 
     fn legacy_queue_path() -> Option<PathBuf> {
         Self::legacy_settings_path().map(|path| path.with_file_name("queue.json"))
+    }
+
+    /// First launch means no settings file exists yet. The settings file is
+    /// written immediately after construction so later launches restore the
+    /// queue normally.
+    fn is_first_run() -> bool {
+        let current = Self::settings_path().is_some_and(|path| path.exists());
+        let legacy = Self::legacy_settings_path().is_some_and(|path| path.exists());
+        !current && !legacy
+    }
+
+    fn clear_queue_files() {
+        for path in [Self::queue_path(), Self::legacy_queue_path()]
+            .into_iter()
+            .flatten()
+        {
+            let _ = std::fs::remove_file(path);
+        }
     }
 
     /// Load the queue plus the paths from the most recent batch.
@@ -1892,10 +1923,8 @@ impl App {
                     return Task::none();
                 }
                 if !asr::gpu_available() {
-                    self.toast = Some((
-                        "GPU unavailable in this build".to_string(),
-                        Instant::now(),
-                    ));
+                    self.toast =
+                        Some(("GPU unavailable in this build".to_string(), Instant::now()));
                     return Task::none();
                 }
                 let tested = self.gpu_profile().is_some_and(|profile| profile.tested);
@@ -1945,15 +1974,14 @@ impl App {
                 Task::none()
             }
             Message::RetestGpu => {
-                if matches!(self.status, Status::Running) || !self.can(license::Feature::GpuAcceleration)
+                if matches!(self.status, Status::Running)
+                    || !self.can(license::Feature::GpuAcceleration)
                 {
                     return Task::none();
                 }
                 if !asr::gpu_available() {
-                    self.toast = Some((
-                        "GPU unavailable in this build".to_string(),
-                        Instant::now(),
-                    ));
+                    self.toast =
+                        Some(("GPU unavailable in this build".to_string(), Instant::now()));
                     return Task::none();
                 }
                 self.gpu_profiles.remove(self.preset.arg());
@@ -2293,7 +2321,8 @@ impl App {
                 if self.rename_open
                     || self.line_edit.is_some()
                     || self.settings_open
-                    || self.calibration.is_some() {
+                    || self.calibration.is_some()
+                {
                     return Task::none();
                 }
                 Self::focus_probe()
@@ -2670,7 +2699,8 @@ impl App {
                 if self.rename_open
                     || self.line_edit.is_some()
                     || self.settings_open
-                    || self.calibration.is_some() {
+                    || self.calibration.is_some()
+                {
                     return Task::none();
                 }
                 Self::focus_probe().map(Message::ShortcutPlayChecked)
@@ -2690,16 +2720,19 @@ impl App {
                 if self.rename_open
                     || self.line_edit.is_some()
                     || self.settings_open
-                    || self.calibration.is_some() {
+                    || self.calibration.is_some()
+                {
                     return Task::none();
                 }
                 Self::focus_probe().map(move |focused| Message::SeekByChecked(delta, focused))
             }
             Message::SeekByChecked(delta, focused) => {
-                if focused || self.rename_open
+                if focused
+                    || self.rename_open
                     || self.line_edit.is_some()
                     || self.settings_open
-                    || self.calibration.is_some() {
+                    || self.calibration.is_some()
+                {
                     return Task::none();
                 }
                 if self.shown_duration().is_some() {
@@ -5080,14 +5113,13 @@ impl App {
             "Actual backend reported by the transcription pipeline.".to_string()
         });
         let now = self.tip(
-            text(now)
-                .size(11)
-                .wrapping(NO_WRAP)
-                .color(if actual.is_some_and(|value| !value.eq_ignore_ascii_case("cpu")) {
+            text(now).size(11).wrapping(NO_WRAP).color(
+                if actual.is_some_and(|value| !value.eq_ignore_ascii_case("cpu")) {
                     scheme.green
                 } else {
                     scheme.muted
-                }),
+                },
+            ),
             now_tip,
             &scheme,
         );
@@ -6558,9 +6590,7 @@ impl App {
                                  and make it the default?"
                             )
                         } else {
-                            format!(
-                                "GPU is {multiplier:.1}\u{00d7} CPU. Keep CPU?"
-                            )
+                            format!("GPU is {multiplier:.1}\u{00d7} CPU. Keep CPU?")
                         })
                         .size(theme::TEXT_SM)
                         .color(scheme.text),
@@ -6579,9 +6609,7 @@ impl App {
                             gpu.style(pill_button_secondary),
                         )
                     };
-                    body = body.push(
-                        row![horizontal_space(), keep, gpu].spacing(8),
-                    );
+                    body = body.push(row![horizontal_space(), keep, gpu].spacing(8));
                 }
             }
         }
@@ -9434,6 +9462,41 @@ mod tests {
         assert!(matches!(loaded[0].status, ItemStatus::Done));
         assert_eq!(loaded[0].duration, Some(1.5));
         assert_eq!(loaded[0].peaks.as_ref(), &vec![0.1, 0.2, 0.3]);
+    }
+
+    #[test]
+    fn first_launch_clears_a_stale_queue() {
+        let _guard = env_lock();
+        let config = ConfigEnv::new("first-launch-queue");
+        let dir = config.dir.clone();
+        let config_dir = dir.join("hippo-transcribe");
+        std::fs::create_dir_all(&config_dir).unwrap();
+
+        let audio = dir.join("stale.mp3");
+        std::fs::write(&audio, b"audio").unwrap();
+        let state = QueueState {
+            items: vec![QueueRecord {
+                audio: Some(audio.display().to_string()),
+                transcript: None,
+                duration: None,
+                status: "done".to_string(),
+                message: None,
+                stats: None,
+                peaks: Vec::new(),
+            }],
+            last_batch: vec![audio.display().to_string()],
+        };
+        std::fs::write(
+            config_dir.join("queue.json"),
+            serde_json::to_string(&state).unwrap(),
+        )
+        .unwrap();
+
+        let app = App::new();
+        assert!(app.queue.is_empty());
+        assert!(app.batch_paths.is_empty());
+        assert!(!App::queue_path().unwrap().exists());
+        assert!(App::settings_path().unwrap().exists());
     }
 
     #[test]
