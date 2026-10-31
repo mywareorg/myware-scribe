@@ -561,7 +561,8 @@ impl App {
         if license_state.access.tier == license::Tier::Free {
             preset = Preset::Balanced;
         }
-        Self {
+        let gpu_crashed = Self::gpu_guard_path().is_some_and(|path| path.exists());
+        let mut app = Self {
             output_dir: settings.output_dir.as_ref().map(PathBuf::from),
             preset,
             theme_mode: settings
@@ -601,7 +602,7 @@ impl App {
             rename_focus: 0,
             sms_mode: settings.sms_mode.unwrap_or(false),
             notifications: settings.notifications,
-            gpu_acceleration: settings.gpu_acceleration.unwrap_or(true),
+            gpu_acceleration: settings.gpu_acceleration.unwrap_or(true) && !gpu_crashed,
             show_timestamps: settings.show_timestamps,
             num_speakers: match settings.num_speakers {
                 Some(count) if count > 0 => Some(count),
@@ -662,7 +663,21 @@ impl App {
             model_cancel: Arc::new(AtomicBool::new(false)),
             last_model_check: Some(Instant::now()),
             drag_hover: false,
+        };
+        if gpu_crashed {
+            app.gpu_acceleration = false;
+            app.save_settings();
+            Self::clear_gpu_guard();
+            app.console_lines.push(
+                "GPU acceleration was disabled after the previous run did not finish cleanly."
+                    .to_string(),
+            );
+            app.toast = Some((
+                "GPU acceleration disabled after an unclean shutdown".to_string(),
+                Instant::now(),
+            ));
         }
+        app
     }
 
     /// Current configuration directory (`.../hippo-transcribe`).
@@ -699,6 +714,19 @@ impl App {
 
     fn settings_path() -> Option<PathBuf> {
         Self::config_dir().map(|dir| dir.join("settings.json"))
+    }
+
+    /// Marker for an in-flight GPU run. It is removed on a clean finish or an
+    /// explicit cancel, so its presence on the next launch means the previous
+    /// process crashed before it could fall back.
+    fn gpu_guard_path() -> Option<PathBuf> {
+        Self::settings_path().map(|path| path.with_file_name("gpu-run.lock"))
+    }
+
+    fn clear_gpu_guard() {
+        if let Some(path) = Self::gpu_guard_path() {
+            let _ = std::fs::remove_file(path);
+        }
     }
 
     fn license_path() -> Option<PathBuf> {
@@ -1582,6 +1610,9 @@ impl App {
                     return Task::none();
                 }
                 self.gpu_acceleration = value;
+                if !value {
+                    Self::clear_gpu_guard();
+                }
                 self.save_settings();
                 Task::none()
             }
@@ -3277,6 +3308,24 @@ impl App {
         self.begin_batch(false);
     }
 
+    /// Turn off GPU acceleration after a failed run so a broken driver cannot
+    /// trap the next attempt in the same backend.
+    fn disable_gpu_after_failure(&mut self, reason: &str) {
+        Self::clear_gpu_guard();
+        if !self.gpu_acceleration {
+            return;
+        }
+        self.gpu_acceleration = false;
+        self.save_settings();
+        self.console_lines.push(format!(
+            "GPU acceleration disabled after a transcription failure: {reason}"
+        ));
+        self.toast = Some((
+            "GPU acceleration disabled after an error; retry on CPU".to_string(),
+            Instant::now(),
+        ));
+    }
+
     /// Spawn a single pipeline process for all pending queue items, so the
     /// models load once and are reused across the whole batch. `preserve_view`
     /// keeps a completed transcript (and its playback) visible across an
@@ -3376,6 +3425,16 @@ impl App {
             self.view_error = None;
         }
         self.cancelled.store(false, Ordering::SeqCst);
+        if self.gpu_acceleration && cfg!(feature = "gpu") {
+            if let Some(path) = Self::gpu_guard_path() {
+                if let Some(parent) = path.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                let _ = std::fs::write(&path, std::process::id().to_string());
+            }
+        } else {
+            Self::clear_gpu_guard();
+        }
 
         backend::spawn(
             inputs,
@@ -3412,6 +3471,7 @@ impl App {
             backend::kill(pid);
         }
         self.cancelled.store(true, Ordering::SeqCst);
+        Self::clear_gpu_guard();
         self.status = Status::Cancelled;
         self.stage = "cancelled".to_string();
         self.progress = 0.0;
@@ -3854,6 +3914,7 @@ impl App {
                     self.save_queue();
                 }
                 Event::Error { message } => {
+                    self.disable_gpu_after_failure(&message);
                     self.stage = "error".to_string();
                     let had_current = self.current.is_some();
                     if let Some(index) = self.current.take() {
@@ -3878,6 +3939,7 @@ impl App {
                     self.save_queue();
                 }
                 Event::AllDone => {
+                    Self::clear_gpu_guard();
                     self.batch = false;
                     self.current = None;
                     self.stage = "done".to_string();
@@ -9224,6 +9286,49 @@ mod tests {
 
         let reloaded = pro_app();
         assert_eq!(reloaded.theme_mode, AppTheme::Dark);
+    }
+
+    #[test]
+    fn gpu_failure_turns_acceleration_off_and_persists() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("gpu-failure");
+        let mut app = pro_app();
+        assert!(app.gpu_acceleration);
+
+        let marker = App::gpu_guard_path().expect("config dir");
+        std::fs::write(&marker, "123").unwrap();
+        app.events.lock().unwrap().push_back(Event::Error {
+            message: "Vulkan device lost".to_string(),
+        });
+        let _ = app.drain_events();
+
+        assert!(!app.gpu_acceleration);
+        assert!(!marker.exists());
+        assert!(app
+            .console_lines
+            .iter()
+            .any(|line| line.contains("Vulkan device lost")));
+        assert!(app.toast.is_some());
+
+        let reloaded = pro_app();
+        assert!(!reloaded.gpu_acceleration);
+    }
+
+    #[test]
+    fn unclean_gpu_run_disables_acceleration_on_next_launch() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("gpu-crash");
+        let mut app = pro_app();
+        app.gpu_acceleration = true;
+        app.save_settings();
+
+        let marker = App::gpu_guard_path().expect("config dir");
+        std::fs::write(&marker, "123").unwrap();
+
+        let restarted = App::new();
+        assert!(!restarted.gpu_acceleration);
+        assert!(!marker.exists());
+        assert!(restarted.toast.is_some());
     }
 
     #[test]

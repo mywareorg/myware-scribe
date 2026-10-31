@@ -216,7 +216,9 @@ whisper.cpp uses the fastest backend the build provides:
   and the console reports why. `HIPPO_TRANSCRIBE_ACCEL=cpu` forces CPU.
 - **GPU switch** — Settings > GPU acceleration (Experimental) is available in
   `-Gpu` builds. Turning it off passes the CPU-only override to the
-  transcription child process; CPU-only builds show it as unavailable.
+  transcription child process; CPU-only builds show it as unavailable. A
+  transcription error, or an unclean shutdown during a GPU run, turns the
+  switch off automatically so the next attempt starts on the CPU.
 - **Windows GPU troubleshooting** — run `.\scripts\test-gpu-build.ps1` before a
   build; `-Probe` isolates the ggml shader configure, `-Build` performs the GPU
   build, and `-Artifact` checks the finished executable's runtime DLLs. The
