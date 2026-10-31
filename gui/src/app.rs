@@ -6991,7 +6991,11 @@ impl App {
         };
         let toast = mouse_area(
             container(text(message.clone()).size(13))
-                .padding([8, 14])
+                // 44 px is roughly 50% taller than the old padded text row.
+                // The top padding below centres it on the header button line.
+                .height(Length::Fixed(44.0))
+                .align_y(iced::Alignment::Center)
+                .padding([0, 14])
                 .style(move |_theme| container::Style {
                     background: Some(scheme.toast_bg.into()),
                     text_color: Some(scheme.toast_text),
@@ -7006,7 +7010,7 @@ impl App {
             .height(Length::Fill)
             .align_x(iced::Alignment::End)
             .align_y(iced::Alignment::Start)
-            .padding(20);
+            .padding([24, 20]);
         stack![base, overlay].into()
     }
 
@@ -7942,19 +7946,6 @@ fn header_logo_handle() -> iced::widget::image::Handle {
     .clone()
 }
 
-/// Bundled brand mark, decoded once and shared with the image widget.
-fn logo_handle() -> iced::widget::image::Handle {
-    static LOGO: OnceLock<iced::widget::image::Handle> = OnceLock::new();
-    LOGO.get_or_init(|| {
-        let image = image::load_from_memory(include_bytes!("../assets/logo.png"))
-            .expect("bundled Hippo Transcribe logo")
-            .into_rgba8();
-        let (width, height) = image.dimensions();
-        iced::widget::image::Handle::from_rgba(width, height, image.into_raw())
-    })
-    .clone()
-}
-
 /// A Bootstrap Icons glyph rendered as an element.
 fn icon(code: char, size: f32) -> Element<'static, Message> {
     text(code.to_string())
@@ -8340,7 +8331,7 @@ fn feature_vignette_review(scheme: Scheme) -> Element<'static, Message> {
 fn feature_vignette_local(scheme: Scheme) -> Element<'static, Message> {
     let mark = container(
         container(
-            iced::widget::image(logo_handle())
+            iced::widget::image(header_logo_handle())
                 .width(Length::Fixed(66.0))
                 .height(Length::Fixed(66.0)),
         )
