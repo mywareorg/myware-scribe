@@ -431,6 +431,7 @@ pub struct App {
     rename_focus: usize,
     sms_mode: bool,
     notifications: bool,
+    gpu_acceleration: bool,
     show_timestamps: bool,
     num_speakers: Option<i32>,
     language: Option<String>,
@@ -600,6 +601,7 @@ impl App {
             rename_focus: 0,
             sms_mode: settings.sms_mode.unwrap_or(false),
             notifications: settings.notifications,
+            gpu_acceleration: settings.gpu_acceleration.unwrap_or(true),
             show_timestamps: settings.show_timestamps,
             num_speakers: match settings.num_speakers {
                 Some(count) if count > 0 => Some(count),
@@ -730,6 +732,7 @@ impl App {
             num_speakers: Some(self.num_speakers.unwrap_or(2)),
             language: self.language.clone(),
             notifications: self.notifications,
+            gpu_acceleration: Some(self.gpu_acceleration),
             show_timestamps: self.show_timestamps,
             font_scale: Some(self.font_scale),
             playback_speed: Some(self.playback_speed),
@@ -1571,6 +1574,14 @@ impl App {
             }
             Message::NotificationsToggled(value) => {
                 self.notifications = value;
+                self.save_settings();
+                Task::none()
+            }
+            Message::GpuToggled(value) => {
+                if matches!(self.status, Status::Running) {
+                    return Task::none();
+                }
+                self.gpu_acceleration = value;
                 self.save_settings();
                 Task::none()
             }
@@ -3372,6 +3383,7 @@ impl App {
             self.preset.arg(),
             self.num_speakers,
             self.language.clone(),
+            self.gpu_acceleration,
             true, // diarization cache is always on
             self.pipelines_diarize(),
             self.events.clone(),
@@ -5964,6 +5976,51 @@ impl App {
                 .width(Length::Fixed(64.0)),
         );
 
+        let gpu_available = cfg!(feature = "gpu");
+        let gpu_on = self.gpu_acceleration && gpu_available;
+        let gpu_hint = if !gpu_available {
+            "Not included in this build"
+        } else if running {
+            "Locked while transcribing"
+        } else {
+            "Vulkan, CPU fallback"
+        };
+        let gpu_toggle = settings_control(
+            action(text(if gpu_on { "On" } else { "Off" }).size(theme::TEXT_XS))
+                .on_press_maybe((gpu_available && !running).then_some(Message::GpuToggled(!gpu_on)))
+                .style(move |theme, status| {
+                    if gpu_on {
+                        pill_button_active(theme, status)
+                    } else {
+                        pill_button_secondary(theme, status)
+                    }
+                })
+                .width(Length::Fixed(64.0)),
+        );
+        let gpu_row = row![
+            column![
+                row![
+                    text("GPU acceleration")
+                        .size(theme::TEXT_SM)
+                        .wrapping(NO_WRAP)
+                        .color(scheme.text),
+                    text("Experimental").size(10).color(scheme.muted),
+                ]
+                .spacing(6)
+                .align_y(iced::Alignment::Center),
+                text(gpu_hint)
+                    .size(11)
+                    .wrapping(NO_WRAP)
+                    .color(scheme.muted),
+            ]
+            .spacing(1)
+            .width(Length::Fill),
+            gpu_toggle,
+        ]
+        .spacing(theme::SPACE_LG)
+        .align_y(iced::Alignment::Center)
+        .width(Length::Fill);
+
         let location = self
             .output_dir
             .as_ref()
@@ -6091,6 +6148,7 @@ impl App {
         body = body.push(settings_row("Speakers", speakers, scheme));
         body = body.push(settings_row("Language", language, scheme));
         body = body.push(settings_row("Show timestamps", timestamps, scheme));
+        body = body.push(gpu_row);
         body = body.push(settings_divider(scheme));
         if self.can(license::Feature::Playback) {
             body = body.push(settings_section_label("Playback", scheme));
@@ -9175,6 +9233,7 @@ mod tests {
 
         let mut app = pro_app();
         assert!(!app.settings_open);
+        assert!(app.gpu_acceleration);
 
         let _ = app.update(Message::OpenSettings);
         assert!(app.settings_open);
@@ -9190,6 +9249,7 @@ mod tests {
         let _ = app.update(Message::ZoomIn);
         let _ = app.update(Message::ToggleFollowPlayhead);
         let _ = app.update(Message::NotificationsToggled(false));
+        let _ = app.update(Message::GpuToggled(false));
         let _ = app.update(Message::CloseSettings);
         assert!(!app.settings_open);
 
@@ -9199,6 +9259,7 @@ mod tests {
         assert!((reloaded.font_scale - 1.1).abs() < 0.001);
         assert!(!reloaded.follow_playhead);
         assert!(!reloaded.notifications);
+        assert!(!reloaded.gpu_acceleration);
     }
 
     #[test]

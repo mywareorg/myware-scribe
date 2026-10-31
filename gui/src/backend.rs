@@ -114,6 +114,7 @@ pub fn spawn(
     preset: &'static str,
     num_speakers: Option<i32>,
     language: Option<String>,
+    gpu_acceleration: bool,
     cache: bool,
     // False runs ASR only: no diarization, no speaker labels.
     diarized: bool,
@@ -160,6 +161,11 @@ pub fn spawn(
         }
         if let Some(language) = &language {
             command.arg("--language").arg(language);
+        }
+        if !gpu_acceleration {
+            // The core reads this at model-load time. Setting it here only
+            // affects the pipeline child, not the GUI process.
+            command.env("HIPPO_TRANSCRIBE_ACCEL", "cpu");
         }
         if let Some(dir) = &output_dir {
             command.arg("--output-dir").arg(dir);
