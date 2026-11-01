@@ -604,7 +604,7 @@ try {
         "$hash  $(Split-Path $zip -Leaf)" | Set-Content "$zip.sha256" -Encoding ASCII
     }
 
-    $msix = $null
+    $msixPath = $null
     if ($Msix -or $Sign -or $Wack -or $CertificatePath) {
         $identityFile = if ($IdentityPath) {
             if ([System.IO.Path]::IsPathRooted($IdentityPath)) {
@@ -620,8 +620,8 @@ try {
         # the in-script helper here with a spurious SwitchParameter error, while
         # the identical call works from a fresh runspace.
         $packer = Join-Path $PSScriptRoot "make-msix.ps1"
-        $msix = Join-Path $outRoot "$name.msix"
-        if (Test-Path $msix) { Remove-Item $msix -Force }
+        $msixPath = Join-Path $outRoot "$name.msix"
+        if (Test-Path $msixPath) { Remove-Item $msixPath -Force }
         Invoke-Native powershell @(
             "-NoProfile", "-ExecutionPolicy", "Bypass",
             "-File", $packer,
@@ -631,8 +631,8 @@ try {
             "-Version", $releaseVersion,
             "-IdentityPath", $identityFile
         )
-        if (-not (Test-Path $msix)) {
-            throw "Packing returned without producing $msix"
+        if (-not (Test-Path $msixPath)) {
+            throw "Packing returned without producing $msixPath"
         }
 
         if ($Sign -or $CertificatePath) {
@@ -644,14 +644,14 @@ try {
             } else {
                 Join-Path $root $CertificatePath
             }
-            Invoke-MsixSigning -Msix $msix -Certificate $certificate -Password $CertificatePassword
+            Invoke-MsixSigning -Msix $msixPath -Certificate $certificate -Password $CertificatePassword
         }
 
         if ($Wack) {
             if (-not $CertificatePath) {
                 throw "-Wack needs a signed package; pass -Sign -CertificatePath as well"
             }
-            Invoke-Wack -Msix $msix -ReportPath (Join-Path $outRoot "$name-wack.xml")
+            Invoke-Wack -Msix $msixPath -ReportPath (Join-Path $outRoot "$name-wack.xml")
         }
     }
 
@@ -660,7 +660,7 @@ try {
     Write-Host "  Binary: $binary"
     Write-Host "  Stage:  $stage"
     if (-not $NoZip) { Write-Host "  Zip:    $zip" }
-    if ($msix) { Write-Host "  MSIX:   $msix" }
+    if ($msixPath) { Write-Host "  MSIX:   $msixPath" }
 }
 finally {
     Pop-Location
