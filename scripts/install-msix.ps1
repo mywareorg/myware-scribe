@@ -71,12 +71,6 @@ function Remove-PackageData {
     Write-Host "  Deleted"
 }
 
-function Test-Elevated {
-    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
-    $principal = New-Object Security.Principal.WindowsPrincipal($identity)
-    return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-}
-
 if ($Msix) {
     $package = Resolve-RepoPath $Msix
     if (-not (Test-Path $package)) { throw "Package not found: $package" }

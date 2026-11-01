@@ -322,7 +322,48 @@ function Invoke-Wack {
         throw "appcert.exe (Windows App Certification Kit) was not found. Add the 'Windows App Certification Kit' component to the Windows 10/11 SDK in the Visual Studio installer, or install the standalone SDK."
     }
 
+    # AppXSvc installs the package from appcert, and it only trusts machine-wide
+    # certificates, so a cert trusted for the user alone fails inside appcert.
+    $thumbprint = (Get-AuthenticodeSignature -FilePath $Msix).SignerCertificate.Thumbprint
+    if ($thumbprint) {
+        $machineTrust = Get-ChildItem "Cert:\LocalMachine\TrustedPeople" -ErrorAction SilentlyContinue |
+            Where-Object { $_.Thumbprint -eq $thumbprint } |
+            Select-Object -First 1
+        if (-not $machineTrust) {
+            Write-Warn "The signing certificate is only trusted for this user, so appcert cannot install the package. From an elevated prompt: Import-Certificate -FilePath <signing.cer> -CertStoreLocation Cert:\LocalMachine\TrustedPeople"
+        }
+    }
+
     Write-Step "Running the Windows App Certification Kit"
+
+    # appcert.exe is the one SDK tool that refuses to run unelevated, and it
+    # also installs the package, which AppXSvc only allows for a certificate in
+    # the machine store. Elevate just this step so the build stays unprivileged.
+    if (-not (Test-Elevated)) {
+        $helper = Join-Path $PSScriptRoot "wack-elevated.ps1"
+        $logPath = [System.IO.Path]::ChangeExtension($ReportPath, ".log")
+        $arguments = @(
+            "-NoProfile", "-ExecutionPolicy", "Bypass",
+            "-File", "`"$helper`"",
+            "-Appcert", "`"$appcert`"",
+            "-Msix", "`"$Msix`"",
+            "-ReportPath", "`"$ReportPath`"",
+            "-LogPath", "`"$logPath`""
+        ) -join " "
+        Write-Host "  appcert.exe needs administrator rights; approve the UAC prompt"
+        try {
+            $elevated = Start-Process -FilePath "powershell" -ArgumentList $arguments -Verb RunAs -Wait -PassThru
+        } catch {
+            throw "Could not elevate for appcert.exe ($($_.Exception.Message)). Run the build from an elevated prompt, or drop -Wack."
+        }
+        if (Test-Path $logPath) { Get-Content -Path $logPath | Out-Host }
+        if ($elevated.ExitCode -ne 0) {
+            throw "appcert failed with exit code $($elevated.ExitCode) (report: $ReportPath)"
+        }
+        Write-Host "  WACK report: $ReportPath"
+        return
+    }
+
     & $appcert reset | Out-Null
     # appcert installs the package, then removes it again. The package must be
     # signed by a certificate this machine trusts.

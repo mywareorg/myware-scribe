@@ -555,6 +555,13 @@ function Resolve-SdkTool {
     return $null
 }
 
+# appcert.exe and the AppXSvc trust store both need administrator rights.
+function Test-Elevated {
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $principal = New-Object Security.Principal.WindowsPrincipal($identity)
+    return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+}
+
 # The manifest needs four parts; the crate version only has three.
 function ConvertTo-FourPartVersion {
     param([Parameter(Mandatory = $true)][string]$Version)
