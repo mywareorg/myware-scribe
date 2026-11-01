@@ -70,6 +70,8 @@ param(
     [string]$CertificatePassword,
     # Run the Windows App Certification Kit against the finished package.
     [switch]$Wack,
+    # Keep the unpacked MSIX layout under dist for inspection.
+    [switch]$KeepLayout,
     # Vulkan + OpenMP acceleration. Enabled automatically whenever the Vulkan
     # SDK is installed; -Gpu requires the SDK and fails without it, -Cpu forces
     # the CPU-only build even on a machine that has the SDK.
@@ -685,7 +687,7 @@ try {
         $packer = Join-Path $PSScriptRoot "make-msix.ps1"
         $msixPath = Join-Path $outRoot "$name.msix"
         if (Test-Path $msixPath) { Remove-Item $msixPath -Force }
-        Invoke-Native powershell @(
+        $packArgs = @(
             "-NoProfile", "-ExecutionPolicy", "Bypass",
             "-File", $packer,
             "-Stage", $stage,
@@ -694,6 +696,8 @@ try {
             "-Version", $releaseVersion,
             "-IdentityPath", $identityFile
         )
+        if ($KeepLayout) { $packArgs += "-KeepLayout" }
+        Invoke-Native powershell $packArgs
         if (-not (Test-Path $msixPath)) {
             throw "Packing returned without producing $msixPath"
         }
