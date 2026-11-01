@@ -92,13 +92,13 @@ counts in mind, they are the limits the form enforces.
 
 ## Screenshot shot list
 
-Capture on the Windows VM at 1920x1080, window maximised, no personal file names
-in the queue, one shot in the dark theme. The Store needs at least one image and
-accepts up to ten, each at least 1366x768.
+Capture on the Windows build machine at 1920x1080, window maximised, no personal
+file names in the queue, one shot in the dark theme. The Store needs at least
+one image and accepts up to ten, each at least 1366x768.
 
 The eight files in `packaging/screenshots/` are the listing set, in order:
 
-1. `01-drop.png` — the drop zone with a file added and Start visible.
+1. `01-drop.png` — a finished transcript with the queue, player and speaker bar.
 2. `02-running.png` — a run in progress: stage label, progress, elapsed time.
 3. `03-transcript.png` — a finished multi-speaker transcript with labels and timestamps.
 4. `04-summary.png` — the completion summary.
