@@ -341,6 +341,7 @@ function Invoke-Wack {
     # the machine store. Elevate just this step so the build stays unprivileged.
     if (-not (Test-Elevated)) {
         $helper = Join-Path $PSScriptRoot "wack-elevated.ps1"
+        if (-not (Test-Path $helper)) { throw "Missing helper script: $helper" }
         $logPath = [System.IO.Path]::ChangeExtension($ReportPath, ".log")
         $arguments = @(
             "-NoProfile", "-ExecutionPolicy", "Bypass",
@@ -351,19 +352,27 @@ function Invoke-Wack {
             "-LogPath", "`"$logPath`""
         ) -join " "
         Write-Host "  appcert.exe needs administrator rights; approve the UAC prompt"
+        Write-Verbose "powershell $arguments"
         try {
             $elevated = Start-Process -FilePath "powershell" -ArgumentList $arguments -Verb RunAs -Wait -PassThru
         } catch {
             throw "Could not elevate for appcert.exe ($($_.Exception.Message)). Run the build from an elevated prompt, or drop -Wack."
         }
+        if ($elevated) { $elevated.Refresh() }
         if (Test-Path $logPath) {
             Get-Content -Path $logPath | Out-Host
         } else {
-            Write-Warn "appcert wrote no output to $logPath"
+            Write-Warn "appcert wrote nothing to $logPath, so the elevated run never started. Run this from an elevated prompt to see why:"
+            Write-Host "    powershell $arguments"
         }
-        if ($elevated.ExitCode -ne 0) {
+        # -PassThru can report a null exit code; treat only a real failure as one.
+        $code = if ($elevated -and $null -ne $elevated.ExitCode) { $elevated.ExitCode } else { 0 }
+        if ($code -ne 0) {
             $report = if (Test-Path $ReportPath) { "report: $ReportPath" } else { "no report written" }
-            throw "appcert failed with exit code $($elevated.ExitCode) ($report)"
+            throw "appcert failed with exit code $code ($report)"
+        }
+        if (-not (Test-Path $ReportPath)) {
+            throw "appcert exited 0 but wrote no report to $ReportPath"
         }
         Write-Host "  WACK report: $ReportPath"
         return
@@ -375,6 +384,9 @@ function Invoke-Wack {
     & $appcert test -appxpackagepath $Msix -reportoutputpath $ReportPath | Out-Host
     if ($LASTEXITCODE -ne 0) {
         throw "appcert failed with exit code $LASTEXITCODE (report: $ReportPath)"
+    }
+    if (-not (Test-Path $ReportPath)) {
+        throw "appcert exited 0 but wrote no report to $ReportPath"
     }
     Write-Host "  WACK report: $ReportPath"
 }

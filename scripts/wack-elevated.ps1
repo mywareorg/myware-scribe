@@ -20,11 +20,20 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+# Written before anything can fail, so a crashed run still leaves evidence of
+# how far it got.
+"wack-elevated started $(Get-Date -Format 'u')" | Out-File -Path $LogPath -Encoding utf8
+"  appcert:    $Appcert" | Out-File -Path $LogPath -Encoding utf8 -Append
+"  package:    $Msix" | Out-File -Path $LogPath -Encoding utf8 -Append
+"  report:     $ReportPath" | Out-File -Path $LogPath -Encoding utf8 -Append
+
 $exitCode = 1
 try {
-    & $Appcert reset 2>&1 | Out-File -Path $LogPath -Encoding utf8
+    "--- appcert reset ---" | Out-File -Path $LogPath -Encoding utf8 -Append
+    & $Appcert reset 2>&1 | Out-File -Path $LogPath -Encoding utf8 -Append
     # appcert installs the package, runs the tests, then removes it again. The
     # package must be signed by a certificate this machine trusts.
+    "--- appcert test ---" | Out-File -Path $LogPath -Encoding utf8 -Append
     & $Appcert test -appxpackagepath $Msix -reportoutputpath $ReportPath 2>&1 |
         Out-File -Path $LogPath -Encoding utf8 -Append
     $exitCode = if ($null -eq $LASTEXITCODE) { 0 } else { $LASTEXITCODE }
