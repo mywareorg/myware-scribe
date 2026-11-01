@@ -1,9 +1,11 @@
-﻿=== Build failed 2026-11-01 13:38:07 ===
-At C:\Users\wuphy\Documents\hippo-transcribe\scripts\build-windows.ps1:322 char:9
-+         throw "appcert.exe (Windows App Certification Kit) was not fo ...
-+         ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-Message: appcert.exe (Windows App Certification Kit) was not found. Install the Windows 10/11 SDK.
-Stack:   at Invoke-Wack, C:\Users\wuphy\Documents\hippo-transcribe\scripts\build-windows.ps1: line 322
+﻿=== Build failed 2026-11-01 13:40:01 ===
+At C:\Users\wuphy\Documents\hippo-transcribe\scripts\build-windows.ps1:654 char:13
++             Invoke-Wack -Msix $msixPath -ReportPath (Join-Path $outRo ...
++             ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Message: Program 'appcert.exe' failed to run: The requested operation requires elevationAt C:\Users\wuphy\Documents\hippo-transcribe\scripts\build-windows.ps1:326 char:5
++     & $appcert reset | Out-Null
++     ~~~~~~~~~~~~~~~~.
+Stack:   at Invoke-Wack, C:\Users\wuphy\Documents\hippo-transcribe\scripts\build-windows.ps1: line 326
 at <ScriptBlock>, C:\Users\wuphy\Documents\hippo-transcribe\scripts\build-windows.ps1: line 654
 at <ScriptBlock>, <No file>: line 1
 
@@ -52,12 +54,6 @@ Package creation succeeded.
   Package: C:\Users\wuphy\Documents\hippo-transcribe\dist\hippo-transcribe-0.1.0-windows-x64.msix
 
 === console ===
-model set v4: 3 ok, 0 failed (C:\Users\wuphy\Documents\hippo-transcribe\dist\hippo-transcribe-0.1.0-windows-x64\models)
-==> Writing C:\Users\wuphy\Documents\hippo-transcribe\dist\hippo-transcribe-0.1.0-windows-x64.zip
-    powershell -NoProfile -ExecutionPolicy Bypass -File C:\Users\wuphy\Documents\hippo-transcribe\scripts\make-msix.ps1 -Stage C:\Users\wuphy\Documents\hippo-transcribe\dist\hippo-transcribe-0.1.0-windows-x64 -OutDir C:\Users\wuphy\Documents\hippo-transcribe\dist -Name hippo-transcribe-0.1.0-windows-x64 -Version 0.1.0 -IdentityPath C:\Users\wuphy\Documents\hippo-transcribe\packaging\identity.json
-==> Packing C:\Users\wuphy\Documents\hippo-transcribe\dist\hippo-transcribe-0.1.0-windows-x64.msix
-Microsoft (R) MakeAppx Tool
-
 Copyright (C) 2013 Microsoft.  All rights reserved.
 
 
@@ -127,10 +123,16 @@ Package creation succeeded.
 Done Adding Additional Store
 Successfully signed: C:\Users\wuphy\Documents\hippo-transcribe\dist\hippo-transcribe-0.1.0-windows-x64.msix
 
-PS>TerminatingError(): "appcert.exe (Windows App Certification Kit) was not found. Install the Windows 10/11 SDK."
+==> Running the Windows App Certification Kit
+PS>TerminatingError(): "Program 'appcert.exe' failed to run: The requested operation requires elevationAt C:\Users\wuphy\Documents\hippo-transcribe\scripts\build-windows.ps1:326 char:5
++     & $appcert reset | Out-Null
++     ~~~~~~~~~~~~~~~~."
+>> TerminatingError(Invoke-Wack): "Program 'appcert.exe' failed to run: The requested operation requires elevationAt C:\Users\wuphy\Documents\hippo-transcribe\scripts\build-windows.ps1:326 char:5
++     & $appcert reset | Out-Null
++     ~~~~~~~~~~~~~~~~."
 **********************
 Windows PowerShell transcript end
-End time: 20261101133807
+End time: 20261101134000
 **********************
 
 === configure state ===
