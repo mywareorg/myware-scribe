@@ -519,6 +519,10 @@ function Ensure-SherpaDlls {
 
 # Store tooling ships with the Windows SDK, which VsDevCmd does not always put
 # on PATH. Fall back to the newest installed kit.
+#
+# appcert.exe is not under bin\<version>\x64 like makeappx and signtool: the
+# Windows App Certification Kit installs into its own folder beside bin, so the
+# bin scan alone never finds it.
 function Resolve-SdkTool {
     param([Parameter(Mandatory = $true)][string]$Name)
 
@@ -526,15 +530,26 @@ function Resolve-SdkTool {
     if ($command) { return $command.Source }
 
     $kits = @(
-        "${env:ProgramFiles(x86)}\Windows Kits\10\bin",
-        "$env:ProgramFiles\Windows Kits\10\bin"
+        "${env:ProgramFiles(x86)}\Windows Kits\10",
+        "$env:ProgramFiles\Windows Kits\10"
     ) | Where-Object { $_ -and (Test-Path $_) }
-    foreach ($kitsRoot in $kits) {
-        $found = Get-ChildItem -Path $kitsRoot -Directory -ErrorAction SilentlyContinue |
+
+    foreach ($kit in $kits) {
+        $bin = Join-Path $kit "bin"
+        $found = Get-ChildItem -Path $bin -Directory -ErrorAction SilentlyContinue |
             Sort-Object Name -Descending |
             ForEach-Object { Join-Path $_.FullName "x64\$Name" } |
             Where-Object { Test-Path $_ } |
             Select-Object -First 1
+        if ($found) { return $found }
+    }
+
+    $certKit = "App Certification Kit"
+    foreach ($kit in $kits) {
+        $found = @(
+            (Join-Path (Join-Path $kit $certKit) $Name),
+            (Join-Path (Join-Path (Join-Path $kit $certKit) "x64") $Name)
+        ) | Where-Object { Test-Path $_ } | Select-Object -First 1
         if ($found) { return $found }
     }
     return $null

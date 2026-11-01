@@ -319,7 +319,7 @@ function Invoke-Wack {
 
     $appcert = Resolve-SdkTool -Name "appcert.exe"
     if (-not $appcert) {
-        throw "appcert.exe (Windows App Certification Kit) was not found. Install the Windows 10/11 SDK."
+        throw "appcert.exe (Windows App Certification Kit) was not found. Add the 'Windows App Certification Kit' component to the Windows 10/11 SDK in the Visual Studio installer, or install the standalone SDK."
     }
 
     Write-Step "Running the Windows App Certification Kit"
