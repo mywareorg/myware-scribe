@@ -26,7 +26,7 @@ it for the current user:
 
     .\scripts\make-test-cert.ps1
     .\scripts\build-windows.ps1 -SkipTests -SkipModels -NoZip -Msix -Sign `
-        -CertificatePath C:\keys\hippo-test.pfx -CertificatePassword hippo-dev
+        -CertificatePath C:\keys\hippo-test.pfx -CertificatePassword hippo-test
 
 To sign a package that already exists (for example one a build left unsigned),
 run the same signing step on its own:

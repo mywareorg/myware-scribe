@@ -30,7 +30,7 @@ param(
     # in packaging/identity.json rather than a friendly name.
     [string]$Subject,
     [string]$PfxPath = "C:\keys\hippo-test.pfx",
-    [string]$Password = "hippo-dev",
+    [string]$Password = "hippo-test",
     # Skip the TrustedPeople import when only the .pfx is wanted.
     [switch]$NoTrust,
     [switch]$Force

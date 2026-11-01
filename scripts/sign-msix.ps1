@@ -20,7 +20,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\sign-msix.ps1
 
 .EXAMPLE
 .\scripts\sign-msix.ps1 -Msix dist\hippo-transcribe-0.1.0-windows-x64.msix `
-    -PfxPath C:\keys\hippo-test.pfx -Password hippo-dev
+    -PfxPath C:\keys\hippo-test.pfx -Password hippo-test
 #>
 [CmdletBinding()]
 param(
@@ -28,7 +28,7 @@ param(
     [string]$Msix,
     [string]$PfxPath = "C:\keys\hippo-test.pfx",
     # Password for the PFX. Left empty it comes from HIPPO_TEST_PFX_PASSWORD,
-    # then falls back to "hippo-dev" (what make-test-cert.ps1 uses by default).
+    # then falls back to "hippo-test" (what make-test-cert.ps1 uses by default).
     [string]$Password,
     # Optional RFC 3161 timestamp server. A self-signed test certificate does
     # not need one; a real certificate should have it.
@@ -39,7 +39,7 @@ $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
 if (-not $PSBoundParameters.ContainsKey("Password")) {
-    $Password = if ($env:HIPPO_TEST_PFX_PASSWORD) { $env:HIPPO_TEST_PFX_PASSWORD } else { "hippo-dev" }
+    $Password = if ($env:HIPPO_TEST_PFX_PASSWORD) { $env:HIPPO_TEST_PFX_PASSWORD } else { "hippo-test" }
 }
 
 . (Join-Path $PSScriptRoot "windows-env.ps1")
@@ -126,7 +126,7 @@ if ($exitCode -ne 0) {
         throw @"
 signtool rejected the password for $certificate.
 Pass the real one with -Password '<password>', or set HIPPO_TEST_PFX_PASSWORD.
-"hippo-dev" is only the default of .\scripts\make-test-cert.ps1.
+"hippo-test" is only the default of .\scripts\make-test-cert.ps1.
 "@
     }
     throw "signtool failed with exit code $exitCode (output in $log)"

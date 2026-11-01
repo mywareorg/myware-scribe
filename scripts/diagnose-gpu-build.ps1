@@ -173,7 +173,7 @@ if ($generators -match "Visual Studio") {
     Say ""
     Say '    $env:CMAKE_GENERATOR = "Ninja"'
     Say ('    Remove-Item -Recurse -Force "' + $buildRoot + '\whisper-rs-sys-*"')
-    Say '    .\scripts\build-windows.ps1 -SkipTests -SkipModels -NoZip -Msix -Sign -Gpu -CertificatePath C:\keys\hippo-test.pfx -CertificatePassword hippo-dev'
+    Say '    .\scripts\build-windows.ps1 -SkipTests -SkipModels -NoZip -Msix -Sign -Gpu -CertificatePath C:\keys\hippo-test.pfx -CertificatePassword hippo-test'
 } elseif ($generators.Count -gt 0) {
     Say ("  Generator: " + ($generators -join ", "))
 } else {
