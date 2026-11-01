@@ -105,8 +105,16 @@ if (-not $SkipTrust -and -not (Test-Elevated)) {
     if ($Fresh) { $arguments += "-Fresh" }
     $arguments = $arguments -join " "
     $elevated = Start-Process -FilePath "powershell" -ArgumentList $arguments -Verb RunAs -Wait -PassThru
-    if ($elevated.ExitCode -ne 0) {
-        throw "The elevated install failed with exit code $($elevated.ExitCode). Run this script from an elevated Prompt to see the output, or enable Developer Mode and pass -SkipTrust."
+    if ($elevated) { $elevated.Refresh() }
+    $childCode = if ($elevated -and $null -ne $elevated.ExitCode) { $elevated.ExitCode } else { 0 }
+    if ($childCode -ne 0) {
+        # The elevated window closes with its process, so the child leaves the
+        # failure detail beside the package for the parent to print.
+        $errorLog = Join-Path (Split-Path -Parent $package) "install-error.txt"
+        if (Test-Path $errorLog) {
+            Get-Content -Path $errorLog | Out-Host
+        }
+        throw "The elevated install failed with exit code $childCode. Run this script from an elevated Prompt to see the output, or enable Developer Mode and pass -SkipTrust."
     }
     Write-Host ""
     Write-Host "Installed" -ForegroundColor Green
@@ -177,7 +185,27 @@ if ($Fresh) {
 }
 
 Write-Step "Installing $(Split-Path $package -Leaf)"
-Add-AppxPackage -Path $package
+try {
+    Add-AppxPackage -Path $package -ErrorAction Stop
+} catch {
+    # The HRESULT maps to a specific AppXSvc failure, and the log entry usually
+    # names the cause; a bare "it failed" costs another round trip.
+    $errorLog = Join-Path (Split-Path -Parent $package) "install-error.txt"
+    $detail = @(
+        "Install failed: $($_.Exception.Message)",
+        "  Package:   $package",
+        "  Signature: $((Get-AuthenticodeSignature -FilePath $package).Status)",
+        "  AppXSvc log:"
+    )
+    $detail += Get-AppxLog -ErrorAction SilentlyContinue |
+        Where-Object { $_.Level -ne "Info" } |
+        Select-Object -Last 6 |
+        ForEach-Object { "    " + $_.Message }
+    $detail | Out-File -FilePath $errorLog -Encoding utf8
+    $detail | Out-Host
+    Write-Warn "Details written to $errorLog"
+    exit 1
+}
 
 $installed = if ($packageName) {
     Get-AppxPackage -Name $packageName -ErrorAction SilentlyContinue | Select-Object -First 1
