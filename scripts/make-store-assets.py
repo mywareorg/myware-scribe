@@ -74,8 +74,9 @@ def main() -> None:
         background = corner
 
     # Store listing logo and the Start menu / taskbar / tile assets. These are
-    # transparent: Windows and the Store supply their own backdrop.
-    save(badge, 300, 300, out / "StoreLogo.png", transparent)
+    # transparent: Windows and the Store supply their own backdrop. The packaged
+    # StoreLogo is 50x50 by schema; WACK rejects any other size.
+    save(badge, 50, 50, out / "StoreLogo.png", transparent)
     save(badge, 44, 44, out / "Square44x44Logo.png", transparent)
     save(badge, 88, 88, out / "Square44x44Logo.scale-200.png", transparent)
     save(badge, 176, 176, out / "Square44x44Logo.scale-400.png", transparent)
