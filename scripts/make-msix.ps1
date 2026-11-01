@@ -187,6 +187,38 @@ if ($LASTEXITCODE -ne 0) {
 $hash = (Get-FileHash $msix -Algorithm SHA256).Hash.ToLowerInvariant()
 "$hash  $(Split-Path $msix -Leaf)" | Set-Content "$msix.sha256" -Encoding ASCII
 
+# Unpack what was just built and diff it against the layout. A package that
+# quietly loses a DLL or a model installs fine and only fails at the point of
+# use, on someone else's machine, so the build refuses to produce one.
+Write-Step "Verifying package contents"
+$verifyDir = Join-Path $OutDir "$Name-verify"
+if (Test-Path $verifyDir) { Remove-Item $verifyDir -Recurse -Force }
+& $makeappx unpack /p $msix /d $verifyDir /o | Out-Host
+if ($LASTEXITCODE -ne 0) {
+    throw "makeappx unpack failed with exit code $LASTEXITCODE"
+}
+$expected = Get-ChildItem -LiteralPath $layout -Recurse -File |
+    ForEach-Object { $_.FullName.Substring((Resolve-Path $layout).Path.Length).TrimStart('\') }
+$packed = Get-ChildItem -LiteralPath $verifyDir -Recurse -File |
+    ForEach-Object { $_.FullName.Substring((Resolve-Path $verifyDir).Path.Length).TrimStart('\') }
+$absent = @($expected | Where-Object { $packed -notcontains $_ })
+if ($absent.Count -gt 0) {
+    throw ("The package is missing " + $absent.Count + " file(s) from the layout: " + ($absent -join ", "))
+}
+$required = @(
+    "hippo-transcribe.exe", "AppxManifest.xml", "resources.pri",
+    "sherpa-onnx-c-api.dll", "onnxruntime.dll",
+    "vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll",
+    "sample-short.mp3", "Assets\StoreLogo.png"
+)
+foreach ($file in $required) {
+    if ($packed -notcontains $file) {
+        throw "$file is required in the package but is not in it."
+    }
+}
+Remove-Item $verifyDir -Recurse -Force -ErrorAction SilentlyContinue
+Write-Host ("  Verified {0:N0} files in the package" -f $packed.Count) -ForegroundColor Green
+
 if (-not $KeepLayout) {
     Remove-Item (Join-Path $OutDir "$Name-msix") -Recurse -Force -ErrorAction SilentlyContinue
 }

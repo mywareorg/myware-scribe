@@ -115,6 +115,14 @@ fn candidates() -> Vec<PathBuf> {
     paths
 }
 
+/// The DLL path this build would load, for diagnostics.
+pub fn resolved_path() -> Option<PathBuf> {
+    candidates()
+        .into_iter()
+        .find(|path| path.is_file())
+        .map(|path| path.canonicalize().unwrap_or(path))
+}
+
 unsafe fn resolve<T: Copy>(library: &Library, name: &[u8]) -> Result<T, String> {
     let symbol = library
         .get::<T>(name)

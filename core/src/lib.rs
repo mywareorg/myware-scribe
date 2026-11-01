@@ -12,6 +12,7 @@ pub mod export;
 pub mod license;
 pub mod logging;
 pub mod models;
+pub mod paths;
 pub mod pipeline;
 
 #[cfg(windows)]

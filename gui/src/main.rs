@@ -126,9 +126,18 @@ fn main() -> iced::Result {
 
     let cli = std::env::args().nth(1).as_deref() == Some("--cli");
     hippo_transcribe_core::logging::init();
+    hippo_transcribe_core::paths::log_all();
     install_panic_hook(cli);
 
     let args: Vec<String> = std::env::args().collect();
+    // Diagnose a packaged install from a terminal: this prints the table the
+    // GUI logs at startup, for whichever process ran it.
+    if args.get(1).map(String::as_str) == Some("--paths") {
+        #[cfg(windows)]
+        attach_console();
+        print!("{}", hippo_transcribe_core::paths::report());
+        std::process::exit(0);
+    }
     if args.get(1).map(String::as_str) == Some("--cli") {
         #[cfg(windows)]
         attach_console();

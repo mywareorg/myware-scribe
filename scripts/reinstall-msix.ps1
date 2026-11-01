@@ -214,3 +214,18 @@ Write-Host "  Package: $testCopy"
 Write-Host "  Version: $($installed.Version)"
 Write-Host "  DLLs:    $($requiredDlls.Count) present in $($installed.InstallLocation)"
 Write-Host "  Launch:  explorer.exe shell:AppsFolder\$($installed.PackageFamilyName)!$($identity.applicationId)"
+
+# Ask the installed binary where it resolves everything. The GUI logs the same
+# table on every start, so a disagreement between the two is visible here rather
+# than as "model not found" later.
+Write-Host ""
+Write-Host "Paths as the installed app resolves them:" -ForegroundColor Cyan
+$exe = Join-Path $installed.InstallLocation "hippo-transcribe.exe"
+$report = & $exe --paths 2>&1
+if ($LASTEXITCODE -ne 0) {
+    Write-Warn "hippo-transcribe.exe --paths exited with $LASTEXITCODE"
+}
+$report | ForEach-Object { Write-Host "  $_" }
+if (@($report | Where-Object { $_ -match 'MISSING' }).Count -gt 0) {
+    Write-Warn "Some paths above are missing; the app will not be able to start a transcription."
+}

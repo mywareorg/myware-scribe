@@ -619,6 +619,141 @@ fn aspect_clamp(requested: Size, last: Size) -> Size {
     Size::new(w, h)
 }
 
+/// Draws the toast as a real overlay layer. A plain stack child is drawn
+/// below the Help pick list's overlay; emitting the toast from `overlay`
+/// puts it after that overlay in the group.
+struct ToastLayer<'a> {
+    content: Element<'a, Message>,
+}
+
+impl<'a> iced::advanced::Widget<Message, Theme, Renderer> for ToastLayer<'a> {
+    fn size(&self) -> Size<Length> {
+        Size::new(Length::Shrink, Length::Shrink)
+    }
+
+    fn layout(
+        &self,
+        _tree: &mut iced::advanced::widget::Tree,
+        _renderer: &Renderer,
+        _limits: &iced::advanced::layout::Limits,
+    ) -> iced::advanced::layout::Node {
+        iced::advanced::layout::Node::new(Size::ZERO)
+    }
+
+    fn draw(
+        &self,
+        _tree: &iced::advanced::widget::Tree,
+        _renderer: &mut Renderer,
+        _theme: &Theme,
+        _style: &iced::advanced::renderer::Style,
+        _layout: iced::advanced::Layout<'_>,
+        _cursor: mouse::Cursor,
+        _viewport: &Rectangle,
+    ) {
+    }
+
+    fn tag(&self) -> iced::advanced::widget::tree::Tag {
+        self.content.as_widget().tag()
+    }
+
+    fn state(&self) -> iced::advanced::widget::tree::State {
+        self.content.as_widget().state()
+    }
+
+    fn children(&self) -> Vec<iced::advanced::widget::Tree> {
+        self.content.as_widget().children()
+    }
+
+    fn diff(&self, tree: &mut iced::advanced::widget::Tree) {
+        self.content.as_widget().diff(tree);
+    }
+
+    fn overlay<'b>(
+        &'b mut self,
+        tree: &'b mut iced::advanced::widget::Tree,
+        _layout: iced::advanced::Layout<'_>,
+        _renderer: &Renderer,
+        translation: Vector,
+    ) -> Option<iced::advanced::overlay::Element<'b, Message, Theme, Renderer>> {
+        Some(iced::advanced::overlay::Element::new(Box::new(
+            ToastOverlay {
+                content: &mut self.content,
+                state: tree,
+                translation,
+            },
+        )))
+    }
+}
+
+struct ToastOverlay<'a, 'b> {
+    content: &'b mut Element<'a, Message>,
+    state: &'b mut iced::advanced::widget::Tree,
+    translation: Vector,
+}
+
+impl<'a, 'b> iced::advanced::Overlay<Message, Theme, Renderer> for ToastOverlay<'a, 'b> {
+    fn layout(&mut self, renderer: &Renderer, bounds: Size) -> iced::advanced::layout::Node {
+        let node = self.content.as_widget_mut().layout(
+            self.state,
+            renderer,
+            &iced::advanced::layout::Limits::new(Size::ZERO, bounds),
+        );
+        node.move_to(Point::new(self.translation.x, self.translation.y))
+    }
+
+    fn draw(
+        &self,
+        renderer: &mut Renderer,
+        theme: &Theme,
+        style: &iced::advanced::renderer::Style,
+        layout: iced::advanced::Layout<'_>,
+        cursor: mouse::Cursor,
+    ) {
+        let viewport = layout.bounds();
+        self.content.as_widget().draw(
+            self.state, renderer, theme, style, layout, cursor, &viewport,
+        );
+    }
+
+    fn operate(
+        &mut self,
+        layout: iced::advanced::Layout<'_>,
+        renderer: &Renderer,
+        operation: &mut dyn iced::advanced::widget::Operation,
+    ) {
+        self.content
+            .as_widget_mut()
+            .operate(self.state, layout, renderer, operation);
+    }
+
+    fn on_event(
+        &mut self,
+        event: iced::Event,
+        layout: iced::advanced::Layout<'_>,
+        cursor: mouse::Cursor,
+        renderer: &Renderer,
+        clipboard: &mut dyn iced::advanced::Clipboard,
+        shell: &mut iced::advanced::Shell<'_, Message>,
+    ) -> iced::event::Status {
+        let viewport = layout.bounds();
+        self.content.as_widget_mut().on_event(
+            self.state, event, layout, cursor, renderer, clipboard, shell, &viewport,
+        )
+    }
+
+    fn mouse_interaction(
+        &self,
+        layout: iced::advanced::Layout<'_>,
+        cursor: mouse::Cursor,
+        viewport: &Rectangle,
+        renderer: &Renderer,
+    ) -> mouse::Interaction {
+        self.content
+            .as_widget()
+            .mouse_interaction(self.state, layout, cursor, viewport, renderer)
+    }
+}
+
 impl App {
     pub fn new() -> Self {
         let settings = Self::load_settings();
@@ -6990,8 +7125,8 @@ impl App {
             return base;
         };
         let toast = mouse_area(
-            // Larger than the default button text used by "Get Pro".
-            container(text(message.clone()).size(18))
+            // Match the default button text size used by "Get Pro".
+            container(text(message.clone()))
                 // 44 px is roughly 50% taller than the old padded text row.
                 // The top padding below centres it on the header button line.
                 .height(Length::Fixed(44.0))
@@ -7012,7 +7147,13 @@ impl App {
             .align_x(iced::Alignment::End)
             .align_y(iced::Alignment::Start)
             .padding([24, 20]);
-        stack![base, overlay].into()
+        stack![
+            base,
+            Element::new(ToastLayer {
+                content: overlay.into()
+            })
+        ]
+        .into()
     }
 
     pub fn view(&self) -> Element<'_, Message> {
