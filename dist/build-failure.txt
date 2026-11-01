@@ -1,4 +1,4 @@
-﻿=== Build failed 2026-11-01 13:29:13 ===
+﻿=== Build failed 2026-11-01 13:35:55 ===
 At C:\Users\wuphy\Documents\hippo-transcribe\scripts\build-windows.ps1:623 char:9
 +         $msix = Join-Path $outRoot "$name.msix"
 +         ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -7,130 +7,50 @@ Stack:   at <ScriptBlock>, C:\Users\wuphy\Documents\hippo-transcribe\scripts\bui
 at <ScriptBlock>, <No file>: line 1
 
 === build-windows.log ===
-86: Compiling gl_generator v0.14.0
 
 === last 40 lines ===
-   Compiling windows v0.62.2
-   Compiling webpki-roots v0.26.11
-   Compiling digest v0.10.7
-   Compiling url v2.5.8
-   Compiling winresource v0.1.34
-   Compiling windows v0.54.0
-   Compiling window_clipboard v0.4.1
-   Compiling ogg v0.8.0
-   Compiling serde_derive v1.0.229
-   Compiling windows-version v0.1.7
-   Compiling itoa v1.0.18
-   Compiling dasp_sample v0.11.0
-   Compiling pxfm v0.1.30
-   Compiling cpufeatures v0.2.17
-   Compiling rfd v0.15.4
-   Compiling base64 v0.22.1
-   Compiling sha2 v0.10.9
-   Compiling ureq v2.12.1
-   Compiling tauri-winrt-notification v0.8.1
-   Compiling moxcms v0.8.1
-   Compiling iced_winit v0.13.0
-   Compiling lewton v0.10.2
-   Compiling hippo-transcribe-gui v0.1.0 (C:\Users\wuphy\Documents\hippo-transcribe\gui)
-   Compiling rubato v0.15.0
-   Compiling png v0.18.1
-   Compiling iced_glyphon v0.6.0
-   Compiling iced_wgpu v0.13.5
-   Compiling windows-sys v0.59.0
-   Compiling byteorder-lite v0.1.0
-   Compiling iced_renderer v0.13.0
-   Compiling hound v3.5.1
-   Compiling iced_widget v0.13.4
-   Compiling claxon v0.4.3
-   Compiling num_cpus v1.17.0
-   Compiling rodio v0.20.1
-   Compiling image v0.25.10
-   Compiling iced v0.13.1
-   Compiling notify-rust v4.18.2
-   Compiling hippo-transcribe-core v0.1.0 (C:\Users\wuphy\Documents\hippo-transcribe\core)
-    Finished `release` profile [optimized] target(s) in 7m 40s
+    Finished `release` profile [optimized] target(s) in 0.46s
 
 === console ===
-   Compiling crypto-common v0.1.7
-   Compiling windows-numerics v0.3.1
-   Compiling windows-collections v0.3.2
-   Compiling webpki-roots v1.0.9
-   Compiling symphonia-format-ogg v0.5.5
-   Compiling symphonia-bundle-flac v0.5.5
-   Compiling symphonia-codec-vorbis v0.5.5
-   Compiling symphonia-format-mkv v0.5.5
-   Compiling symphonia-format-isomp4 v0.5.5
-   Compiling iced_runtime v0.13.2
-   Compiling symphonia-bundle-mp3 v0.5.5
-   Compiling symphonia-format-caf v0.5.5
-   Compiling symphonia-codec-aac v0.5.5
-   Compiling symphonia-codec-alac v0.5.5
-   Compiling symphonia-codec-pcm v0.5.5
-   Compiling symphonia-codec-adpcm v0.5.5
-   Compiling thiserror-impl v2.0.21
-   Compiling windows-sys v0.52.0
-   Compiling whisper-rs v0.16.0
-   Compiling serde v1.0.229
-   Compiling dpi v0.1.2
-   Compiling cpal v0.15.3
-   Compiling cursor-icon v1.2.0
-   Compiling subtle v2.6.1
-   Compiling serde_json v1.0.154
-   Compiling symphonia v0.5.5
-   Compiling realfft v3.5.0
-   Compiling windows v0.62.2
-   Compiling webpki-roots v0.26.11
-   Compiling digest v0.10.7
-   Compiling url v2.5.8
-   Compiling winresource v0.1.34
-   Compiling windows v0.54.0
-   Compiling window_clipboard v0.4.1
-   Compiling ogg v0.8.0
-   Compiling serde_derive v1.0.229
-   Compiling windows-version v0.1.7
-   Compiling itoa v1.0.18
-   Compiling dasp_sample v0.11.0
-   Compiling pxfm v0.1.30
-   Compiling cpufeatures v0.2.17
-   Compiling rfd v0.15.4
-   Compiling base64 v0.22.1
-   Compiling sha2 v0.10.9
-   Compiling ureq v2.12.1
-   Compiling tauri-winrt-notification v0.8.1
-   Compiling moxcms v0.8.1
-   Compiling iced_winit v0.13.0
-   Compiling lewton v0.10.2
-   Compiling hippo-transcribe-gui v0.1.0 (C:\Users\wuphy\Documents\hippo-transcribe\gui)
-   Compiling rubato v0.15.0
-   Compiling png v0.18.1
-   Compiling iced_glyphon v0.6.0
-   Compiling iced_wgpu v0.13.5
-   Compiling windows-sys v0.59.0
-   Compiling byteorder-lite v0.1.0
-   Compiling iced_renderer v0.13.0
-   Compiling hound v3.5.1
-   Compiling iced_widget v0.13.4
-   Compiling claxon v0.4.3
-   Compiling num_cpus v1.17.0
-   Compiling rodio v0.20.1
-   Compiling image v0.25.10
-   Compiling iced v0.13.1
-   Compiling notify-rust v4.18.2
-   Compiling hippo-transcribe-core v0.1.0 (C:\Users\wuphy\Documents\hippo-transcribe\core)
-    Finished `release` profile [optimized] target(s) in 7m 40s
+**********************
+Windows PowerShell transcript start
+Start time: 20261101133545
+Username: WU-PRO-8\wuphy
+RunAs User: WU-PRO-8\wuphy
+Configuration Name: 
+Machine: WU-PRO-8 (Microsoft Windows NT 10.0.19045.0)
+Host Application: C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe
+Process ID: 11356
+PSVersion: 5.1.19041.6456
+PSEdition: Desktop
+PSCompatibleVersions: 1.0, 2.0, 3.0, 4.0, 5.0, 5.1.19041.6456
+BuildVersion: 10.0.19041.6456
+CLRVersion: 4.0.30319.42000
+WSManStackVersion: 3.0
+PSRemotingProtocolVersion: 2.3
+SerializationVersion: 1.1.0.1
+**********************
+==> Configuring CMake with Ninja for the Vulkan build
+  CMAKE_GENERATOR=Ninja
+  Using the Visual Studio CMake at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin
+==> Building in C:\Users\wuphy\hb so the ggml paths stay under MAX_PATH
+  cl: C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\bin\HostX64\x64\cl.exe
+  cmake: C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe cmake version 3.31.6-msvc6
+==> Using libclang at C:\Program Files\LLVM\bin
+==> Using cargo target directory C:\Users\wuphy\hb
+==> Building release binary
+    cargo build --release --locked --features gpu
+    Finished `release` profile [optimized] target(s) in 0.46s
 ==> Verified the DLL CRT dependency of hippo-transcribe.exe
 ==> Staging bundled models (models.lock.json)
 [ok]   segmentation <- cached C:\Users\wuphy\AppData\Local\hippo-transcribe\models\sherpa-onnx-pyannote-segmentation-3-0\model.onnx
 [ok]   embedding <- cached C:\Users\wuphy\AppData\Local\hippo-transcribe\models\wespeaker_en_voxceleb_resnet34_LM.onnx
 [ok]   whisper-speed <- cached C:\Users\wuphy\AppData\Local\hippo-transcribe\models\ggml-tiny-q5_1.bin
 model set v4: 3 ok, 0 failed (C:\Users\wuphy\Documents\hippo-transcribe\dist\hippo-transcribe-0.1.0-windows-x64\models)
-==> Cleared persisted queue C:\Users\wuphy\AppData\Roaming\hippo-transcribe\queue.json
-==> Cleared persisted queue C:\Users\wuphy\AppData\Roaming\transiel\queue.json
 ==> Writing C:\Users\wuphy\Documents\hippo-transcribe\dist\hippo-transcribe-0.1.0-windows-x64.zip
 **********************
 Windows PowerShell transcript end
-End time: 20261101132913
+End time: 20261101133555
 **********************
 
 === configure state ===
