@@ -62,8 +62,12 @@ def main() -> None:
     args = parser.parse_args()
 
     source = Image.open(args.source).convert("RGBA")
-    badge = load_store_assets().disc(source)
-    fill = source.getpixel((2, 2)) if args.fill else (0, 0, 0, 0)
+    corner = source.getpixel((2, 2))
+    # Artwork that already has a transparent surround keeps its own silhouette;
+    # masking it would cut a second, smaller shape out of the field. Only
+    # art with an opaque corner is treated as a badge on a flat background.
+    badge = load_store_assets().disc(source) if corner[3] != 0 else source
+    fill = corner if args.fill else (0, 0, 0, 0)
 
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
