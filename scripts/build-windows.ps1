@@ -356,9 +356,14 @@ function Invoke-Wack {
         } catch {
             throw "Could not elevate for appcert.exe ($($_.Exception.Message)). Run the build from an elevated prompt, or drop -Wack."
         }
-        if (Test-Path $logPath) { Get-Content -Path $logPath | Out-Host }
+        if (Test-Path $logPath) {
+            Get-Content -Path $logPath | Out-Host
+        } else {
+            Write-Warn "appcert wrote no output to $logPath"
+        }
         if ($elevated.ExitCode -ne 0) {
-            throw "appcert failed with exit code $($elevated.ExitCode) (report: $ReportPath)"
+            $report = if (Test-Path $ReportPath) { "report: $ReportPath" } else { "no report written" }
+            throw "appcert failed with exit code $($elevated.ExitCode) ($report)"
         }
         Write-Host "  WACK report: $ReportPath"
         return

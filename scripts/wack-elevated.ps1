@@ -28,6 +28,7 @@ try {
     & $Appcert test -appxpackagepath $Msix -reportoutputpath $ReportPath 2>&1 |
         Out-File -Path $LogPath -Encoding utf8 -Append
     $exitCode = if ($null -eq $LASTEXITCODE) { 0 } else { $LASTEXITCODE }
+    "appcert exit code: $exitCode" | Out-File -Path $LogPath -Encoding utf8 -Append
 }
 catch {
     "appcert failed: $($_.Exception.Message)" | Out-File -Path $LogPath -Encoding utf8 -Append
