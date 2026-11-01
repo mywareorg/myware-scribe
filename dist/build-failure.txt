@@ -1,56 +1,136 @@
-﻿=== Build failed 2026-11-01 13:35:55 ===
-At C:\Users\wuphy\Documents\hippo-transcribe\scripts\build-windows.ps1:623 char:9
-+         $msix = Join-Path $outRoot "$name.msix"
-+         ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-Message: Cannot convert value "System.String" to type "System.Management.Automation.SwitchParameter". Boolean parameters accept only Boolean values and numbers, such as $True, $False, 1 or 0.
-Stack:   at <ScriptBlock>, C:\Users\wuphy\Documents\hippo-transcribe\scripts\build-windows.ps1: line 623
+﻿=== Build failed 2026-11-01 13:38:07 ===
+At C:\Users\wuphy\Documents\hippo-transcribe\scripts\build-windows.ps1:322 char:9
++         throw "appcert.exe (Windows App Certification Kit) was not fo ...
++         ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Message: appcert.exe (Windows App Certification Kit) was not found. Install the Windows 10/11 SDK.
+Stack:   at Invoke-Wack, C:\Users\wuphy\Documents\hippo-transcribe\scripts\build-windows.ps1: line 322
+at <ScriptBlock>, C:\Users\wuphy\Documents\hippo-transcribe\scripts\build-windows.ps1: line 654
 at <ScriptBlock>, <No file>: line 1
 
 === build-windows.log ===
 
 === last 40 lines ===
-    Finished `release` profile [optimized] target(s) in 0.46s
+
+Processing "\\?\C:\Users\wuphy\Documents\hippo-transcribe\dist\hippo-transcribe-0.1.0-windows-x64-msix\layout\vcomp140.dll" as a payload file.  Its path in the package will be "vcomp140.dll".
+
+Processing "\\?\C:\Users\wuphy\Documents\hippo-transcribe\dist\hippo-transcribe-0.1.0-windows-x64-msix\layout\Assets\SplashScreen.png" as a payload file.  Its path in the package will be "Assets\SplashScreen.png".
+
+Processing "\\?\C:\Users\wuphy\Documents\hippo-transcribe\dist\hippo-transcribe-0.1.0-windows-x64-msix\layout\Assets\SplashScreen.scale-200.png" as a payload file.  Its path in the package will be "Assets\SplashScreen.scale-200.png".
+
+Processing "\\?\C:\Users\wuphy\Documents\hippo-transcribe\dist\hippo-transcribe-0.1.0-windows-x64-msix\layout\Assets\Square150x150Logo.png" as a payload file.  Its path in the package will be "Assets\Square150x150Logo.png".
+
+Processing "\\?\C:\Users\wuphy\Documents\hippo-transcribe\dist\hippo-transcribe-0.1.0-windows-x64-msix\layout\Assets\Square150x150Logo.scale-200.png" as a payload file.  Its path in the package will be "Assets\Square150x150Logo.scale-200.png".
+
+Processing "\\?\C:\Users\wuphy\Documents\hippo-transcribe\dist\hippo-transcribe-0.1.0-windows-x64-msix\layout\Assets\Square150x150Logo.scale-400.png" as a payload file.  Its path in the package will be "Assets\Square150x150Logo.scale-400.png".
+
+Processing "\\?\C:\Users\wuphy\Documents\hippo-transcribe\dist\hippo-transcribe-0.1.0-windows-x64-msix\layout\Assets\Square44x44Logo.scale-200.png" as a payload file.  Its path in the package will be "Assets\Square44x44Logo.scale-200.png".
+
+Processing "\\?\C:\Users\wuphy\Documents\hippo-transcribe\dist\hippo-transcribe-0.1.0-windows-x64-msix\layout\Assets\Square44x44Logo.png" as a payload file.  Its path in the package will be "Assets\Square44x44Logo.png".
+
+Processing "\\?\C:\Users\wuphy\Documents\hippo-transcribe\dist\hippo-transcribe-0.1.0-windows-x64-msix\layout\Assets\Square44x44Logo.targetsize-16_altform-unplated.png" as a payload file.  Its path in the package will be "Assets\Square44x44Logo.targetsize-16_altform-unplated.png".
+
+Processing "\\?\C:\Users\wuphy\Documents\hippo-transcribe\dist\hippo-transcribe-0.1.0-windows-x64-msix\layout\Assets\Square44x44Logo.scale-400.png" as a payload file.  Its path in the package will be "Assets\Square44x44Logo.scale-400.png".
+
+Processing "\\?\C:\Users\wuphy\Documents\hippo-transcribe\dist\hippo-transcribe-0.1.0-windows-x64-msix\layout\Assets\Square44x44Logo.targetsize-24_altform-unplated.png" as a payload file.  Its path in the package will be "Assets\Square44x44Logo.targetsize-24_altform-unplated.png".
+
+Processing "\\?\C:\Users\wuphy\Documents\hippo-transcribe\dist\hippo-transcribe-0.1.0-windows-x64-msix\layout\Assets\Square44x44Logo.targetsize-32_altform-unplated.png" as a payload file.  Its path in the package will be "Assets\Square44x44Logo.targetsize-32_altform-unplated.png".
+
+Processing "\\?\C:\Users\wuphy\Documents\hippo-transcribe\dist\hippo-transcribe-0.1.0-windows-x64-msix\layout\Assets\Square44x44Logo.targetsize-256_altform-unplated.png" as a payload file.  Its path in the package will be "Assets\Square44x44Logo.targetsize-256_altform-unplated.png".
+
+Processing "\\?\C:\Users\wuphy\Documents\hippo-transcribe\dist\hippo-transcribe-0.1.0-windows-x64-msix\layout\Assets\StoreLogo.png" as a payload file.  Its path in the package will be "Assets\StoreLogo.png".
+
+Processing "\\?\C:\Users\wuphy\Documents\hippo-transcribe\dist\hippo-transcribe-0.1.0-windows-x64-msix\layout\Assets\Square44x44Logo.targetsize-48_altform-unplated.png" as a payload file.  Its path in the package will be "Assets\Square44x44Logo.targetsize-48_altform-unplated.png".
+
+Processing "\\?\C:\Users\wuphy\Documents\hippo-transcribe\dist\hippo-transcribe-0.1.0-windows-x64-msix\layout\Assets\Wide310x150Logo.png" as a payload file.  Its path in the package will be "Assets\Wide310x150Logo.png".
+
+Processing "\\?\C:\Users\wuphy\Documents\hippo-transcribe\dist\hippo-transcribe-0.1.0-windows-x64-msix\layout\Assets\Wide310x150Logo.scale-200.png" as a payload file.  Its path in the package will be "Assets\Wide310x150Logo.scale-200.png".
+
+Processing "\\?\C:\Users\wuphy\Documents\hippo-transcribe\dist\hippo-transcribe-0.1.0-windows-x64-msix\layout\hippo-transcribe.exe" as a payload file.  Its path in the package will be "hippo-transcribe.exe".
+
+Package creation succeeded.
+
+  Package: C:\Users\wuphy\Documents\hippo-transcribe\dist\hippo-transcribe-0.1.0-windows-x64.msix
 
 === console ===
-**********************
-Windows PowerShell transcript start
-Start time: 20261101133545
-Username: WU-PRO-8\wuphy
-RunAs User: WU-PRO-8\wuphy
-Configuration Name: 
-Machine: WU-PRO-8 (Microsoft Windows NT 10.0.19045.0)
-Host Application: C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe
-Process ID: 11356
-PSVersion: 5.1.19041.6456
-PSEdition: Desktop
-PSCompatibleVersions: 1.0, 2.0, 3.0, 4.0, 5.0, 5.1.19041.6456
-BuildVersion: 10.0.19041.6456
-CLRVersion: 4.0.30319.42000
-WSManStackVersion: 3.0
-PSRemotingProtocolVersion: 2.3
-SerializationVersion: 1.1.0.1
-**********************
-==> Configuring CMake with Ninja for the Vulkan build
-  CMAKE_GENERATOR=Ninja
-  Using the Visual Studio CMake at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin
-==> Building in C:\Users\wuphy\hb so the ggml paths stay under MAX_PATH
-  cl: C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\bin\HostX64\x64\cl.exe
-  cmake: C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe cmake version 3.31.6-msvc6
-==> Using libclang at C:\Program Files\LLVM\bin
-==> Using cargo target directory C:\Users\wuphy\hb
-==> Building release binary
-    cargo build --release --locked --features gpu
-    Finished `release` profile [optimized] target(s) in 0.46s
-==> Verified the DLL CRT dependency of hippo-transcribe.exe
-==> Staging bundled models (models.lock.json)
-[ok]   segmentation <- cached C:\Users\wuphy\AppData\Local\hippo-transcribe\models\sherpa-onnx-pyannote-segmentation-3-0\model.onnx
-[ok]   embedding <- cached C:\Users\wuphy\AppData\Local\hippo-transcribe\models\wespeaker_en_voxceleb_resnet34_LM.onnx
-[ok]   whisper-speed <- cached C:\Users\wuphy\AppData\Local\hippo-transcribe\models\ggml-tiny-q5_1.bin
 model set v4: 3 ok, 0 failed (C:\Users\wuphy\Documents\hippo-transcribe\dist\hippo-transcribe-0.1.0-windows-x64\models)
 ==> Writing C:\Users\wuphy\Documents\hippo-transcribe\dist\hippo-transcribe-0.1.0-windows-x64.zip
+    powershell -NoProfile -ExecutionPolicy Bypass -File C:\Users\wuphy\Documents\hippo-transcribe\scripts\make-msix.ps1 -Stage C:\Users\wuphy\Documents\hippo-transcribe\dist\hippo-transcribe-0.1.0-windows-x64 -OutDir C:\Users\wuphy\Documents\hippo-transcribe\dist -Name hippo-transcribe-0.1.0-windows-x64 -Version 0.1.0 -IdentityPath C:\Users\wuphy\Documents\hippo-transcribe\packaging\identity.json
+==> Packing C:\Users\wuphy\Documents\hippo-transcribe\dist\hippo-transcribe-0.1.0-windows-x64.msix
+Microsoft (R) MakeAppx Tool
+
+Copyright (C) 2013 Microsoft.  All rights reserved.
+
+
+
+The path (/p) parameter is: "\\?\C:\Users\wuphy\Documents\hippo-transcribe\dist\hippo-transcribe-0.1.0-windows-x64.msix"
+
+The content directory (/d) parameter is: "\\?\C:\Users\wuphy\Documents\hippo-transcribe\dist\hippo-transcribe-0.1.0-windows-x64-msix\layout"
+
+Enumerating files from directory "\\?\C:\Users\wuphy\Documents\hippo-transcribe\dist\hippo-transcribe-0.1.0-windows-x64-msix\layout"
+
+Packing 24 file(s) in "\\?\C:\Users\wuphy\Documents\hippo-transcribe\dist\hippo-transcribe-0.1.0-windows-x64-msix\layout" (content directory) to "\\?\C:\Users\wuphy\Documents\hippo-transcribe\dist\hippo-transcribe-0.1.0-windows-x64.msix" (output file name).
+
+Memory limit defaulting to 8502771712 bytes.
+
+Using "\\?\C:\Users\wuphy\Documents\hippo-transcribe\dist\hippo-transcribe-0.1.0-windows-x64-msix\layout\AppxManifest.xml" as the manifest for the package.
+
+Processing "\\?\C:\Users\wuphy\Documents\hippo-transcribe\dist\hippo-transcribe-0.1.0-windows-x64-msix\layout\onnxruntime.dll" as a payload file.  Its path in the package will be "onnxruntime.dll".
+
+Processing "\\?\C:\Users\wuphy\Documents\hippo-transcribe\dist\hippo-transcribe-0.1.0-windows-x64-msix\layout\sherpa-onnx-c-api.dll" as a payload file.  Its path in the package will be "sherpa-onnx-c-api.dll".
+
+Processing "\\?\C:\Users\wuphy\Documents\hippo-transcribe\dist\hippo-transcribe-0.1.0-windows-x64-msix\layout\msvcp140.dll" as a payload file.  Its path in the package will be "msvcp140.dll".
+
+Processing "\\?\C:\Users\wuphy\Documents\hippo-transcribe\dist\hippo-transcribe-0.1.0-windows-x64-msix\layout\vcruntime140.dll" as a payload file.  Its path in the package will be "vcruntime140.dll".
+
+Processing "\\?\C:\Users\wuphy\Documents\hippo-transcribe\dist\hippo-transcribe-0.1.0-windows-x64-msix\layout\vcruntime140_1.dll" as a payload file.  Its path in the package will be "vcruntime140_1.dll".
+
+Processing "\\?\C:\Users\wuphy\Documents\hippo-transcribe\dist\hippo-transcribe-0.1.0-windows-x64-msix\layout\vcomp140.dll" as a payload file.  Its path in the package will be "vcomp140.dll".
+
+Processing "\\?\C:\Users\wuphy\Documents\hippo-transcribe\dist\hippo-transcribe-0.1.0-windows-x64-msix\layout\Assets\SplashScreen.png" as a payload file.  Its path in the package will be "Assets\SplashScreen.png".
+
+Processing "\\?\C:\Users\wuphy\Documents\hippo-transcribe\dist\hippo-transcribe-0.1.0-windows-x64-msix\layout\Assets\SplashScreen.scale-200.png" as a payload file.  Its path in the package will be "Assets\SplashScreen.scale-200.png".
+
+Processing "\\?\C:\Users\wuphy\Documents\hippo-transcribe\dist\hippo-transcribe-0.1.0-windows-x64-msix\layout\Assets\Square150x150Logo.png" as a payload file.  Its path in the package will be "Assets\Square150x150Logo.png".
+
+Processing "\\?\C:\Users\wuphy\Documents\hippo-transcribe\dist\hippo-transcribe-0.1.0-windows-x64-msix\layout\Assets\Square150x150Logo.scale-200.png" as a payload file.  Its path in the package will be "Assets\Square150x150Logo.scale-200.png".
+
+Processing "\\?\C:\Users\wuphy\Documents\hippo-transcribe\dist\hippo-transcribe-0.1.0-windows-x64-msix\layout\Assets\Square150x150Logo.scale-400.png" as a payload file.  Its path in the package will be "Assets\Square150x150Logo.scale-400.png".
+
+Processing "\\?\C:\Users\wuphy\Documents\hippo-transcribe\dist\hippo-transcribe-0.1.0-windows-x64-msix\layout\Assets\Square44x44Logo.scale-200.png" as a payload file.  Its path in the package will be "Assets\Square44x44Logo.scale-200.png".
+
+Processing "\\?\C:\Users\wuphy\Documents\hippo-transcribe\dist\hippo-transcribe-0.1.0-windows-x64-msix\layout\Assets\Square44x44Logo.png" as a payload file.  Its path in the package will be "Assets\Square44x44Logo.png".
+
+Processing "\\?\C:\Users\wuphy\Documents\hippo-transcribe\dist\hippo-transcribe-0.1.0-windows-x64-msix\layout\Assets\Square44x44Logo.targetsize-16_altform-unplated.png" as a payload file.  Its path in the package will be "Assets\Square44x44Logo.targetsize-16_altform-unplated.png".
+
+Processing "\\?\C:\Users\wuphy\Documents\hippo-transcribe\dist\hippo-transcribe-0.1.0-windows-x64-msix\layout\Assets\Square44x44Logo.scale-400.png" as a payload file.  Its path in the package will be "Assets\Square44x44Logo.scale-400.png".
+
+Processing "\\?\C:\Users\wuphy\Documents\hippo-transcribe\dist\hippo-transcribe-0.1.0-windows-x64-msix\layout\Assets\Square44x44Logo.targetsize-24_altform-unplated.png" as a payload file.  Its path in the package will be "Assets\Square44x44Logo.targetsize-24_altform-unplated.png".
+
+Processing "\\?\C:\Users\wuphy\Documents\hippo-transcribe\dist\hippo-transcribe-0.1.0-windows-x64-msix\layout\Assets\Square44x44Logo.targetsize-32_altform-unplated.png" as a payload file.  Its path in the package will be "Assets\Square44x44Logo.targetsize-32_altform-unplated.png".
+
+Processing "\\?\C:\Users\wuphy\Documents\hippo-transcribe\dist\hippo-transcribe-0.1.0-windows-x64-msix\layout\Assets\Square44x44Logo.targetsize-256_altform-unplated.png" as a payload file.  Its path in the package will be "Assets\Square44x44Logo.targetsize-256_altform-unplated.png".
+
+Processing "\\?\C:\Users\wuphy\Documents\hippo-transcribe\dist\hippo-transcribe-0.1.0-windows-x64-msix\layout\Assets\StoreLogo.png" as a payload file.  Its path in the package will be "Assets\StoreLogo.png".
+
+Processing "\\?\C:\Users\wuphy\Documents\hippo-transcribe\dist\hippo-transcribe-0.1.0-windows-x64-msix\layout\Assets\Square44x44Logo.targetsize-48_altform-unplated.png" as a payload file.  Its path in the package will be "Assets\Square44x44Logo.targetsize-48_altform-unplated.png".
+
+Processing "\\?\C:\Users\wuphy\Documents\hippo-transcribe\dist\hippo-transcribe-0.1.0-windows-x64-msix\layout\Assets\Wide310x150Logo.png" as a payload file.  Its path in the package will be "Assets\Wide310x150Logo.png".
+
+Processing "\\?\C:\Users\wuphy\Documents\hippo-transcribe\dist\hippo-transcribe-0.1.0-windows-x64-msix\layout\Assets\Wide310x150Logo.scale-200.png" as a payload file.  Its path in the package will be "Assets\Wide310x150Logo.scale-200.png".
+
+Processing "\\?\C:\Users\wuphy\Documents\hippo-transcribe\dist\hippo-transcribe-0.1.0-windows-x64-msix\layout\hippo-transcribe.exe" as a payload file.  Its path in the package will be "hippo-transcribe.exe".
+
+Package creation succeeded.
+
+  Package: C:\Users\wuphy\Documents\hippo-transcribe\dist\hippo-transcribe-0.1.0-windows-x64.msix
+==> Signing the package
+Done Adding Additional Store
+Successfully signed: C:\Users\wuphy\Documents\hippo-transcribe\dist\hippo-transcribe-0.1.0-windows-x64.msix
+
+PS>TerminatingError(): "appcert.exe (Windows App Certification Kit) was not found. Install the Windows 10/11 SDK."
 **********************
 Windows PowerShell transcript end
-End time: 20261101133555
+End time: 20261101133807
 **********************
 
 === configure state ===
