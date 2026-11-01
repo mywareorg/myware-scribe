@@ -167,6 +167,23 @@ pub fn spawn(
             // affects the pipeline child, not the GUI process.
             command.env("HIPPO_TRANSCRIBE_ACCEL", "cpu");
         }
+        // Pin the data directories to the ones this process resolved. In an
+        // MSIX the packaged parent sees its AppData redirected into the package
+        // LocalCache, and a spawned child does not necessarily inherit that, so
+        // the GUI could have the models downloaded while the worker looked in an
+        // empty folder and failed with "whisper model not found".
+        command.env(
+            "HIPPO_TRANSCRIBE_MODELS_DIR",
+            hippo_transcribe_core::models::models_dir(),
+        );
+        command.env(
+            "HIPPO_TRANSCRIBE_CACHE_DIR",
+            hippo_transcribe_core::cache::cache_dir(),
+        );
+        command.env(
+            "HIPPO_TRANSCRIBE_LOG_DIR",
+            hippo_transcribe_core::logging::log_dir(),
+        );
         if let Some(dir) = &output_dir {
             command.arg("--output-dir").arg(dir);
         }
