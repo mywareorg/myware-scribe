@@ -102,6 +102,16 @@ $assets = Join-Path $layout "Assets"
 New-Item -ItemType Directory -Path $assets -Force | Out-Null
 Copy-Item (Join-Path $root "packaging\assets\*.png") $assets
 
+# The GPU calibration benchmark transcribes this clip, and it looks for it
+# beside the executable, so leaving it out makes the calibration fail with "the
+# bundled calibration sample is missing" instead of ever testing the GPU.
+$sample = Join-Path $Stage "sample-short.mp3"
+if (-not (Test-Path $sample)) { $sample = Join-Path $root "audio\sample-short.mp3" }
+if (-not (Test-Path $sample)) {
+    throw "sample-short.mp3 was not found; the GPU calibration cannot run without it."
+}
+Copy-Item $sample $layout
+
 $template = Get-Content -Path (Join-Path $root "packaging\AppxManifest.xml.template") -Raw
 if (-not $template) {
     throw "packaging\AppxManifest.xml.template is missing or empty"
