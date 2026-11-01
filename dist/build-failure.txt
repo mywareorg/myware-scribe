@@ -1,4 +1,4 @@
-﻿=== Build failed 2026-11-01 13:56:56 ===
+﻿=== Build failed 2026-11-01 13:57:32 ===
 At C:\Users\wuphy\Documents\hippo-transcribe\scripts\build-windows.ps1:447 char:5
 +     $clPath = (Get-Command cl.exe -ErrorAction SilentlyContinue).Sour ...
 +     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -9,7 +9,7 @@ at <ScriptBlock>, <No file>: line 1
 === console ===
 **********************
 Windows PowerShell transcript start
-Start time: 20261101135656
+Start time: 20261101135732
 Username: WU-PRO-8\wuphy
 RunAs User: WU-PRO-8\wuphy
 Configuration Name: 
@@ -31,5 +31,5 @@ SerializationVersion: 1.1.0.1
 ==> Building in C:\Users\wuphy\hb so the ggml paths stay under MAX_PATH
 **********************
 Windows PowerShell transcript end
-End time: 20261101135656
+End time: 20261101135732
 **********************
