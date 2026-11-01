@@ -36,7 +36,8 @@ if ($cl) { Add-Line ((& $cl.Source 2>&1 | Select-Object -First 3) -join " / ") }
 $cmake = Get-Command cmake.exe -ErrorAction SilentlyContinue
 Add-Line ("cmake  : " + $(if ($cmake) { $cmake.Source } else { "not on PATH" }))
 if ($cmake) { Add-Line ((& $cmake.Source --version 2>&1 | Select-Object -First 1)) }
-Add-Line ("ninja  : " + ((Get-Command ninja.exe -ErrorAction SilentlyContinue).Source))
+$ninja = Get-Command ninja.exe -ErrorAction SilentlyContinue
+Add-Line ("ninja  : " + $(if ($ninja) { $ninja.Source } else { "not on PATH" }))
 Add-Line ("TEMP   : " + $env:TEMP)
 Add-Line ("TMP    : " + $env:TMP)
 

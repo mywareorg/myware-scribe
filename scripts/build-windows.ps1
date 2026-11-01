@@ -444,10 +444,15 @@ try {
     # PowerShell may have been opened for x86. Only re-enter the environment when
     # the current compiler is missing or hosted on the wrong architecture;
     # VsDevCmd.bat is slow and fails for reasons of its own.
-    $clPath = (Get-Command cl.exe -ErrorAction SilentlyContinue).Source
+    #
+    # Strict mode throws on a missing property, so never read .Source from a
+    # command that Get-Command may not have returned.
+    $cl = Get-Command cl.exe -ErrorAction SilentlyContinue
+    $clPath = if ($cl) { $cl.Source } else { $null }
     if (-not $clPath -or $clPath -notmatch 'Host(X64|ARM64)\\x64') {
         Enter-DevEnvironment
-        $clPath = (Get-Command cl.exe -ErrorAction SilentlyContinue).Source
+        $cl = Get-Command cl.exe -ErrorAction SilentlyContinue
+        $clPath = if ($cl) { $cl.Source } else { $null }
     }
     if (-not $clPath) {
         throw "cl.exe is not on PATH; install the Visual Studio C++ workload or run this from a Developer PowerShell."
