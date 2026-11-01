@@ -124,6 +124,28 @@ if ($template -match '\{\{') {
 }
 Set-Content -Path (Join-Path $layout "AppxManifest.xml") -Value $template -Encoding UTF8
 
+# Windows resolves the tile label and the scaled asset variants through
+# resources.pri. A package built without one still installs, but Windows has
+# nothing to map the app's display name to and falls back to the executable's
+# file name in the Start menu. This is the documented manual-packaging step.
+$makepri = Resolve-SdkTool -Name "makepri.exe"
+if (-not $makepri) {
+    throw "makepri.exe was not found. Install the Windows 10/11 SDK, or run this from a developer prompt."
+}
+$priConfig = Join-Path $OutDir "$Name-msix\priconfig.xml"
+Write-Step "Indexing resources.pri"
+& $makepri createconfig /cf $priConfig /dq en-US /o | Out-Host
+if ($LASTEXITCODE -ne 0) {
+    throw "makepri createconfig failed with exit code $LASTEXITCODE"
+}
+& $makepri new /pr $layout /cf $priConfig /of (Join-Path $layout "resources.pri") /mn $identity.packageName /o | Out-Host
+if ($LASTEXITCODE -ne 0) {
+    throw "makepri new failed with exit code $LASTEXITCODE"
+}
+if (-not (Test-Path (Join-Path $layout "resources.pri"))) {
+    throw "makepri returned without producing resources.pri"
+}
+
 $msix = Join-Path $OutDir "$Name.msix"
 if (Test-Path $msix) { Remove-Item $msix -Force }
 Write-Step "Packing $msix"
