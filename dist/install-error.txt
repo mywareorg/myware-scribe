@@ -1,0 +1,15 @@
+﻿Install failed: Deployment failed with HRESULT: 0x800B0100, No signature was present in the subject.
+
+error 0x800B0100: The app package must be digitally signed for signature validation.
+
+NOTE: For additional information, look for [ActivityId] 1d0a568a-29a7-0005-def6-261da729dd01 in the Event Log or use the command line Get-AppPackageLog -ActivityID 1d0a568a-29a7-0005-def6-261da729dd01
+
+  Package:   C:\Users\wuphy\Documents\hippo-transcribe\dist\hippo-transcribe-0.1.0-windows-x64.msix
+  Signature: NotSigned
+  AppXSvc log:
+    Started deployment Add operation on a package with main parameter hippo-transcribe-0.1.0-windows-x64.msix and Options 0 and 0. See http://go.microsoft.com/fwlink/?LinkId=235160 for help diagnosing app deployment issues.
+    error 0x800B0100: The app package must be digitally signed for signature validation.
+    error 0x800B0100: Opening the package from location hippo-transcribe-0.1.0-windows-x64.msix failed.
+    Error 0x80070002: Opening the Msixvc package from location hippo-transcribe-0.1.0-windows-x64.msix failed. Please check whether the Msixvc support services are installed.
+    error 0x800B0100: Failure to get staging session for: file:///C:/Users/wuphy/Documents/hippo-transcribe/dist/hippo-transcribe-0.1.0-windows-x64.msix.
+    AppX Deployment operation failed for package  with error 0x800B0100. The specific error text for this failure is: error 0x800B0100: The app package must be digitally signed for signature validation.
