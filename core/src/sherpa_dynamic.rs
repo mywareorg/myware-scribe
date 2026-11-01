@@ -127,8 +127,16 @@ fn load() -> Result<Api, String> {
         .into_iter()
         .find(|path| path.is_file())
         .ok_or_else(|| {
-            "sherpa-onnx-c-api.dll was not found next to the executable; reinstall Hippo Transcribe"
-                .to_string()
+            // Naming the directory makes the difference between "the package
+            // is missing the DLL" and "we are looking in the wrong place"
+            // visible without a debugger on someone else's machine.
+            let dir = std::env::current_exe()
+                .ok()
+                .and_then(|exe| exe.parent().map(|parent| parent.display().to_string()))
+                .unwrap_or_else(|| "an unknown directory".to_string());
+            format!(
+                "sherpa-onnx-c-api.dll was not found in {dir}; reinstall Hippo Transcribe"
+            )
         })?;
     let path = path.canonicalize().unwrap_or(path);
 
