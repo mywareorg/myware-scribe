@@ -61,18 +61,57 @@ function Resolve-RepoPath {
 # Run a sibling script in its own process. Windows PowerShell 5.1 fails to bind
 # some in-script parameters (the packer hits this too), and a child process also
 # keeps each script's strict-mode traps from aborting this one.
+#
+# The child's own error text is the only thing that explains a failure, so it is
+# captured through files: $ErrorActionPreference = "Stop" turns a native
+# command's stderr into a terminating ErrorRecord as soon as it is merged into
+# the pipeline, which would abort here before the exit code is even readable.
 function Invoke-Sibling {
     param(
-        [Parameter(Mandatory = $true)][string]$Script,
-        [Parameter(Mandatory = $true)][string[]]$Arguments
+        [Parameter(Mandatory = $true)][string]$ScriptName,
+        [string[]]$Arguments = @()
     )
 
-    $path = Join-Path $PSScriptRoot $Script
+    $path = Join-Path $PSScriptRoot $ScriptName
     if (-not (Test-Path $path)) { throw "Missing script: $path" }
 
-    & powershell -NoProfile -ExecutionPolicy Bypass -File $path @Arguments | Out-Host
-    if ($LASTEXITCODE -ne 0) {
-        throw "$Script failed with exit code $LASTEXITCODE"
+    $log = Join-Path $root ("reinstall-" + [System.IO.Path]::GetFileNameWithoutExtension($ScriptName) + ".log")
+    $stdoutFile = "$log.out"
+    $stderrFile = "$log.err"
+    Remove-Item $log, $stdoutFile, $stderrFile -Force -ErrorAction SilentlyContinue
+
+    $startArgs = @{
+        FilePath               = "powershell"
+        NoNewWindow            = $true
+        Wait                   = $true
+        PassThru               = $true
+        RedirectStandardOutput = $stdoutFile
+        RedirectStandardError  = $stderrFile
+        ArgumentList           = @(
+            @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $path) + $Arguments |
+                ForEach-Object {
+                    $argument = [string]$_
+                    if ($argument -match '[\s"]') {
+                        '"' + ($argument -replace '"', '\"') + '"'
+                    } else {
+                        $argument
+                    }
+                }
+        )
+    }
+
+    Write-Host "    powershell -File $ScriptName $($Arguments -join ' ')" -ForegroundColor DarkGray
+    $child = Start-Process @startArgs
+    $exitCode = $child.ExitCode
+
+    foreach ($file in @($stdoutFile, $stderrFile)) {
+        if (Test-Path $file) {
+            Get-Content -Path $file | Tee-Object -FilePath $log -Append | Out-Host
+        }
+    }
+
+    if ($exitCode -ne 0) {
+        throw ("{0} failed with exit code {1} (output in {2})" -f $ScriptName, $exitCode, $log)
     }
 }
 
@@ -110,7 +149,7 @@ if ($baseName -match '-test$') {
 
 # Signing is idempotent, so re-sign every time rather than guessing whether the
 # copy already carries a signature from an earlier run.
-Invoke-Sibling -Script "sign-msix.ps1" -Arguments @(
+Invoke-Sibling -ScriptName "sign-msix.ps1" -Arguments @(
     "-Msix", $testCopy,
     "-PfxPath", (Resolve-RepoPath $PfxPath),
     "-Password", $Password
@@ -122,7 +161,7 @@ $installArguments = @(
 )
 if ($Fresh) { $installArguments += "-Fresh" }
 
-Invoke-Sibling -Script "install-msix.ps1" -Arguments $installArguments
+Invoke-Sibling -ScriptName "install-msix.ps1" -Arguments $installArguments
 
 if ($NoVerify) {
     Write-Host ""
