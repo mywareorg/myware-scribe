@@ -27,7 +27,9 @@ param(
     # Package to sign. Defaults to the newest .msix under dist.
     [string]$Msix,
     [string]$PfxPath = "C:\keys\hippo-test.pfx",
-    [string]$Password = "hippo-dev",
+    # Password for the PFX. Left empty it comes from HIPPO_TEST_PFX_PASSWORD,
+    # then falls back to "hippo-dev" (what make-test-cert.ps1 uses by default).
+    [string]$Password,
     # Optional RFC 3161 timestamp server. A self-signed test certificate does
     # not need one; a real certificate should have it.
     [string]$TimestampUrl
@@ -35,6 +37,10 @@ param(
 
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
+
+if (-not $PSBoundParameters.ContainsKey("Password")) {
+    $Password = if ($env:HIPPO_TEST_PFX_PASSWORD) { $env:HIPPO_TEST_PFX_PASSWORD } else { "hippo-dev" }
+}
 
 . (Join-Path $PSScriptRoot "windows-env.ps1")
 
@@ -80,9 +86,50 @@ if ($TimestampUrl) { $arguments += @("/tr", $TimestampUrl, "/td", "SHA256") }
 $arguments += $package
 
 Write-Step "Signing $(Split-Path $package -Leaf)"
-& $signtool @arguments | Out-Host
-if ($LASTEXITCODE -ne 0) {
-    throw "signtool failed with exit code $LASTEXITCODE"
+
+# signtool reports its diagnosis on stderr, and PowerShell 5.1 turns a native
+# command's stderr into a terminating error as soon as it is merged into the
+# pipeline. Redirect both streams to files so the message survives to be read
+# and matched against the known failures below.
+$log = Join-Path $root "sign-msix.log"
+$stdoutFile = "$log.out"
+$stderrFile = "$log.err"
+Remove-Item $log, $stdoutFile, $stderrFile -Force -ErrorAction SilentlyContinue
+
+$startArgs = @{
+    FilePath               = $signtool
+    NoNewWindow            = $true
+    Wait                   = $true
+    PassThru               = $true
+    RedirectStandardOutput = $stdoutFile
+    RedirectStandardError  = $stderrFile
+    ArgumentList           = @($arguments | ForEach-Object {
+        $argument = [string]$_
+        if ($argument -match '[\s"]') {
+            '"' + ($argument -replace '"', '\"') + '"'
+        } else {
+            $argument
+        }
+    })
+}
+$child = Start-Process @startArgs
+$exitCode = $child.ExitCode
+
+$lines = @()
+foreach ($file in @($stdoutFile, $stderrFile)) {
+    if (Test-Path $file) { $lines += @(Get-Content -Path $file) }
+}
+$lines | Tee-Object -FilePath $log | Out-Host
+
+if ($exitCode -ne 0) {
+    if (($lines -join "`n") -match "PFX password is not correct") {
+        throw @"
+signtool rejected the password for $certificate.
+Pass the real one with -Password '<password>', or set HIPPO_TEST_PFX_PASSWORD.
+"hippo-dev" is only the default of .\scripts\make-test-cert.ps1.
+"@
+    }
+    throw "signtool failed with exit code $exitCode (output in $log)"
 }
 
 # signtool can exit 0 without leaving a signature, so read the result back

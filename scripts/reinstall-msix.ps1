@@ -34,7 +34,9 @@ param(
     [string]$Msix,
     # Signing certificate. make-test-cert.ps1 writes one here.
     [string]$PfxPath = "C:\keys\hippo-test.pfx",
-    [string]$Password = "hippo-dev",
+    # PFX password. Left empty, sign-msix.ps1 reads HIPPO_TEST_PFX_PASSWORD and
+    # then its own default, so the password never has to be repeated here.
+    [string]$Password,
     # Public certificate to trust before Add-AppxPackage runs.
     [string]$CerPath = "C:\keys\hippo-test.cer",
     # Also delete the package's data directory, so the app starts as a first
@@ -149,11 +151,13 @@ if ($baseName -match '-test$') {
 
 # Signing is idempotent, so re-sign every time rather than guessing whether the
 # copy already carries a signature from an earlier run.
-Invoke-Sibling -ScriptName "sign-msix.ps1" -Arguments @(
+$signArguments = @(
     "-Msix", $testCopy,
-    "-PfxPath", (Resolve-RepoPath $PfxPath),
-    "-Password", $Password
+    "-PfxPath", (Resolve-RepoPath $PfxPath)
 )
+if ($Password) { $signArguments += @("-Password", $Password) }
+
+Invoke-Sibling -ScriptName "sign-msix.ps1" -Arguments $signArguments
 
 $installArguments = @(
     "-Msix", $testCopy,

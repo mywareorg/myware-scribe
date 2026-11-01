@@ -23,6 +23,12 @@ AppPackages/
 build-windows.log
 build-windows.out.log
 build-windows.err.log
+sign-msix.log
+sign-msix.log.out
+sign-msix.log.err
+reinstall-*.log
+reinstall-*.log.out
+reinstall-*.log.err
 build-windows.failure.txt
 dist/build-failure.txt
 __pycache__/
