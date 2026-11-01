@@ -40,9 +40,11 @@ certificate there, and installs the newest package:
 
     .\scripts\install-msix.ps1
 
-Removing a package also removes its private data, which is where downloaded
-models live, so every reinstall re-downloads them. `-Fresh` additionally
-deletes that folder explicitly and fails if anything is left behind:
+The models ship inside the package, so nothing is downloaded on install and a
+reinstall costs no network time. Any models downloaded for a preset the package
+does not carry live in the package's private data, which removing the package
+deletes; `-Fresh` additionally deletes that folder explicitly and fails if
+anything is left behind:
 
     .\scripts\install-msix.ps1 -Fresh
 

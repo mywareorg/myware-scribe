@@ -697,6 +697,7 @@ try {
             "-IdentityPath", $identityFile
         )
         if ($KeepLayout) { $packArgs += "-KeepLayout" }
+        if ($SkipModels) { $packArgs += "-NoModels" }
         Invoke-Native powershell $packArgs
         if (-not (Test-Path $msixPath)) {
             throw "Packing returned without producing $msixPath"

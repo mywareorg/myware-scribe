@@ -42,6 +42,8 @@ param(
     [Parameter(Mandatory = $true)][string]$Name,
     [Parameter(Mandatory = $true)][string]$Version,
     [Parameter(Mandatory = $true)][string]$IdentityPath,
+    # Leave the model files out (a small package for quick iteration).
+    [switch]$NoModels,
     [switch]$KeepLayout
 )
 
@@ -111,6 +113,23 @@ if (-not (Test-Path $sample)) {
     throw "sample-short.mp3 was not found; the GPU calibration cannot run without it."
 }
 Copy-Item $sample $layout
+
+# Ship the models inside the package. The core looks for <exe>\models before the
+# per-user folder, so a bundled copy needs no download at all: nothing depends
+# on where the packaged process's AppData is redirected to.
+if (-not $NoModels) {
+    $modelsSource = Join-Path $Stage "models"
+    if (-not (Test-Path $modelsSource)) {
+        throw "No models in $Stage. Build without -SkipModels, or pass -NoModels for a slim package."
+    }
+    $modelsTarget = Join-Path $layout "models"
+    New-Item -ItemType Directory -Path $modelsTarget -Force | Out-Null
+    Copy-Item (Join-Path $modelsSource "*") $modelsTarget -Recurse -Force
+    $modelBytes = (Get-ChildItem -Path $modelsTarget -Recurse -File |
+        Measure-Object -Property Length -Sum).Sum
+    if (-not $modelBytes) { $modelBytes = 0 }
+    Write-Host ("  Models:  {0:N0} MB" -f ($modelBytes / 1MB))
+}
 
 $template = Get-Content -Path (Join-Path $root "packaging\AppxManifest.xml.template") -Raw
 if (-not $template) {
