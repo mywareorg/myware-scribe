@@ -133,25 +133,25 @@ Assert-MachineTrust -Package $Msix
 Write-Step "Certifying $([System.IO.Path]::GetFileName($Msix))"
 
 # A short lead-in so a crash still leaves evidence of how far the run got.
-"wack-elevated started $(Get-Date -Format 'u')" | Out-File -Path $LogPath -Encoding utf8
-"  appcert:    $Appcert" | Out-File -Path $LogPath -Encoding utf8 -Append
-"  package:    $Msix" | Out-File -Path $LogPath -Encoding utf8 -Append
-"  report:     $ReportPath" | Out-File -Path $LogPath -Encoding utf8 -Append
+"wack-elevated started $(Get-Date -Format 'u')" | Out-File -FilePath $LogPath -Encoding utf8
+"  appcert:    $Appcert" | Out-File -FilePath $LogPath -Encoding utf8 -Append
+"  package:    $Msix" | Out-File -FilePath $LogPath -Encoding utf8 -Append
+"  report:     $ReportPath" | Out-File -FilePath $LogPath -Encoding utf8 -Append
 
 $exitCode = 1
 try {
     # reset clears any previous run's state; test does the work and writes the
     # report. Both need elevation, which is why this script exists.
-    "--- appcert reset ---" | Out-File -Path $LogPath -Encoding utf8 -Append
-    & $Appcert reset 2>&1 | Out-File -Path $LogPath -Encoding utf8 -Append
-    "--- appcert test ---" | Out-File -Path $LogPath -Encoding utf8 -Append
+    "--- appcert reset ---" | Out-File -FilePath $LogPath -Encoding utf8 -Append
+    & $Appcert reset 2>&1 | Out-File -FilePath $LogPath -Encoding utf8 -Append
+    "--- appcert test ---" | Out-File -FilePath $LogPath -Encoding utf8 -Append
     & $Appcert test -appxpackagepath $Msix -reportoutputpath $ReportPath 2>&1 |
-        Out-File -Path $LogPath -Encoding utf8 -Append
+        Out-File -FilePath $LogPath -Encoding utf8 -Append
     $exitCode = if ($null -eq $LASTEXITCODE) { 0 } else { $LASTEXITCODE }
-    "appcert exit code: $exitCode" | Out-File -Path $LogPath -Encoding utf8 -Append
+    "appcert exit code: $exitCode" | Out-File -FilePath $LogPath -Encoding utf8 -Append
 }
 catch {
-    "appcert failed: $($_.Exception.Message)" | Out-File -Path $LogPath -Encoding utf8 -Append
+    "appcert failed: $($_.Exception.Message)" | Out-File -FilePath $LogPath -Encoding utf8 -Append
     $exitCode = 1
 }
 
