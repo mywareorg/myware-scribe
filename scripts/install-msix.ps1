@@ -89,6 +89,20 @@ if ($Msix) {
 
 $certificate = Resolve-RepoPath $CerPath
 
+# Add-AppxPackage refuses an unsigned package with 0x800B0100, which reads like
+# a deployment fault rather than "you are installing the Store upload by hand".
+if (-not (Get-AuthenticodeSignature -FilePath $package).SignerCertificate) {
+    $testCopy = Join-Path (Split-Path -Parent $package) ([System.IO.Path]::GetFileNameWithoutExtension($package) + "-test.msix")
+    throw @"
+$(Split-Path $package -Leaf) is not signed, so Windows will not install it.
+The Store re-signs its upload, so keep this file for Partner Center and sign a copy to test:
+    Copy-Item "$package" "$testCopy"
+    .\scripts\sign-msix.ps1 -Msix "$testCopy"
+    .\scripts\install-msix.ps1 -Msix "$testCopy"
+"@
+}
+
+
 # UAC: re-run this script elevated. -Wait keeps the exit code meaningful and
 # the argument list is quoted because the repo path can contain spaces.
 if (-not $SkipTrust -and -not (Test-Elevated)) {
