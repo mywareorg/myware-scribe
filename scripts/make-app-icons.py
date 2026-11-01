@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Render the executable and window icons from the source artwork.
 
-`gui/assets/icon.ico` is embedded into the .exe by gui/build.rs, and
-`gui/assets/icon.png` is the fallback bitmap. Both come from the same badge as
-the Store assets, so the app looks the same everywhere.
+`gui/assets/pencil-icon.ico` is embedded into the .exe by gui/build.rs, and
+`icons/pencil-icon.png` is the bitmap the window decodes at startup. Both come
+from the same badge as the Store assets, so the app looks the same everywhere.
+`gui/assets/icon.*` and `logo.png` are still written for older references.
 
 By default the badge keeps transparency outside its ring. Pass --fill to keep
 the artwork's flat background instead, which is what a tile-shaped icon looks
@@ -11,7 +12,7 @@ like.
 
 Usage:
     python3 scripts/make-app-icons.py
-    python3 scripts/make-app-icons.py --source icons/mic-hippo-final.png --fill
+    python3 scripts/make-app-icons.py --source icons/simple-hippo-square-icon.png --fill
 """
 
 import argparse
@@ -50,8 +51,9 @@ def render(badge: Image.Image, size: int, fill) -> Image.Image:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--source", default="icons/mic-hippo-final.png")
+    parser.add_argument("--source", default="icons/red-pencil.png")
     parser.add_argument("--out", default="gui/assets")
+    parser.add_argument("--icons-out", default="icons")
     parser.add_argument(
         "--fill",
         action="store_true",
@@ -65,10 +67,19 @@ def main() -> None:
 
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
+    icons_out = Path(args.icons_out)
+    icons_out.mkdir(parents=True, exist_ok=True)
 
-    png = render(badge, PNG_SIZE, fill)
+    # Never upsample: the badge is centred in a transparent square of its own
+    # size at most, so the mark keeps the same footprint at every scale.
+    png_size = min(PNG_SIZE, badge.width)
+    png = render(badge, png_size, fill)
     png.save(out / "icon.png")
-    print(f"icon.png  {PNG_SIZE}x{PNG_SIZE}")
+    print(f"icon.png  {png_size}x{png_size}")
+
+    # Window / title-bar / taskbar bitmap decoded by gui/src/app.rs.
+    png.save(icons_out / "pencil-icon.png")
+    print(f"pencil-icon.png  {png_size}x{png_size}")
 
     logo = render(badge, LOGO_SIZE, fill)
     logo.save(out / "logo.png")
@@ -76,14 +87,15 @@ def main() -> None:
 
     frames = [render(badge, size, fill) for size in ICO_SIZES]
     # Pillow uses a supplied frame verbatim when its size matches, so each
-    # entry is downsampled from the 827 px source rather than from a sibling.
-    frames[-1].save(
-        out / "icon.ico",
-        format="ICO",
-        sizes=[(size, size) for size in ICO_SIZES],
-        append_images=frames[:-1],
-    )
-    print(f"icon.ico  {', '.join(str(size) for size in ICO_SIZES)}")
+    # entry is downsampled from the source rather than from a sibling.
+    for name in ("pencil-icon.ico", "icon.ico"):
+        frames[-1].save(
+            out / name,
+            format="ICO",
+            sizes=[(size, size) for size in ICO_SIZES],
+            append_images=frames[:-1],
+        )
+        print(f"{name}  {', '.join(str(size) for size in ICO_SIZES)}")
 
 
 if __name__ == "__main__":
