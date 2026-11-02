@@ -7,7 +7,7 @@
 //!
 //! Resolution order for a model file:
 //! 1. explicit environment override (`HIPPO_TRANSCRIBE_*_MODEL`),
-//! 2. the user's writable models directory,
+//! 2. a complete file in the user's writable models directory,
 //! 3. a `models/` directory beside the executable (bundled/read-only).
 //!
 //! Downloads always target the user directory; bundled files are never written.
@@ -111,7 +111,20 @@ pub fn bundled_dir() -> Option<PathBuf> {
 pub fn resolve(relative: &str) -> PathBuf {
     let user = models_dir().join(relative);
     if user.is_file() {
-        return user;
+        // A stale or partial file in AppData must not shadow a valid copy
+        // shipped inside the MSIX. Downloads always target the user directory,
+        // so a complete user copy still wins on the next launch.
+        let expected = manifest()
+            .models
+            .iter()
+            .find(|model| model.file == relative)
+            .map(|model| model.size);
+        let valid = std::fs::metadata(&user)
+            .map(|meta| expected.is_none_or(|size| meta.len() == size))
+            .unwrap_or(false);
+        if valid {
+            return user;
+        }
     }
     if let Some(bundled) = bundled_dir() {
         let shipped = bundled.join(relative);

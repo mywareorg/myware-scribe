@@ -1526,16 +1526,33 @@ impl App {
         if !asr::gpu_available() {
             return Some("GPU unavailable in this build.".to_string());
         }
+        if !self.models_ready() {
+            return Some("Download the transcription models before testing GPU.".to_string());
+        }
         self.gpu_profile()
             .and_then(|profile| profile.gpu_error.clone())
     }
 
-    /// A first run should offer calibration once per preset. CPU-only builds
-    /// and free users never see the modal.
+    /// First-run prompt for a preset that has never been offered calibration.
     fn calibration_needed(&self) -> bool {
         self.can(license::Feature::GpuAcceleration)
             && asr::gpu_available()
+            && self.models_ready()
+            && self.gpu_unavailable_reason().is_none()
             && !self.gpu_profile().is_some_and(|profile| profile.tested)
+    }
+
+    /// True until a preset has a successful CPU-vs-GPU measurement. Selecting
+    /// GPU after a skipped test must prompt again; only a real multiplier
+    /// proves the backend works.
+    fn gpu_test_needed(&self) -> bool {
+        self.can(license::Feature::GpuAcceleration)
+            && asr::gpu_available()
+            && self.models_ready()
+            && self.gpu_unavailable_reason().is_none()
+            && !self
+                .gpu_profile()
+                .is_some_and(|profile| profile.multiplier.is_some())
     }
 
     fn open_calibration(&mut self, start_run: bool) {
@@ -2062,12 +2079,16 @@ impl App {
                         Some(("GPU unavailable in this build".to_string(), Instant::now()));
                     return Task::none();
                 }
-                let tested = self.gpu_profile().is_some_and(|profile| profile.tested);
+                if let Some(reason) = self.gpu_unavailable_reason() {
+                    self.toast = Some((reason, Instant::now()));
+                    return Task::none();
+                }
+                let needs_test = self.gpu_test_needed();
                 let preset = self.preset.arg().to_string();
                 let entry = self.gpu_profiles.entry(preset).or_default();
                 entry.selected = true;
                 self.save_settings();
-                if !tested {
+                if needs_test {
                     self.open_calibration(false);
                 }
                 Task::none()
@@ -3866,7 +3887,7 @@ impl App {
             self.invalidate_derived();
             self.save_queue();
         }
-        if self.calibration_needed() {
+        if self.calibration_needed() || (self.gpu_selected() && self.gpu_test_needed()) {
             self.open_calibration(true);
             return;
         }
