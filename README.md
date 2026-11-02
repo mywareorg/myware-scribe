@@ -134,8 +134,7 @@ Every preset uses a multilingual model:
 - `ggml-small-q5_1.bin` (balanced) — downloaded on demand
 - `ggml-large-v3-turbo-q5_0.bin` (accuracy) — downloaded on demand
 - `sherpa-onnx-pyannote-segmentation-3-0/model.onnx`
-- `wespeaker_en_voxceleb_resnet34_LM.onnx` (speed/balanced)
-- `wespeaker_en_voxceleb_CAM++_LM.onnx` (accuracy)
+- `wespeaker_en_voxceleb_CAM++_LM.onnx`
 
 `models.lock.json` is the single source of truth for file names, sizes,
 SHA-256 hashes, licenses and mirrors. The application compiles it in, and

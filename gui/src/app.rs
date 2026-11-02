@@ -114,14 +114,13 @@ struct QueueItem {
     transcript: Option<PathBuf>,
     /// Run statistics for transcripts produced by the pipeline.
     stats: Option<backend::Stats>,
-    /// Diarization turns kept for the session; re-derived from the cache after
-    /// a restart.
+    /// Diarization turns, persisted with the queue for timeline colours.
     turns: Vec<backend::Turn>,
     peaks: Arc<Vec<f32>>,
 }
 
-/// Persisted queue entry. Runtime-only data (turns, waveform) is re-derived
-/// on demand and is intentionally not stored.
+/// Persisted queue entry. Speaker turns are stored so the timeline keeps its
+/// speaker colours after a restart even if the diarization cache is gone.
 #[derive(Serialize, Deserialize)]
 struct QueueState {
     #[serde(default)]
@@ -141,6 +140,9 @@ struct QueueRecord {
     status: String,
     message: Option<String>,
     stats: Option<backend::Stats>,
+    /// Diarization turns, so speaker bands survive a restart.
+    #[serde(default)]
+    turns: Vec<backend::Turn>,
     /// Downsampled RMS waveform, so completed items render their timeline
     /// immediately after a restart.
     #[serde(default)]
@@ -1149,7 +1151,7 @@ impl App {
                     duration: record.duration,
                     transcript,
                     stats: record.stats,
-                    turns: Vec::new(),
+                    turns: record.turns,
                     peaks: Arc::new(record.peaks),
                 })
             })
@@ -1187,6 +1189,7 @@ impl App {
                         _ => None,
                     },
                     stats: item.stats.clone(),
+                    turns: item.turns.clone(),
                     peaks: item.peaks.as_ref().clone(),
                 })
                 .collect(),
@@ -1428,6 +1431,34 @@ impl App {
         };
 
         let lines = parse_lines(&text);
+        // Older queue entries did not persist turns, and the diarization cache
+        // may belong to a different model set. Derive speaker bands from the
+        // transcript labels so both speakers still appear after a restart.
+        let turns = if turns.is_empty() {
+            lines
+                .iter()
+                .enumerate()
+                .filter_map(|(line_index, line)| {
+                    let start = line.start?;
+                    if line.speaker.is_empty() {
+                        return None;
+                    }
+                    let end = lines
+                        .iter()
+                        .skip(line_index + 1)
+                        .find_map(|next| next.start)
+                        .or(duration)
+                        .unwrap_or(start + 2.0);
+                    Some(backend::Turn {
+                        start,
+                        end: end.max(start + 0.2),
+                        speaker: line.speaker.clone(),
+                    })
+                })
+                .collect()
+        } else {
+            turns
+        };
         self.view_error = None;
         self.selected = Some(index);
         self.selected_view = Some(ItemView {
@@ -1463,23 +1494,16 @@ impl App {
                 .stats
                 .as_ref()
                 .and_then(|stats| stats.num_speakers);
-            let preset = self.queue[index]
-                .stats
-                .as_ref()
-                .map(|stats| stats.preset.clone())
-                .unwrap_or_else(|| self.preset.arg().to_string());
             if needs_probe {
                 tasks.push(Task::perform(
-                    async move {
-                        backend::load_completed(audio, preset, num_speakers, TIMELINE_BUCKETS)
-                    },
+                    async move { backend::load_completed(audio, num_speakers, TIMELINE_BUCKETS) },
                     move |(turns, probe)| {
                         Message::ViewDetailsLoaded(index, source.clone(), turns, probe)
                     },
                 ));
             } else if needs_turns {
                 tasks.push(Task::perform(
-                    async move { backend::load_turns(&audio, &preset, num_speakers) },
+                    async move { backend::load_turns(&audio, num_speakers) },
                     move |turns| Message::ViewDetailsLoaded(index, source.clone(), turns, None),
                 ));
             }
@@ -2206,14 +2230,15 @@ impl App {
                 let Some(calibration) = &self.calibration else {
                     return Task::none();
                 };
-                if calibration.testing() {
-                    return Task::none();
-                }
+                let testing = calibration.testing();
                 let preset = calibration.preset;
                 let run = calibration.start_run;
                 self.calibration = None;
                 self.remember_skip(preset);
-                if run {
+                // Closing during a test cancels that attempt. Starting a run
+                // while the benchmark thread is still winding down would
+                // compete for the same CPU/GPU.
+                if run && !testing {
                     self.begin_batch(false);
                 }
                 Task::none()
@@ -2469,7 +2494,8 @@ impl App {
                 }
                 if from != index {
                     self.move_queue_item(from, index);
-                    return Task::none();
+                    // Dropping moves focus to the item in its new position.
+                    return self.view_item(index);
                 }
                 let Some(item) = self.queue.get(index) else {
                     return Task::none();
@@ -3965,7 +3991,7 @@ impl App {
             let Some(path) = self.shown_audio().map(Path::to_path_buf) else {
                 return;
             };
-            self.player = Player::new(&path);
+            self.player = Player::new(&path, self.playback_speed);
             if self.player.is_none() {
                 self.toast = Some(("Could not open the audio file".to_string(), Instant::now()));
                 return;
@@ -4788,7 +4814,12 @@ impl App {
         let mut lines = vec![
             format!("Total run time: {}", format_secs(s.run_seconds)),
             format!("Audio length: {}", format_secs(s.audio_seconds)),
-            format!("Speed: {:.1}\u{00d7} realtime", speed),
+            format!(
+                "Speed: {:.1}\u{00d7} realtime \u{00b7} {} audio in {}",
+                speed,
+                human_duration(s.audio_seconds),
+                human_duration(s.run_seconds)
+            ),
             format!("Speakers: {speakers}"),
             format!("Preset: {}", s.preset),
         ];
@@ -5277,119 +5308,136 @@ impl App {
         let selected = self.gpu_selected();
         let reason = self.gpu_unavailable_reason();
         let multiplier = self.gpu_multiplier();
+        let pro = self.can(license::Feature::GpuAcceleration);
+
+        // CPU-only builds do not need a toggle or a test action.
+        if !asr::gpu_available() {
+            return row![
+                text("Acceleration")
+                    .size(11)
+                    .wrapping(NO_WRAP)
+                    .color(scheme.muted),
+                horizontal_space(),
+                self.tip(
+                    text("CPU only")
+                        .size(11)
+                        .wrapping(NO_WRAP)
+                        .color(scheme.muted),
+                    "This build has no GPU support.",
+                    &scheme,
+                ),
+            ]
+            .spacing(4)
+            .align_y(iced::Alignment::Center)
+            .into();
+        }
+
         let gpu_label = multiplier
+            .filter(|_| reason.is_none())
             .map(|value| format!("GPU {value:.1}\u{00d7}"))
             .unwrap_or_else(|| "GPU".to_string());
-        let gpu_label = if reason.is_none() {
-            gpu_label
-        } else {
-            "GPU".to_string()
+
+        let segment = |label: String, selected: bool, muted: bool| {
+            button(
+                container(text(label).size(12).wrapping(NO_WRAP))
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .center_x(Length::Fill)
+                    .center_y(Length::Fill),
+            )
+            .padding(0)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .style(segment_button(scheme, selected, muted))
         };
 
-        let cpu_button = action_text("CPU 1\u{00d7}")
-            .on_press_maybe((!running && selected).then_some(Message::SetAcceleration(false)))
-            .style(if selected {
-                pill_button_secondary
-            } else {
-                pill_button_active
-            });
+        let cpu_selected = !selected;
+        let cpu_button = segment("CPU 1\u{00d7}".to_string(), cpu_selected, false)
+            .on_press_maybe((!running && selected).then_some(Message::SetAcceleration(false)));
 
-        let gpu_button = if reason.is_some() {
-            let message = if self.can(license::Feature::GpuAcceleration) {
-                None
-            } else {
-                Some(Message::LockedGpu)
-            };
-            action_owned(gpu_label.clone())
-                .on_press_maybe((!running).then_some(message).flatten())
-                .style(greyed_button(scheme))
-                .into()
-        } else {
-            action_owned(gpu_label)
-                .on_press_maybe((!running && !selected).then_some(Message::SetAcceleration(true)))
-                .style(if selected {
-                    pill_button_active
-                } else {
-                    pill_button_secondary
-                })
-                .into()
-        };
-        let gpu_button = if let Some(reason) = &reason {
-            self.tip(gpu_button, reason.as_str(), &scheme)
-        } else {
-            gpu_button
-        };
-
-        let retest = self.tip(
-            action(icon(ICON_REFRESH, 13.0))
-                .on_press_maybe(
-                    (!running
-                        && self.can(license::Feature::GpuAcceleration)
-                        && asr::gpu_available())
-                    .then_some(Message::RetestGpu),
+        let gpu_locked = !pro;
+        let gpu_muted = gpu_locked || reason.is_some();
+        let gpu_button = {
+            let button = segment(gpu_label, selected, gpu_muted);
+            if gpu_locked {
+                button.on_press_maybe((!running).then_some(Message::LockedGpu))
+            } else if reason.is_none() {
+                button.on_press_maybe(
+                    (!running && !selected).then_some(Message::SetAcceleration(true)),
                 )
-                .style(subtle_icon_button),
-            "Retest GPU with the current preset",
-            &scheme,
-        );
-
-        let actual = self.gpu_actual.as_deref();
-        let now = match actual {
-            Some(backend) if backend.eq_ignore_ascii_case("cpu") => {
-                if self.gpu_fallback.is_some() {
-                    "Now: CPU \u{00b7} GPU failed".to_string()
-                } else {
-                    "Now: CPU".to_string()
-                }
+            } else {
+                button
             }
-            Some(backend) => {
-                let name = if backend.eq_ignore_ascii_case("vulkan") {
-                    "Vulkan"
-                } else if backend.eq_ignore_ascii_case("metal") {
-                    "Metal"
-                } else if backend.eq_ignore_ascii_case("coreml") {
-                    "Core ML"
-                } else {
-                    backend
-                };
-                format!("Now: GPU \u{00b7} {name}")
-            }
-            None => "Now: CPU".to_string(),
         };
-        let now_tip = self.gpu_fallback.clone().unwrap_or_else(|| {
-            "Actual backend reported by the transcription pipeline.".to_string()
-        });
-        let now = self.tip(
-            text(now).size(11).wrapping(NO_WRAP).color(
-                if actual.is_some_and(|value| !value.eq_ignore_ascii_case("cpu")) {
-                    scheme.green
-                } else {
-                    scheme.muted
-                },
-            ),
-            now_tip,
-            &scheme,
-        );
+        let gpu_button = match &reason {
+            Some(reason) => self.tip(gpu_button, reason.as_str(), &scheme),
+            None => gpu_button.into(),
+        };
 
-        let label = row![
+        let action_label = if self
+            .gpu_profile()
+            .is_some_and(|profile| profile.gpu_error.is_some())
+        {
+            "Test again"
+        } else if multiplier.is_some() {
+            "Retest GPU"
+        } else {
+            "Test GPU speed"
+        };
+        let can_test = pro && self.models_ready();
+        let action = button(text(action_label).size(11).wrapping(NO_WRAP))
+            .padding([2, 6])
+            .on_press_maybe(
+                (can_test && !running && self.calibration.is_none()).then_some(Message::RetestGpu),
+            )
+            .style(text_action_button(scheme));
+        let action_tip = if let Some(error) = self
+            .gpu_profile()
+            .and_then(|profile| profile.gpu_error.as_deref())
+        {
+            format!("{error} Test GPU speed again.")
+        } else if !self.models_ready() {
+            "Download the transcription models before testing GPU.".to_string()
+        } else if multiplier.is_some() {
+            "Retest GPU speed. Replaces the saved result.".to_string()
+        } else {
+            "Test CPU and GPU speed on a short sample.".to_string()
+        };
+        let action = self.tip(action, action_tip, &scheme);
+
+        let mut header = row![
             text("Acceleration")
                 .size(11)
                 .wrapping(NO_WRAP)
                 .color(scheme.muted),
-            retest,
+            horizontal_space(),
         ]
         .spacing(4)
         .align_y(iced::Alignment::Center);
+        if pro {
+            header = header.push(action);
+        }
 
-        column![
-            label,
+        let track = container(
             row![cpu_button, gpu_button]
-                .spacing(4)
-                .align_y(iced::Alignment::Center),
-            now,
-        ]
-        .spacing(4)
-        .into()
+                .spacing(2)
+                .width(Length::Fill)
+                .height(Length::Fill),
+        )
+        .padding(2)
+        .width(Length::Fill)
+        .height(Length::Fixed(28.0))
+        .style(move |_theme| container::Style {
+            background: Some(scheme.track.into()),
+            border: iced::border::Border {
+                color: scheme.border,
+                width: 1.0,
+                radius: PILL.into(),
+            },
+            ..container::Style::default()
+        });
+
+        column![header, track].spacing(4).into()
     }
 
     /// Floating copy of the dragged queue row, positioned under the pointer.
@@ -6778,9 +6826,8 @@ impl App {
             return container(horizontal_space()).into();
         };
         let preset = calibration.preset.label();
-        let testing = calibration.testing();
         let close = action(icon(ICON_X, 14.0))
-            .on_press_maybe((!testing).then_some(Message::CloseCalibration))
+            .on_press(Message::CloseCalibration)
             .style(subtle_icon_button);
         let header = row![
             text("GPU Calibration").size(theme::TEXT_LG),
@@ -8184,7 +8231,7 @@ impl PitchSource {
         )
         .ok()?;
         let buffer = vec![0.0; stretch.min_output_buff_size() * 4];
-        Some(Self {
+        let mut source = Self {
             decoder,
             stretch,
             speed,
@@ -8194,7 +8241,15 @@ impl PitchSource {
             sample_rate,
             draining: false,
             done: false,
-        })
+        };
+        // Pre-roll roughly half a second so the output callback never waits for
+        // the first WSOLA pass.
+        for _ in 0..8 {
+            if !source.fill() {
+                break;
+            }
+        }
+        Some(source)
     }
 
     fn fill(&mut self) -> bool {
@@ -8297,10 +8352,10 @@ struct Player {
 }
 
 impl Player {
-    fn new(path: &Path) -> Option<Player> {
+    fn new(path: &Path, speed: f32) -> Option<Player> {
         let (stream, handle) = OutputStream::try_default().ok()?;
         let sink = Sink::try_new(&handle).ok()?;
-        let speed = Arc::new(AtomicU32::new(1.0f32.to_bits()));
+        let speed = Arc::new(AtomicU32::new(speed.max(0.1).to_bits()));
         let source = PitchSource::new(path, speed.clone())?;
         sink.append(source);
         sink.pause();
@@ -8922,7 +8977,6 @@ const ICON_PLAY: char = '\u{f4f4}';
 const ICON_PAUSE: char = '\u{f4c3}';
 const ICON_REWIND: char = '\u{f818}';
 const ICON_FORWARD: char = '\u{f7f3}';
-const ICON_REFRESH: char = '\u{f116}';
 const ICON_ARROW_UP: char = '\u{f148}';
 const ICON_ARROW_DOWN: char = '\u{f128}';
 const ICON_CIRCLE: char = '\u{f28a}';
@@ -9426,11 +9480,6 @@ fn action_text<'a>(label: &'a str) -> iced::widget::Button<'a, Message> {
     action(text(label).wrapping(NO_WRAP)).width(Length::Fixed(action_width(label)))
 }
 
-fn action_owned(label: String) -> iced::widget::Button<'static, Message> {
-    let width = action_width(&label);
-    action(text(label).wrapping(NO_WRAP)).width(Length::Fixed(width))
-}
-
 /// A subtle drop shadow that gives surfaces a soft, raised look.
 fn soft_shadow() -> Shadow {
     Shadow {
@@ -9528,6 +9577,84 @@ fn pill_button_active(theme: &iced::Theme, status: button::Status) -> button::St
             radius: PILL.into(),
         },
         shadow,
+    }
+}
+
+/// One half of the CPU/GPU segmented toggle.
+fn segment_button(
+    scheme: Scheme,
+    selected: bool,
+    muted: bool,
+) -> impl Fn(&iced::Theme, button::Status) -> button::Style {
+    move |theme, status| {
+        let text = theme.palette().text;
+        let (background, color, border) = if selected {
+            (
+                Color {
+                    a: 0.22,
+                    ..scheme.blue
+                },
+                text,
+                Color {
+                    a: 0.55,
+                    ..scheme.blue
+                },
+            )
+        } else if muted {
+            (Color::TRANSPARENT, scheme.muted, Color::TRANSPARENT)
+        } else {
+            match status {
+                button::Status::Hovered => (Color { a: 0.06, ..text }, text, Color::TRANSPARENT),
+                button::Status::Pressed => (Color { a: 0.12, ..text }, text, Color::TRANSPARENT),
+                _ => (Color::TRANSPARENT, scheme.muted, Color::TRANSPARENT),
+            }
+        };
+        button::Style {
+            background: Some(background.into()),
+            text_color: color,
+            border: iced::border::Border {
+                color: border,
+                width: if selected { 1.0 } else { 0.0 },
+                radius: PILL.into(),
+            },
+            shadow: Shadow::default(),
+        }
+    }
+}
+
+/// Verb-phrase action used beside the toggle, not as a third segment.
+fn text_action_button(scheme: Scheme) -> impl Fn(&iced::Theme, button::Status) -> button::Style {
+    move |_theme, status| {
+        let (background, color) = match status {
+            button::Status::Hovered => (
+                Color {
+                    a: 0.08,
+                    ..scheme.text
+                },
+                scheme.text,
+            ),
+            button::Status::Pressed => (
+                Color {
+                    a: 0.16,
+                    ..scheme.text
+                },
+                scheme.text,
+            ),
+            button::Status::Disabled => (
+                Color::TRANSPARENT,
+                Color {
+                    a: 0.30,
+                    ..scheme.text
+                },
+            ),
+            _ => (Color::TRANSPARENT, scheme.text),
+        };
+        button::Style {
+            background: Some(background.into()),
+            text_color: color,
+            border: iced::border::rounded(6.0),
+            shadow: Shadow::default(),
+        }
     }
 }
 
@@ -9886,7 +10013,11 @@ mod tests {
             duration: Some(1.5),
             transcript: Some(transcript.clone()),
             stats: None,
-            turns: Vec::new(),
+            turns: vec![backend::Turn {
+                start: 0.0,
+                end: 1.5,
+                speaker: "SPEAKER 1".to_string(),
+            }],
             peaks: Arc::new(vec![0.1, 0.2, 0.3]),
         });
         app.batch_paths = vec![audio.clone()];
@@ -9899,6 +10030,8 @@ mod tests {
         assert_eq!(loaded[0].transcript.as_deref(), Some(transcript.as_path()));
         assert!(matches!(loaded[0].status, ItemStatus::Done));
         assert_eq!(loaded[0].duration, Some(1.5));
+        assert_eq!(loaded[0].turns.len(), 1);
+        assert_eq!(loaded[0].turns[0].speaker, "SPEAKER 1");
         assert_eq!(loaded[0].peaks.as_ref(), &vec![0.1, 0.2, 0.3]);
     }
 
@@ -9920,6 +10053,7 @@ mod tests {
                 status: "done".to_string(),
                 message: None,
                 stats: None,
+                turns: Vec::new(),
                 peaks: Vec::new(),
             }],
             last_batch: vec![audio.display().to_string()],
@@ -10917,9 +11051,9 @@ mod tests {
         let _ = app.update(Message::QueueDragStart(1));
         let _ = app.update(Message::QueueDrop(0));
         assert_eq!(names(&app), vec!["b.mp3", "a.mp3", "c.mp3"]);
-        // Selection follows the moved entry.
-        assert_eq!(app.selected, Some(1));
-        assert_eq!(app.selected_view.as_ref().unwrap().index, 1);
+        // The dropped entry becomes the focused/selected item.
+        assert_eq!(app.selected, Some(0));
+        assert_eq!(app.selected_view.as_ref().unwrap().index, 0);
 
         let _ = app.update(Message::QueueDragStart(0));
         let _ = app.update(Message::QueueDrop(1));

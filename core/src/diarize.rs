@@ -20,34 +20,6 @@ use crate::event::Turn;
 /// Clustering threshold used when the speaker count is auto-detected.
 pub const CLUSTER_THRESHOLD: f32 = 0.5;
 
-/// Post-processing knobs for the diarization model.
-#[derive(Debug, Clone, Copy)]
-pub struct Profile {
-    pub threshold: f32,
-    pub min_duration_on: f32,
-    pub min_duration_off: f32,
-}
-
-/// The Accuracy preset uses the larger speaker encoder and closes sub-second
-/// gaps so a single speaker is not split around breaths.
-pub fn profile(preset: &str) -> Profile {
-    if preset.eq_ignore_ascii_case("accuracy") {
-        Profile {
-            threshold: CLUSTER_THRESHOLD,
-            // Keep short interjections: filling sub-second gaps merges them
-            // into the previous speaker.
-            min_duration_on: 0.0,
-            min_duration_off: 0.0,
-        }
-    } else {
-        Profile {
-            threshold: CLUSTER_THRESHOLD,
-            min_duration_on: 0.0,
-            min_duration_off: 0.0,
-        }
-    }
-}
-
 /// Progress is stored as a fraction scaled by this constant.
 const PROGRESS_SCALE: f32 = 1_000_000.0;
 

@@ -7,6 +7,12 @@ default-members = ["gui"]
 lto = true
 codegen-units = 1
 
+# WSOLA is used on the real-time audio thread. Keep it optimized even in
+# debug builds so playback does not underrun while the rest of the GUI is
+# unoptimized.
+[profile.dev.package.wsola]
+opt-level = 3
+
 # Iteration profile: no LTO and parallel codegen for fast rebuilds. Use
 # `cargo run --profile release-fast` while developing.
 [profile.release-fast]

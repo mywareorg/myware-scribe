@@ -10,7 +10,6 @@ pub(crate) fn friendly_model(label: &str) -> &'static str {
     match label {
         "segmentation" => "speaker segmentation",
         "embedding" => "speaker embedding",
-        "embedding-accuracy" => "accuracy speaker embedding",
         "whisper-speed" => "Whisper speed model",
         "whisper-balanced" => "Whisper balanced model",
         "whisper-accuracy" => "Whisper accuracy model",
@@ -69,6 +68,24 @@ pub(crate) fn format_secs(secs: f64) -> String {
         format!("{hours}:{minutes:02}:{seconds:02}")
     } else {
         format!("{minutes}:{seconds:02}")
+    }
+}
+
+/// Coarse human duration for the summary: "45 sec", "14 min", "1 hr 5 min".
+pub(crate) fn human_duration(secs: f64) -> String {
+    let total = secs.max(0.0).round() as u64;
+    if total >= 3600 {
+        let hours = total / 3600;
+        let minutes = (total % 3600) / 60;
+        if minutes == 0 {
+            format!("{hours} hr")
+        } else {
+            format!("{hours} hr {minutes} min")
+        }
+    } else if total >= 60 {
+        format!("{} min", total / 60)
+    } else {
+        format!("{total} sec")
     }
 }
 

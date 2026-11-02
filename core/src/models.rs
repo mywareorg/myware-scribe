@@ -158,24 +158,16 @@ pub fn segmentation_model() -> PathBuf {
     resolve(&segmentation_relative())
 }
 
-/// Embedding model id for a preset. Accuracy uses the larger ResNet152
-/// speaker encoder; the other presets keep the smaller ResNet34 model.
-pub fn embedding_id(preset: &str) -> &'static str {
-    if preset.eq_ignore_ascii_case("accuracy") {
-        "embedding-accuracy"
-    } else {
-        "embedding"
-    }
-}
-
-pub fn embedding_model(preset: &str) -> PathBuf {
+/// The CAM++ speaker encoder. Every preset uses it: it finds roughly 30% more
+/// speaker changes than ResNet34 and does not cost measurable time.
+pub fn embedding_model() -> PathBuf {
     if let Some(path) = crate::env_compat(
         "HIPPO_TRANSCRIBE_EMBEDDING_MODEL",
         "TRANSIEL_EMBEDDING_MODEL",
     ) {
         return PathBuf::from(path);
     }
-    resolve(&embedding_relative(preset))
+    resolve(&embedding_relative())
 }
 
 /// Manifest id for a CLI/GUI preset string.
@@ -211,18 +203,18 @@ pub fn segmentation_relative() -> String {
         .unwrap_or_else(|| "sherpa-onnx-pyannote-segmentation-3-0/model.onnx".to_string())
 }
 
-pub fn embedding_relative(preset: &str) -> String {
-    spec(embedding_id(preset))
+pub fn embedding_relative() -> String {
+    spec("embedding")
         .map(|model| model.file.clone())
-        .unwrap_or_else(|| "wespeaker_en_voxceleb_resnet34_LM.onnx".to_string())
+        .unwrap_or_else(|| "wespeaker_en_voxceleb_CAM++_LM.onnx".to_string())
 }
 
 /// Identifier for the diarization model pair (used as the cache salt).
 ///
 /// Includes the model set version so a model update cannot reuse stale turns.
-pub fn diarizer_id(preset: &str) -> String {
+pub fn diarizer_id() -> String {
     let seg = segmentation_model();
-    let emb = embedding_model(preset);
+    let emb = embedding_model();
     let name = |p: &std::path::Path| {
         p.file_name()
             .and_then(|n| n.to_str())
@@ -240,7 +232,7 @@ mod tests {
     fn manifest_parses_and_is_internally_consistent() {
         let manifest = manifest();
         assert!(!manifest.version.is_empty());
-        assert_eq!(manifest.models.len(), 6);
+        assert_eq!(manifest.models.len(), 5);
         for model in &manifest.models {
             assert!(!model.id.is_empty());
             assert!(!model.file.is_empty());
@@ -316,11 +308,6 @@ mod tests {
         assert_eq!(whisper_relative("speed"), "ggml-tiny-q5_1.bin");
         assert_eq!(whisper_relative("balanced"), "ggml-small-q5_1.bin");
         assert_eq!(whisper_relative("accuracy"), "ggml-large-v3-turbo-q5_0.bin");
-        assert_eq!(embedding_id("balanced"), "embedding");
-        assert_eq!(embedding_id("accuracy"), "embedding-accuracy");
-        assert_eq!(
-            embedding_relative("accuracy"),
-            "wespeaker_en_voxceleb_CAM++_LM.onnx"
-        );
+        assert_eq!(embedding_relative(), "wespeaker_en_voxceleb_CAM++_LM.onnx");
     }
 }

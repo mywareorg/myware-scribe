@@ -395,7 +395,7 @@ pub fn required_for(preset: &str, diarized: bool) -> Vec<&'static str> {
     let mut ids = Vec::with_capacity(3);
     if diarized {
         ids.push("segmentation");
-        ids.push(models::embedding_id(preset));
+        ids.push("embedding");
     }
     ids.push(models::whisper_id(preset));
     ids
@@ -660,7 +660,7 @@ mod tests {
         );
         assert_eq!(
             required_for("accuracy", true),
-            ["segmentation", "embedding-accuracy", "whisper-accuracy"]
+            ["segmentation", "embedding", "whisper-accuracy"]
         );
         // ASR-only needs no diarization models.
         assert_eq!(required_for("speed", false), ["whisper-speed"]);

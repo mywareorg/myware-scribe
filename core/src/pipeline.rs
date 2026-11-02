@@ -399,9 +399,9 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
     ));
 
     let segmentation = models::segmentation_model();
-    let embedding = models::embedding_model(&opts.preset);
+    let embedding = models::embedding_model();
     let whisper = models::whisper_model(&opts.preset);
-    let diarizer = models::diarizer_id(&opts.preset);
+    let diarizer = models::diarizer_id();
     let diarized = opts.mode.diarizes();
 
     emit(Event::Stage {
@@ -590,16 +590,15 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
                     let embedding = embedding.clone();
                     let audio = samples.clone();
                     let num_speakers = opts.num_speakers;
-                    let profile = diarize::profile(&opts.preset);
                     let handle = std::thread::spawn(move || {
                         diarize::diarize_with_progress(
                             audio.as_slice(),
                             &segmentation,
                             &embedding,
                             num_speakers,
-                            profile.threshold,
-                            profile.min_duration_on,
-                            profile.min_duration_off,
+                            diarize::CLUSTER_THRESHOLD,
+                            0.0,
+                            0.0,
                             progress_for_thread,
                         )
                     });
