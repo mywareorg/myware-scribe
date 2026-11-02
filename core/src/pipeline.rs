@@ -15,6 +15,8 @@ use crate::models;
 
 const MERGE_GAP_S: f32 = 1.0;
 const MIN_TURN_S: f32 = 0.4;
+/// A split group shorter than this is treated as a diarization artefact.
+const MIN_GROUP_S: f32 = 0.5;
 const CLIP_PAD_S: f32 = 0.1;
 /// Bucket count for the waveform emitted once diarization identifies speakers.
 const TIMELINE_BUCKETS: usize = 2000;
@@ -214,15 +216,18 @@ fn build_clips(turns: &[Turn], duration: f32, rate: u32, samples: &[f32]) -> Vec
     let mut clips = Vec::new();
     let mut index = 0;
     while index < turns.len() {
+        // Group every turn connected by a short gap. Do not cap the group by
+        // TARGET_S here: a long turn can contain short overlapping turns, and
+        // stopping at the last short turn would skip the remainder of the long
+        // turn. The chunk loop below handles the 29 s split.
         let mut last = index;
-        while last + 1 < turns.len()
-            && turns[last + 1].start - turns[last].end <= MAX_GAP_S
-            && turns[last + 1].end - turns[index].start <= TARGET_S
-        {
+        let mut group_end = turns[index].end;
+        while last + 1 < turns.len() && turns[last + 1].start - group_end <= MAX_GAP_S {
             last += 1;
+            group_end = group_end.max(turns[last].end);
         }
         let window_start = (turns[index].start - CLIP_PAD_S).max(0.0);
-        let window_end = (turns[last].end + CLIP_PAD_S).min(duration);
+        let window_end = (group_end + CLIP_PAD_S).min(duration);
         let mut chunk_start = window_start;
         while chunk_start < window_end {
             let chunk_end = (chunk_start + TARGET_S).min(window_end);
@@ -338,8 +343,10 @@ fn segment_lines(
         }
     }
 
-    // A single detached word is usually a diarization boundary error, not a
-    // real speaker change. Keep the whole segment with its dominant speaker.
+    // A brief detached fragment is a diarization boundary error, not a real
+    // speaker change. Judge that by duration, not word count: one word that
+    // takes half a second ("What?") is a real interjection, one that barely
+    // covers a moment is an artefact.
     let mut runs: Vec<Option<usize>> = groups.iter().map(|(turn, _, _, _, _)| *turn).collect();
     runs.dedup();
     if runs.len() > 1 {
@@ -348,7 +355,10 @@ fn segment_lines(
     if groups.len() <= 1 {
         return vec![whole()];
     }
-    if groups.iter().any(|(_, _, _, _, count)| *count < 2) {
+    let fragment = groups
+        .iter()
+        .any(|(_, _, start, end, count)| *count < 2 && end - start < MIN_GROUP_S);
+    if fragment {
         stats.collapsed += 1;
         return vec![whole()];
     }
@@ -997,6 +1007,44 @@ mod tests {
     }
 
     #[test]
+    fn overlapping_short_turns_do_not_skip_the_rest_of_a_long_turn() {
+        let turns = vec![
+            Turn {
+                start: 0.0,
+                end: 60.0,
+                speaker: "SPEAKER 1".to_string(),
+            },
+            Turn {
+                start: 10.0,
+                end: 12.0,
+                speaker: "SPEAKER 2".to_string(),
+            },
+            Turn {
+                start: 61.0,
+                end: 62.0,
+                speaker: "SPEAKER 2".to_string(),
+            },
+        ];
+        let rate = 16_000;
+        let samples = vec![0.1; 70 * rate as usize];
+        let clips = build_clips(&turns, 70.0, rate, &samples);
+        let covered: f32 = clips
+            .iter()
+            .map(|clip| (clip.to - clip.from) as f32 / rate as f32)
+            .sum();
+        assert!(
+            covered >= 60.0,
+            "long turn coverage was only {covered} seconds"
+        );
+        assert!(
+            clips
+                .iter()
+                .any(|clip| clip.start > 55.0 && clip.start < 60.0),
+            "the tail of the long turn was not transcribed"
+        );
+    }
+
+    #[test]
     fn token_timestamps_split_a_segment_between_speakers() {
         let turns = vec![
             Turn {
@@ -1064,6 +1112,18 @@ mod tests {
         let lines = segment_lines(&clip, &short, &turns, &mut stats);
         assert_eq!(lines.len(), 1);
         assert_eq!(stats.collapsed, 1);
+
+        // A one-word interjection that actually lasts is a real speaker change.
+        let mut spoken = segment.clone();
+        spoken.tokens[2].start = 1.0;
+        spoken.tokens[2].end = 1.75;
+        spoken.tokens.truncate(3);
+        let mut stats = SplitStats::default();
+        let lines = segment_lines(&clip, &spoken, &turns, &mut stats);
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[1].speaker, "SPEAKER 2");
+        assert_eq!(lines[1].text, "general");
+        assert_eq!(stats.collapsed, 0);
     }
 
     #[test]
