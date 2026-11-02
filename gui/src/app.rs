@@ -2279,8 +2279,8 @@ impl App {
                     .is_some_and(|target| (offset - target).abs() <= 6.0);
 
                 // A user scroll disengages Follow instead of snapping the
-                // transcript back to the playhead. Programmatic scrolls from
-                // line selection or Follow tracking stay exempt.
+                // transcript back to the playhead. Scrolling never moves the
+                // playhead; only the timeline, line selection and playback do.
                 if following && !programmatic {
                     if let Some(expected) = self.follow_offset {
                         if (offset - expected).abs() > 6.0 {
@@ -2289,12 +2289,9 @@ impl App {
                             self.scroll_target = None;
                             self.scroll_seek = false;
                             self.save_settings();
-                            self.seek_from_scroll(offset, viewport_h);
                             return Task::none();
                         }
                     }
-                } else if !programmatic {
-                    self.seek_from_scroll(offset, viewport_h);
                 }
                 Task::none()
             }
@@ -2460,6 +2457,7 @@ impl App {
                 let Some(from) = self.queue_drag.take() else {
                     return Task::none();
                 };
+                self.queue_hover = None;
                 if index >= self.queue.len() {
                     return Task::none();
                 }
@@ -4975,43 +4973,6 @@ impl App {
         }
     }
 
-    /// Move the playhead to the line matching the scroll position after a user
-    /// scroll. Reaches the first line at the top and the last line at the
-    /// bottom instead of always centring.
-    fn seek_from_scroll(&mut self, offset: f32, viewport: f32) {
-        let order = self.display_order();
-        let total = order.len();
-        if total == 0 || viewport <= 0.0 {
-            return;
-        }
-        let content = self.transcript_content;
-        if content <= 0.0 {
-            return;
-        }
-        let max_offset = (content - viewport).max(0.0);
-        let rank = if max_offset > 0.0 {
-            (offset.clamp(0.0, max_offset) / max_offset) * (total - 1) as f32
-        } else {
-            0.0
-        };
-        let rank = rank.floor().clamp(0.0, (order.len() - 1) as f32) as usize;
-        let start = order
-            .iter()
-            .skip(rank)
-            .chain(order[..rank].iter().rev())
-            .find_map(|index| self.shown_lines().get(*index).and_then(|line| line.start));
-        let Some(start) = start else {
-            return;
-        };
-        let max = self.shown_duration().unwrap_or(start);
-        self.playhead = start.clamp(0.0, max);
-        self.scroll_seek = true;
-        self.last_tick = Some(Instant::now());
-        if let Some(player) = &self.player {
-            player.seek(self.playhead);
-        }
-    }
-
     /// True when the transcript pane is showing the global empty state.
     fn feature_deck_visible(&self) -> bool {
         // Free-tier upgrade pitch. It is the default pane whenever no
@@ -5519,6 +5480,21 @@ impl App {
         let body: Element<Message> = if has_queue {
             let mut rows = column![].spacing(4).width(Length::Fill);
             for index in 0..self.queue.len() {
+                if self.queue_drag.is_some()
+                    && self.queue_drag != Some(index)
+                    && self.queue_hover == Some(index)
+                {
+                    rows = rows.push(
+                        container(horizontal_space())
+                            .width(Length::Fill)
+                            .height(Length::Fixed(2.0))
+                            .style(move |_theme| container::Style {
+                                background: Some(scheme.blue.into()),
+                                border: iced::border::rounded(1.0),
+                                ..container::Style::default()
+                            }),
+                    );
+                }
                 rows = rows.push(self.queue_row(index, &scheme));
             }
             scrollable(rows)
@@ -5835,15 +5811,21 @@ impl App {
         } else {
             scheme.text
         };
+        let dragging = self.queue_drag == Some(index);
         let hovered = self.queue_hover == Some(index);
-        let background = if viewing {
+        let background = if dragging {
+            Color {
+                a: 0.14,
+                ..scheme.blue
+            }
+        } else if viewing {
             row_tint
         } else if selectable && hovered {
             hover_tint
         } else {
             Color::TRANSPARENT
         };
-        let border_color = if viewing {
+        let border_color = if dragging || viewing {
             scheme.blue
         } else {
             Color::TRANSPARENT
@@ -5858,6 +5840,11 @@ impl App {
                     color: border_color,
                     width: 1.0,
                     radius: 10.0.into(),
+                },
+                shadow: if dragging {
+                    soft_shadow()
+                } else {
+                    Shadow::default()
                 },
                 ..container::Style::default()
             });
@@ -10375,46 +10362,6 @@ mod tests {
         app.follow_playhead = true;
         let _ = app.update(Message::ToggleFollowPlayhead);
         assert!(!app.follow_playhead);
-    }
-
-    #[test]
-    fn scrolling_moves_the_playhead_to_the_visible_line() {
-        let _guard = env_lock();
-        let _config = ConfigEnv::new("scroll-config");
-        let media = temp_dir("scroll-media");
-
-        let audio = media.join("talk.mp3");
-        std::fs::write(&audio, b"audio").unwrap();
-        let transcript = media.join("talk.txt");
-        std::fs::write(
-            &transcript,
-            "[00:00] SPEAKER 1: first\n[00:05] SPEAKER 2: second\n",
-        )
-        .unwrap();
-
-        let mut app = pro_app();
-        app.queue.push(QueueItem {
-            path: audio.clone(),
-            audio: Some(audio),
-            status: ItemStatus::Done,
-            duration: Some(10.0),
-            transcript: Some(transcript),
-            stats: None,
-            turns: Vec::new(),
-            peaks: Arc::new(Vec::new()),
-        });
-        let _ = app.view_item(0);
-
-        // Two lines over a scrollable range: the top maps to the first line
-        // and the bottom maps to the last line.
-        app.transcript_content = 300.0;
-        app.seek_from_scroll(0.0, 100.0);
-        assert_eq!(app.playhead, 0.0);
-        app.seek_from_scroll(200.0, 100.0);
-        assert_eq!(app.playhead, 5.0);
-        assert!(app.scroll_seek);
-
-        let _ = std::fs::remove_dir_all(&media);
     }
 
     #[test]
