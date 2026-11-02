@@ -673,9 +673,10 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
             // already coarse the model missed the changes, not the filters.
             crate::logging::info(format!(
                 "diarize: {raw_turns} raw turn(s), {merged_turns} merged, {dropped_turns} \
-                 dropped as short, {} kept, {} speaker(s)",
+                 dropped as short, {} kept, {} speaker(s), {:.1}s",
                 cleaned.len(),
-                map.len()
+                map.len(),
+                diarized_at.duration_since(decoded_at).as_secs_f64()
             ));
         }
         let turns: Vec<Turn> = cleaned
