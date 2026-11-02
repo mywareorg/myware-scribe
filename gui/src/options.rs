@@ -173,10 +173,17 @@ pub(crate) enum Speed {
     One,
     OneHalf,
     Two,
+    Four,
 }
 
 impl Speed {
-    pub(crate) const ALL: [Speed; 4] = [Speed::Half, Speed::One, Speed::OneHalf, Speed::Two];
+    pub(crate) const ALL: [Speed; 5] = [
+        Speed::Half,
+        Speed::One,
+        Speed::OneHalf,
+        Speed::Two,
+        Speed::Four,
+    ];
 
     pub(crate) fn factor(self) -> f32 {
         match self {
@@ -184,6 +191,7 @@ impl Speed {
             Speed::One => 1.0,
             Speed::OneHalf => 1.5,
             Speed::Two => 2.0,
+            Speed::Four => 4.0,
         }
     }
 
@@ -194,6 +202,8 @@ impl Speed {
             Speed::OneHalf
         } else if (factor - 2.0).abs() < 0.01 {
             Speed::Two
+        } else if (factor - 4.0).abs() < 0.01 {
+            Speed::Four
         } else {
             Speed::One
         }
@@ -205,6 +215,7 @@ impl Speed {
             Speed::One => "1x",
             Speed::OneHalf => "1.5x",
             Speed::Two => "2x",
+            Speed::Four => "4x",
         }
     }
 }

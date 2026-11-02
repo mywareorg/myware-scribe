@@ -664,141 +664,6 @@ fn aspect_clamp(requested: Size, last: Size) -> Size {
     Size::new(w, h)
 }
 
-/// Draws the toast as a real overlay layer. A plain stack child is drawn
-/// below the Help pick list's overlay; emitting the toast from `overlay`
-/// puts it after that overlay in the group.
-struct ToastLayer<'a> {
-    content: Element<'a, Message>,
-}
-
-impl<'a> iced::advanced::Widget<Message, Theme, Renderer> for ToastLayer<'a> {
-    fn size(&self) -> Size<Length> {
-        Size::new(Length::Shrink, Length::Shrink)
-    }
-
-    fn layout(
-        &self,
-        _tree: &mut iced::advanced::widget::Tree,
-        _renderer: &Renderer,
-        _limits: &iced::advanced::layout::Limits,
-    ) -> iced::advanced::layout::Node {
-        iced::advanced::layout::Node::new(Size::ZERO)
-    }
-
-    fn draw(
-        &self,
-        _tree: &iced::advanced::widget::Tree,
-        _renderer: &mut Renderer,
-        _theme: &Theme,
-        _style: &iced::advanced::renderer::Style,
-        _layout: iced::advanced::Layout<'_>,
-        _cursor: mouse::Cursor,
-        _viewport: &Rectangle,
-    ) {
-    }
-
-    fn tag(&self) -> iced::advanced::widget::tree::Tag {
-        self.content.as_widget().tag()
-    }
-
-    fn state(&self) -> iced::advanced::widget::tree::State {
-        self.content.as_widget().state()
-    }
-
-    fn children(&self) -> Vec<iced::advanced::widget::Tree> {
-        self.content.as_widget().children()
-    }
-
-    fn diff(&self, tree: &mut iced::advanced::widget::Tree) {
-        self.content.as_widget().diff(tree);
-    }
-
-    fn overlay<'b>(
-        &'b mut self,
-        tree: &'b mut iced::advanced::widget::Tree,
-        _layout: iced::advanced::Layout<'_>,
-        _renderer: &Renderer,
-        translation: Vector,
-    ) -> Option<iced::advanced::overlay::Element<'b, Message, Theme, Renderer>> {
-        Some(iced::advanced::overlay::Element::new(Box::new(
-            ToastOverlay {
-                content: &mut self.content,
-                state: tree,
-                translation,
-            },
-        )))
-    }
-}
-
-struct ToastOverlay<'a, 'b> {
-    content: &'b mut Element<'a, Message>,
-    state: &'b mut iced::advanced::widget::Tree,
-    translation: Vector,
-}
-
-impl<'a, 'b> iced::advanced::Overlay<Message, Theme, Renderer> for ToastOverlay<'a, 'b> {
-    fn layout(&mut self, renderer: &Renderer, bounds: Size) -> iced::advanced::layout::Node {
-        let node = self.content.as_widget_mut().layout(
-            self.state,
-            renderer,
-            &iced::advanced::layout::Limits::new(Size::ZERO, bounds),
-        );
-        node.move_to(Point::new(self.translation.x, self.translation.y))
-    }
-
-    fn draw(
-        &self,
-        renderer: &mut Renderer,
-        theme: &Theme,
-        style: &iced::advanced::renderer::Style,
-        layout: iced::advanced::Layout<'_>,
-        cursor: mouse::Cursor,
-    ) {
-        let viewport = layout.bounds();
-        self.content.as_widget().draw(
-            self.state, renderer, theme, style, layout, cursor, &viewport,
-        );
-    }
-
-    fn operate(
-        &mut self,
-        layout: iced::advanced::Layout<'_>,
-        renderer: &Renderer,
-        operation: &mut dyn iced::advanced::widget::Operation,
-    ) {
-        self.content
-            .as_widget_mut()
-            .operate(self.state, layout, renderer, operation);
-    }
-
-    fn on_event(
-        &mut self,
-        event: iced::Event,
-        layout: iced::advanced::Layout<'_>,
-        cursor: mouse::Cursor,
-        renderer: &Renderer,
-        clipboard: &mut dyn iced::advanced::Clipboard,
-        shell: &mut iced::advanced::Shell<'_, Message>,
-    ) -> iced::event::Status {
-        let viewport = layout.bounds();
-        self.content.as_widget_mut().on_event(
-            self.state, event, layout, cursor, renderer, clipboard, shell, &viewport,
-        )
-    }
-
-    fn mouse_interaction(
-        &self,
-        layout: iced::advanced::Layout<'_>,
-        cursor: mouse::Cursor,
-        viewport: &Rectangle,
-        renderer: &Renderer,
-    ) -> mouse::Interaction {
-        self.content
-            .as_widget()
-            .mouse_interaction(self.state, layout, cursor, viewport, renderer)
-    }
-}
-
 impl App {
     pub fn new() -> Self {
         let settings = Self::load_settings();
@@ -3759,7 +3624,7 @@ impl App {
                 if self
                     .toast
                     .as_ref()
-                    .is_some_and(|(_, at)| at.elapsed() > Duration::from_secs(4))
+                    .is_some_and(|(message, at)| at.elapsed() > toast_ttl(message))
                 {
                     self.toast = None;
                 }
@@ -5332,10 +5197,19 @@ impl App {
             .into();
         }
 
-        let gpu_label = multiplier
-            .filter(|_| reason.is_none())
-            .map(|value| format!("GPU {value:.1}\u{00d7}"))
-            .unwrap_or_else(|| "GPU".to_string());
+        let failed = self
+            .gpu_profile()
+            .is_some_and(|profile| profile.gpu_error.is_some());
+        let measured = multiplier.is_some();
+        let untested = !measured && !failed;
+        let gpu_label = if measured && reason.is_none() {
+            format!("GPU {:.1}\u{00d7}", multiplier.unwrap_or(1.0))
+        } else if untested {
+            "Test GPU".to_string()
+        } else {
+            "GPU".to_string()
+        };
+        let can_test = pro && self.models_ready();
 
         let segment = |label: String, selected: bool, muted: bool| {
             button(
@@ -5352,7 +5226,7 @@ impl App {
         };
 
         let cpu_selected = !selected;
-        let cpu_button = segment("CPU 1\u{00d7}".to_string(), cpu_selected, false)
+        let cpu_button = segment("CPU".to_string(), cpu_selected, false)
             .on_press_maybe((!running && selected).then_some(Message::SetAcceleration(false)));
 
         let gpu_locked = !pro;
@@ -5362,29 +5236,40 @@ impl App {
             if gpu_locked {
                 button.on_press_maybe((!running).then_some(Message::LockedGpu))
             } else if reason.is_none() {
-                button.on_press_maybe(
-                    (!running && !selected).then_some(Message::SetAcceleration(true)),
-                )
+                if untested {
+                    button.on_press_maybe((!running && can_test).then_some(Message::RetestGpu))
+                } else {
+                    button.on_press_maybe(
+                        (!running && !selected).then_some(Message::SetAcceleration(true)),
+                    )
+                }
             } else {
                 button
             }
         };
-        let gpu_button = match &reason {
-            Some(reason) => self.tip(gpu_button, reason.as_str(), &scheme),
-            None => gpu_button.into(),
+        let gpu_button: Element<Message> = if let Some(reason) = &reason {
+            self.tip(gpu_button, reason.as_str(), &scheme)
+        } else if untested {
+            self.tip(
+                gpu_button,
+                if can_test {
+                    "Test CPU and GPU speed for this preset."
+                } else {
+                    "Download the transcription models before testing GPU."
+                },
+                &scheme,
+            )
+        } else {
+            gpu_button.into()
         };
 
-        let action_label = if self
-            .gpu_profile()
-            .is_some_and(|profile| profile.gpu_error.is_some())
-        {
+        let action_label = if failed {
             "Test again"
-        } else if multiplier.is_some() {
+        } else if measured {
             "Retest GPU"
         } else {
             "Test GPU speed"
         };
-        let can_test = pro && self.models_ready();
         let action = button(text(action_label).size(11).wrapping(NO_WRAP))
             .padding([2, 6])
             .on_press_maybe(
@@ -5414,7 +5299,7 @@ impl App {
         ]
         .spacing(4)
         .align_y(iced::Alignment::Center);
-        if pro {
+        if pro && (measured || failed) {
             header = header.push(action);
         }
 
@@ -5754,12 +5639,24 @@ impl App {
             options,
             self.acceleration_row(&scheme),
             row![
-                action_text("Transcribe")
-                    .on_press_maybe(can_start.then_some(Message::Start))
-                    .style(color_button(scheme.green, scheme.on_accent)),
-                action_text("Cancel")
-                    .on_press_maybe(running.then_some(Message::Cancel))
-                    .style(color_button(scheme.danger, scheme.on_accent)),
+                button(
+                    container(text("Transcribe"))
+                        .center_x(Length::Fill)
+                        .center_y(Length::Fill),
+                )
+                .width(Length::Fill)
+                .height(Length::Fixed(30.0))
+                .on_press_maybe(can_start.then_some(Message::Start))
+                .style(color_button(scheme.green, scheme.on_accent)),
+                button(
+                    container(text("Cancel"))
+                        .center_x(Length::Fill)
+                        .center_y(Length::Fill),
+                )
+                .width(Length::Fill)
+                .height(Length::Fixed(30.0))
+                .on_press_maybe(running.then_some(Message::Cancel))
+                .style(color_button(scheme.danger, scheme.on_accent)),
             ]
             .spacing(8)
             .align_y(iced::Alignment::Center),
@@ -7314,41 +7211,68 @@ impl App {
         )
     }
 
-    /// Draw the toast above whatever the view built (including modals).
-    fn with_toast<'a>(&self, base: Element<'a, Message>, scheme: Scheme) -> Element<'a, Message> {
+    /// Bottom-right notification layer for the right pane.
+    fn with_toast<'a>(
+        &'a self,
+        base: Element<'a, Message>,
+        scheme: Scheme,
+        bottom: f32,
+    ) -> Element<'a, Message> {
         let Some((message, _)) = &self.toast else {
             return base;
         };
+        let tone = toast_tone(message);
+        let dot_color = match tone {
+            ToastTone::Success => scheme.green,
+            ToastTone::Info => scheme.blue,
+            ToastTone::Danger => scheme.danger,
+        };
+        let toast_text = ellipsize(message, 44);
+        let width =
+            ((toast_text.chars().count() as f32 * 7.2 + 46.0).clamp(180.0, 320.0)).max(180.0);
+        let dot = container(horizontal_space())
+            .width(Length::Fixed(6.0))
+            .height(Length::Fixed(6.0))
+            .style(move |_theme| container::Style {
+                background: Some(dot_color.into()),
+                border: iced::border::rounded(3.0),
+                ..container::Style::default()
+            });
         let toast = mouse_area(
-            // Match the default button text size used by "Get Pro".
-            container(text(message.clone()))
-                // 44 px is roughly 50% taller than the old padded text row.
-                // The top padding below centres it on the header button line.
-                .height(Length::Fixed(44.0))
-                .align_y(iced::Alignment::Center)
-                .padding([0, 14])
-                .style(move |_theme| container::Style {
-                    background: Some(scheme.toast_bg.into()),
-                    text_color: Some(scheme.toast_text),
-                    border: iced::border::rounded(PILL),
-                    shadow: soft_shadow(),
-                    ..container::Style::default()
-                }),
+            container(
+                row![dot, text(toast_text).size(13).wrapping(NO_WRAP)]
+                    .spacing(8)
+                    .align_y(iced::Alignment::Center),
+            )
+            .width(Length::Fixed(width))
+            .height(Length::Fixed(36.0))
+            .align_y(iced::Alignment::Center)
+            .padding([0, 12])
+            .style(move |_theme| container::Style {
+                background: Some(scheme.dialog_bg.into()),
+                text_color: Some(scheme.text),
+                border: iced::border::Border {
+                    color: scheme.border,
+                    width: 1.0,
+                    radius: 12.0.into(),
+                },
+                shadow: soft_shadow(),
+                ..container::Style::default()
+            }),
         )
         .on_press(Message::DismissToast);
         let overlay = container(toast)
             .width(Length::Fill)
             .height(Length::Fill)
             .align_x(iced::Alignment::End)
-            .align_y(iced::Alignment::Start)
-            .padding([24, 20]);
-        stack![
-            base,
-            Element::new(ToastLayer {
-                content: overlay.into()
-            })
-        ]
-        .into()
+            .align_y(iced::Alignment::End)
+            .padding(iced::Padding {
+                top: 0.0,
+                right: 16.0,
+                bottom,
+                left: 0.0,
+            });
+        stack![base, overlay].into()
     }
 
     pub fn view(&self) -> Element<'_, Message> {
@@ -7379,6 +7303,7 @@ impl App {
             1 + (self.activity_frame / 5) % 5,
             file_name.as_deref(),
         );
+
         // The file name leads the status, including while "Decoding" animates.
         // A fixed five-dot block keeps the left side stationary.
         let label_el: Element<Message> = if self.stage.eq_ignore_ascii_case("Decoding") {
@@ -7413,16 +7338,14 @@ impl App {
                 radius: 15.0.into(),
             },
         };
-        let progress_stack = stack![
-            progress_bar(0.0..=1.0, global_progress)
-                .width(Length::Fill)
-                .height(Length::Fixed(30.0))
-                .style(bar_style),
-            container(label_el)
-                .center_x(Length::Fill)
-                .center_y(Length::Fill),
-        ]
-        .width(Length::Fill);
+        let bar = progress_bar(0.0..=1.0, global_progress)
+            .width(Length::Fill)
+            .height(Length::Fixed(30.0))
+            .style(bar_style);
+        let label = container(label_el)
+            .center_x(Length::Fill)
+            .center_y(Length::Fill);
+        let progress_stack = stack![bar, label].width(Length::Fill);
         let progress_shell = container(progress_stack)
             .width(Length::Fill)
             .style(move |_theme| container::Style {
@@ -7571,6 +7494,7 @@ impl App {
             right = right.push(search_actions_row);
         }
         let right_panel: Element<Message> = right.into();
+        let right_panel = self.with_toast(right_panel, scheme, if has_queue { 48.0 } else { 20.0 });
 
         let (theme_icon, theme_tip) = match self.theme_mode {
             AppTheme::Light => (ICON_MOON, "Switch to dark theme"),
@@ -7690,7 +7614,7 @@ impl App {
                 ]
                 .spacing(10);
                 let dialog = modal_card(body, 440.0, scheme);
-                return self.with_toast(modal_overlay(base, dialog, scheme), scheme);
+                return modal_overlay(base, dialog, scheme);
             }
         }
 
@@ -7755,7 +7679,7 @@ impl App {
                 .align_x(iced::Alignment::End),
             );
             let dialog = modal_card(col, 560.0, scheme);
-            return self.with_toast(modal_overlay(base, dialog, scheme), scheme);
+            return modal_overlay(base, dialog, scheme);
         }
 
         if self.summary_open {
@@ -7826,22 +7750,22 @@ impl App {
             .spacing(8);
 
             let dialog = modal_card(col, 460.0, scheme);
-            return self.with_toast(modal_overlay(base, dialog, scheme), scheme);
+            return modal_overlay(base, dialog, scheme);
         }
 
         if self.calibration.is_some() {
             let dialog = self.calibration_dialog(&scheme);
-            return self.with_toast(modal_overlay(base, dialog, scheme), scheme);
+            return modal_overlay(base, dialog, scheme);
         }
 
         if self.paywall_open {
             let dialog = self.paywall_dialog(&scheme);
-            return self.with_toast(modal_overlay(base, dialog, scheme), scheme);
+            return modal_overlay(base, dialog, scheme);
         }
 
         if self.settings_open {
             let dialog = self.settings_dialog(&scheme);
-            return self.with_toast(modal_overlay(base, dialog, scheme), scheme);
+            return modal_overlay(base, dialog, scheme);
         }
 
         if let Some(kind) = self.help_open {
@@ -7950,11 +7874,11 @@ impl App {
                 .align_x(iced::Alignment::End),
             );
             let dialog = modal_card(col, 460.0, scheme);
-            return self.with_toast(modal_overlay(base, dialog, scheme), scheme);
+            return modal_overlay(base, dialog, scheme);
         }
 
         if !self.rename_open {
-            return self.with_toast(base, scheme);
+            return base;
         }
 
         let mut col = column![text("Rename Speakers").size(20)].spacing(8);
@@ -7994,7 +7918,7 @@ impl App {
             .align_x(iced::Alignment::End),
         );
         let dialog = modal_card(col, 380.0, scheme);
-        self.with_toast(modal_overlay(base, dialog, scheme), scheme)
+        modal_overlay(base, dialog, scheme)
     }
 }
 
@@ -9147,6 +9071,64 @@ fn queue_weight(item: &QueueItem, fallback: f32) -> f32 {
         .unwrap_or(fallback)
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ToastTone {
+    Success,
+    Info,
+    Danger,
+}
+
+fn toast_tone(message: &str) -> ToastTone {
+    let message = message.to_ascii_lowercase();
+    if [
+        "fail",
+        "error",
+        "could not",
+        "cannot",
+        "missing",
+        "unavailable",
+        "disabled",
+        "read-only",
+        "too short",
+        "no audio",
+        "no output",
+    ]
+    .iter()
+    .any(|needle| message.contains(needle))
+    {
+        ToastTone::Danger
+    } else if [
+        "pro",
+        "download",
+        "copied",
+        "imported",
+        "queued",
+        "stopping",
+        "purchase",
+        "trial",
+        "restored",
+        "switched",
+        "player is",
+        "editing is",
+        "reviewing",
+    ]
+    .iter()
+    .any(|needle| message.contains(needle))
+    {
+        ToastTone::Info
+    } else {
+        ToastTone::Success
+    }
+}
+
+fn toast_ttl(message: &str) -> Duration {
+    match toast_tone(message) {
+        ToastTone::Danger => Duration::from_secs(6),
+        ToastTone::Info => Duration::from_secs(3),
+        ToastTone::Success => Duration::from_millis(2400),
+    }
+}
+
 /// Progress-bar text: phase (with detail) plus overall percentage.
 fn progress_label(
     status: &Status,
@@ -9740,17 +9722,31 @@ fn greyed_button(scheme: Scheme) -> impl Fn(&iced::Theme, button::Status) -> but
 
 fn color_button(bg: Color, ink: Color) -> impl Fn(&iced::Theme, button::Status) -> button::Style {
     move |theme, status| {
-        let (top, bottom, text, shadow) = match status {
+        let (top, bottom, text, border, border_width, shadow) = match status {
             button::Status::Hovered => (
-                theme::lighten(bg, 0.18),
-                theme::lighten(bg, 0.02),
+                theme::lighten(bg, 0.30),
+                theme::lighten(bg, 0.10),
                 ink,
-                soft_shadow(),
+                Color {
+                    a: 0.95,
+                    ..theme::lighten(bg, 0.78)
+                },
+                2.0,
+                Shadow {
+                    color: Color::from_rgba(0.0, 0.0, 0.0, 0.30),
+                    offset: Vector::new(0.0, 4.0),
+                    blur_radius: 12.0,
+                },
             ),
             button::Status::Pressed => (
-                theme::darken(bg, 0.16),
-                theme::darken(bg, 0.04),
+                theme::darken(bg, 0.18),
+                theme::darken(bg, 0.06),
                 ink,
+                Color {
+                    a: 0.80,
+                    ..theme::lighten(bg, 0.65)
+                },
+                2.0,
                 Shadow::default(),
             ),
             // Filled buttons keep their hue when disabled, but the label must
@@ -9764,6 +9760,8 @@ fn color_button(bg: Color, ink: Color) -> impl Fn(&iced::Theme, button::Status) 
                         a: 0.85,
                         ..theme.palette().text
                     },
+                    Color { a: 0.20, ..bg },
+                    1.0,
                     Shadow::default(),
                 )
             }
@@ -9771,6 +9769,11 @@ fn color_button(bg: Color, ink: Color) -> impl Fn(&iced::Theme, button::Status) 
                 theme::lighten(bg, 0.12),
                 theme::darken(bg, 0.04),
                 ink,
+                Color {
+                    a: 0.45,
+                    ..theme::lighten(bg, 0.55)
+                },
+                1.0,
                 soft_shadow(),
             ),
         };
@@ -9778,11 +9781,8 @@ fn color_button(bg: Color, ink: Color) -> impl Fn(&iced::Theme, button::Status) 
             background: Some(linear_gradient(top, bottom)),
             text_color: text,
             border: iced::border::Border {
-                color: Color {
-                    a: 0.45,
-                    ..theme::lighten(bg, 0.55)
-                },
-                width: 1.0,
+                color: border,
+                width: border_width,
                 radius: PILL.into(),
             },
             shadow,
