@@ -10,6 +10,16 @@ pub struct Segment {
     pub end: f32,
     pub text: String,
     pub confidence: f32,
+    /// Token-level timestamps, used to split a segment between speakers.
+    #[serde(default)]
+    pub tokens: Vec<Token>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct Token {
+    pub start: f32,
+    pub end: f32,
+    pub text: String,
 }
 
 /// Compute backend whisper.cpp was built with, or is using at runtime.
@@ -224,6 +234,7 @@ impl Transcriber {
         params.set_print_progress(false);
         params.set_print_realtime(false);
         params.set_print_timestamps(false);
+        params.set_token_timestamps(!fast);
         params.set_n_threads(threads);
         if fast {
             // The speed preset trades the temperature fallback for latency.
@@ -255,18 +266,30 @@ impl Transcriber {
             }
 
             let mut log_sum = 0.0f64;
-            let mut tokens = 0usize;
+            let mut token_count = 0usize;
+            let mut word_tokens = Vec::new();
             for token_index in 0..segment.n_tokens() {
                 if let Some(token) = segment.get_token(token_index) {
                     let probability = token.token_probability() as f64;
                     if probability > 0.0 {
                         log_sum += probability.ln();
-                        tokens += 1;
+                        token_count += 1;
+                    }
+                    let data = token.token_data();
+                    if data.t0 >= 0 && data.t1 >= 0 {
+                        let text = token.to_str_lossy().unwrap_or_default();
+                        if !text.is_empty() && !text.starts_with("[_") {
+                            word_tokens.push(Token {
+                                start: data.t0 as f32 / 100.0,
+                                end: data.t1 as f32 / 100.0,
+                                text: text.into_owned(),
+                            });
+                        }
                     }
                 }
             }
-            let confidence = if tokens > 0 {
-                (log_sum / tokens as f64) as f32
+            let confidence = if token_count > 0 {
+                (log_sum / token_count as f64) as f32
             } else {
                 0.0
             };
@@ -276,6 +299,7 @@ impl Transcriber {
                 end: segment.end_timestamp() as f32 / 100.0,
                 text,
                 confidence,
+                tokens: word_tokens,
             });
         }
         Ok(segments)

@@ -20,6 +20,34 @@ use crate::event::Turn;
 /// Clustering threshold used when the speaker count is auto-detected.
 pub const CLUSTER_THRESHOLD: f32 = 0.5;
 
+/// Post-processing knobs for the diarization model.
+#[derive(Debug, Clone, Copy)]
+pub struct Profile {
+    pub threshold: f32,
+    pub min_duration_on: f32,
+    pub min_duration_off: f32,
+}
+
+/// The Accuracy preset uses the larger speaker encoder and closes sub-second
+/// gaps so a single speaker is not split around breaths.
+pub fn profile(preset: &str) -> Profile {
+    if preset.eq_ignore_ascii_case("accuracy") {
+        Profile {
+            threshold: CLUSTER_THRESHOLD,
+            // Keep short interjections: filling sub-second gaps merges them
+            // into the previous speaker.
+            min_duration_on: 0.0,
+            min_duration_off: 0.0,
+        }
+    } else {
+        Profile {
+            threshold: CLUSTER_THRESHOLD,
+            min_duration_on: 0.0,
+            min_duration_off: 0.0,
+        }
+    }
+}
+
 /// Progress is stored as a fraction scaled by this constant.
 const PROGRESS_SCALE: f32 = 1_000_000.0;
 
@@ -48,6 +76,8 @@ pub fn diarize(
         embedding,
         num_speakers,
         threshold,
+        0.0,
+        0.0,
         None,
     )
 }
@@ -59,6 +89,8 @@ pub fn diarize_with_progress(
     embedding: &Path,
     num_speakers: Option<i32>,
     threshold: f32,
+    min_duration_on: f32,
+    min_duration_off: f32,
     progress: Arc<AtomicU32>,
 ) -> Result<Vec<Turn>, String> {
     run(
@@ -67,6 +99,8 @@ pub fn diarize_with_progress(
         embedding,
         num_speakers,
         threshold,
+        min_duration_on,
+        min_duration_off,
         Some(progress),
     )
 }
@@ -77,6 +111,8 @@ fn run(
     embedding: &Path,
     num_speakers: Option<i32>,
     threshold: f32,
+    min_duration_on: f32,
+    min_duration_off: f32,
     progress: Option<Arc<AtomicU32>>,
 ) -> Result<Vec<Turn>, String> {
     #[cfg(windows)]
@@ -101,8 +137,8 @@ fn run(
             num_clusters: num_speakers.unwrap_or(-1),
             threshold,
         },
-        min_duration_off: 0.0,
-        min_duration_on: 0.0,
+        min_duration_off,
+        min_duration_on,
         segmentation: ffi::SherpaOnnxOfflineSpeakerSegmentationModelConfig {
             pyannote: ffi::SherpaOnnxOfflineSpeakerSegmentationPyannoteModelConfig {
                 model: segmentation.as_ptr(),

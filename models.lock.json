@@ -28,6 +28,19 @@
       ]
     },
     {
+      "id": "embedding-accuracy",
+      "file": "wespeaker_en_voxceleb_CAM++_LM.onnx",
+      "size": 29292687,
+      "sha256": "e197af7e9d473030cf486b3124149a19bf37014d0e4485e4c70c483b0ec10cb2",
+      "license": "CC-BY-4.0",
+      "source": "WeSpeaker en_voxceleb_CAM++_LM (sherpa-onnx release)",
+      "bundled": false,
+      "mirrors": [
+        "https://gitlab.com/api/v4/projects/librewarelive%2Fhippo-transcribe-models/packages/generic/hippo-models/1.0.0/wespeaker_en_voxceleb_CAM++_LM.onnx",
+        "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/wespeaker_en_voxceleb_CAM++_LM.onnx"
+      ]
+    },
+    {
       "id": "whisper-speed",
       "file": "ggml-tiny-q5_1.bin",
       "size": 32152673,

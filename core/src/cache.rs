@@ -88,6 +88,8 @@ pub fn clip_key(
     hasher.update(to.to_string().as_bytes());
     hasher.update(best_of.to_string().as_bytes());
     hasher.update([fast as u8]);
+    // Token timestamps were added to cached segments; old entries lack them.
+    hasher.update(b"tokens-v1");
     hex(&hasher.finalize()[..12])
 }
 

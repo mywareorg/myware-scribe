@@ -62,8 +62,8 @@ pub fn probe_duration(path: &Path) -> Option<f64> {
 pub type CompletedDetails = (Option<Vec<Turn>>, Option<(f64, Vec<f32>)>);
 
 /// Read a completed item's diarization turns back out of the cache.
-pub fn load_turns(path: &Path, num_speakers: Option<i32>) -> Option<Vec<Turn>> {
-    let diarizer = hippo_transcribe_core::models::diarizer_id();
+pub fn load_turns(path: &Path, preset: &str, num_speakers: Option<i32>) -> Option<Vec<Turn>> {
+    let diarizer = hippo_transcribe_core::models::diarizer_id(preset);
     hippo_transcribe_core::cache::key(path, &diarizer, num_speakers)
         .and_then(|key| hippo_transcribe_core::cache::read(&key))
 }
@@ -72,10 +72,11 @@ pub fn load_turns(path: &Path, num_speakers: Option<i32>) -> Option<Vec<Turn>> {
 /// waveform (by probing the audio), used when a queue is restored at startup.
 pub fn load_completed(
     path: PathBuf,
+    preset: String,
     num_speakers: Option<i32>,
     buckets: usize,
 ) -> CompletedDetails {
-    let turns = load_turns(&path, num_speakers);
+    let turns = load_turns(&path, &preset, num_speakers);
     let probe = hippo_transcribe_core::audio::waveform(&path, buckets).ok();
     (turns, probe)
 }

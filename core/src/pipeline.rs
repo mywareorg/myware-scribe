@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use crate::asr::{Segment, Transcriber};
 use crate::audio;
 use crate::cache;
-use crate::diarize::{self, CLUSTER_THRESHOLD};
+use crate::diarize;
 use crate::event::{Event, SpeakerStat, Stats, Turn};
 use crate::models;
 
@@ -196,33 +196,51 @@ fn trim_silence(samples: &[f32], from: usize, to: usize, rate: u32) -> (usize, u
     )
 }
 
-/// Build one clip per turn (split at the whisper window size). Turns are not
-/// batched together: diarization can emit nested short interjections, and
-/// grouping across them re-encodes the same audio and duplicates text. Each
-/// clip is silence-trimmed at its edges.
+/// Group consecutive turns into whisper-sized windows. A window can span
+/// several speakers; token timestamps assign each piece of text back to the
+/// turn that actually covered it. Short gaps are left inside the window so
+/// whisper keeps context, while longer gaps start a new clip.
 fn build_clips(turns: &[Turn], duration: f32, rate: u32, samples: &[f32]) -> Vec<Clip> {
     const TARGET_S: f32 = 29.0;
     const MIN_S: f32 = 0.15;
+    const MAX_GAP_S: f32 = 0.75;
     let mut clips = Vec::new();
-    for (index, turn) in turns.iter().enumerate() {
-        let start = (turn.start - CLIP_PAD_S).max(0.0);
-        let end = (turn.end + CLIP_PAD_S).min(duration);
-        let mut chunk_start = start;
-        while chunk_start < end {
-            let chunk_end = (chunk_start + TARGET_S).min(end);
-            let raw_from = (chunk_start * rate as f32) as usize;
-            let raw_to = ((chunk_end * rate as f32) as usize).min(samples.len());
-            let (from, to) = trim_silence(samples, raw_from, raw_to, rate);
-            if to > from && (to - from) as f32 >= MIN_S * rate as f32 {
-                clips.push(Clip {
-                    turns: vec![(index, turn.start, turn.end)],
-                    start: from as f32 / rate as f32,
-                    from,
-                    to,
-                });
+    let mut index = 0;
+    while index < turns.len() {
+        let mut last = index;
+        while last + 1 < turns.len()
+            && turns[last + 1].start - turns[last].end <= MAX_GAP_S
+            && turns[last + 1].end - turns[index].start <= TARGET_S
+        {
+            last += 1;
+        }
+        let window_start = (turns[index].start - CLIP_PAD_S).max(0.0);
+        let window_end = (turns[last].end + CLIP_PAD_S).min(duration);
+        let mut chunk_start = window_start;
+        while chunk_start < window_end {
+            let chunk_end = (chunk_start + TARGET_S).min(window_end);
+            let clip_turns: Vec<(usize, f32, f32)> = turns[index..=last]
+                .iter()
+                .enumerate()
+                .filter(|(_, turn)| turn.end > chunk_start && turn.start < chunk_end)
+                .map(|(offset, turn)| (index + offset, turn.start, turn.end))
+                .collect();
+            if !clip_turns.is_empty() {
+                let raw_from = (chunk_start * rate as f32) as usize;
+                let raw_to = ((chunk_end * rate as f32) as usize).min(samples.len());
+                let (from, to) = trim_silence(samples, raw_from, raw_to, rate);
+                if to > from && (to - from) as f32 >= MIN_S * rate as f32 {
+                    clips.push(Clip {
+                        turns: clip_turns,
+                        start: from as f32 / rate as f32,
+                        from,
+                        to,
+                    });
+                }
             }
             chunk_start = chunk_end;
         }
+        index = last + 1;
     }
     clips
 }
@@ -251,6 +269,65 @@ fn attribute_turn(clip: &Clip, start: f32, end: f32) -> Option<usize> {
         .map(|(index, _, _)| *index)
 }
 
+/// Split one ASR segment at speaker changes using token timestamps. When the
+/// model did not provide token times, or every token belongs to one turn,
+/// return the original segment as a single line.
+fn segment_lines(clip: &Clip, segment: &Segment, turns: &[Turn]) -> Vec<Line> {
+    let speaker_for = |turn: Option<usize>| {
+        turn.and_then(|index| turns.get(index))
+            .map(|turn| turn.speaker.clone())
+            .unwrap_or_default()
+    };
+    let whole = || Line {
+        start: clip.start + segment.start,
+        speaker: speaker_for(attribute_turn(
+            clip,
+            clip.start + segment.start,
+            clip.start + segment.end,
+        )),
+        text: segment.text.clone(),
+        confidence: segment.confidence,
+    };
+
+    if segment.tokens.len() < 2 {
+        return vec![whole()];
+    }
+
+    let mut groups: Vec<(Option<usize>, String, f32, f32, usize)> = Vec::new();
+    for token in &segment.tokens {
+        let start = clip.start + token.start;
+        let end = clip.start + token.end;
+        let turn = attribute_turn(clip, start, end);
+        match groups.last_mut() {
+            Some((last_turn, text, _, last_end, count)) if *last_turn == turn => {
+                text.push_str(&token.text);
+                *last_end = end;
+                *count += 1;
+            }
+            _ => groups.push((turn, token.text.clone(), start, end, 1)),
+        }
+    }
+
+    // A single detached word is usually a diarization boundary error, not a
+    // real speaker change. Keep the whole segment with its dominant speaker.
+    if groups.len() <= 1 || groups.iter().any(|(_, _, _, _, count)| *count < 2) {
+        return vec![whole()];
+    }
+
+    groups
+        .into_iter()
+        .filter_map(|(turn, text, start, _, _)| {
+            let text = text.trim().to_string();
+            (!text.is_empty()).then(|| Line {
+                start,
+                speaker: speaker_for(turn),
+                text,
+                confidence: segment.confidence,
+            })
+        })
+        .collect()
+}
+
 /// Run the pipeline over all inputs, emitting progress events.
 pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
     let run_start = std::time::Instant::now();
@@ -272,9 +349,9 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
     ));
 
     let segmentation = models::segmentation_model();
-    let embedding = models::embedding_model();
+    let embedding = models::embedding_model(&opts.preset);
     let whisper = models::whisper_model(&opts.preset);
-    let diarizer = models::diarizer_id();
+    let diarizer = models::diarizer_id(&opts.preset);
     let diarized = opts.mode.diarizes();
 
     emit(Event::Stage {
@@ -463,13 +540,16 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
                     let embedding = embedding.clone();
                     let audio = samples.clone();
                     let num_speakers = opts.num_speakers;
+                    let profile = diarize::profile(&opts.preset);
                     let handle = std::thread::spawn(move || {
                         diarize::diarize_with_progress(
                             audio.as_slice(),
                             &segmentation,
                             &embedding,
                             num_speakers,
-                            CLUSTER_THRESHOLD,
+                            profile.threshold,
+                            profile.min_duration_on,
+                            profile.min_duration_off,
                             progress_for_thread,
                         )
                     });
@@ -671,18 +751,7 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
                         match result {
                             Ok(segments) => {
                                 for segment in segments {
-                                    let start = clip.start + segment.start;
-                                    let end = clip.start + segment.end;
-                                    let speaker = attribute_turn(clip, start, end)
-                                        .and_then(|turn| turns.get(turn))
-                                        .map(|turn| turn.speaker.clone())
-                                        .unwrap_or_default();
-                                    buffer.push(Line {
-                                        start,
-                                        speaker,
-                                        text: segment.text,
-                                        confidence: segment.confidence,
-                                    });
+                                    buffer.extend(segment_lines(clip, &segment, &turns));
                                 }
                             }
                             Err(message) => emit(Event::Log { message }),
@@ -852,6 +921,69 @@ mod tests {
         assert_eq!(route(None), PipelineMode::Diarized);
         assert!(!PipelineMode::AsrOnly.diarizes());
         assert!(PipelineMode::Diarized.diarizes());
+    }
+
+    #[test]
+    fn token_timestamps_split_a_segment_between_speakers() {
+        let turns = vec![
+            Turn {
+                start: 0.0,
+                end: 1.0,
+                speaker: "SPEAKER 1".to_string(),
+            },
+            Turn {
+                start: 1.0,
+                end: 2.0,
+                speaker: "SPEAKER 2".to_string(),
+            },
+        ];
+        let clip = Clip {
+            turns: vec![(0, 0.0, 1.0), (1, 1.0, 2.0)],
+            start: 0.0,
+            from: 0,
+            to: 32_000,
+        };
+        let segment = Segment {
+            start: 0.0,
+            end: 2.0,
+            text: "hello there general kenobi".to_string(),
+            confidence: 0.0,
+            tokens: vec![
+                crate::asr::Token {
+                    start: 0.0,
+                    end: 0.4,
+                    text: " hello".to_string(),
+                },
+                crate::asr::Token {
+                    start: 0.4,
+                    end: 0.9,
+                    text: " there".to_string(),
+                },
+                crate::asr::Token {
+                    start: 1.1,
+                    end: 1.5,
+                    text: " general".to_string(),
+                },
+                crate::asr::Token {
+                    start: 1.5,
+                    end: 1.9,
+                    text: " kenobi".to_string(),
+                },
+            ],
+        };
+        let lines = segment_lines(&clip, &segment, &turns);
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].speaker, "SPEAKER 1");
+        assert_eq!(lines[0].text, "hello there");
+        assert_eq!(lines[1].speaker, "SPEAKER 2");
+        assert_eq!(lines[1].text, "general kenobi");
+
+        // One detached token is a boundary artefact, not a speaker change.
+        let mut short = segment.clone();
+        short.tokens[2].start = 0.95;
+        short.tokens[2].end = 1.0;
+        let lines = segment_lines(&clip, &short, &turns);
+        assert_eq!(lines.len(), 1);
     }
 
     #[test]

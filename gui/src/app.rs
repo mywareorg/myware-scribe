@@ -236,6 +236,9 @@ struct Calibration {
     gpu_seconds: Option<f64>,
     multiplier: Option<f32>,
     error: Option<String>,
+    /// True when the failure came from the GPU backend itself, not from a
+    /// missing model or calibration setup.
+    backend_failed: bool,
     /// True when calibration was opened by pressing Transcribe, so a choice
     /// continues into the run instead of only updating the preference.
     start_run: bool,
@@ -253,6 +256,7 @@ impl Calibration {
             gpu_seconds: None,
             multiplier: None,
             error: None,
+            backend_failed: false,
             start_run,
             recorded: false,
         }
@@ -590,6 +594,36 @@ impl Default for App {
     }
 }
 
+/// Primary display height in iced's logical pixels.
+#[cfg(windows)]
+fn screen_height() -> Option<f32> {
+    use windows_sys::Win32::UI::HiDpi::GetDpiForSystem;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_CYSCREEN};
+
+    unsafe {
+        let dpi = GetDpiForSystem();
+        if dpi == 0 {
+            return None;
+        }
+        Some(GetSystemMetrics(SM_CYSCREEN) as f32 * 96.0 / dpi as f32)
+    }
+}
+
+#[cfg(not(windows))]
+fn screen_height() -> Option<f32> {
+    None
+}
+
+/// Default window: 85% of the display height, kept inside the 4:3 grid.
+fn default_window_size() -> Size {
+    let Some(height) = screen_height() else {
+        return Size::new(DEFAULT_W, DEFAULT_H);
+    };
+    let height = (height * 0.85).max(MIN_H);
+    let width = height * ASPECT;
+    aspect_clamp(Size::new(width, height), Size::new(width, height))
+}
+
 /// Snap a requested window size to the 4:3 grid, honoring `MIN_W`/`MIN_H`.
 /// Pick the dimension the user actually moved (heuristic: the one that
 /// changed more from `last`) and derive the other from it. Both outputs
@@ -896,6 +930,26 @@ impl App {
             // Establish the settings marker so the next launch restores the
             // queue instead of treating every launch as a first run.
             app.save_settings();
+        }
+        // Older builds stored "whisper model not found" as a GPU failure.
+        // Once the models resolve, that is stale setup noise, not a backend
+        // failure, and must not disable GPU for a new user.
+        if app.models_ready() {
+            let mut cleared = false;
+            for profile in app.gpu_profiles.values_mut() {
+                if profile
+                    .gpu_error
+                    .as_deref()
+                    .is_some_and(|error| error.to_ascii_lowercase().contains("model not found"))
+                {
+                    profile.gpu_error = None;
+                    profile.tested = false;
+                    cleared = true;
+                }
+            }
+            if cleared {
+                app.save_settings();
+            }
         }
         if gpu_crashed {
             for profile in app.gpu_profiles.values_mut() {
@@ -1397,16 +1451,23 @@ impl App {
                 .stats
                 .as_ref()
                 .and_then(|stats| stats.num_speakers);
+            let preset = self.queue[index]
+                .stats
+                .as_ref()
+                .map(|stats| stats.preset.clone())
+                .unwrap_or_else(|| self.preset.arg().to_string());
             if needs_probe {
                 tasks.push(Task::perform(
-                    async move { backend::load_completed(audio, num_speakers, TIMELINE_BUCKETS) },
+                    async move {
+                        backend::load_completed(audio, preset, num_speakers, TIMELINE_BUCKETS)
+                    },
                     move |(turns, probe)| {
                         Message::ViewDetailsLoaded(index, source.clone(), turns, probe)
                     },
                 ));
             } else if needs_turns {
                 tasks.push(Task::perform(
-                    async move { backend::load_turns(&audio, num_speakers) },
+                    async move { backend::load_turns(&audio, &preset, num_speakers) },
                     move |turns| Message::ViewDetailsLoaded(index, source.clone(), turns, None),
                 ));
             }
@@ -1487,7 +1548,7 @@ impl App {
                 // aspect enforcement.
                 aspect_clamp(Size::new(width, height), Size::new(width, height))
             }
-            _ => Size::new(DEFAULT_W, DEFAULT_H),
+            _ => default_window_size(),
         }
     }
 
@@ -1530,7 +1591,14 @@ impl App {
             return Some("Download the transcription models before testing GPU.".to_string());
         }
         self.gpu_profile()
-            .and_then(|profile| profile.gpu_error.clone())
+            .and_then(|profile| profile.gpu_error.as_deref())
+            .filter(|error| {
+                // A stored model-not-found error is stale once the selected
+                // preset resolves. Keep real backend failures, such as Vulkan
+                // device loss, but let the next GPU selection retest.
+                !(self.models_ready() && error.to_ascii_lowercase().contains("model not found"))
+            })
+            .map(str::to_string)
     }
 
     /// First-run prompt for a preset that has never been offered calibration.
@@ -1573,6 +1641,7 @@ impl App {
         calibration.gpu_seconds = None;
         calibration.multiplier = None;
         calibration.error = None;
+        calibration.backend_failed = false;
         let preset = calibration.preset;
         let events = self.calibration_events.clone();
         let Some(sample) = benchmark::sample_path() else {
@@ -1668,11 +1737,13 @@ impl App {
                 }
                 BenchmarkEvent::GpuFailed { message } => {
                     calibration.error = Some(message);
+                    calibration.backend_failed = true;
                     calibration.phase = CalibrationPhase::Result;
                     calibration.progress = 1.0;
                 }
                 BenchmarkEvent::Failed { message } => {
                     calibration.error = Some(message);
+                    calibration.backend_failed = false;
                     calibration.phase = CalibrationPhase::Result;
                     calibration.progress = 1.0;
                 }
@@ -1684,19 +1755,28 @@ impl App {
                 let preset = calibration.preset;
                 let multiplier = calibration.multiplier;
                 let error = calibration.error.clone();
+                let backend_failed = calibration.backend_failed;
                 let entry = self
                     .gpu_profiles
                     .entry(preset.arg().to_string())
                     .or_default();
-                entry.tested = true;
-                if multiplier.is_some() {
-                    entry.multiplier = multiplier;
-                }
-                if let Some(message) = error {
+                if backend_failed {
+                    // A real GPU failure is worth remembering until retest.
+                    entry.tested = true;
                     entry.selected = false;
-                    entry.gpu_error = Some(message);
-                } else {
+                    entry.gpu_error = error;
+                } else if error.is_none() {
+                    entry.tested = true;
+                    entry.selected = false;
                     entry.gpu_error = None;
+                    if multiplier.is_some() {
+                        entry.multiplier = multiplier;
+                    }
+                } else {
+                    // Missing models or a bad sample are setup failures, not
+                    // evidence that this GPU is broken. Leave the profile
+                    // unmeasured so the next selection can retest.
+                    entry.selected = false;
                 }
                 self.save_settings();
             }
@@ -1822,12 +1902,9 @@ impl App {
         }
 
         body = body.push(
-            text(
-                "The best free pipeline: balanced model, full-length transcripts \
-                 and unlimited files. No minutes. No account. No subscription.",
-            )
-            .size(theme::TEXT_XS)
-            .color(scheme.muted),
+            text("Free version includes balanced model, unlimited, full length transcriptions")
+                .size(theme::TEXT_XS)
+                .color(scheme.muted),
         );
 
         let mut actions = row![].spacing(8).align_y(iced::Alignment::Center);
@@ -3904,13 +3981,20 @@ impl App {
         let preset = self.preset.arg().to_string();
         let entry = self.gpu_profiles.entry(preset).or_default();
         entry.selected = false;
-        entry.gpu_error = Some(reason.to_string());
+        let setup_failure = reason.to_ascii_lowercase().contains("model not found");
+        if !setup_failure {
+            entry.gpu_error = Some(reason.to_string());
+        }
         self.save_settings();
         self.console_lines.push(format!(
             "GPU acceleration disabled after a transcription failure: {reason}"
         ));
         self.toast = Some((
-            "GPU acceleration disabled after an error; retry on CPU".to_string(),
+            if setup_failure {
+                "Transcription failed: model files are missing".to_string()
+            } else {
+                "GPU acceleration disabled after an error; retry on CPU".to_string()
+            },
             Instant::now(),
         ));
     }
@@ -5285,7 +5369,6 @@ impl App {
                 .size(11)
                 .wrapping(NO_WRAP)
                 .color(scheme.muted),
-            horizontal_space(),
             retest,
         ]
         .spacing(4)
@@ -5436,7 +5519,8 @@ impl App {
             .as_ref()
             .map(|p| p.display().to_string())
             .unwrap_or_else(|| "Audio source directory".to_string());
-        let output_short = ellipsize_middle(&output, 20);
+        // Keep the default label intact; only longer paths are shortened.
+        let output_short = ellipsize_middle(&output, 22);
         let output_row = row![
             action_text("Save Location")
                 .on_press_maybe((!running && has_queue).then_some(Message::PickOutput))
@@ -6100,21 +6184,24 @@ impl App {
             self.tip(
                 action(follow)
                     .on_press(Message::ToggleFollowPlayhead)
-                    .style(follow_style),
+                    .style(follow_style)
+                    .width(Length::Fixed(92.0)),
                 follow_tip,
                 scheme,
             ),
             self.tip(
                 action(sms)
                     .on_press(Message::SmsToggled(!self.sms_mode))
-                    .style(sms_style),
+                    .style(sms_style)
+                    .width(Length::Fixed(60.0)),
                 sms_tip,
                 scheme,
             ),
             self.tip(
                 action(timestamps)
                     .on_press(Message::TimestampsToggled(!self.show_timestamps))
-                    .style(time_style),
+                    .style(time_style)
+                    .width(Length::Fixed(76.0)),
                 if self.show_timestamps {
                     "Hide timestamps"
                 } else {
@@ -6425,7 +6512,7 @@ impl App {
             controls = controls.push(
                 pick_list(speakers, Some(selected), Message::SpeakerFilterChanged)
                     .style(pill_pick)
-                    .width(Length::Fixed(110.0)),
+                    .width(Length::Fixed(140.0)),
             );
         }
         controls.into()
@@ -7012,7 +7099,8 @@ impl App {
                 .align_y(iced::Alignment::Center),
         )
         .on_press(Message::OpenModelsFolder)
-        .style(pill_button_secondary);
+        .style(pill_button_secondary)
+        .width(Length::Fixed(136.0));
         let download_models = action_text("Download missing")
             .on_press_maybe(
                 (!self.models_ready() && self.model_download.is_none())
@@ -7039,30 +7127,7 @@ impl App {
         .spacing(theme::SPACE_SM)
         .width(Length::Fill);
 
-        let privacy_processing = settings_control(
-            text("On this device")
-                .size(theme::TEXT_XS)
-                .color(scheme.green),
-        );
-        let privacy_cloud = settings_control(text("None").size(theme::TEXT_XS).color(scheme.text));
-        let privacy_telemetry =
-            settings_control(text("None").size(theme::TEXT_XS).color(scheme.text));
-        let privacy_network = settings_control(
-            text("Model downloads only")
-                .size(theme::TEXT_XS)
-                .color(scheme.text),
-        );
-        let privacy_storage =
-            settings_control(text("Local files").size(theme::TEXT_XS).color(scheme.text));
-
         let mut body = column![].spacing(theme::SPACE_SM).width(Length::Fill);
-        body = body.push(settings_section_label("Privacy", scheme));
-        body = body.push(settings_row("Processing", privacy_processing, scheme));
-        body = body.push(settings_row("Cloud & accounts", privacy_cloud, scheme));
-        body = body.push(settings_row("Telemetry", privacy_telemetry, scheme));
-        body = body.push(settings_row("Network", privacy_network, scheme));
-        body = body.push(settings_row("Audio & transcripts", privacy_storage, scheme));
-        body = body.push(settings_divider(scheme));
         body = body.push(settings_section_label("Appearance", scheme));
         body = body.push(settings_row("Theme", theme, scheme));
         body = body.push(settings_row("Transcript text size", font_controls, scheme));
@@ -9151,13 +9216,20 @@ fn action<'a>(content: impl Into<Element<'a, Message>>) -> iced::widget::Button<
     button(content)
 }
 
+/// Fixed width for a text button so its label can never wrap. The constant is
+/// deliberately generous for the iced default 16 px UI font.
+fn action_width(label: &str) -> f32 {
+    (label.chars().count() as f32 * 8.6 + 24.0).max(44.0)
+}
+
 /// A button with a single-line text label.
 fn action_text<'a>(label: &'a str) -> iced::widget::Button<'a, Message> {
-    action(text(label).wrapping(NO_WRAP))
+    action(text(label).wrapping(NO_WRAP)).width(Length::Fixed(action_width(label)))
 }
 
 fn action_owned(label: String) -> iced::widget::Button<'static, Message> {
-    action(text(label).wrapping(NO_WRAP))
+    let width = action_width(&label);
+    action(text(label).wrapping(NO_WRAP)).width(Length::Fixed(width))
 }
 
 /// A subtle drop shadow that gives surfaces a soft, raised look.

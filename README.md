@@ -20,10 +20,11 @@ No cloud · No accounts · No telemetry · Audio and transcripts stay on this de
   (GGML models) via `whisper-rs`.
 - **Audio** — `symphonia` decode + `rubato` resample to 16 kHz mono.
 
-The pipeline diarizes the audio, cleans up the speaker turns, then transcribes
-each speaker turn independently; the speaker label comes from the diarization
-turn, so transcription timing never affects speaker assignment. The user picks
-the speaker count with `--num-speakers N` (default 2); there is no auto-detect.
+The pipeline diarizes the audio, groups consecutive turns into Whisper-sized
+windows, and uses token timestamps to split each ASR segment at speaker
+changes. A detached single-word group falls back to the dominant speaker, which
+avoids one-word speaker flips at noisy turn boundaries. The user picks the
+speaker count with `--num-speakers N` (default 2); there is no auto-detect.
 
 ## Workspace
 
@@ -133,7 +134,8 @@ Every preset uses a multilingual model:
 - `ggml-small-q5_1.bin` (balanced) — downloaded on demand
 - `ggml-large-v3-turbo-q5_0.bin` (accuracy) — downloaded on demand
 - `sherpa-onnx-pyannote-segmentation-3-0/model.onnx`
-- `wespeaker_en_voxceleb_resnet34_LM.onnx`
+- `wespeaker_en_voxceleb_resnet34_LM.onnx` (speed/balanced)
+- `wespeaker_en_voxceleb_CAM++_LM.onnx` (accuracy)
 
 `models.lock.json` is the single source of truth for file names, sizes,
 SHA-256 hashes, licenses and mirrors. The application compiles it in, and
@@ -235,9 +237,10 @@ whisper.cpp uses the fastest backend the build provides:
   report is written to `dist\gpu-test.txt`.
 
 Every preset routes internally: one speaker skips diarization entirely and
-transcribes in one pass; two or more speakers run diarization and then
-transcribe each turn. A single-speaker run never loads or downloads the
-diarization models, whatever the preset.
+transcribes in one pass; two or more speakers run diarization and transcribe
+short windows that can span several turns, then assign token timestamps back to
+the matching turn. A single-speaker run never loads or downloads the diarization
+models, whatever the preset.
 
 Each file logs a `timing ...` line (decode, diarize, ASR, write, realtime
 factor). Per-clip ASR results are cached by audio hash, model, language and
