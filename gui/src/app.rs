@@ -14,7 +14,7 @@ use iced::{
     font, mouse, Color, Element, Font, Length, Pixels, Point, Rectangle, Renderer, Shadow, Size,
     Subscription, Task, Theme, Vector,
 };
-use rodio::{Decoder, OutputStream, Sink};
+use rodio::{Decoder, OutputStream, Sink, Source};
 use serde::{Deserialize, Serialize};
 
 use crate::backend::{self, Event};
@@ -36,8 +36,10 @@ const TIMELINE_HEIGHT: f32 = 72.0;
 /// Logical 4:3 sizing for the window (default) and floors.
 const DEFAULT_W: f32 = 1024.0;
 const DEFAULT_H: f32 = 768.0; // 1024 * 3 / 4
-const MIN_W: f32 = 800.0;
-const MIN_H: f32 = 600.0;
+                              // The transcript header and bottom action row need this much horizontal room
+                              // for the fixed-width Time, Reveal and Rename buttons to keep their size.
+const MIN_W: f32 = 1024.0;
+const MIN_H: f32 = 768.0;
 
 /// Aspect-ratio snap grid (pixels). 4 keeps things crisp.
 const ASPECT_SNAP_PX: f32 = 4.0;
@@ -2477,7 +2479,7 @@ impl App {
                 self.playhead = seconds.clamp(0.0, max);
                 self.last_tick = Some(Instant::now());
                 if let Some(player) = &self.player {
-                    player.seek(self.playhead, self.playback_speed);
+                    player.seek(self.playhead);
                 }
                 Task::none()
             }
@@ -2544,7 +2546,7 @@ impl App {
                         self.follow_offset = None;
                         self.scroll_seek = true;
                         if let Some(player) = &self.player {
-                            player.seek(self.playhead, self.playback_speed);
+                            player.seek(self.playhead);
                         }
                     }
                 }
@@ -2974,7 +2976,7 @@ impl App {
                     let playhead = self.playhead;
                     self.last_tick = Some(Instant::now());
                     if let Some(player) = &self.player {
-                        player.seek(playhead, self.playback_speed);
+                        player.seek(playhead);
                     }
                 }
                 Task::none()
@@ -3927,7 +3929,7 @@ impl App {
                 return;
             }
             if let Some(player) = &self.player {
-                player.seek(self.playhead, self.playback_speed);
+                player.seek(self.playhead);
             }
         }
         if self.player.as_ref().is_some_and(|player| player.finished()) {
@@ -4978,7 +4980,7 @@ impl App {
         self.scroll_seek = true;
         self.last_tick = Some(Instant::now());
         if let Some(player) = &self.player {
-            player.seek(self.playhead, self.playback_speed);
+            player.seek(self.playhead);
         }
     }
 
@@ -5768,7 +5770,7 @@ impl App {
             );
         }
 
-        if matches!(item.status, ItemStatus::Pending) {
+        if !running {
             content = content.push(
                 self.tip(
                     action(icon(ICON_ARROW_UP, 11.0))
@@ -6193,7 +6195,8 @@ impl App {
                 action(sms)
                     .on_press(Message::SmsToggled(!self.sms_mode))
                     .style(sms_style)
-                    .width(Length::Fixed(60.0)),
+                    // Wide enough for the check icon shown while toggled on.
+                    .width(Length::Fixed(74.0)),
                 sms_tip,
                 scheme,
             ),
@@ -7588,12 +7591,19 @@ impl App {
         if let Some(edit) = &self.line_edit {
             let mut col = column![
                 text("Edit line").size(20),
-                column![
-                    text("Speaker").size(12),
-                    text_input("Speaker", &edit.speaker)
-                        .on_input(Message::LineEditSpeaker)
-                        .style(pill_input),
-                ]
+                column![text("Speaker").size(12), {
+                    let mut speakers = self.speaker_order();
+                    if !speakers.iter().any(|name| name == &edit.speaker) {
+                        speakers.push(edit.speaker.clone());
+                    }
+                    pick_list(
+                        speakers,
+                        Some(edit.speaker.clone()),
+                        Message::LineEditSpeaker,
+                    )
+                    .style(pill_pick)
+                    .width(Length::Fill)
+                },]
                 .spacing(4),
                 column![
                     text("Transcribed text").size(12),
@@ -8089,38 +8099,166 @@ fn speaker_palette(index: usize, scheme: &Scheme) -> Color {
     scheme.speaker_colors[index % scheme.speaker_colors.len()]
 }
 
+/// A decoder wrapped in pitch-preserving WSOLA time stretch. The sink always
+/// plays at 1x; speed changes only alter the stretcher's tempo.
+struct PitchSource {
+    decoder: Decoder<std::io::BufReader<std::fs::File>>,
+    stretch: wsola::TimeStretch,
+    speed: Arc<AtomicU32>,
+    pending: VecDeque<f32>,
+    buffer: Vec<f32>,
+    channels: u16,
+    sample_rate: u32,
+    draining: bool,
+    done: bool,
+}
+
+impl PitchSource {
+    fn new(path: &Path, speed: Arc<AtomicU32>) -> Option<Self> {
+        let file = std::fs::File::open(path).ok()?;
+        let decoder = Decoder::new(std::io::BufReader::new(file)).ok()?;
+        let channels = decoder.channels();
+        let sample_rate = decoder.sample_rate();
+        let stretch = wsola::TimeStretch::new(
+            std::num::NonZeroU32::new(sample_rate)?,
+            std::num::NonZeroU16::new(channels)?,
+        )
+        .ok()?;
+        let buffer = vec![0.0; stretch.min_output_buff_size() * 4];
+        Some(Self {
+            decoder,
+            stretch,
+            speed,
+            pending: VecDeque::new(),
+            buffer,
+            channels,
+            sample_rate,
+            draining: false,
+            done: false,
+        })
+    }
+
+    fn fill(&mut self) -> bool {
+        let tempo = f32::from_bits(self.speed.load(Ordering::Relaxed));
+        self.stretch.set_tempo(tempo);
+        loop {
+            if !self.draining {
+                let block = 4096 * self.channels as usize;
+                let mut chunk = Vec::with_capacity(block);
+                while chunk.len() < block {
+                    match self.decoder.next() {
+                        Some(sample) => chunk.push(sample as f32 / 32768.0),
+                        None => break,
+                    }
+                }
+                let aligned = chunk.len() - chunk.len() % self.channels as usize;
+                if aligned > 0 {
+                    self.stretch.push(&chunk[..aligned]);
+                }
+                if chunk.len() < block {
+                    self.draining = true;
+                    self.stretch.set_draining();
+                }
+            }
+
+            match self.stretch.pull(&mut self.buffer) {
+                Ok(written) if written > 0 => {
+                    self.pending.extend(self.buffer[..written].iter().copied());
+                    return true;
+                }
+                Ok(_) => {
+                    if self.draining {
+                        self.done = true;
+                        return false;
+                    }
+                }
+                Err(wsola::Error::NotEnoughInput) => {
+                    if self.draining {
+                        self.done = true;
+                        return false;
+                    }
+                }
+                Err(_) => {
+                    self.done = true;
+                    return false;
+                }
+            }
+        }
+    }
+}
+
+impl Iterator for PitchSource {
+    type Item = f32;
+
+    fn next(&mut self) -> Option<f32> {
+        loop {
+            if let Some(sample) = self.pending.pop_front() {
+                return Some(sample);
+            }
+            if self.done || !self.fill() {
+                return None;
+            }
+        }
+    }
+}
+
+impl Source for PitchSource {
+    fn current_frame_len(&self) -> Option<usize> {
+        None
+    }
+
+    fn channels(&self) -> u16 {
+        self.channels
+    }
+
+    fn sample_rate(&self) -> u32 {
+        self.sample_rate
+    }
+
+    fn total_duration(&self) -> Option<Duration> {
+        self.decoder.total_duration()
+    }
+
+    fn try_seek(&mut self, pos: Duration) -> Result<(), rodio::source::SeekError> {
+        self.decoder.try_seek(pos)?;
+        self.stretch.reset();
+        self.pending.clear();
+        self.draining = false;
+        self.done = false;
+        Ok(())
+    }
+}
+
 /// Audio playback through rodio; the `OutputStream` must stay alive.
 struct Player {
     _stream: OutputStream,
     sink: Sink,
     path: PathBuf,
+    speed: Arc<AtomicU32>,
 }
 
 impl Player {
     fn new(path: &Path) -> Option<Player> {
         let (stream, handle) = OutputStream::try_default().ok()?;
         let sink = Sink::try_new(&handle).ok()?;
-        let decoder = Self::decoder(path)?;
-        sink.append(decoder);
+        let speed = Arc::new(AtomicU32::new(1.0f32.to_bits()));
+        let source = PitchSource::new(path, speed.clone())?;
+        sink.append(source);
         sink.pause();
         Some(Player {
             _stream: stream,
             sink,
             path: path.to_path_buf(),
+            speed,
         })
-    }
-
-    fn decoder(path: &Path) -> Option<Decoder<std::io::BufReader<std::fs::File>>> {
-        let file = std::fs::File::open(path).ok()?;
-        Decoder::new(std::io::BufReader::new(file)).ok()
     }
 
     /// Re-append the source after it has been fully consumed, so the sink is
     /// seekable again instead of staying stuck at the end.
     fn rebuild_if_empty(&self) {
         if self.sink.empty() {
-            if let Some(decoder) = Self::decoder(&self.path) {
-                self.sink.append(decoder);
+            if let Some(source) = PitchSource::new(&self.path, self.speed.clone()) {
+                self.sink.append(source);
                 self.sink.pause();
             }
         }
@@ -8146,17 +8284,18 @@ impl Player {
         }
     }
 
-    /// Seek to an audio-timeline position. rodio's `try_seek` works in
-    /// real-time units (it multiplies by the speed factor internally), so the
-    /// requested audio position is divided by the current speed.
-    fn seek(&self, seconds: f32, speed: f32) {
+    /// Seek to an audio-timeline position. The sink itself stays at 1x; WSOLA
+    /// changes duration without changing pitch.
+    fn seek(&self, seconds: f32) {
         self.rebuild_if_empty();
-        let real = seconds.max(0.0) / speed.max(0.01);
-        let _ = self.sink.try_seek(Duration::from_secs_f32(real));
+        let _ = self
+            .sink
+            .try_seek(Duration::from_secs_f32(seconds.max(0.0)));
     }
 
     fn set_speed(&self, factor: f32) {
-        self.sink.set_speed(factor.max(0.1));
+        self.speed
+            .store(factor.max(0.1).to_bits(), Ordering::Relaxed);
     }
 }
 
@@ -9216,10 +9355,11 @@ fn action<'a>(content: impl Into<Element<'a, Message>>) -> iced::widget::Button<
     button(content)
 }
 
-/// Fixed width for a text button so its label can never wrap. The constant is
-/// deliberately generous for the iced default 16 px UI font.
+/// Fixed width for a text button so its label can never wrap. The iced default
+/// 16 px UI font averages close to 10 px per character for mixed-case Latin
+/// text, and the button adds 10 px of padding on each side.
 fn action_width(label: &str) -> f32 {
-    (label.chars().count() as f32 * 8.6 + 24.0).max(44.0)
+    (label.chars().count() as f32 * 10.0 + 28.0).max(44.0)
 }
 
 /// A button with a single-line text label.
