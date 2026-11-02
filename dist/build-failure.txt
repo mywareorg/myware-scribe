@@ -1,35 +1,140 @@
-﻿=== Build failed 2026-11-01 13:57:32 ===
-At C:\Users\wuphy\Documents\hippo-transcribe\scripts\build-windows.ps1:447 char:5
-+     $clPath = (Get-Command cl.exe -ErrorAction SilentlyContinue).Sour ...
-+     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-Message: The property 'Source' cannot be found on this object. Verify that the property exists.
-Stack:   at <ScriptBlock>, C:\Users\wuphy\Documents\hippo-transcribe\scripts\build-windows.ps1: line 447
+﻿=== Build failed 2026-11-01 18:43:58 ===
+At C:\Users\wuphy\Documents\hippo-transcribe\scripts\build-windows.ps1:269 char:9
++         throw "$commandLine failed with exit code $exitCode (full out ...
++         ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Message: cargo test --workspace --release --features gpu failed with exit code 101 (full output in C:\Users\wuphy\Documents\hippo-transcribe\build-windows.log)
+Stack:   at Invoke-Native, C:\Users\wuphy\Documents\hippo-transcribe\scripts\build-windows.ps1: line 269
+at <ScriptBlock>, C:\Users\wuphy\Documents\hippo-transcribe\scripts\build-windows.ps1: line 536
 at <ScriptBlock>, <No file>: line 1
 
+=== build-windows.log ===
+
+=== last 40 lines ===
+test app::tests::missing_models_show_a_download_notice_with_progress ... ok
+test app::tests::player_ready_for_completed_items_during_a_run ... ok
+test app::tests::speaker_options_are_fixed_counts ... ok
+test app::tests::styled_spans_preserves_multibyte_text ... ok
+test app::tests::queue_items_can_be_reordered_when_idle ... ok
+test app::tests::queue_state_round_trips ... ok
+test app::tests::queue_summary_and_import_failure_feedback ... ok
+test app::tests::reopening_json_transcript_parses_lines ... ok
+test app::tests::scrolling_moves_the_playhead_to_the_visible_line ... ok
+test theme::tests::system_theme_is_selectable_and_cycles ... ok
+test app::tests::settings_modal_changes_defaults_and_persists ... FAILED
+test app::tests::speaker_filter_limits_the_transcript ... ok
+test app::tests::summary_is_limited_to_the_current_batch ... ok
+test app::tests::theme_toggle_round_trips_through_settings ... ok
+test app::tests::transcript_renders_line_and_bubble_modes_with_search ... ok
+test app::tests::unclean_gpu_run_disables_acceleration_on_next_launch ... ok
+test app::tests::viewing_and_renaming_a_completed_item ... ok
+
+failures:
+
+---- app::tests::settings_modal_changes_defaults_and_persists stdout ----
+
+thread 'app::tests::settings_modal_changes_defaults_and_persists' (5356) panicked at gui\src\app.rs:10405:9:
+assertion `left == right` failed
+  left: Balanced
+ right: Accuracy
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    app::tests::settings_modal_changes_defaults_and_persists
+
+test result: FAILED. 36 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.48s
+
+   Compiling hippo-transcribe-core v0.1.0 (C:\Users\wuphy\Documents\hippo-transcribe\core)
+   Compiling hippo-transcribe-gui v0.1.0 (C:\Users\wuphy\Documents\hippo-transcribe\gui)
+    Finished `release` profile [optimized] target(s) in 2m 36s
+     Running unittests src\lib.rs (C:\Users\wuphy\hb\release\deps\hippo_transcribe_core-93378657023c77c5.exe)
+     Running unittests src\main.rs (C:\Users\wuphy\hb\release\deps\hippo_transcribe-e584450d0658247a.exe)
+error: test failed, to rerun pass `-p hippo-transcribe-gui --bin hippo-transcribe`
+
 === console ===
-**********************
-Windows PowerShell transcript start
-Start time: 20261101135732
-Username: WU-PRO-8\wuphy
-RunAs User: WU-PRO-8\wuphy
-Configuration Name: 
-Machine: WU-PRO-8 (Microsoft Windows NT 10.0.19045.0)
-Host Application: C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe
-Process ID: 15036
-PSVersion: 5.1.19041.6456
-PSEdition: Desktop
-PSCompatibleVersions: 1.0, 2.0, 3.0, 4.0, 5.0, 5.1.19041.6456
-BuildVersion: 10.0.19041.6456
-CLRVersion: 4.0.30319.42000
-WSManStackVersion: 3.0
-PSRemotingProtocolVersion: 2.3
-SerializationVersion: 1.1.0.1
-**********************
-==> Configuring CMake with Ninja for the Vulkan build
-  CMAKE_GENERATOR=Ninja
-  Using the Visual Studio CMake at C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin
-==> Building in C:\Users\wuphy\hb so the ggml paths stay under MAX_PATH
+
+failures:
+    app::tests::settings_modal_changes_defaults_and_persists
+
+test result: FAILED. 36 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.48s
+
+   Compiling hippo-transcribe-core v0.1.0 (C:\Users\wuphy\Documents\hippo-transcribe\core)
+   Compiling hippo-transcribe-gui v0.1.0 (C:\Users\wuphy\Documents\hippo-transcribe\gui)
+    Finished `release` profile [optimized] target(s) in 2m 36s
+     Running unittests src\lib.rs (C:\Users\wuphy\hb\release\deps\hippo_transcribe_core-93378657023c77c5.exe)
+     Running unittests src\main.rs (C:\Users\wuphy\hb\release\deps\hippo_transcribe-e584450d0658247a.exe)
+error: test failed, to rerun pass `-p hippo-transcribe-gui --bin hippo-transcribe`
+
+Last lines of C:\Users\wuphy\Documents\hippo-transcribe\build-windows.log:
+    test app::tests::done_label_waits_for_the_bar ... ok
+    test app::tests::ellipsize_keeps_names_readable ... ok
+    test app::tests::cached_orders_match_direct_derivation_after_edit ... ok
+    test app::tests::calibration_dialog_renders_offer_progress_result_and_error ... ok
+    test app::tests::calibration_events_store_a_per_preset_multiplier ... ok
+    test app::tests::acceleration_selection_is_per_preset ... ok
+    test app::tests::checked_shortcuts_respect_focus ... ok
+    test app::tests::line_prefix_handles_multibyte_after_timestamp ... ok
+    test app::tests::line_text_drops_the_prefix_once ... ok
+    test app::tests::dropping_a_folder_queues_only_audio_files ... ok
+    test app::tests::matching_audio_finds_same_stem ... ok
+    test app::tests::editing_one_line_changes_only_that_line ... ok
+    test app::tests::palette_has_distinct_colors_for_many_speakers ... ok
+    test app::tests::failed_items_can_be_retried_when_idle ... ok
+    test app::tests::first_launch_clears_a_stale_queue ... ok
+    test app::tests::follow_toggle_is_user_controlled_during_a_run ... ok
+    test app::tests::gpu_failure_turns_acceleration_off_and_persists ... ok
+    test app::tests::importing_a_transcript_adds_a_completed_item ... ok
+    test app::tests::lines_can_be_merged_and_split_from_the_editor ... ok
+    test app::tests::search_options_honour_case_and_word_boundaries ... ok
+    test app::tests::missing_models_show_a_download_notice_with_progress ... ok
+    test app::tests::player_ready_for_completed_items_during_a_run ... ok
+    test app::tests::speaker_options_are_fixed_counts ... ok
+    test app::tests::styled_spans_preserves_multibyte_text ... ok
+    test app::tests::queue_items_can_be_reordered_when_idle ... ok
+    test app::tests::queue_state_round_trips ... ok
+    test app::tests::queue_summary_and_import_failure_feedback ... ok
+    test app::tests::reopening_json_transcript_parses_lines ... ok
+    test app::tests::scrolling_moves_the_playhead_to_the_visible_line ... ok
+    test theme::tests::system_theme_is_selectable_and_cycles ... ok
+    test app::tests::settings_modal_changes_defaults_and_persists ... FAILED
+    test app::tests::speaker_filter_limits_the_transcript ... ok
+    test app::tests::summary_is_limited_to_the_current_batch ... ok
+    test app::tests::theme_toggle_round_trips_through_settings ... ok
+    test app::tests::transcript_renders_line_and_bubble_modes_with_search ... ok
+    test app::tests::unclean_gpu_run_disables_acceleration_on_next_launch ... ok
+    test app::tests::viewing_and_renaming_a_completed_item ... ok
+
+    failures:
+
+    ---- app::tests::settings_modal_changes_defaults_and_persists stdout ----
+
+    thread 'app::tests::settings_modal_changes_defaults_and_persists' (5356) panicked at gui\src\app.rs:10405:9:
+    assertion `left == right` failed
+      left: Balanced
+     right: Accuracy
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+    failures:
+        app::tests::settings_modal_changes_defaults_and_persists
+
+    test result: FAILED. 36 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.48s
+
+       Compiling hippo-transcribe-core v0.1.0 (C:\Users\wuphy\Documents\hippo-transcribe\core)
+       Compiling hippo-transcribe-gui v0.1.0 (C:\Users\wuphy\Documents\hippo-transcribe\gui)
+        Finished `release` profile [optimized] target(s) in 2m 36s
+         Running unittests src\lib.rs (C:\Users\wuphy\hb\release\deps\hippo_transcribe_core-93378657023c77c5.exe)
+         Running unittests src\main.rs (C:\Users\wuphy\hb\release\deps\hippo_transcribe-e584450d0658247a.exe)
+    error: test failed, to rerun pass `-p hippo-transcribe-gui --bin hippo-transcribe`
+
+PS>TerminatingError(): "cargo test --workspace --release --features gpu failed with exit code 101 (full output in C:\Users\wuphy\Documents\hippo-transcribe\build-windows.log)"
 **********************
 Windows PowerShell transcript end
-End time: 20261101135732
+End time: 20261101184358
 **********************
+
+=== configure state ===
+C:\Users\wuphy\hb\release\build\whisper-rs-sys-e90bd669a06643ef\out\build\CMakeCache.txt
+    CMAKE_GENERATOR:UNINITIALIZED=Ninja
+C:\Users\wuphy\hb\release\build\whisper-rs-sys-e90bd669a06643ef\out\build\ggml\src\ggml-vulkan\vulkan-shaders-gen-prefix\src\vulkan-shaders-gen-build\CMakeCache.txt
+    CMAKE_GENERATOR:INTERNAL=Ninja
