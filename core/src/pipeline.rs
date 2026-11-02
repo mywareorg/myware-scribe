@@ -84,20 +84,27 @@ struct Line {
 }
 
 /// Merge near-adjacent same-speaker turns and drop ultra-short fragments.
-fn clean_turns(turns: Vec<Turn>) -> Vec<Turn> {
+/// Returns the turns plus how many were merged and how many were dropped, so
+/// the log can tell model granularity apart from our own filtering.
+fn clean_turns(turns: Vec<Turn>) -> (Vec<Turn>, usize, usize) {
     let mut merged: Vec<Turn> = Vec::new();
+    let mut merge_count = 0usize;
     for turn in turns {
         match merged.last_mut() {
             Some(last) if last.speaker == turn.speaker && turn.start - last.end <= MERGE_GAP_S => {
                 last.end = last.end.max(turn.end);
+                merge_count += 1;
             }
             _ => merged.push(turn),
         }
     }
-    merged
+    let before = merged.len();
+    let kept: Vec<Turn> = merged
         .into_iter()
         .filter(|t| t.end - t.start >= MIN_TURN_S)
-        .collect()
+        .collect();
+    let dropped = before - kept.len();
+    (kept, merge_count, dropped)
 }
 
 /// Map raw diarization labels to display labels ("SPEAKER 1", ...).
@@ -269,10 +276,32 @@ fn attribute_turn(clip: &Clip, start: f32, end: f32) -> Option<usize> {
         .map(|(index, _, _)| *index)
 }
 
+/// How speaker attribution resolved for one file. Diarization quality cannot
+/// be judged from the transcript alone, so the counters are logged per file:
+/// a rising `collapsed` rate on long audio points at the one-word fallback.
+#[derive(Debug, Default)]
+struct SplitStats {
+    segments: usize,
+    /// Segments whose tokens covered more than one diarization turn.
+    multi_turn: usize,
+    /// Segments collapsed to one speaker because a group held a single word.
+    collapsed: usize,
+    /// Segments that were actually split between speakers.
+    split: usize,
+    /// Segments without usable token times (no timestamps from the model).
+    untimed: usize,
+}
+
 /// Split one ASR segment at speaker changes using token timestamps. When the
 /// model did not provide token times, or every token belongs to one turn,
 /// return the original segment as a single line.
-fn segment_lines(clip: &Clip, segment: &Segment, turns: &[Turn]) -> Vec<Line> {
+fn segment_lines(
+    clip: &Clip,
+    segment: &Segment,
+    turns: &[Turn],
+    stats: &mut SplitStats,
+) -> Vec<Line> {
+    stats.segments += 1;
     let speaker_for = |turn: Option<usize>| {
         turn.and_then(|index| turns.get(index))
             .map(|turn| turn.speaker.clone())
@@ -290,6 +319,7 @@ fn segment_lines(clip: &Clip, segment: &Segment, turns: &[Turn]) -> Vec<Line> {
     };
 
     if segment.tokens.len() < 2 {
+        stats.untimed += 1;
         return vec![whole()];
     }
 
@@ -310,9 +340,19 @@ fn segment_lines(clip: &Clip, segment: &Segment, turns: &[Turn]) -> Vec<Line> {
 
     // A single detached word is usually a diarization boundary error, not a
     // real speaker change. Keep the whole segment with its dominant speaker.
-    if groups.len() <= 1 || groups.iter().any(|(_, _, _, _, count)| *count < 2) {
+    let mut runs: Vec<Option<usize>> = groups.iter().map(|(turn, _, _, _, _)| *turn).collect();
+    runs.dedup();
+    if runs.len() > 1 {
+        stats.multi_turn += 1;
+    }
+    if groups.len() <= 1 {
         return vec![whole()];
     }
+    if groups.iter().any(|(_, _, _, _, count)| *count < 2) {
+        stats.collapsed += 1;
+        return vec![whole()];
+    }
+    stats.split += 1;
 
     groups
         .into_iter()
@@ -608,7 +648,8 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
         } else {
             DECODE_DONE
         };
-        let cleaned = clean_turns(raw);
+        let raw_turns = raw.len();
+        let (cleaned, merged_turns, dropped_turns) = clean_turns(raw);
         let mut map = build_speaker_map(&cleaned);
         if map.len() <= 1 {
             for label in map.values_mut() {
@@ -618,6 +659,16 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
         // ASR-only transcripts have no speaker labels, but the filename still
         // describes a single undifferentiated stream.
         let speaker_count = if diarized { map.len() } else { 1 };
+        if diarized {
+            // Separate diarizer granularity from our own cleanup: if `raw` is
+            // already coarse the model missed the changes, not the filters.
+            crate::logging::info(format!(
+                "diarize: {raw_turns} raw turn(s), {merged_turns} merged, {dropped_turns} \
+                 dropped as short, {} kept, {} speaker(s)",
+                cleaned.len(),
+                map.len()
+            ));
+        }
         let turns: Vec<Turn> = cleaned
             .iter()
             .map(|turn| Turn {
@@ -639,6 +690,7 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
         });
 
         let mut lines: Vec<Line> = Vec::new();
+        let mut split_stats = SplitStats::default();
         if let Some(transcriber) = &transcriber {
             // Consecutive turns are grouped into ~29 s clips so each ASR call
             // encodes one whisper window instead of one window per short turn.
@@ -751,7 +803,12 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
                         match result {
                             Ok(segments) => {
                                 for segment in segments {
-                                    buffer.extend(segment_lines(clip, &segment, &turns));
+                                    buffer.extend(segment_lines(
+                                        clip,
+                                        &segment,
+                                        &turns,
+                                        &mut split_stats,
+                                    ));
                                 }
                             }
                             Err(message) => emit(Event::Log { message }),
@@ -817,6 +874,22 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
                 .partial_cmp(&b.start)
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
+        if diarized && split_stats.segments > 0 {
+            // Compare files: a `collapsed` rate that climbs with duration is
+            // the one-word fallback eating short turns, not diarization drift.
+            crate::logging::info(format!(
+                "speakers: {} segment(s), {} spanning turns, {} split, {} collapsed \
+                 ({:.1}% collapsed), {} untimed ({:.1}%), {} turn(s)",
+                split_stats.segments,
+                split_stats.multi_turn,
+                split_stats.split,
+                split_stats.collapsed,
+                100.0 * split_stats.collapsed as f64 / split_stats.segments as f64,
+                split_stats.untimed,
+                100.0 * split_stats.untimed as f64 / split_stats.segments as f64,
+                turns.len()
+            ));
+        }
 
         let use_hours = duration >= 3600.0;
         let render = |with_timestamps: bool| {
@@ -971,19 +1044,26 @@ mod tests {
                 },
             ],
         };
-        let lines = segment_lines(&clip, &segment, &turns);
+        let mut stats = SplitStats::default();
+        let lines = segment_lines(&clip, &segment, &turns, &mut stats);
         assert_eq!(lines.len(), 2);
         assert_eq!(lines[0].speaker, "SPEAKER 1");
         assert_eq!(lines[0].text, "hello there");
         assert_eq!(lines[1].speaker, "SPEAKER 2");
         assert_eq!(lines[1].text, "general kenobi");
+        assert_eq!(stats.segments, 1);
+        assert_eq!(stats.multi_turn, 1);
+        assert_eq!(stats.split, 1);
+        assert_eq!(stats.collapsed, 0);
 
         // One detached token is a boundary artefact, not a speaker change.
         let mut short = segment.clone();
         short.tokens[2].start = 0.95;
         short.tokens[2].end = 1.0;
-        let lines = segment_lines(&clip, &short, &turns);
+        let mut stats = SplitStats::default();
+        let lines = segment_lines(&clip, &short, &turns, &mut stats);
         assert_eq!(lines.len(), 1);
+        assert_eq!(stats.collapsed, 1);
     }
 
     #[test]
