@@ -467,6 +467,8 @@ pub enum Message {
     QueueDragStart(usize),
     QueueDrop(usize),
     QueueHover(Option<usize>),
+    QueuePointerMoved(Point),
+    QueuePointerLeft,
     ResetOutputDir,
     OpenModelsFolder,
 }
@@ -564,6 +566,8 @@ pub struct App {
     queue_drag: Option<usize>,
     /// Queue index under the pointer, used for hover styling.
     queue_hover: Option<usize>,
+    /// Pointer position inside the queue list while dragging.
+    queue_pointer: Option<Point>,
     batch: bool,
     /// Queue paths belonging to the current (or most recent) transcription
     /// batch, including follow-up passes for files added during a run.
@@ -914,6 +918,7 @@ impl App {
             queue,
             queue_drag: None,
             queue_hover: None,
+            queue_pointer: None,
             batch: false,
             batch_paths,
             current: None,
@@ -2458,6 +2463,7 @@ impl App {
                     return Task::none();
                 };
                 self.queue_hover = None;
+                self.queue_pointer = None;
                 if index >= self.queue.len() {
                     return Task::none();
                 }
@@ -2489,6 +2495,16 @@ impl App {
             }
             Message::QueueHover(index) => {
                 self.queue_hover = index;
+                Task::none()
+            }
+            Message::QueuePointerMoved(point) => {
+                if self.queue_drag.is_some() {
+                    self.queue_pointer = Some(point);
+                }
+                Task::none()
+            }
+            Message::QueuePointerLeft => {
+                self.queue_pointer = None;
                 Task::none()
             }
             Message::ResetOutputDir => {
@@ -5376,6 +5392,54 @@ impl App {
         .into()
     }
 
+    /// Floating copy of the dragged queue row, positioned under the pointer.
+    fn queue_drag_ghost(&self, scheme: &Scheme) -> Option<Element<'_, Message>> {
+        let index = self.queue_drag?;
+        let point = self.queue_pointer?;
+        let item = self.queue.get(index)?;
+        let name = item
+            .path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| item.path.display().to_string());
+        let name = ellipsize_middle(&name, 32);
+        let scheme = *scheme;
+        let ghost = container(
+            row![
+                icon(ICON_FILE_TEXT, 12.0),
+                text(name).size(12).wrapping(NO_WRAP),
+            ]
+            .spacing(6)
+            .align_y(iced::Alignment::Center),
+        )
+        .padding([6, 10])
+        .style(move |_theme| container::Style {
+            background: Some(scheme.dialog_bg.into()),
+            text_color: Some(scheme.text),
+            border: iced::border::Border {
+                color: scheme.blue,
+                width: 1.0,
+                radius: 8.0.into(),
+            },
+            shadow: dialog_shadow(),
+            ..container::Style::default()
+        });
+        Some(
+            container(ghost)
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .align_x(iced::Alignment::Start)
+                .align_y(iced::Alignment::Start)
+                .padding(iced::Padding {
+                    top: (point.y - 18.0).max(0.0),
+                    left: (point.x + 12.0).max(0.0),
+                    right: 0.0,
+                    bottom: 0.0,
+                })
+                .into(),
+        )
+    }
+
     fn queue_panel(&self, scheme: &Scheme, width: f32) -> Element<'_, Message> {
         let scheme = *scheme;
         let running = matches!(self.status, Status::Running);
@@ -5497,11 +5561,18 @@ impl App {
                 }
                 rows = rows.push(self.queue_row(index, &scheme));
             }
-            scrollable(rows)
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .style(queue_scrollbar_style)
-                .into()
+            let list = mouse_area(
+                scrollable(rows)
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .style(queue_scrollbar_style),
+            )
+            .on_move(Message::QueuePointerMoved)
+            .on_exit(Message::QueuePointerLeft);
+            match self.queue_drag_ghost(&scheme) {
+                Some(ghost) => stack![list, ghost].into(),
+                None => list.into(),
+            }
         } else {
             container(
                 column![
