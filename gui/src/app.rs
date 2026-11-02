@@ -9540,6 +9540,7 @@ mod tests {
         dir: PathBuf,
         xdg: Option<std::ffi::OsString>,
         appdata: Option<std::ffi::OsString>,
+        tier: Option<std::ffi::OsString>,
     }
 
     impl ConfigEnv {
@@ -9547,11 +9548,21 @@ mod tests {
             let dir = temp_dir(tag);
             let xdg = std::env::var_os("XDG_CONFIG_HOME");
             let appdata = std::env::var_os("APPDATA");
+            // A tier override inherited from the developer shell must not
+            // decide the outcome of a test. `pro_app` grants Pro through the
+            // license record instead.
+            let tier = std::env::var_os("HIPPO_TRANSCRIBE_TIER");
             // `settings_path` uses APPDATA on Windows and XDG_CONFIG_HOME
             // elsewhere, so set both to keep tests hermetic on every platform.
             std::env::set_var("XDG_CONFIG_HOME", &dir);
             std::env::set_var("APPDATA", &dir);
-            Self { dir, xdg, appdata }
+            std::env::remove_var("HIPPO_TRANSCRIBE_TIER");
+            Self {
+                dir,
+                xdg,
+                appdata,
+                tier,
+            }
         }
     }
 
@@ -9559,6 +9570,7 @@ mod tests {
         fn drop(&mut self) {
             restore_env("XDG_CONFIG_HOME", self.xdg.take());
             restore_env("APPDATA", self.appdata.take());
+            restore_env("HIPPO_TRANSCRIBE_TIER", self.tier.take());
             let _ = std::fs::remove_dir_all(&self.dir);
         }
     }
