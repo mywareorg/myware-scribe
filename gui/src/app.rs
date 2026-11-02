@@ -386,7 +386,6 @@ pub enum Message {
     LockedImport,
     LockedPlayer,
     LockedRename,
-    LockedPreviousView,
     FeatureAdvance,
     PurchasePro,
     RestorePro,
@@ -456,7 +455,6 @@ pub enum Message {
     RemoveItem(usize),
     ClearQueue,
     ItemDurationProbed(PathBuf, Option<f64>),
-    ViewItem(usize),
     ViewDetailsLoaded(
         usize,
         PathBuf,
@@ -466,8 +464,9 @@ pub enum Message {
     QueueWaveformLoaded(PathBuf, Option<(f64, Vec<f32>)>),
     RequeueItem(usize),
     RetryItem(usize),
-    MoveItemUp(usize),
-    MoveItemDown(usize),
+    QueueDragStart(usize),
+    QueueDrop(usize),
+    QueueHover(Option<usize>),
     ResetOutputDir,
     OpenModelsFolder,
 }
@@ -561,6 +560,10 @@ pub struct App {
     pid: Arc<AtomicU32>,
     cancelled: Arc<AtomicBool>,
     queue: Vec<QueueItem>,
+    /// Queue index currently being dragged, if any.
+    queue_drag: Option<usize>,
+    /// Queue index under the pointer, used for hover styling.
+    queue_hover: Option<usize>,
     batch: bool,
     /// Queue paths belonging to the current (or most recent) transcription
     /// batch, including follow-up passes for files added during a run.
@@ -909,6 +912,8 @@ impl App {
             pid: Arc::new(AtomicU32::new(0)),
             cancelled: Arc::new(AtomicBool::new(false)),
             queue,
+            queue_drag: None,
+            queue_hover: None,
             batch: false,
             batch_paths,
             current: None,
@@ -2405,7 +2410,6 @@ impl App {
                 }
                 self.backfill_next_waveform()
             }
-            Message::ViewItem(index) => self.view_item(index),
             Message::RequeueItem(index) => {
                 if index >= self.queue.len() || self.queue[index].audio.is_none() {
                     self.toast = Some(("No audio file to transcribe".to_string(), Instant::now()));
@@ -2446,16 +2450,47 @@ impl App {
                 }
                 Task::none()
             }
-            Message::MoveItemUp(index) => {
-                if !matches!(self.status, Status::Running) {
-                    self.move_queue_item(index, index.saturating_sub(1));
+            Message::QueueDragStart(index) => {
+                if !matches!(self.status, Status::Running) && index < self.queue.len() {
+                    self.queue_drag = Some(index);
                 }
                 Task::none()
             }
-            Message::MoveItemDown(index) => {
-                if !matches!(self.status, Status::Running) {
-                    self.move_queue_item(index, index.saturating_add(1));
+            Message::QueueDrop(index) => {
+                let Some(from) = self.queue_drag.take() else {
+                    return Task::none();
+                };
+                if index >= self.queue.len() {
+                    return Task::none();
                 }
+                if from != index {
+                    self.move_queue_item(from, index);
+                    return Task::none();
+                }
+                let Some(item) = self.queue.get(index) else {
+                    return Task::none();
+                };
+                let running = matches!(self.status, Status::Running);
+                let locked_previous = self.shows(license::Audience::FreeOnly)
+                    && running
+                    && matches!(item.status, ItemStatus::Done)
+                    && self.current_index != Some(index);
+                let selectable = !locked_previous
+                    && (matches!(item.status, ItemStatus::Running)
+                        || (!running && matches!(item.status, ItemStatus::Pending))
+                        || (matches!(item.status, ItemStatus::Done) && item.transcript.is_some()));
+                if locked_previous {
+                    self.toast = Some((
+                        "Reviewing during active transcription is a Pro feature".to_string(),
+                        Instant::now(),
+                    ));
+                } else if selectable {
+                    return self.view_item(index);
+                }
+                Task::none()
+            }
+            Message::QueueHover(index) => {
+                self.queue_hover = index;
                 Task::none()
             }
             Message::ResetOutputDir => {
@@ -2730,13 +2765,6 @@ impl App {
                     self.feature_slide = (self.feature_slide + 1) % FEATURE_DECK.len();
                     self.feature_slide_at = Instant::now();
                 }
-                Task::none()
-            }
-            Message::LockedPreviousView => {
-                self.toast = Some((
-                    "Reviewing during active transcription is a Pro feature".to_string(),
-                    Instant::now(),
-                ));
                 Task::none()
             }
             Message::LockedPlayer => {
@@ -5678,12 +5706,17 @@ impl App {
                 || (!running && matches!(item.status, ItemStatus::Pending))
                 || (matches!(item.status, ItemStatus::Done) && item.transcript.is_some()));
 
-        let name = item
+        let full_name = item
             .path
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_else(|| item.path.display().to_string());
-        let name = ellipsize_middle(&name, 16);
+        let name_limit = if matches!(item.status, ItemStatus::Running) {
+            22
+        } else {
+            30
+        };
+        let name = ellipsize_middle(&full_name, name_limit);
         let duration = item
             .duration
             .map(format_secs)
@@ -5770,32 +5803,6 @@ impl App {
             );
         }
 
-        if !running {
-            content = content.push(
-                self.tip(
-                    action(icon(ICON_ARROW_UP, 11.0))
-                        .on_press_maybe(
-                            (!running && index > 0).then_some(Message::MoveItemUp(index)),
-                        )
-                        .style(subtle_icon_button),
-                    "Move up",
-                    &scheme,
-                ),
-            );
-            content = content.push(
-                self.tip(
-                    action(icon(ICON_ARROW_DOWN, 11.0))
-                        .on_press_maybe(
-                            (!running && index + 1 < self.queue.len())
-                                .then_some(Message::MoveItemDown(index)),
-                        )
-                        .style(subtle_icon_button),
-                    "Move down",
-                    &scheme,
-                ),
-            );
-        }
-
         if matches!(item.status, ItemStatus::Failed(_)) {
             content = content.push(
                 self.tip(
@@ -5828,45 +5835,39 @@ impl App {
         } else {
             scheme.text
         };
-        let row_button =
-            button(content)
-                .padding([6, 8])
-                .width(Length::Fill)
-                .style(move |_theme, status| {
-                    let background = if viewing {
-                        row_tint
-                    } else if selectable && matches!(status, button::Status::Hovered) {
-                        hover_tint
-                    } else {
-                        Color::TRANSPARENT
-                    };
-                    let border_color = if viewing {
-                        scheme.blue
-                    } else {
-                        Color::TRANSPARENT
-                    };
-                    button::Style {
-                        background: Some(background.into()),
-                        text_color: row_text,
-                        border: iced::border::Border {
-                            color: border_color,
-                            width: 1.0,
-                            radius: 10.0.into(),
-                        },
-                        shadow: Shadow::default(),
-                    }
-                });
-        if locked_previous {
-            self.tip(
-                row_button.on_press(Message::LockedPreviousView),
-                "Reviewing during active transcription is a Pro feature",
-                &scheme,
-            )
-        } else if selectable {
-            row_button.on_press(Message::ViewItem(index)).into()
+        let hovered = self.queue_hover == Some(index);
+        let background = if viewing {
+            row_tint
+        } else if selectable && hovered {
+            hover_tint
         } else {
-            row_button.into()
-        }
+            Color::TRANSPARENT
+        };
+        let border_color = if viewing {
+            scheme.blue
+        } else {
+            Color::TRANSPARENT
+        };
+        let row = container(content)
+            .padding([6, 8])
+            .width(Length::Fill)
+            .style(move |_theme| container::Style {
+                background: Some(background.into()),
+                text_color: Some(row_text),
+                border: iced::border::Border {
+                    color: border_color,
+                    width: 1.0,
+                    radius: 10.0.into(),
+                },
+                ..container::Style::default()
+            });
+        let row = mouse_area(row)
+            .interaction(mouse::Interaction::Pointer)
+            .on_press(Message::QueueDragStart(index))
+            .on_release(Message::QueueDrop(index))
+            .on_enter(Message::QueueHover(Some(index)))
+            .on_exit(Message::QueueHover(None));
+        row.into()
     }
 
     /// Transcript view: per-line (search tinted) or SMS bubbles.
@@ -10895,18 +10896,21 @@ mod tests {
                 .collect()
         };
 
-        let _ = app.update(Message::MoveItemUp(1));
+        let _ = app.update(Message::QueueDragStart(1));
+        let _ = app.update(Message::QueueDrop(0));
         assert_eq!(names(&app), vec!["b.mp3", "a.mp3", "c.mp3"]);
         // Selection follows the moved entry.
         assert_eq!(app.selected, Some(1));
         assert_eq!(app.selected_view.as_ref().unwrap().index, 1);
 
-        let _ = app.update(Message::MoveItemDown(0));
+        let _ = app.update(Message::QueueDragStart(0));
+        let _ = app.update(Message::QueueDrop(1));
         assert_eq!(names(&app), vec!["a.mp3", "b.mp3", "c.mp3"]);
 
         // Reordering is locked while transcribing.
         app.status = Status::Running;
-        let _ = app.update(Message::MoveItemUp(2));
+        let _ = app.update(Message::QueueDragStart(2));
+        let _ = app.update(Message::QueueDrop(1));
         assert_eq!(names(&app), vec!["a.mp3", "b.mp3", "c.mp3"]);
 
         // The order is persisted.
