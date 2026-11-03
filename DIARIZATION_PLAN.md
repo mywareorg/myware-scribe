@@ -1,9 +1,37 @@
 # Diarization Improvement Plan
 
-Status: proposed
+Status: Phase 0 complete; Phase 1 next.
 
 Goal: improve speaker isolation on long recordings without cloud services,
 without gated models, and without changing the local-only architecture.
+
+## What the baseline actually says
+
+Measured on `audio/sample-long.mp3` (10 min, two speakers) against
+`tests/diarization/sample-long.rttm`:
+
+```text
+DER @0.25s 13.04%   DER @1.0s 7.08%
+missed 1.08%  false alarm 4.66%  confusion 7.29%
+confusion by ref turn length: <1s 9.4%, 1-3s 27.2%, >3s 63.4%
+diarize stage 31.34s for 600s audio (0.052x realtime, 8 threads)
+```
+
+Three conclusions, each of which changed the plan:
+
+1. **The error is one-directional.** SPEAKER 2's speech is credited to
+   SPEAKER 1 for ~24 s across the file. That is absorption/merging, not random
+   frame noise.
+2. **It is not drift.** The two 5-minute blocks lose about the same amount
+   (10.7 s vs 13.5 s); the second block's higher DER comes from false alarm.
+3. **It is not a short-turn problem.** Only 9.4% of confusion sits inside turns
+   under 1 s; 63.4% sits inside turns over 3 s. Half the headline figure is
+   collar noise from estimated reference boundaries.
+
+A 5-minute clip cut from 300-600 s and diarized *alone* scores 12.56% / 4.86%
+(DER@0.25 / DER@1.0) and halves the absorption to 5.7 s on the same reference
+window. Local diarization is materially better on the same audio, so replacing
+the global clustering step has a measured target.
 
 ## Target pipeline
 
@@ -11,32 +39,12 @@ without gated models, and without changing the local-only architecture.
 decode
   -> split into overlapping blocks
   -> local diarization per block
-  -> segment embeddings
-  -> global speaker centroids
-  -> reassign segments to global speakers
-  -> temporal smoothing / resegmentation
+  -> one mean embedding per local cluster
+  -> two global centroids, assigned cluster-by-cluster
   -> speaker turns
   -> Whisper windows
   -> token-level speaker attribution
 ```
-
-## Current baseline
-
-Already present:
-
-- pyannote segmentation 3.0 ONNX
-- CAM++ embedding for the Accuracy preset
-- Whisper token timestamps
-- token-level speaker splitting
-- one global diarization call for the whole file
-
-Missing:
-
-- blockwise diarization
-- segment embeddings outside the sherpa clustering step
-- global centroid reassignment
-- temporal smoothing / resegmentation
-- overlap-aware segmentation
 
 ## Model constraints
 
@@ -44,203 +52,134 @@ Use only ungated, locally runnable models:
 
 - Segmentation: `sherpa-onnx-pyannote-segmentation-3-0/model.onnx`
   via the ungated ONNX mirror.
-- Accuracy embedding: `wespeaker_en_voxceleb_CAM++_LM.onnx`
-  from the sherpa-onnx release.
+- Accuracy embedding: `wespeaker_en_voxceleb_CAM++_LM.onnx`.
 - Fallback embedding: `wespeaker_en_voxceleb_resnet34_LM.onnx`.
 - ASR: existing Whisper GGML models.
 
 Do not use the gated `pyannote/speaker-diarization-3.1` pipeline or cloud
-diarization APIs.
+diarization APIs. All model files stay in `models.lock.json` with size,
+SHA-256, license, and mirrors.
 
-All model files stay in `models.lock.json` with size, SHA-256, license, and
-mirrors.
+## Phase 0 - Measurement (done)
 
-## Phase 0 - Evaluation harness
+Delivered:
 
-Before changing diarization, make quality measurable.
+- `scripts/diarize-score.py`: `score`, `record`, `compare`, `draft`,
+  `from-transcript`, `speakers`.
+- DER at every requested collar; 0.25 s and 1.0 s by default.
+- Per-block ref-vs-hyp confusion matrix (`--matrices`), which is what exposes
+  one speaker being absorbed by the other.
+- Confusion bucketed by reference turn length (<1 s, 1-3 s, >3 s).
+- `--ref-range` / `--hyp-offset`, so a clip can be scored against a slice of a
+  longer reference.
+- `speakers --expect N` for the phantom-speaker check.
+- `--diarize-only` now applies the pipeline's own `clean_turns` and prints a
+  `#` timing line, so a baseline matches the shipped turn geometry.
 
-Deliverables:
+Open item: no single-speaker file in the repo, so the phantom-speaker assertion
+is implemented but unexercised.
 
-- A small labeled set of local audio with RTTM or JSON speaker turns.
-- Scripts to compute:
-  - diarization error rate
-  - missed speech / false alarm / speaker confusion
-  - short-turn recall for turns under 1 second
-  - speaker-attributed word error rate
-- Per-block DER so drift is visible across a long file.
+## Phase 1 - Turn geometry
 
-Acceptance:
+Targets the part of the error the baseline does show: short interjections and
+spurious fragments.
 
-- Baseline numbers for the current single-pass diarization.
-- Reproducible before/after comparisons.
+- `min_duration_on = 0.6`, `min_duration_off = 0.3` in `core/src/diarize.rs`
+  (currently `0.0`; the Rust side reimplements both downstream in
+  `clean_turns`).
+- Turn-level relabel: a turn under ~1 s whose embedding is closer to the
+  *neighbouring* speaker's centroid than its own, with both neighbours
+  agreeing, is relabelled.
 
-This prevents another unverified "sounds better" change.
+Acceptance: short-turn recall rises, confusion in the <1 s bucket falls, no
+change to turns over 3 s.
 
-## Phase 1 - Blockwise local diarization
+## Phase 2 - Decidability gate (answered)
 
-Deliverables:
+The gate was run as part of Phase 0 and passed: local diarization on a 5-minute
+slice beats the full-file pass on the same slice (see above). Phase 3 therefore
+proceeds. Keep the script in `tests/diarization/README.md` as the regression
+check for any future blockwise change.
 
-- Split decoded audio into configurable blocks.
-- Initial setting: 5 minutes with 20-30 seconds of overlap.
-- Benchmark 2 minutes with 15 seconds separately.
-- Each block runs local diarization and returns turns.
-- Per block, allow 1-2 local clusters, never force 2.
-- Keep the user-selected global speaker count as the global target.
+## Phase 3 - Blockwise diarization, cluster-level assignment
 
-Important rule:
+One phase, replacing the earlier blockwise / centroid / Viterbi trio.
 
-```text
-global target: 2 speakers
-per-block clusters: 1..2
-```
+Blocks:
 
-A 2-minute monologue must not be split into two speakers just because the
-global target is 2.
+- 5 minutes with 20-30 s overlap; benchmark 2 minutes with 15 s separately.
+- **Seam ownership by midpoint**: a segment belongs to the block whose centre it
+  falls in; drop the duplicate copy before assignment. No seam churn, no nested
+  turns at block boundaries.
+- Local clusters may be 1..N, but a cluster under 2 s or 10% of the block's
+  speech is merged into the nearest local cluster before assignment.
 
-Acceptance:
+Assignment:
 
-- One-speaker block produces one local cluster.
-- No phantom speaker during monologue.
-- Diarization stage overhead stays within roughly 1.10-1.15x.
-- End-to-end overhead stays within roughly 1.02-1.05x.
+- One mean embedding per **local cluster**, never per segment. This preserves
+  the local clustering that was just paid for and removes per-segment flapping
+  at the source.
+- Two global centroids initialised from the most widely separated cluster means;
+  verify the permutation is stable across two independent initialisations.
+- Assign each local cluster **wholesale** to a global centroid, with an absolute
+  similarity floor and a margin veto against the runner-up.
+- Cap influence per **block**, not per segment: a 4.5-minute monologue block
+  otherwise dominates the centroid.
+- Never recompute a centroid from a cluster whose internal dispersion exceeds
+  the inter-centroid distance — that is the re-split check that stops a merged
+  cluster from absorbing the other speaker.
+- Anchor speaker identity explicitly; do not rely on first-appearance ordering,
+  which inverts the whole transcript when one early block is mis-mapped.
 
-## Phase 2 - Segment embeddings and global centroids
+Progress:
 
-Deliverables:
-
-- Extract an embedding for each local turn or sub-window.
-- Prefer multiple overlapping 1.5-3 second windows per turn, then average.
-- L2-normalize every embedding.
-- Build global centroids from confident local clusters:
-  - duration-weighted mean
-  - cap any single segment's influence
-  - re-normalize after averaging
-- Reassign every segment to the nearest global centroid.
-- Assign only when:
-  - best similarity clears an absolute floor
-  - best speaker beats the second speaker by a margin
-- Mark low-confidence segments as unknown rather than forcing a speaker.
-
-Implementation notes:
-
-- Add speaker-embedding-extractor symbols to `core/src/sherpa_dynamic.rs`
-  and use the existing `sherpa-rs-sys` path on Linux.
-- Keep the existing sherpa diarizer for local segmentation and clustering.
-- Use a separate embedding pass for centroid construction and reassignment.
-- Store `SegmentEmbedding { start, end, vector, duration, block, local_cluster }`.
-- Store `SpeakerCentroid { vector, weight, anchor, last_update }`.
-
-Acceptance:
-
-- Segments from a single-speaker block all map to one global centroid.
-- A speaker absent from a block gets no turns in that block.
-- Centroid reassignment improves DER over the single-pass baseline.
-
-## Phase 3 - Temporal smoothing and resegmentation
-
-Deliverables:
-
-- Score short frames or segments against both global centroids.
-- Run Viterbi/HMM smoothing with a speaker-change penalty.
-- Use smoothing to correct isolated flips and short uncertain segments.
-- Recompute centroids once from accepted assignments.
-- Do not update centroids from:
-  - segments under roughly 0.5 seconds
-  - low-margin segments
-  - overlap regions
+- `run_with_progress` reports 0..1 per block and `overlap_progress` clamps with
+  `.min()`, so the bar would go backwards. Add a base/span parameter.
 
 Acceptance:
 
-- Fewer one-word speaker flips.
-- Short interjections either inherit the correct surrounding speaker or remain
-  unknown.
-- No regression on clean two-speaker audio.
+- Beats the Phase 2 slice numbers (12.56% / 4.86%, absorption 5.7 s on
+  300-600 s) without regressing the full file.
+- No block where both global speakers collapse into one.
+- No phantom speaker on the single-speaker check once a file exists.
+- Diarize wall time stays below ASR wall time for the same file.
 
-## Phase 4 - Overlap-aware segmentation
+Explicit non-goals: frame-level Viterbi smoothing, forced alignment,
+overlap-aware segmentation, incremental attribution inside the ASR path.
 
-This is the hardest part. Treat it as a separate research phase.
+Overlap justification: Sherpa already emits both speakers on powerset overlap
+frames, reference overlap is ~1% of speech, and the transcript UI renders one
+speaker per line. The ceiling does not pay for the work.
 
-Options to evaluate:
+## Phase 4 - UI, cache, progress
 
-- pyannote segmentation 3.0 powerset output, if the ONNX model exposes
-  multi-label frames.
-- A second ungated segmentation model that outputs overlapping speaker
-  activity.
-- Keep the current single-label segmentation and mark low-confidence overlap
-  regions rather than pretending they are clean turns.
+- Add a `DIARIZER_VERSION` const to the cache key, mirroring `tokens-v3`.
+  `models::diarizer_id()` only changes when model files change, so Phase 3 would
+  otherwise serve stale single-pass turns.
+- Fix the existing key mismatch: `gui/src/backend.rs` reads with `cache::key`
+  (file bytes) while the pipeline writes with `samples_hash` (decoded samples),
+  so GUI cache reads always miss.
+- Include block geometry and embedding model in per-block cache keys.
+- `Diarizing block 3/12`, with a correct base/span.
+- `Only one speaker detected` when the global result is one centroid.
 
-Do not introduce gated models or cloud services.
+## Phase 5 - Performance and Windows validation
 
-Acceptance:
-
-- Overlap regions are detected or explicitly marked uncertain.
-- Mixed-speaker segments are not silently assigned to one speaker.
-- If no viable ungated overlap model exists, document the limitation and keep
-  overlap handling as a later improvement.
-
-## Phase 5 - ASR attribution
-
-Already partly implemented.
-
-Remaining work:
-
-- Keep token-level timestamps for Balanced and Accuracy.
-- Attribute tokens to smoothed speaker turns.
-- Preserve the single-word fallback rule.
-- Optionally add a lightweight forced-alignment pass if Whisper token
-  boundaries prove too coarse.
-
-Acceptance:
-
-- Word-level speaker splits align with smoothed turns.
-- No mid-sentence speaker flips caused by a single token.
-
-## Phase 6 - UI, cache, and progress
-
-Deliverables:
-
-- Show block progress during diarization: `Diarizing block 3/12`.
-- Cache block results by audio hash, block range, model set, preset, and
-  speaker count.
-- Invalidate caches when the embedding model or manifest version changes.
-- Keep the UI at a fixed two-speaker target; no auto-speaker selector.
-- If only one speaker is found globally, show `Only one speaker detected`
-  instead of inventing a second.
-
-Acceptance:
-
-- Re-running a file reuses block caches.
-- Changing preset or embedding model does not reuse incompatible turns.
-- Windows MSIX works offline after models are installed.
-
-## Phase 7 - Windows and performance validation
-
-Test matrix:
-
-- CPU-only Windows build.
-- GPU build with CPU fallback.
-- 2-minute, 30-minute, and 2-hour files.
-- Paths with spaces.
-- Offline install with bundled/downloaded models.
-- Clean MSIX install.
-
-Measure:
-
-- end-to-end runtime factor
-- diarization-stage factor
-- peak memory
-- DER per block
-- speaker-attributed WER
+- Gate on **diarize wall time < ASR wall time**, not on a fixed 1.10-1.15x
+  factor: that factor is not achievable once 2-3 embeddings per turn are added,
+  and the overlap schedule only needs the former.
+- Measure: end-to-end factor, diarize factor, peak memory (blockwise exists to
+  bound the O(n^2) clustering matrix — that is the number to prove), per-block
+  DER, speaker-attributed WER.
+- Test matrix: CPU-only Windows, GPU with CPU fallback, 2 min / 30 min / 2 h
+  files, paths with spaces, offline install, clean MSIX.
 
 ## Recommended order
 
-1. Evaluation harness.
-2. Blockwise local diarization with 1-2 clusters per block.
-3. Segment embeddings and global centroid reassignment.
-4. Viterbi smoothing.
-5. Overlap-aware segmentation.
-6. Cache/progress/UI.
-7. Windows packaging and long-file validation.
+1. Turn geometry (Phase 1).
+2. Blockwise with cluster-level assignment (Phase 3).
+3. Cache/progress corrections (Phase 4).
+4. Windows and performance validation (Phase 5).
 
-The first three phases deliver most of the quality gain. Overlap handling is
-valuable but should not block the blockwise/centroid work.
+Viterbi smoothing, overlap research, forced alignment, and incremental
+attribution are deferred, each with a documented reason above.

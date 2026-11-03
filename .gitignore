@@ -8,6 +8,17 @@ models/
 *-transcript.txt
 *-transcription.txt
 
+# generated transcripts and ASR sidecars; hand-corrected transcripts are the
+# source of an RTTM (docs/diarization-eval.md), so they stay tracked
+audio/**/*.txt
+!audio/*-corrected.txt
+audio/*-ts.json
+# large eval recordings kept out of the repo; the two drafts in
+# tests/diarization reference hour-conversation-short-1 and -mid-1, which are
+# small enough to track
+audio/hour-conversation-full.mp3
+audio/hour-conversation-mid-2.mp3
+
 *.hippo-transcribe.bak
 *.transiel.bak
 
