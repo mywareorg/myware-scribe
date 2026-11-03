@@ -63,7 +63,7 @@
 [3:20] SPEAKER 1: So we have to go somewhere else
 [3:21] SPEAKER 1: and we might go another time somewhere else.
 [3:23] SPEAKER 2: We run out of milk usually.
-[3:25] SPEAKER 1: Yeah, we do run out of milk.
+[3:25] SPEAKER 2: Yeah, we do run out of milk.
 [3:26] SPEAKER 2: Or something.
 [3:27] SPEAKER 2: Some kind of, some product we run out of.
 [3:29] SPEAKER 2: So we actually live close enough to a grocery store
@@ -77,12 +77,12 @@
 [3:41] SPEAKER 2: but the infrastructure in America is not great for biking.
 [3:45] SPEAKER 2: So it would be kind of annoying.
 [3:48] SPEAKER 2: You'd be sharing the road with a
-[3:50] SPEAKER 1: lot of-
+[3:50] SPEAKER 2: lot of-
 [3:50] SPEAKER 1: It'd be dangerous.
 [3:51] SPEAKER 2: Cars, yeah.
 [3:52] SPEAKER 1: It'd probably take 30 minutes to get there.
 [3:54] SPEAKER 1: And if we drove in a car, it takes like five minutes.
-[3:57] SPEAKER 1: Yeah, we
+[3:57] SPEAKER 2: Yeah, we
 [3:58] SPEAKER 2: 're five minutes away in a car.
 [3:59] SPEAKER 2: So we just drive there.
 [4:00] SPEAKER 1: And you can
@@ -113,7 +113,7 @@
 [5:09] SPEAKER 1: I love going there
 [5:10] SPEAKER 2: because-
 [5:10] SPEAKER 1: They got good
-[5:11] SPEAKER 1: vibes.
+[5:11] SPEAKER 2: vibes.
 [5:11] SPEAKER 2: They all wear shirts like this.
 [5:12] SPEAKER 2: They're
 [5:12] SPEAKER 2: really happy.
@@ -143,7 +143,7 @@
 [6:30] SPEAKER 1: That is a really good question.
 [6:33] SPEAKER 2: Well,
 [6:34] SPEAKER 1: I don't know.
-[6:34] SPEAKER 1: How do we...
+[6:34] SPEAKER 2: How do we...
 [6:35] SPEAKER 2: May I answer this first?
 [6:36] SPEAKER 1: Yeah.
 [6:37] SPEAKER 1: What do you think?
@@ -167,9 +167,9 @@
 [7:18] SPEAKER 2: So you gotta be a lot more selfless in the position we've put ourselves in, especially
 [7:22] SPEAKER 2: because we've added not one, not two, but three children to the mix.
 [7:28] SPEAKER 1: Yeah.
-[7:29] SPEAKER 1: So...
+[7:29] SPEAKER 2: So...
 [7:30] SPEAKER 1: It is
-[7:30] SPEAKER 2: hectic.
+[7:30] SPEAKER 1: hectic.
 [7:31] SPEAKER 2: So yeah, it helps a lot if you have a good relationship and have good communication and
 [7:40] SPEAKER 2: can share a lot of stuff.
 [7:42] SPEAKER 2: So in the past, I actually didn't work a regular job at all.
@@ -191,12 +191,12 @@
 [8:24] SPEAKER 1: Yeah.
 [8:25] SPEAKER 2: That's my answer.
 [8:26] SPEAKER 2: So there's a lot of strategy that goes on beyond this behind the
-[8:29] SPEAKER 1: scenes.
+[8:29] SPEAKER 2: scenes.
 [8:29] SPEAKER 2: You have to share stuff really well and you have to make sacrifices in your own life.
 [8:34] SPEAKER 1: That's some really good wisdom.
 [8:35] SPEAKER 1: Yeah.
 [8:36] SPEAKER 2: That's the gist
-[8:37] SPEAKER 1: of it.
+[8:37] SPEAKER 2: of it.
 [8:37] SPEAKER 1: Yeah.
 [8:38] SPEAKER 1: I hope you guys cannot just hear the lawnmower that just started beside us.
 [8:42] SPEAKER 1: I wanted you to hear the beautiful bird sounds because there's so many wonderful birds, but
@@ -207,7 +207,7 @@
 [8:56] SPEAKER 1: team of people.
 [8:58] SPEAKER 1: For example, David will help to edit this audio so that that lawnmower is not so loud.
 [9:03] SPEAKER 1: If that were up to me, the audio would just have the lawnmower really loud and I
-[9:09] SPEAKER 2: couldn't
+[9:09] SPEAKER 1: couldn't
 [9:09] SPEAKER 1: do anything about it.
 [9:10] SPEAKER 1: But because the business is capable of hiring people to do various jobs, I don't have to
 [9:17] SPEAKER 1: do everything.
@@ -229,5 +229,5 @@
 [9:52] SPEAKER 1: And sometimes that's not what you see.
 [9:53] SPEAKER 1: You just see the final product, whether it's...
 [9:56] SPEAKER 1: Oh, we have homemade dinners for our family.
-[9:58] SPEAKER 1: The product.
+[9:58] SPEAKER 2: The product.
 [9:58] SPEAKER 1: Every night.
