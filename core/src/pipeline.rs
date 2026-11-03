@@ -602,7 +602,7 @@ fn finish_diarization(
     job: DiarizeJob,
     emit: &mut dyn FnMut(Event),
     cancelled: &dyn Fn() -> bool,
-    cache_key: Option<&str>,
+    cache_keys: &[&str],
     quiet: bool,
     quiet_band: Option<(f32, f32)>,
 ) -> (Result<Vec<Turn>, String>, f64) {
@@ -678,7 +678,7 @@ fn finish_diarization(
     }
     match joined {
         Ok((Ok(turns), elapsed)) => {
-            if let Some(key) = cache_key {
+            for key in cache_keys {
                 cache::write(key, &turns);
             }
             (Ok(turns), elapsed)
@@ -1067,6 +1067,21 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
         } else {
             None
         };
+        // The GUI restores a completed item's turns at startup, where there are
+        // no decoded samples to hash, so it looks them up by a hash of the file
+        // bytes instead (`cache::key`, see `gui/src/backend.rs`). Write the
+        // turns under that key too, or a restored item silently loses its
+        // speakers.
+        let file_cache_key = if cache_key.is_some() {
+            cache::key(&input, &diarizer, opts.num_speakers)
+        } else {
+            None
+        };
+        let cache_keys: Vec<&str> = cache_key
+            .iter()
+            .chain(file_cache_key.iter())
+            .map(String::as_str)
+            .collect();
         let mut did_diarize = false;
         // Peek the diarization cache first: the overlap schedule is only worth
         // it when diarization actually has work to do.
@@ -1288,7 +1303,7 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
                 job,
                 emit,
                 &is_cancelled,
-                cache_key.as_deref(),
+                &cache_keys,
                 true,
                 Some((DECODE_DONE, OVERLAP_DONE)),
             ) {
@@ -1379,7 +1394,7 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
                 job,
                 emit,
                 &is_cancelled,
-                cache_key.as_deref(),
+                &cache_keys,
                 false,
                 None,
             ) {

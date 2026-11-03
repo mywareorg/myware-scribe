@@ -88,6 +88,11 @@ pub fn probe_duration(path: &Path) -> Option<f64> {
 pub type CompletedDetails = (Option<Vec<Turn>>, Option<(f64, Vec<f32>)>);
 
 /// Read a completed item's diarization turns back out of the cache.
+///
+/// Keys on a hash of the file bytes rather than the decoded samples: a queue
+/// restored at startup has the file, not the samples. The pipeline writes the
+/// turns under both keys for that reason (see `cache_keys` in
+/// `core/src/pipeline.rs`).
 pub fn load_turns(path: &Path, num_speakers: Option<i32>) -> Option<Vec<Turn>> {
     let diarizer = hippo_transcribe_core::models::diarizer_id();
     hippo_transcribe_core::cache::key(path, &diarizer, num_speakers)
