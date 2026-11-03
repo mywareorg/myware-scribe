@@ -53,6 +53,32 @@ pub fn read_transcript(path: &Path) -> Option<String> {
     Some(out)
 }
 
+/// Per-line confidences from the JSON sidecar of a transcript, if present.
+///
+/// The pipeline writes `<name>-ts.json` beside `<name>-ts.txt`, carrying the
+/// same lines in the same order plus each line's ASR confidence. Empty when
+/// the sidecar is missing or its line count no longer matches.
+pub fn read_confidences(path: &Path) -> Vec<Option<f32>> {
+    let json = path.with_extension("json");
+    let Ok(contents) = std::fs::read_to_string(&json) else {
+        return Vec::new();
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&contents) else {
+        return Vec::new();
+    };
+    let Some(lines) = value.get("lines").and_then(|lines| lines.as_array()) else {
+        return Vec::new();
+    };
+    lines
+        .iter()
+        .map(|line| {
+            line.get("confidence")
+                .and_then(|value| value.as_f64())
+                .map(|value| value as f32)
+        })
+        .collect()
+}
+
 /// Probe the duration (seconds) of an audio file.
 pub fn probe_duration(path: &Path) -> Option<f64> {
     hippo_transcribe_core::audio::duration(path).ok()

@@ -211,14 +211,14 @@ pub struct Scheme {
 impl Scheme {
     pub fn light() -> Scheme {
         Scheme {
-            bg: Color::WHITE,
-            panel_bg: Color::from_rgb(0.96, 0.97, 0.995),
-            dialog_bg: Color::from_rgb(0.99, 0.99, 1.0),
-            track: Color::from_rgb(0.88, 0.88, 0.93),
-            bar_track: Color::from_rgb(0.88, 0.88, 0.93),
+            bg: Color::from_rgb(0.937, 0.941, 0.953), // Gray 10 #EFF0F3
+            panel_bg: Color::from_rgb(0.988, 0.988, 0.996), // raised surface
+            dialog_bg: Color::WHITE,
+            track: Color::from_rgb(0.886, 0.894, 0.918),
+            bar_track: Color::from_rgb(0.886, 0.894, 0.918),
             progress: Color::from_rgb(0.357, 0.808, 0.980),
-            timeline_bg: Color::from_rgb(0.88, 0.88, 0.93),
-            border: Color::from_rgb(0.84, 0.85, 0.91),
+            timeline_bg: Color::from_rgb(0.878, 0.886, 0.910),
+            border: Color::from_rgb(0.827, 0.839, 0.878),
             blue: Color::from_rgb(0.357, 0.808, 0.980),
             pink: Color::from_rgb(0.961, 0.663, 0.722),
             green: Color::from_rgb(0.30, 0.72, 0.42),
@@ -228,19 +228,19 @@ impl Scheme {
             muted: Color::from_rgb(0.42, 0.42, 0.50),
             on_accent: Color::from_rgb(0.13, 0.13, 0.17),
             speaker_colors: [
-                Color::from_rgb(0.357, 0.808, 0.980), // blue
-                Color::from_rgb(0.961, 0.663, 0.722), // pink
-                Color::from_rgb(0.66, 0.62, 0.98),    // violet
-                Color::from_rgb(0.45, 0.82, 0.62),    // green
-                Color::from_rgb(0.98, 0.78, 0.42),    // amber
-                Color::from_rgb(0.55, 0.85, 0.88),    // teal
-                Color::from_rgb(0.96, 0.58, 0.42),    // coral
-                Color::from_rgb(0.58, 0.66, 0.98),    // periwinkle
-                Color::from_rgb(0.78, 0.88, 0.48),    // lime
-                Color::from_rgb(0.90, 0.70, 0.97),    // lavender
+                Color::from_rgb(96.0 / 255.0, 165.0 / 255.0, 250.0 / 255.0), // blue 400
+                Color::from_rgb(251.0 / 255.0, 113.0 / 255.0, 133.0 / 255.0), // rose 400
+                Color::from_rgb(251.0 / 255.0, 146.0 / 255.0, 60.0 / 255.0), // orange 400
+                Color::from_rgb(251.0 / 255.0, 191.0 / 255.0, 36.0 / 255.0), // amber 400
+                Color::from_rgb(163.0 / 255.0, 230.0 / 255.0, 53.0 / 255.0), // lime 400
+                Color::from_rgb(52.0 / 255.0, 211.0 / 255.0, 153.0 / 255.0), // emerald 400
+                Color::from_rgb(45.0 / 255.0, 212.0 / 255.0, 191.0 / 255.0), // teal 400
+                Color::from_rgb(34.0 / 255.0, 211.0 / 255.0, 238.0 / 255.0), // cyan 400
+                Color::from_rgb(167.0 / 255.0, 139.0 / 255.0, 250.0 / 255.0), // violet 400
+                Color::from_rgb(232.0 / 255.0, 121.0 / 255.0, 249.0 / 255.0), // fuchsia 400
             ],
-            sms0: Color::from_rgb(0.357, 0.808, 0.980),
-            sms1: Color::from_rgb(0.961, 0.663, 0.722),
+            sms0: Color::from_rgb(96.0 / 255.0, 165.0 / 255.0, 250.0 / 255.0),
+            sms1: Color::from_rgb(251.0 / 255.0, 113.0 / 255.0, 133.0 / 255.0),
             warn_tint: Color::from_rgba(0.529, 0.867, 1.0, 0.35),
             search_hl: Color::from_rgba(1.0, 0.85, 0.3, 0.5),
             search_active: Color::from_rgba(1.0, 0.72, 0.2, 0.8),
@@ -257,36 +257,36 @@ impl Scheme {
         // semantic support colours; this keeps panels, fields, and speaker
         // chips from competing with each other.
         Scheme {
-            bg: Color::from_rgb(0.086, 0.086, 0.086),          // Gray 100 #161616
-            panel_bg: Color::from_rgb(0.149, 0.149, 0.149),    // Gray 90  #262626
-            dialog_bg: Color::from_rgb(0.224, 0.224, 0.224),   // Gray 80  #393939
-            track: Color::from_rgb(0.224, 0.224, 0.224),       // Gray 80
-            bar_track: Color::from_rgb(0.224, 0.224, 0.224),   // Gray 80
-            progress: Color::from_rgb(0.471, 0.663, 1.0),      // Blue 40  #78a9ff
+            bg: Color::from_rgb(0.086, 0.086, 0.086), // Gray 100 #161616
+            panel_bg: Color::from_rgb(0.149, 0.149, 0.149), // Gray 90  #262626
+            dialog_bg: Color::from_rgb(0.224, 0.224, 0.224), // Gray 80  #393939
+            track: Color::from_rgb(0.224, 0.224, 0.224), // Gray 80
+            bar_track: Color::from_rgb(0.224, 0.224, 0.224), // Gray 80
+            progress: Color::from_rgb(0.471, 0.663, 1.0), // Blue 40  #78a9ff
             timeline_bg: Color::from_rgb(0.149, 0.149, 0.149), // Gray 90
-            border: Color::from_rgb(0.322, 0.322, 0.322),      // Gray 70  #525252
-            blue: Color::from_rgb(0.471, 0.663, 1.0),          // Blue 40
-            pink: Color::from_rgb(1.0, 0.494, 0.714),          // Magenta 40
-            green: Color::from_rgb(0.259, 0.745, 0.396),       // Green 40 #42be65
-            danger: Color::from_rgb(0.980, 0.302, 0.337),      // Red 50   #fa4d56
-            ink: Color::from_rgb(0.957, 0.957, 0.957),         // Gray 10  #f4f4f4
-            text: Color::from_rgb(0.957, 0.957, 0.957),        // Gray 10
-            muted: Color::from_rgb(0.659, 0.659, 0.659),       // Gray 40  #a8a8a8
-            on_accent: Color::from_rgb(0.086, 0.086, 0.086),   // Gray 100
+            border: Color::from_rgb(0.322, 0.322, 0.322), // Gray 70  #525252
+            blue: Color::from_rgb(0.471, 0.663, 1.0), // Blue 40
+            pink: Color::from_rgb(1.0, 0.494, 0.714), // Magenta 40
+            green: Color::from_rgb(0.259, 0.745, 0.396), // Green 40 #42be65
+            danger: Color::from_rgb(0.980, 0.302, 0.337), // Red 50   #fa4d56
+            ink: Color::from_rgb(0.957, 0.957, 0.957), // Gray 10  #f4f4f4
+            text: Color::from_rgb(0.957, 0.957, 0.957), // Gray 10
+            muted: Color::from_rgb(0.659, 0.659, 0.659), // Gray 40  #a8a8a8
+            on_accent: Color::from_rgb(0.086, 0.086, 0.086), // Gray 100
             speaker_colors: [
-                Color::from_rgb(0.0, 0.263, 0.808),   // Blue 70
-                Color::from_rgb(0.624, 0.094, 0.325), // Magenta 70
-                Color::from_rgb(0.412, 0.161, 0.769), // Purple 70
-                Color::from_rgb(0.055, 0.376, 0.153), // Green 60
-                Color::from_rgb(0.557, 0.416, 0.0),   // Yellow 60
-                Color::from_rgb(0.0, 0.365, 0.365),   // Teal 70
-                Color::from_rgb(0.541, 0.220, 0.0),   // Orange 70
-                Color::from_rgb(0.0, 0.326, 0.604),   // Cyan 60
-                Color::from_rgb(0.098, 0.502, 0.220), // Green 50
-                Color::from_rgb(0.541, 0.247, 0.988), // Purple 60
+                Color::from_rgb(29.0 / 255.0, 78.0 / 255.0, 216.0 / 255.0), // blue 700
+                Color::from_rgb(190.0 / 255.0, 18.0 / 255.0, 60.0 / 255.0), // rose 700
+                Color::from_rgb(194.0 / 255.0, 65.0 / 255.0, 12.0 / 255.0), // orange 700
+                Color::from_rgb(146.0 / 255.0, 64.0 / 255.0, 14.0 / 255.0), // amber 800
+                Color::from_rgb(63.0 / 255.0, 98.0 / 255.0, 18.0 / 255.0),  // lime 800
+                Color::from_rgb(4.0 / 255.0, 120.0 / 255.0, 87.0 / 255.0),  // emerald 700
+                Color::from_rgb(15.0 / 255.0, 118.0 / 255.0, 110.0 / 255.0), // teal 700
+                Color::from_rgb(14.0 / 255.0, 116.0 / 255.0, 144.0 / 255.0), // cyan 700
+                Color::from_rgb(109.0 / 255.0, 40.0 / 255.0, 217.0 / 255.0), // violet 700
+                Color::from_rgb(162.0 / 255.0, 28.0 / 255.0, 175.0 / 255.0), // fuchsia 700
             ],
-            sms0: Color::from_rgb(0.0, 0.263, 0.808),
-            sms1: Color::from_rgb(0.624, 0.094, 0.325),
+            sms0: Color::from_rgb(29.0 / 255.0, 78.0 / 255.0, 216.0 / 255.0),
+            sms1: Color::from_rgb(190.0 / 255.0, 18.0 / 255.0, 60.0 / 255.0),
             warn_tint: Color::from_rgba(0.471, 0.663, 1.0, 0.18),
             search_hl: Color::from_rgba(0.945, 0.761, 0.106, 0.35),
             search_active: Color::from_rgba(0.945, 0.761, 0.106, 0.65),

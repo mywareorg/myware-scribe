@@ -25,6 +25,18 @@ pub struct Stats {
     pub num_speakers: Option<i32>,
     pub preset: String,
     pub speaker_stats: HashMap<String, SpeakerStat>,
+    /// Wall-clock seconds spent decoding audio for this file.
+    #[serde(default)]
+    pub decode_seconds: f64,
+    /// Wall-clock seconds spent diarizing this file.
+    #[serde(default)]
+    pub diarize_seconds: f64,
+    /// Wall-clock seconds spent in ASR for this file.
+    #[serde(default)]
+    pub asr_seconds: f64,
+    /// Wall-clock seconds spent after ASR — attribution and writing.
+    #[serde(default)]
+    pub prepare_seconds: f64,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -60,6 +72,12 @@ pub enum Event {
         device: Option<String>,
         fallback: Option<String>,
     },
+    /// Audio seconds transcribed so far, and the total for the current file.
+    #[serde(rename = "work")]
+    Work { done: f64, total: f64 },
+    /// Fraction of the current file's diarization completed.
+    #[serde(rename = "diarize")]
+    Diarize { fraction: f32 },
     #[serde(rename = "log")]
     Log { message: String },
     #[serde(rename = "error")]

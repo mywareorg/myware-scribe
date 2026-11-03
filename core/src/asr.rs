@@ -217,6 +217,32 @@ impl Transcriber {
         fast: bool,
         best_of: i32,
     ) -> Result<Vec<Segment>, String> {
+        self.transcribe_full(samples, threads, language, fast, best_of, !fast)
+    }
+
+    /// Detect the spoken language from a short prefix, so every later clip can
+    /// pin it instead of repeating auto-detection per call. `None` keeps the
+    /// per-clip behaviour.
+    pub fn detect_language(&self, samples: &[f32], threads: i32) -> Option<String> {
+        let mut state = self.ctx.create_state().ok()?;
+        state.pcm_to_mel(samples, threads.max(1) as usize).ok()?;
+        let (id, _probabilities) = state.lang_detect(0, threads.max(1) as usize).ok()?;
+        whisper_rs::get_lang_str(id).map(str::to_string)
+    }
+
+    /// Full control over the decode: `token_timestamps` is the expensive extra
+    /// pass used to split a segment between speakers, so callers turn it off
+    /// when a span belongs to a single turn.
+    #[allow(clippy::too_many_arguments)]
+    pub fn transcribe_full(
+        &self,
+        samples: &[f32],
+        threads: i32,
+        language: Option<&str>,
+        fast: bool,
+        best_of: i32,
+        token_timestamps: bool,
+    ) -> Result<Vec<Segment>, String> {
         let mut state = self
             .ctx
             .create_state()
@@ -234,7 +260,7 @@ impl Transcriber {
         params.set_print_progress(false);
         params.set_print_realtime(false);
         params.set_print_timestamps(false);
-        params.set_token_timestamps(!fast);
+        params.set_token_timestamps(token_timestamps);
         params.set_n_threads(threads);
         if fast {
             // The speed preset trades the temperature fallback for latency.

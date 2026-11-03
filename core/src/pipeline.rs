@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -24,10 +24,10 @@ const TIMELINE_BUCKETS: usize = 2000;
 /// fixed phase boundaries makes the progress bar monotonic across stages
 /// instead of jumping back to zero when transcription starts.
 const DECODE_DONE: f32 = 0.03;
-/// Never prefetch-decode a file longer than this: decoded 16 kHz f32 audio for
-/// 30 minutes is ~115 MB, so a batch stays within a predictable memory budget.
-const PREFETCH_MAX_SECONDS: f64 = 1800.0;
 const DIARIZATION_DONE: f32 = 0.45;
+/// Per-file progress when the overlap schedule's concurrent phases are done.
+/// The last 3 % is left for attribution and writing the transcript.
+const OVERLAP_DONE: f32 = 0.97;
 
 /// Whether the pipeline runs the speaker-diarization stage.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -88,7 +88,7 @@ struct Line {
 /// Merge near-adjacent same-speaker turns and drop ultra-short fragments.
 /// Returns the turns plus how many were merged and how many were dropped, so
 /// the log can tell model granularity apart from our own filtering.
-fn clean_turns(turns: Vec<Turn>) -> (Vec<Turn>, usize, usize) {
+pub(crate) fn clean_turns(turns: Vec<Turn>) -> (Vec<Turn>, usize, usize) {
     let mut merged: Vec<Turn> = Vec::new();
     let mut merge_count = 0usize;
     for turn in turns {
@@ -297,6 +297,42 @@ struct SplitStats {
     untimed: usize,
 }
 
+/// Overlaps within this distance of the best one are treated as a tie, and the
+/// shorter turn wins it.
+const NESTED_TOLERANCE_S: f32 = 0.15;
+
+/// Token-level attribution. Diarization emits nested turns: a one-word
+/// interjection sits inside the other speaker's longer turn, so both cover the
+/// word and the overlap ties. The earlier (longer) turn used to win by
+/// default, which is how short fragments kept landing on the dominant speaker;
+/// a tie now goes to the shorter, more specific turn. Whole segments keep the
+/// plain maximum-overlap rule: they legitimately span several turns.
+fn attribute_token(clip: &Clip, start: f32, end: f32) -> Option<usize> {
+    let mut best: Option<(usize, f32, f32)> = None;
+    for (index, turn_start, turn_end) in &clip.turns {
+        let overlap = (end.min(*turn_end) - start.max(*turn_start)).max(0.0);
+        if overlap <= 0.0 {
+            continue;
+        }
+        let duration = (turn_end - turn_start).max(0.0);
+        let better = match best {
+            None => true,
+            Some((_, best_overlap, best_duration)) => {
+                overlap > best_overlap + NESTED_TOLERANCE_S
+                    || ((overlap - best_overlap).abs() <= NESTED_TOLERANCE_S
+                        && duration < best_duration)
+            }
+        };
+        if better {
+            best = Some((*index, overlap, duration));
+        }
+    }
+    if let Some((index, _, _)) = best {
+        return Some(index);
+    }
+    attribute_turn(clip, start, end)
+}
+
 /// Split one ASR segment at speaker changes using token timestamps. When the
 /// model did not provide token times, or every token belongs to one turn,
 /// return the original segment as a single line.
@@ -332,7 +368,7 @@ fn segment_lines(
     for token in &segment.tokens {
         let start = clip.start + token.start;
         let end = clip.start + token.end;
-        let turn = attribute_turn(clip, start, end);
+        let turn = attribute_token(clip, start, end);
         match groups.last_mut() {
             Some((last_turn, text, _, last_end, count)) if *last_turn == turn => {
                 text.push_str(&token.text);
@@ -378,6 +414,442 @@ fn segment_lines(
         .collect()
 }
 
+/// Per-file ASR counters shared with the worker threads.
+#[derive(Clone, Default)]
+struct AsrCounters {
+    /// Microseconds spent inside whisper across all workers.
+    busy_us: Arc<AtomicU64>,
+    /// Clips actually sent to the model.
+    calls: Arc<AtomicU64>,
+    /// Clips served from the segment cache.
+    hits: Arc<AtomicU64>,
+}
+
+impl AsrCounters {
+    fn seconds(&self) -> (f64, u64, u64) {
+        (
+            self.busy_us.load(Ordering::Relaxed) as f64 / 1_000_000.0,
+            self.calls.load(Ordering::Relaxed),
+            self.hits.load(Ordering::Relaxed),
+        )
+    }
+}
+
+/// Transcribe a list of decoded spans with a small worker pool. Results are
+/// handed to `on_result` in completion order; the caller owns ordering and
+/// whatever it wants to do with the text.
+#[allow(clippy::too_many_arguments)]
+fn run_asr_pool(
+    spans: &[(usize, usize)],
+    token_flags: &[bool],
+    samples: &[f32],
+    transcriber: &Transcriber,
+    workers: usize,
+    per_call_threads: i32,
+    language: Option<&str>,
+    fast: bool,
+    best_of: i32,
+    audio_hash: Option<&String>,
+    model_name: &str,
+    cancelled: &dyn Fn() -> bool,
+    counters: &AsrCounters,
+    mut on_result: impl FnMut(usize, Result<Vec<Segment>, String>),
+) {
+    if spans.is_empty() {
+        return;
+    }
+    let (tx, rx) = std::sync::mpsc::channel();
+    let next = AtomicUsize::new(0);
+    std::thread::scope(|scope| {
+        for _ in 0..workers {
+            let tx = tx.clone();
+            let busy = counters.busy_us.clone();
+            let calls = counters.calls.clone();
+            let hits = counters.hits.clone();
+            let next = &next;
+            scope.spawn(move || loop {
+                let index = next.fetch_add(1, Ordering::Relaxed);
+                if index >= spans.len() {
+                    break;
+                }
+                let (from, to) = spans[index];
+                let token_timestamps = token_flags.get(index).copied().unwrap_or(true);
+                let key = audio_hash.map(|hash| {
+                    cache::clip_key(
+                        hash,
+                        model_name,
+                        language,
+                        from,
+                        to,
+                        best_of,
+                        fast,
+                        token_timestamps,
+                    )
+                });
+                let result = match key.as_ref().and_then(|key| cache::read_segments(key)) {
+                    Some(segments) => {
+                        hits.fetch_add(1, Ordering::Relaxed);
+                        Ok(segments)
+                    }
+                    None => {
+                        let call_started = Instant::now();
+                        let result = transcriber.transcribe_full(
+                            &samples[from..to],
+                            per_call_threads,
+                            language,
+                            fast,
+                            best_of,
+                            token_timestamps,
+                        );
+                        calls.fetch_add(1, Ordering::Relaxed);
+                        busy.fetch_add(
+                            call_started.elapsed().as_micros() as u64,
+                            Ordering::Relaxed,
+                        );
+                        if let (Ok(segments), Some(key)) = (&result, key.as_ref()) {
+                            cache::write_segments(key, segments);
+                        }
+                        result
+                    }
+                };
+                if tx.send((index, result)).is_err() {
+                    break;
+                }
+            });
+        }
+        drop(tx);
+
+        let mut remaining = spans.len();
+        while remaining > 0 {
+            if cancelled() {
+                break;
+            }
+            let Ok((index, result)) = rx.recv() else {
+                break;
+            };
+            remaining -= 1;
+            on_result(index, result);
+        }
+    });
+}
+
+/// How transcription is scheduled against diarization.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Schedule {
+    /// Diarize first, then transcribe the resulting speaker clips.
+    Classic,
+    /// Transcribe fixed windows while diarization runs, then attribute.
+    Overlap,
+}
+
+/// Below this many physical cores the overlap schedule loses more to
+/// contention than it gains; those machines keep the sequential path.
+const OVERLAP_MIN_CORES: usize = 8;
+
+impl Schedule {
+    fn select(physical: usize) -> Self {
+        let setting = crate::env_compat("HIPPO_TRANSCRIBE_PIPELINE", "TRANSIEL_PIPELINE")
+            .map(|value| value.trim().to_ascii_lowercase());
+        Self::from_setting(setting.as_deref(), physical)
+    }
+
+    fn from_setting(setting: Option<&str>, physical: usize) -> Self {
+        match setting {
+            Some("classic") | Some("sequential") => Schedule::Classic,
+            Some("overlap") | Some("parallel") => Schedule::Overlap,
+            _ if physical >= OVERLAP_MIN_CORES => Schedule::Overlap,
+            _ => Schedule::Classic,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Schedule::Classic => "classic",
+            Schedule::Overlap => "overlap",
+        }
+    }
+}
+
+/// A diarization run that may already be in flight.
+enum DiarizeJob {
+    Ready(Vec<Turn>),
+    Running(
+        std::thread::JoinHandle<(Result<Vec<Turn>, String>, f64)>,
+        Arc<AtomicU32>,
+    ),
+}
+
+/// Bar fraction shared by the overlap schedule's concurrent phases. The bar
+/// follows whichever phase is behind, so neither can finish it early.
+fn overlap_progress(asr_fraction: f32, diarize_fraction: f32) -> f32 {
+    let combined = asr_fraction
+        .clamp(0.0, 1.0)
+        .min(diarize_fraction.clamp(0.0, 1.0));
+    (DECODE_DONE + (OVERLAP_DONE - DECODE_DONE) * combined).clamp(DECODE_DONE, OVERLAP_DONE)
+}
+
+/// Bar fraction while waiting for the speaker map inside an already-started
+/// range.
+fn quiet_band_progress(floor: f32, ceiling: f32, progress: &Arc<AtomicU32>) -> f32 {
+    let fraction = (progress.load(Ordering::Relaxed) as f32 / 1_000_000.0).clamp(0.0, 1.0);
+    (floor + (ceiling - floor) * fraction).clamp(floor, ceiling)
+}
+
+/// Wait for a diarization job, reporting its progress when `quiet` is false.
+/// `quiet_band` is set when the caller already ran its own phase (the overlap
+/// schedule's ASR pool) and wants the wait to keep moving inside that range.
+fn finish_diarization(
+    job: DiarizeJob,
+    emit: &mut dyn FnMut(Event),
+    cancelled: &dyn Fn() -> bool,
+    cache_key: Option<&str>,
+    quiet: bool,
+    quiet_band: Option<(f32, f32)>,
+) -> (Result<Vec<Turn>, String>, f64) {
+    let DiarizeJob::Running(handle, progress) = job else {
+        let DiarizeJob::Ready(turns) = job else {
+            unreachable!()
+        };
+        // Nothing to diarize (ASR-only, one speaker, or a cache hit): the
+        // speaker map is already complete as far as the caller is concerned.
+        emit(Event::Diarize { fraction: 1.0 });
+        return (Ok(turns), 0.0);
+    };
+    if !quiet {
+        emit(Event::Stage {
+            stage: "diarization".to_string(),
+            label: "Running Diarization 0%".to_string(),
+            progress: DECODE_DONE,
+        });
+        while !handle.is_finished() {
+            if cancelled() {
+                break;
+            }
+            let fraction = progress.load(Ordering::Relaxed) as f32 / 1_000_000.0;
+            emit(Event::Stage {
+                stage: "diarization".to_string(),
+                label: format!(
+                    "Running Diarization {:.0}%",
+                    (fraction * 100.0).clamp(0.0, 100.0)
+                ),
+                progress: (DECODE_DONE
+                    + (DIARIZATION_DONE - DECODE_DONE) * fraction.clamp(0.0, 1.0))
+                .clamp(0.0, 1.0),
+            });
+            emit(Event::Diarize {
+                fraction: fraction.clamp(0.0, 1.0),
+            });
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+    if quiet {
+        if let Some((floor, ceiling)) = quiet_band {
+            // Transcription finished first and the speaker map is still being
+            // built: keep the bar moving instead of parking it.
+            while !handle.is_finished() {
+                if cancelled() {
+                    break;
+                }
+                let fraction = (progress.load(Ordering::Relaxed) as f32 / 1_000_000.0)
+                    .clamp(0.0, 1.0);
+                emit(Event::Stage {
+                    stage: "diarization".to_string(),
+                    label: "Finishing speaker labels".to_string(),
+                    progress: quiet_band_progress(floor, ceiling, &progress),
+                });
+                emit(Event::Diarize { fraction });
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            emit(Event::Stage {
+                stage: "diarization".to_string(),
+                label: "Finishing speaker labels".to_string(),
+                progress: ceiling,
+            });
+        }
+    }
+    let joined = handle.join();
+    emit(Event::Diarize { fraction: 1.0 });
+    if !quiet {
+        emit(Event::Stage {
+            stage: "diarization".to_string(),
+            label: "Running Diarization 100%".to_string(),
+            progress: DIARIZATION_DONE,
+        });
+    }
+    match joined {
+        Ok((Ok(turns), elapsed)) => {
+            if let Some(key) = cache_key {
+                cache::write(key, &turns);
+            }
+            (Ok(turns), elapsed)
+        }
+        Ok((Err(message), elapsed)) => (Err(message), elapsed),
+        Err(_) => (
+            Err("diarization thread panicked".to_string()),
+            diarized_elapsed_hint(),
+        ),
+    }
+}
+
+/// Elapsed time for a diarization job that panicked, so the timing line still
+/// has a finite value.
+fn diarized_elapsed_hint() -> f64 {
+    0.0
+}
+
+/// Clean raw turns, label the speakers, and publish both to the UI.
+fn resolve_and_emit_turns(
+    raw: Vec<Turn>,
+    diarized: bool,
+    audio_path: &str,
+    samples: &[f32],
+    elapsed: f64,
+    emit: &mut dyn FnMut(Event),
+) -> (Vec<Turn>, usize) {
+    let raw_turns = raw.len();
+    let (cleaned, merged_turns, dropped_turns) = clean_turns(raw);
+    let mut map = build_speaker_map(&cleaned);
+    if map.len() <= 1 {
+        for label in map.values_mut() {
+            label.clear();
+        }
+    }
+    // ASR-only transcripts have no speaker labels, but the filename still
+    // describes a single undifferentiated stream.
+    let speaker_count = if diarized { map.len() } else { 1 };
+    if diarized {
+        // Separate diarizer granularity from our own cleanup: if `raw` is
+        // already coarse the model missed the changes, not the filters.
+        crate::logging::info(format!(
+            "diarize: {raw_turns} raw turn(s), {merged_turns} merged, {dropped_turns} \
+             dropped as short, {} kept, {} speaker(s), {:.1}s",
+            cleaned.len(),
+            map.len(),
+            elapsed
+        ));
+    }
+    let turns: Vec<Turn> = cleaned
+        .iter()
+        .map(|turn| Turn {
+            start: turn.start,
+            end: turn.end,
+            speaker: map
+                .get(&turn.speaker)
+                .cloned()
+                .unwrap_or_else(|| turn.speaker.clone()),
+        })
+        .collect();
+    emit(Event::Turns {
+        turns: turns.clone(),
+    });
+    // Speakers are now known: surface the waveform without re-decoding.
+    emit(Event::Waveform {
+        audio: audio_path.to_string(),
+        peaks: audio::rms_peaks(samples, TIMELINE_BUCKETS),
+    });
+    (turns, speaker_count)
+}
+
+/// Pin the language once per file. Auto-detection otherwise repeats on every
+/// clip or window, which is pure overhead once the first call has decided.
+fn pin_language(
+    transcriber: &Transcriber,
+    requested: &Option<&str>,
+    samples: &[f32],
+    rate: u32,
+    spans: usize,
+    threads: i32,
+) -> Option<String> {
+    let probe = samples.len().min(30 * rate as usize);
+    if requested.is_some() || spans < 2 || probe < 30 * rate as usize {
+        return None;
+    }
+    let language = transcriber.detect_language(&samples[..probe], threads)?;
+    crate::logging::info(format!("language: pinned {language} (detected once)"));
+    Some(language)
+}
+
+/// A fixed transcription window that does not depend on speaker turns.
+struct Window {
+    start: f32,
+    from: usize,
+    to: usize,
+}
+
+/// Fixed 29 s windows with a quiet-point cut near each boundary. Used by the
+/// overlap schedule, where the turns are not known yet when ASR starts.
+const WINDOW_S: f32 = 29.0;
+const WINDOW_CUT_SEARCH_S: f32 = 1.5;
+/// Energy below which a span carries no usable speech (same level as the clip
+/// trimmer).
+const SPEECH_THRESHOLD: f32 = 0.003;
+
+fn span_rms(samples: &[f32], from: usize, to: usize) -> f32 {
+    if to <= from {
+        return 0.0;
+    }
+    (samples[from..to]
+        .iter()
+        .map(|sample| sample * sample)
+        .sum::<f32>()
+        / (to - from) as f32)
+        .sqrt()
+}
+
+/// Move a window boundary to the quietest 100 ms slice near it, so a word is
+/// not sliced in half.
+fn quiet_cut(samples: &[f32], rate: u32, start: f32, end: f32) -> f32 {
+    let step = (rate as f32 * 0.1) as usize;
+    let search = (rate as f32 * WINDOW_CUT_SEARCH_S) as usize;
+    let centre = (end * rate as f32) as usize;
+    let floor = ((start * rate as f32) as usize + step).min(samples.len());
+    let low = centre.saturating_sub(search).max(floor);
+    let high = (centre + search).min(samples.len().saturating_sub(step));
+    if high <= low + step {
+        return end;
+    }
+    let mut best = centre;
+    let mut best_rms = f32::INFINITY;
+    let mut at = low;
+    while at + step <= high {
+        let rms = span_rms(samples, at, at + step);
+        if rms < best_rms {
+            best_rms = rms;
+            best = at + step / 2;
+        }
+        at += step;
+    }
+    (best as f32 / rate as f32).min(end)
+}
+
+fn build_windows(duration: f32, rate: u32, samples: &[f32]) -> Vec<Window> {
+    let mut windows = Vec::new();
+    let mut start = 0.0f32;
+    while start < duration {
+        let end = if start + WINDOW_S >= duration {
+            duration
+        } else {
+            quiet_cut(samples, rate, start, start + WINDOW_S)
+        };
+        if end <= start {
+            break;
+        }
+        let raw_from = (start * rate as f32) as usize;
+        let raw_to = ((end * rate as f32) as usize).min(samples.len());
+        let (from, to) = trim_silence(samples, raw_from, raw_to, rate);
+        let long_enough = (to.saturating_sub(from)) as f32 >= 0.2 * rate as f32;
+        if long_enough && span_rms(samples, from, to) >= SPEECH_THRESHOLD {
+            windows.push(Window {
+                start: from as f32 / rate as f32,
+                from,
+                to,
+            });
+        }
+        start = end;
+    }
+    windows
+}
+
 /// Run the pipeline over all inputs, emitting progress events.
 pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
     let run_start = std::time::Instant::now();
@@ -417,6 +889,7 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
         }
     }
 
+    let load_started = Instant::now();
     let transcriber = match Transcriber::load(&whisper) {
         Ok(transcriber) => Some(transcriber),
         Err(message) => {
@@ -466,6 +939,8 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
         }
     }
 
+    let load_elapsed = load_started.elapsed().as_secs_f64();
+
     // Parallel ASR: a small pool of workers sharing one model (each call creates
     // its own decode state). Per-call threads split the physical cores.
     let physical = num_cpus::get_physical().max(1);
@@ -482,15 +957,43 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
     let workers = env_int("HIPPO_TRANSCRIBE_ASR_WORKERS", "TRANSIEL_ASR_WORKERS")
         .unwrap_or(default_workers)
         .max(1);
-    let per_call_threads = env_int("HIPPO_TRANSCRIBE_ASR_THREADS", "TRANSIEL_ASR_THREADS")
+    let requested_threads = env_int("HIPPO_TRANSCRIBE_ASR_THREADS", "TRANSIEL_ASR_THREADS")
         .map(|v| v as i32)
         .unwrap_or((physical / workers).max(1) as i32)
         .max(1);
 
+    let schedule = Schedule::select(physical);
+    crate::logging::info(format!(
+        "schedule: {} ({} physical core(s), {} ASR worker(s) x {} requested thread(s))",
+        schedule.label(),
+        physical,
+        workers,
+        requested_threads
+    ));
+
+    crate::logging::info(format!(
+        "timing models: whisper {:.2}s, startup {:.2}s",
+        load_elapsed,
+        run_start.elapsed().as_secs_f64()
+    ));
+
     // Decode the next file while the current one is diarized and transcribed.
     // This only helps batches; a single file is decoded inline.
+    //
+    // Prefetching holds two decoded buffers at once (~230 MB per hour of 16 kHz
+    // f32 audio), so a blocking decode used to be the cheaper trade for long
+    // files. It is not: the blocked decode stalls every ASR worker. The cap is
+    // now opt-in — HIPPO_TRANSCRIBE_PREFETCH_MAX_S=<seconds> restores it.
+    let prefetch_max_s =
+        crate::env_compat("HIPPO_TRANSCRIBE_PREFETCH_MAX_S", "TRANSIEL_PREFETCH_MAX_S")
+            .and_then(|value| value.parse::<f64>().ok())
+            .unwrap_or(0.0);
     type Decoded = Result<(Vec<f32>, u32), String>;
     let mut prefetched: Option<std::thread::JoinHandle<Decoded>> = None;
+
+    // One sherpa session for the whole run. Built on first use so a fully
+    // cached batch never pays to load the diarization models.
+    let diarizer_session: std::sync::OnceLock<Arc<diarize::Diarizer>> = std::sync::OnceLock::new();
 
     for (index, input) in opts.inputs.iter().enumerate() {
         if is_cancelled() {
@@ -506,17 +1009,25 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
             progress: 0.0,
         });
 
+        let decode_started = Instant::now();
+        let decode_prefetched = prefetched.is_some();
         let decoded = match prefetched.take() {
             Some(handle) => handle
                 .join()
                 .unwrap_or_else(|_| Err("audio decode thread panicked".to_string())),
-            None => audio::decode(input),
+            None => audio::decode_with_progress(input, &mut |fraction| {
+                emit(Event::Stage {
+                    stage: "decoding".to_string(),
+                    label: format!("Decoding {:.0}%", fraction * 100.0),
+                    progress: DECODE_DONE * fraction,
+                });
+            }),
         };
         if index + 1 < opts.inputs.len() {
             let next = opts.inputs[index + 1].clone();
-            let small =
-                audio::duration_fast(&next).is_some_and(|seconds| seconds <= PREFETCH_MAX_SECONDS);
-            if small {
+            let fits = prefetch_max_s <= 0.0
+                || audio::duration_fast(&next).is_some_and(|seconds| seconds <= prefetch_max_s);
+            if fits {
                 prefetched = Some(std::thread::spawn(move || audio::decode(&next)));
             }
         }
@@ -540,12 +1051,15 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
             progress: DECODE_DONE,
         });
 
-        // Hash the audio once: diarization and per-clip ASR caches both use it.
+        // Hash the samples the decoder just produced: diarization and per-clip
+        // ASR caches both use it, and this avoids reading the file again.
+        let samples_hash_started = Instant::now();
         let audio_hash = if opts.cache {
-            cache::audio_hash(input)
+            Some(cache::samples_hash(samples.as_slice()))
         } else {
             None
         };
+        let hash_elapsed = samples_hash_started.elapsed().as_secs_f64();
         let cache_key = if diarized && opts.num_speakers != Some(1) {
             audio_hash
                 .as_deref()
@@ -554,311 +1068,464 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
             None
         };
         let mut did_diarize = false;
-        let raw = if !diarized {
+        // Peek the diarization cache first: the overlap schedule is only worth
+        // it when diarization actually has work to do.
+        let cached_turns = if diarized && opts.num_speakers != Some(1) {
+            cache_key.as_deref().and_then(cache::read)
+        } else {
+            None
+        };
+        // Only overlap when diarization is about to run for real.
+        let overlap = matches!(schedule, Schedule::Overlap)
+            && diarized
+            && opts.num_speakers != Some(1)
+            && cached_turns.is_none();
+        // Overlap runs diarization beside the ASR pool, so the two split the
+        // cores instead of both claiming all of them.
+        let (per_call_threads, diarize_thread_budget) = if overlap {
+            let reserved = ((physical / 3).max(1)) as i32;
+            let asr_cores = (physical as i32 - reserved).max(1);
+            (
+                requested_threads.min((asr_cores / workers as i32).max(1)),
+                Some(reserved),
+            )
+        } else {
+            (requested_threads, None)
+        };
+
+        let job = if !diarized {
             // ASR-only mode: no speaker turns, no sherpa models, no cache.
-            vec![Turn {
+            DiarizeJob::Ready(vec![Turn {
                 start: 0.0,
                 end: duration as f32,
                 speaker: String::new(),
-            }]
+            }])
         } else if opts.num_speakers == Some(1) {
             // One speaker: skip diarization entirely and transcribe the file as
             // a single turn.
-            vec![Turn {
+            DiarizeJob::Ready(vec![Turn {
                 start: 0.0,
                 end: duration as f32,
                 speaker: "SPEAKER 1".to_string(),
-            }]
+            }])
         } else {
-            match cache_key.as_deref().and_then(cache::read) {
+            match cached_turns {
                 Some(turns) => {
                     emit(Event::Log {
                         message: "Using cached diarization.".to_string(),
                     });
-                    emit(Event::Stage {
-                        stage: "diarization".to_string(),
-                        label: "Running Diarization 100%".to_string(),
-                        progress: DECODE_DONE,
-                    });
-                    turns
+                    DiarizeJob::Ready(turns)
                 }
                 None => {
                     did_diarize = true;
                     let progress = Arc::new(AtomicU32::new(0));
                     let progress_for_thread = progress.clone();
-                    let segmentation = segmentation.clone();
-                    let embedding = embedding.clone();
                     let audio = samples.clone();
-                    let num_speakers = opts.num_speakers;
-                    let handle = std::thread::spawn(move || {
-                        diarize::diarize_with_progress(
-                            audio.as_slice(),
-                            &segmentation,
-                            &embedding,
-                            num_speakers,
-                            diarize::CLUSTER_THRESHOLD,
-                            0.0,
-                            0.0,
-                            progress_for_thread,
-                        )
-                    });
-
-                    emit(Event::Stage {
-                        stage: "diarization".to_string(),
-                        label: "Running Diarization 0%".to_string(),
-                        progress: DECODE_DONE,
-                    });
-                    while !handle.is_finished() {
-                        if is_cancelled() {
-                            break;
-                        }
-                        let fraction = progress.load(Ordering::Relaxed) as f32 / 1_000_000.0;
-                        emit(Event::Stage {
-                            stage: "diarization".to_string(),
-                            label: format!(
-                                "Running Diarization {:.0}%",
-                                (fraction * 100.0).clamp(0.0, 100.0)
-                            ),
-                            progress: (DECODE_DONE
-                                + (DIARIZATION_DONE - DECODE_DONE) * fraction.clamp(0.0, 1.0))
-                            .clamp(0.0, 1.0),
-                        });
-                        std::thread::sleep(Duration::from_millis(100));
-                    }
-
-                    let joined = handle.join();
-                    emit(Event::Stage {
-                        stage: "diarization".to_string(),
-                        label: "Running Diarization 100%".to_string(),
-                        progress: DIARIZATION_DONE,
-                    });
-                    match joined {
-                        Ok(Ok(turns)) => {
-                            if let Some(key) = &cache_key {
-                                cache::write(key, &turns);
+                    let session = match diarizer_session.get() {
+                        Some(session) => session.clone(),
+                        None => {
+                            match diarize::Diarizer::new_with_threads(
+                                &segmentation,
+                                &embedding,
+                                opts.num_speakers,
+                                diarize::CLUSTER_THRESHOLD,
+                                diarize_thread_budget,
+                            ) {
+                                Ok(session) => {
+                                    crate::logging::info(format!(
+                                        "Diarizer ready ({} threads)",
+                                        session.threads()
+                                    ));
+                                    let session = Arc::new(session);
+                                    let _ = diarizer_session.set(session.clone());
+                                    session
+                                }
+                                Err(message) => {
+                                    fail(emit, message);
+                                    continue;
+                                }
                             }
-                            turns
                         }
-                        Ok(Err(message)) => {
-                            fail(emit, message);
-                            continue;
-                        }
-                        Err(_) => {
-                            fail(emit, "diarization thread panicked".to_string());
-                            continue;
-                        }
-                    }
+                    };
+                    let handle = std::thread::spawn(move || {
+                        let started = Instant::now();
+                        let result =
+                            session.run_with_progress(audio.as_slice(), Some(progress_for_thread));
+                        (result, started.elapsed().as_secs_f64())
+                    });
+                    DiarizeJob::Running(handle, progress)
                 }
             }
         };
-        let diarized_at = Instant::now();
-        let transcription_base = if did_diarize {
-            DIARIZATION_DONE
-        } else {
-            DECODE_DONE
+        // The overlap path reads diarization progress while the ASR pool runs so
+        // the bar can follow whichever phase is behind.
+        let job_progress = match &job {
+            DiarizeJob::Running(_, progress) => Some(progress.clone()),
+            DiarizeJob::Ready(_) => None,
         };
-        let raw_turns = raw.len();
-        let (cleaned, merged_turns, dropped_turns) = clean_turns(raw);
-        let mut map = build_speaker_map(&cleaned);
-        if map.len() <= 1 {
-            for label in map.values_mut() {
-                label.clear();
-            }
-        }
-        // ASR-only transcripts have no speaker labels, but the filename still
-        // describes a single undifferentiated stream.
-        let speaker_count = if diarized { map.len() } else { 1 };
-        if diarized {
-            // Separate diarizer granularity from our own cleanup: if `raw` is
-            // already coarse the model missed the changes, not the filters.
-            crate::logging::info(format!(
-                "diarize: {raw_turns} raw turn(s), {merged_turns} merged, {dropped_turns} \
-                 dropped as short, {} kept, {} speaker(s), {:.1}s",
-                cleaned.len(),
-                map.len(),
-                diarized_at.duration_since(decoded_at).as_secs_f64()
-            ));
-        }
-        let turns: Vec<Turn> = cleaned
-            .iter()
-            .map(|turn| Turn {
-                start: turn.start,
-                end: turn.end,
-                speaker: map
-                    .get(&turn.speaker)
-                    .cloned()
-                    .unwrap_or_else(|| turn.speaker.clone()),
-            })
-            .collect();
-        emit(Event::Turns {
-            turns: turns.clone(),
-        });
-        // Speakers are now known: surface the waveform without re-decoding.
-        emit(Event::Waveform {
-            audio: input.display().to_string(),
-            peaks: audio::rms_peaks(samples.as_slice(), TIMELINE_BUCKETS),
-        });
+
+        // Every preset uses a multilingual model, so the requested language (or
+        // auto-detection) always applies. `auto`/empty mean detection,
+        // matching the CLI.
+        let decode_language = opts
+            .language
+            .as_deref()
+            .filter(|code| !code.is_empty() && !code.eq_ignore_ascii_case("auto"));
+        let fast_decode = opts.preset.eq_ignore_ascii_case("speed");
+        // `best_of` only repeats the decoder; the encoder dominates. One sample
+        // is enough for every preset, and it roughly halves the decode stage.
+        // HIPPO_TRANSCRIBE_BEST_OF raises it again for an A/B check.
+        let best_of = env_int("HIPPO_TRANSCRIBE_BEST_OF", "TRANSIEL_BEST_OF")
+            .map(|value| value as i32)
+            .unwrap_or(1)
+            .max(1);
+        let model_name = models::whisper_relative(&opts.preset);
 
         let mut lines: Vec<Line> = Vec::new();
         let mut split_stats = SplitStats::default();
-        if let Some(transcriber) = &transcriber {
-            // Consecutive turns are grouped into ~29 s clips so each ASR call
-            // encodes one whisper window instead of one window per short turn.
-            let clips = build_clips(&turns, duration as f32, rate, samples.as_slice());
+        // Timing accumulators for this file; filled by the ASR section below.
+        let counters = AsrCounters::default();
+        let mut prepare_seconds = 0.0f64;
+        let mut asr_seconds = 0.0f64;
+        let turns: Vec<Turn>;
+        let speaker_count: usize;
+        let diarized_at: Instant;
+        let diarize_seconds: f64;
 
-            let total_turns = clips.len();
-            let total_seconds: f64 = clips
+        if overlap {
+            let transcriber = match transcriber.as_ref() {
+                Some(transcriber) => transcriber,
+                None => {
+                    fail(emit, "speech model unavailable".to_string());
+                    continue;
+                }
+            };
+            // Fixed windows cut before the turns exist: transcription runs on
+            // them while diarization is still working.
+            let windows = build_windows(duration as f32, rate, samples.as_slice());
+            let spans: Vec<(usize, usize)> = windows.iter().map(|w| (w.from, w.to)).collect();
+            let total_windows = spans.len();
+            let total_seconds: f64 = spans
                 .iter()
-                .map(|clip| (clip.to - clip.from) as f64 / rate as f64)
+                .map(|(from, to)| (to - from) as f64 / rate as f64)
                 .sum();
             let mut done_seconds = 0.0f64;
-            let mut done_turns = 0usize;
-
-            // Every preset uses a multilingual model, so the requested
-            // language (or auto-detection) always applies. `auto`/empty mean
-            // detection, matching the CLI.
-            let decode_language = opts
-                .language
-                .as_deref()
-                .filter(|code| !code.is_empty() && !code.eq_ignore_ascii_case("auto"));
-            let fast_decode = opts.preset.eq_ignore_ascii_case("speed");
-            // `best_of` only repeats the decoder; the encoder dominates. Keep
-            // it at 1 for speed and at 2 for the quality tiers.
-            let best_of = if fast_decode { 1 } else { 2 };
-            let model_name = models::whisper_relative(&opts.preset);
+            let mut done_windows = 0usize;
 
             emit(Event::Stage {
                 stage: "transcription".to_string(),
-                label: format!("Transcribing 0/{total_turns}"),
-                progress: transcription_base,
+                label: format!("Transcribing 0/{total_windows}"),
+                progress: DECODE_DONE,
             });
+            crate::logging::info(
+                "schedule: diarization and transcription running in parallel".to_string(),
+            );
 
-            // Worker pool + channel: turns finish out of order, but lines are
-            // emitted strictly in clip (turn/start) order.
-            let (tx, rx) = std::sync::mpsc::channel();
-            let next = AtomicUsize::new(0);
-            let samples_ref = samples.as_slice();
-            let clips_ref = clips.as_slice();
-
-            std::thread::scope(|scope| {
-                for _ in 0..workers {
-                    let tx = tx.clone();
-                    let next = &next;
-                    let model_name = model_name.clone();
-                    let audio_hash = audio_hash.clone();
-                    scope.spawn(move || loop {
-                        let index = next.fetch_add(1, Ordering::Relaxed);
-                        if index >= clips_ref.len() {
-                            break;
-                        }
-                        let clip = &clips_ref[index];
-                        let key = audio_hash.as_ref().map(|hash| {
-                            cache::clip_key(
-                                hash,
-                                &model_name,
-                                decode_language,
-                                clip.from,
-                                clip.to,
-                                best_of,
-                                fast_decode,
-                            )
-                        });
-                        let result = match key.as_ref().and_then(|key| cache::read_segments(key)) {
-                            Some(segments) => Ok(segments),
-                            None => {
-                                let result = transcriber.transcribe_with_threads_and_language(
-                                    &samples_ref[clip.from..clip.to],
-                                    per_call_threads,
-                                    decode_language,
-                                    fast_decode,
-                                    best_of,
-                                );
-                                if let (Ok(segments), Some(key)) = (&result, key.as_ref()) {
-                                    cache::write_segments(key, segments);
-                                }
-                                result
-                            }
-                        };
-                        if tx.send((index, result)).is_err() {
-                            break;
-                        }
-                    });
-                }
-                // Drop the spare sender so the channel closes when workers finish.
-                drop(tx);
-
-                let mut pending: BTreeMap<usize, Result<Vec<Segment>, String>> = BTreeMap::new();
-                let mut buffer: Vec<Line> = Vec::new();
-                let mut next_emit = 0usize;
-                let mut remaining = clips.len();
-                while remaining > 0 {
-                    if is_cancelled() {
-                        break;
-                    }
-                    let Ok((index, result)) = rx.recv() else {
-                        break;
-                    };
-                    remaining -= 1;
-
-                    // Progress reflects completed work.
-                    done_seconds += (clips[index].to - clips[index].from) as f64 / rate as f64;
-                    done_turns += 1;
-                    pending.insert(index, result);
-
-                    // Process completed clips in clip order. Overlapping turns can
-                    // make a later clip's lines start earlier, so buffer lines and
-                    // emit only up to the next unprocessed clip's start time.
-                    while let Some(result) = pending.remove(&next_emit) {
-                        let clip = &clips[next_emit];
-                        match result {
-                            Ok(segments) => {
-                                for segment in segments {
-                                    buffer.extend(segment_lines(
-                                        clip,
-                                        &segment,
-                                        &turns,
-                                        &mut split_stats,
-                                    ));
-                                }
-                            }
-                            Err(message) => emit(Event::Log { message }),
-                        }
-                        next_emit += 1;
-
-                        let watermark = clips
-                            .get(next_emit)
-                            .map(|clip| clip.start)
-                            .unwrap_or(f32::INFINITY);
-                        buffer.sort_by(|a, b| {
-                            a.start
-                                .partial_cmp(&b.start)
-                                .unwrap_or(std::cmp::Ordering::Equal)
-                        });
-                        let split = buffer.partition_point(|line| line.start <= watermark);
-                        for line in buffer.drain(..split) {
-                            emit(Event::Line {
-                                start: line.start,
-                                speaker: line.speaker.clone(),
-                                text: line.text.clone(),
-                                confidence: line.confidence,
-                            });
-                            lines.push(line);
-                        }
-                    }
-
+            // Quality presets need token times on every window: the turns are
+            // not known yet, so any window could span a speaker change. The
+            // speed preset keeps its no-token-timestamps decode.
+            let token_flags = vec![!fast_decode; spans.len()];
+            let pinned_language = pin_language(
+                transcriber,
+                &decode_language,
+                samples.as_slice(),
+                rate,
+                spans.len(),
+                per_call_threads,
+            );
+            let language = decode_language.or(pinned_language.as_deref());
+            let asr_started = Instant::now();
+            let mut results: Vec<Option<Result<Vec<Segment>, String>>> =
+                (0..total_windows).map(|_| None).collect();
+            run_asr_pool(
+                &spans,
+                &token_flags,
+                samples.as_slice(),
+                transcriber,
+                workers,
+                per_call_threads,
+                language,
+                fast_decode,
+                best_of,
+                audio_hash.as_ref(),
+                &model_name,
+                &is_cancelled,
+                &counters,
+                |index, result| {
+                    results[index] = Some(result);
+                    done_seconds += (spans[index].1 - spans[index].0) as f64 / rate as f64;
+                    done_windows += 1;
                     let fraction = if total_seconds > 0.0 {
                         (done_seconds / total_seconds).clamp(0.0, 1.0)
                     } else {
                         1.0
                     };
+                    // Diarization runs beside the pool: the bar follows whichever
+                    // phase is behind so neither can finish it early.
+                    let diarize_fraction = job_progress
+                        .as_ref()
+                        .map(|progress| {
+                            (progress.load(Ordering::Relaxed) as f32 / 1_000_000.0).clamp(0.0, 1.0)
+                        })
+                        .unwrap_or(1.0);
                     emit(Event::Stage {
                         stage: "transcription".to_string(),
-                        label: format!("Transcribing {done_turns}/{total_turns}"),
-                        progress: (transcription_base
-                            + (1.0 - transcription_base) * fraction as f32)
-                            .clamp(0.0, 1.0),
+                        label: format!("Transcribing {done_windows}/{total_windows}"),
+                        progress: overlap_progress(fraction as f32, diarize_fraction),
                     });
+                    emit(Event::Work {
+                        done: done_seconds,
+                        total: total_seconds,
+                    });
+                    emit(Event::Diarize {
+                        fraction: diarize_fraction.clamp(0.0, 1.0),
+                    });
+                },
+            );
+            asr_seconds = asr_started.elapsed().as_secs_f64();
+
+            let (raw, elapsed) = match finish_diarization(
+                job,
+                emit,
+                &is_cancelled,
+                cache_key.as_deref(),
+                true,
+                Some((DECODE_DONE, OVERLAP_DONE)),
+            ) {
+                (Ok(turns), elapsed) => (turns, elapsed),
+                (Err(message), elapsed) => {
+                    // The text is already transcribed: keep it under a single
+                    // unlabelled speaker rather than losing the whole file.
+                    fail(emit, message);
+                    (
+                        vec![Turn {
+                            start: 0.0,
+                            end: duration as f32,
+                            speaker: String::new(),
+                        }],
+                        elapsed,
+                    )
                 }
+            };
+            diarize_seconds = elapsed;
+            diarized_at = Instant::now();
+            let (resolved, count) = resolve_and_emit_turns(
+                raw,
+                diarized,
+                &input.display().to_string(),
+                samples.as_slice(),
+                diarize_seconds,
+                emit,
+            );
+            turns = resolved;
+            speaker_count = count;
+
+            // Attribute the finished text to whoever held the floor.
+            for (index, window) in windows.iter().enumerate() {
+                let window_end = window.start + (window.to - window.from) as f32 / rate as f32;
+                let clip_turns: Vec<(usize, f32, f32)> = turns
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, turn)| turn.end > window.start && turn.start < window_end)
+                    .map(|(turn_index, turn)| (turn_index, turn.start, turn.end))
+                    .collect();
+                if clip_turns.is_empty() {
+                    continue;
+                }
+                let clip = Clip {
+                    turns: clip_turns,
+                    start: window.start,
+                    from: window.from,
+                    to: window.to,
+                };
+                match results[index].take() {
+                    Some(Ok(segments)) => {
+                        for segment in segments {
+                            lines.extend(segment_lines(&clip, &segment, &turns, &mut split_stats));
+                        }
+                    }
+                    Some(Err(message)) => emit(Event::Log { message }),
+                    None => {}
+                }
+            }
+            // Attribution replaced clip building as the post-diarization step.
+            prepare_seconds = diarized_at.elapsed().as_secs_f64();
+            emit(Event::Stage {
+                stage: "transcription".to_string(),
+                label: "Writing transcript".to_string(),
+                progress: 1.0,
+            });
+            lines.sort_by(|a, b| {
+                a.start
+                    .partial_cmp(&b.start)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            for line in std::mem::take(&mut lines) {
+                emit(Event::Line {
+                    start: line.start,
+                    speaker: line.speaker.clone(),
+                    text: line.text.clone(),
+                    confidence: line.confidence,
+                });
+                lines.push(line);
+            }
+        } else {
+            let transcription_base = if did_diarize {
+                DIARIZATION_DONE
+            } else {
+                DECODE_DONE
+            };
+            let (raw, elapsed) = match finish_diarization(
+                job,
+                emit,
+                &is_cancelled,
+                cache_key.as_deref(),
+                false,
+                None,
+            ) {
+                (Ok(turns), elapsed) => (turns, elapsed),
+                (Err(message), _) => {
+                    fail(emit, message);
+                    continue;
+                }
+            };
+            diarize_seconds = elapsed;
+            diarized_at = Instant::now();
+            let (resolved, count) = resolve_and_emit_turns(
+                raw,
+                diarized,
+                &input.display().to_string(),
+                samples.as_slice(),
+                diarize_seconds,
+                emit,
+            );
+            turns = resolved;
+            speaker_count = count;
+
+            if let Some(transcriber) = &transcriber {
+                // Consecutive turns are grouped into ~29 s clips so each ASR call
+                // encodes one whisper window instead of one window per short turn.
+                let clips = build_clips(&turns, duration as f32, rate, samples.as_slice());
+
+                let total_turns = clips.len();
+                let total_seconds: f64 = clips
+                    .iter()
+                    .map(|clip| (clip.to - clip.from) as f64 / rate as f64)
+                    .sum();
+                let mut done_seconds = 0.0f64;
+                let mut done_turns = 0usize;
+
+                emit(Event::Stage {
+                    stage: "transcription".to_string(),
+                    label: format!("Transcribing 0/{total_turns}"),
+                    progress: transcription_base,
+                });
+
+                // Clips are already ordered by start time; the pool returns results
+                // out of order, and the closure below re-orders them before any line
+                // is emitted.
+                let spans: Vec<(usize, usize)> =
+                    clips.iter().map(|clip| (clip.from, clip.to)).collect();
+                // A clip inside one turn can never be split between speakers, and
+                // the speed preset never asks for token times, so both skip
+                // whisper's extra pass.
+                let token_flags: Vec<bool> = clips
+                    .iter()
+                    .map(|clip| !fast_decode && clip.turns.len() > 1)
+                    .collect();
+                let pinned_language = pin_language(
+                    transcriber,
+                    &decode_language,
+                    samples.as_slice(),
+                    rate,
+                    spans.len(),
+                    per_call_threads,
+                );
+                let language = decode_language.or(pinned_language.as_deref());
+                let asr_started = Instant::now();
+                let mut pending: BTreeMap<usize, Result<Vec<Segment>, String>> = BTreeMap::new();
+                let mut buffer: Vec<Line> = Vec::new();
+                let mut next_emit = 0usize;
+
+                run_asr_pool(
+                    &spans,
+                    &token_flags,
+                    samples.as_slice(),
+                    transcriber,
+                    workers,
+                    per_call_threads,
+                    language,
+                    fast_decode,
+                    best_of,
+                    audio_hash.as_ref(),
+                    &model_name,
+                    &is_cancelled,
+                    &counters,
+                    |index, result| {
+                        // Progress reflects completed work.
+                        done_seconds += (clips[index].to - clips[index].from) as f64 / rate as f64;
+                        done_turns += 1;
+                        pending.insert(index, result);
+
+                        // Process completed clips in clip order. Overlapping turns can
+                        // make a later clip's lines start earlier, so buffer lines and
+                        // emit only up to the next unprocessed clip's start time.
+                        while let Some(result) = pending.remove(&next_emit) {
+                            let clip = &clips[next_emit];
+                            match result {
+                                Ok(segments) => {
+                                    for segment in segments {
+                                        buffer.extend(segment_lines(
+                                            clip,
+                                            &segment,
+                                            &turns,
+                                            &mut split_stats,
+                                        ));
+                                    }
+                                }
+                                Err(message) => emit(Event::Log { message }),
+                            }
+                            next_emit += 1;
+
+                            let watermark = clips
+                                .get(next_emit)
+                                .map(|clip| clip.start)
+                                .unwrap_or(f32::INFINITY);
+                            buffer.sort_by(|a, b| {
+                                a.start
+                                    .partial_cmp(&b.start)
+                                    .unwrap_or(std::cmp::Ordering::Equal)
+                            });
+                            let split = buffer.partition_point(|line| line.start <= watermark);
+                            for line in buffer.drain(..split) {
+                                emit(Event::Line {
+                                    start: line.start,
+                                    speaker: line.speaker.clone(),
+                                    text: line.text.clone(),
+                                    confidence: line.confidence,
+                                });
+                                lines.push(line);
+                            }
+                        }
+
+                        let fraction = if total_seconds > 0.0 {
+                            (done_seconds / total_seconds).clamp(0.0, 1.0)
+                        } else {
+                            1.0
+                        };
+                        emit(Event::Stage {
+                            stage: "transcription".to_string(),
+                            label: format!("Transcribing {done_turns}/{total_turns}"),
+                            progress: (transcription_base
+                                + (1.0 - transcription_base) * fraction as f32)
+                                .clamp(0.0, 1.0),
+                        });
+                        emit(Event::Work {
+                            done: done_seconds,
+                            total: total_seconds,
+                        });
+                    },
+                );
 
                 // Flush anything still buffered (end of file or cancellation).
                 buffer.sort_by(|a, b| {
@@ -875,7 +1542,10 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
                     });
                     lines.push(line);
                 }
-            });
+
+                asr_seconds = asr_started.elapsed().as_secs_f64();
+                prepare_seconds = asr_started.duration_since(diarized_at).as_secs_f64();
+            }
         }
 
         let asr_at = Instant::now();
@@ -937,6 +1607,39 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
             });
         }
 
+        // Sidecar with per-line confidence, so the viewer can still mark
+        // uncertain utterances after a restart. Line order matches `txt_ts`.
+        let json_path = ts_path.with_extension("json");
+        let json_lines: Vec<serde_json::Value> = lines
+            .iter()
+            .map(|line| {
+                serde_json::json!({
+                    "time": format_timestamp(line.start, use_hours),
+                    "speaker": line.speaker,
+                    "text": line.text,
+                    "start": line.start,
+                    "confidence": line.confidence,
+                })
+            })
+            .collect();
+        let json_root = serde_json::json!({
+            "lines": json_lines,
+            "turns": turns,
+            "duration": duration,
+        });
+        match serde_json::to_string_pretty(&json_root) {
+            Ok(text) => {
+                if let Err(error) = std::fs::write(&json_path, text) {
+                    emit(Event::Log {
+                        message: format!("could not write {}: {error}", json_path.display()),
+                    });
+                }
+            }
+            Err(error) => emit(Event::Log {
+                message: format!("could not encode {}: {error}", json_path.display()),
+            }),
+        }
+
         let mut speaker_stats: HashMap<String, SpeakerStat> = HashMap::new();
         for line in &lines {
             let entry = speaker_stats.entry(line.speaker.clone()).or_default();
@@ -958,12 +1661,32 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
             .file_name()
             .and_then(|name| name.to_str())
             .unwrap_or("audio");
+        let (busy_seconds, calls, hits) = counters.seconds();
+        let utilisation = if asr_seconds > 0.0 && workers > 0 {
+            100.0 * busy_seconds / (asr_seconds * workers as f64)
+        } else {
+            0.0
+        };
         emit(Event::Log {
             message: format!(
-                "timing {name}: decode {:.2}s diarize {:.2}s asr {:.2}s write {:.2}s total {:.2}s (audio {:.1}s, {:.1}x realtime)",
-                decoded_at.duration_since(file_start).as_secs_f64(),
-                diarized_at.duration_since(decoded_at).as_secs_f64(),
-                asr_at.duration_since(diarized_at).as_secs_f64(),
+                "timing {name} [{}]: decode {:.2}s{} hash {:.2}s prepare {:.2}s diarize {:.2}s{} \
+                 asr {:.2}s (busy {:.2}s, {:.0}% of {} worker(s), {calls} call(s), {hits} cached) \
+                 write {:.2}s total {:.2}s (audio {:.1}s, {:.1}x realtime)",
+                if overlap { "overlap" } else { "classic" },
+                decoded_at.duration_since(decode_started).as_secs_f64(),
+                if decode_prefetched {
+                    " (prefetched)"
+                } else {
+                    ""
+                },
+                hash_elapsed,
+                prepare_seconds,
+                diarize_seconds,
+                if overlap { " (parallel)" } else { "" },
+                asr_seconds,
+                busy_seconds,
+                utilisation,
+                workers,
                 asr_at.elapsed().as_secs_f64(),
                 total_elapsed,
                 duration,
@@ -979,6 +1702,10 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
                 num_speakers: opts.num_speakers,
                 preset: opts.preset.clone(),
                 speaker_stats,
+                decode_seconds: decoded_at.duration_since(file_start).as_secs_f64(),
+                diarize_seconds: diarized_at.duration_since(decoded_at).as_secs_f64(),
+                asr_seconds: asr_at.duration_since(diarized_at).as_secs_f64(),
+                prepare_seconds,
             },
         });
     }
@@ -994,6 +1721,34 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn overlap_progress_follows_the_phase_that_is_behind() {
+        // ASR ahead: diarization is the brake.
+        assert!((overlap_progress(0.9, 0.2) - overlap_progress(0.2, 0.2)).abs() < 1e-6);
+        // Diarization ahead: ASR is the brake.
+        assert!((overlap_progress(0.1, 0.8) - overlap_progress(0.1, 0.1)).abs() < 1e-6);
+        // Both done: stops short of 1.0 so attribution and writing still fit.
+        assert!((overlap_progress(1.0, 1.0) - OVERLAP_DONE).abs() < 1e-6);
+        // Neither phase can drive the bar past its end.
+        assert!(overlap_progress(1.0, 0.0) >= DECODE_DONE);
+        assert!(overlap_progress(0.0, 1.0) <= OVERLAP_DONE);
+        // Out-of-range inputs are clamped instead of extrapolating.
+        assert!(overlap_progress(-1.0, -1.0) >= DECODE_DONE);
+        assert!(overlap_progress(2.0, 2.0) <= OVERLAP_DONE);
+    }
+
+    #[test]
+    fn overlap_progress_is_monotonic_in_both_fractions() {
+        let steps = [0.0, 0.05, 0.25, 0.5, 0.75, 0.95, 1.0];
+        for pair in steps.windows(2) {
+            let (before, after) = (pair[0], pair[1]);
+            for fixed in steps {
+                assert!(overlap_progress(after, fixed) >= overlap_progress(before, fixed));
+                assert!(overlap_progress(fixed, after) >= overlap_progress(fixed, before));
+            }
+        }
+    }
 
     #[test]
     fn routing_skips_diarization_for_one_speaker() {
@@ -1139,6 +1894,73 @@ mod tests {
         assert_eq!(
             path,
             PathBuf::from("/out/my-audio-accuracy-transcription-1speaker.txt")
+        );
+    }
+
+    #[test]
+    fn schedule_keeps_low_core_machines_sequential() {
+        // The overlap schedule contends for cores; small machines default to
+        // the sequential path.
+        assert_eq!(Schedule::from_setting(None, 2), Schedule::Classic);
+        assert_eq!(Schedule::from_setting(None, 4), Schedule::Classic);
+        assert_eq!(Schedule::from_setting(None, 8), Schedule::Overlap);
+        // An explicit setting wins either way.
+        assert_eq!(
+            Schedule::from_setting(Some("classic"), 32),
+            Schedule::Classic
+        );
+        assert_eq!(
+            Schedule::from_setting(Some("overlap"), 2),
+            Schedule::Overlap
+        );
+    }
+
+    #[test]
+    fn fixed_windows_cover_speech_and_skip_silence() {
+        let rate = 16_000u32;
+        let duration = 40.0f32;
+        let mut samples = vec![0.0f32; (duration * rate as f32) as usize];
+        // Speech from 2 s to 20 s and 32 s to 38 s; the rest is silence.
+        for (from, to) in [(2.0f32, 20.0f32), (32.0, 38.0)] {
+            for index in (from * rate as f32) as usize..(to * rate as f32) as usize {
+                samples[index] = if index % 2 == 0 { 0.2 } else { -0.2 };
+            }
+        }
+        let windows = build_windows(duration, rate, samples.as_slice());
+        assert!(!windows.is_empty());
+        // No window may be entirely inside one of the silent stretches.
+        for window in &windows {
+            assert!(span_rms(samples.as_slice(), window.from, window.to) >= SPEECH_THRESHOLD);
+        }
+        // Every speech sample is covered by some window.
+        let covered = |second: f32| {
+            windows.iter().any(|window| {
+                window.start <= second
+                    && second <= window.start + (window.to - window.from) as f32 / rate as f32
+            })
+        };
+        assert!(covered(3.0));
+        assert!(covered(19.0));
+        assert!(covered(35.0));
+    }
+
+    #[test]
+    fn quiet_cut_prefers_a_silent_gap() {
+        let rate = 16_000u32;
+        let mut samples = vec![0.0f32; 40 * rate as usize];
+        // Loud everywhere except a 0.4 s pocket centred on 30 s.
+        for (index, sample) in samples.iter_mut().enumerate() {
+            *sample = if index % 2 == 0 { 0.3 } else { -0.3 };
+        }
+        let pocket = 30.0 * rate as f32;
+        let half = 0.2 * rate as f32;
+        for index in (pocket - half) as usize..(pocket + half) as usize {
+            samples[index] = 0.0;
+        }
+        let cut = quiet_cut(samples.as_slice(), rate, 20.0, 29.5);
+        assert!(
+            (cut - 30.0).abs() <= 1.6,
+            "cut {cut} should land near the silent pocket"
         );
     }
 }

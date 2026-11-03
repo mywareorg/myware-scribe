@@ -24,6 +24,9 @@ pub fn run(args: &[String]) -> i32 {
     let mut progress_json = false;
     let mut cache = true;
     let mut mode = PipelineMode::Diarized;
+    // Diagnostic: run the diarizer only and print the turn map, so a long
+    // file can be analysed in minutes instead of a full transcript run.
+    let mut diarize_only = false;
     // Every preset is multilingual, so default to Whisper's detection;
     // `--language <code>` pins one.
     let mut language: Option<String> = None;
@@ -52,6 +55,7 @@ pub fn run(args: &[String]) -> i32 {
             "--no-timestamps" => timestamps = false,
             "--progress-json" => progress_json = true,
             "--asr-only" => mode = PipelineMode::AsrOnly,
+            "--diarize-only" => diarize_only = true,
             "--no-cache" => cache = false,
             "--language" => {
                 i += 1;
@@ -125,6 +129,10 @@ pub fn run(args: &[String]) -> i32 {
         }
         mode = PipelineMode::AsrOnly;
     }
+    if diarize_only {
+        return diarize_only_run(&inputs, num_speakers);
+    }
+
     // A single speaker never needs diarization: same fast path as the GUI.
     if mode == PipelineMode::Diarized {
         mode = pipeline::route(num_speakers);
@@ -170,6 +178,63 @@ pub fn run(args: &[String]) -> i32 {
         }
     });
     code
+}
+
+/// Print the diarization turn map for one file as TSV: `start\tend\tspeaker`.
+///
+/// The turns go through the same cleanup the pipeline applies (`clean_turns`),
+/// so a scored baseline describes the shipped turn geometry rather than the
+/// raw model output. A leading `#` line carries the timing and the cleanup
+/// counts; `diarize-score.py` treats it as a comment.
+fn diarize_only_run(inputs: &[std::path::PathBuf], num_speakers: Option<i32>) -> i32 {
+    let Some(input) = inputs.first() else {
+        eprintln!("usage: hippo-transcribe --cli <audio> --diarize-only");
+        return 1;
+    };
+    let (samples, rate) = match crate::audio::decode(input) {
+        Ok(decoded) => decoded,
+        Err(message) => {
+            eprintln!("error: {message}");
+            return 1;
+        }
+    };
+    let audio_seconds = if rate > 0 {
+        samples.len() as f64 / rate as f64
+    } else {
+        0.0
+    };
+    let started = std::time::Instant::now();
+    let raw = match crate::diarize::diarize(
+        samples.as_slice(),
+        &crate::models::segmentation_model(),
+        &crate::models::embedding_model(),
+        num_speakers,
+        crate::diarize::CLUSTER_THRESHOLD,
+    ) {
+        Ok(turns) => turns,
+        Err(message) => {
+            eprintln!("error: {message}");
+            return 1;
+        }
+    };
+    let elapsed = started.elapsed().as_secs_f64();
+    let raw_turns = raw.len();
+    let (turns, merged, dropped) = crate::pipeline::clean_turns(raw);
+    println!(
+        "# diarize {elapsed:.2}s audio {audio_seconds:.1}s threads {} raw {raw_turns} \
+         merged {merged} dropped {dropped} kept {} speaker(s) {}",
+        crate::diarize::threads(),
+        turns.len(),
+        turns
+            .iter()
+            .map(|turn| turn.speaker.as_str())
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
+    );
+    for turn in &turns {
+        println!("{:.3}\t{:.3}\t{}", turn.start, turn.end, turn.speaker);
+    }
+    0
 }
 
 /// `hippo-transcribe --cli models [download] [--force] [--verify]`

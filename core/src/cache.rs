@@ -35,6 +35,23 @@ fn hex(bytes: &[u8]) -> String {
 
 /// SHA-256 of the audio bytes, computed once per file and reused by every
 /// cache key that needs it.
+pub fn samples_hash(samples: &[f32]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update((samples.len() as u64).to_le_bytes());
+    let mut buffer = Vec::with_capacity(4096 * 4);
+    for chunk in samples.chunks(4096) {
+        buffer.clear();
+        for sample in chunk {
+            buffer.extend_from_slice(&sample.to_le_bytes());
+        }
+        hasher.update(&buffer);
+    }
+    hex(&hasher.finalize())
+}
+
+/// SHA-256 of the audio bytes, computed once per file and reused by every
+/// cache key that needs it. Prefer [`samples_hash`] when the file has already
+/// been decoded: it avoids reading the file a second time.
 pub fn audio_hash(audio: &Path) -> Option<String> {
     let mut file = std::fs::File::open(audio).ok()?;
     let mut hasher = Sha256::new();
@@ -71,6 +88,7 @@ pub fn key(audio: &Path, diarizer: &str, num_speakers: Option<i32>) -> Option<St
 
 /// Per-clip ASR cache: same audio bytes, model, language and decode settings
 /// produce the same segments, so a re-run can skip whisper entirely.
+#[allow(clippy::too_many_arguments)]
 pub fn clip_key(
     audio_hash: &str,
     model: &str,
@@ -79,6 +97,7 @@ pub fn clip_key(
     to: usize,
     best_of: i32,
     fast: bool,
+    token_timestamps: bool,
 ) -> String {
     let mut hasher = Sha256::new();
     hasher.update(audio_hash.as_bytes());
@@ -88,8 +107,10 @@ pub fn clip_key(
     hasher.update(to.to_string().as_bytes());
     hasher.update(best_of.to_string().as_bytes());
     hasher.update([fast as u8]);
-    // Token timestamps were added to cached segments; old entries lack them.
-    hasher.update(b"tokens-v1");
+    hasher.update([token_timestamps as u8]);
+    // v3: token timestamps are optional per span, and the overlap schedule
+    // caches fixed windows rather than per-turn clips.
+    hasher.update(b"tokens-v3");
     hex(&hasher.finalize()[..12])
 }
 
@@ -118,5 +139,23 @@ pub fn write(key: &str, turns: &[Turn]) {
     let _ = std::fs::create_dir_all(&dir);
     if let Ok(text) = serde_json::to_string(turns) {
         let _ = std::fs::write(dir.join(format!("{key}.json")), text);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn samples_hash_is_stable_and_content_sensitive() {
+        let a = vec![0.0f32, 0.5, -0.5, 1.0];
+        let b = vec![0.0f32, 0.5, -0.5, 1.0];
+        assert_eq!(samples_hash(&a), samples_hash(&b));
+
+        // A single changed sample, and a length change, both change the hash.
+        let mut changed = a.clone();
+        changed[2] = -0.4;
+        assert_ne!(samples_hash(&a), samples_hash(&changed));
+        assert_ne!(samples_hash(&a), samples_hash(&a[..3]));
     }
 }

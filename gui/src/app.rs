@@ -1,4 +1,4 @@
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -33,11 +33,31 @@ const AUDIO_EXTS: &[&str] = &[
 /// Height of the waveform/speaker timeline strip.
 const TIMELINE_HEIGHT: f32 = 72.0;
 
+/// Movement smaller than this is invisible, so the follow logic does not
+/// issue a programmatic transcript scroll for it. Kept under the 6 px
+/// programmatic-scroll tolerance in `Message::TranscriptScrolled`.
+const FOLLOW_DEADBAND: f32 = 3.0;
+
+/// Shortest gap between two follow scrolls. While the target keeps changing
+/// (streamed text), issuing on every frame turns smooth growth into a series
+/// of one-frame jumps.
+const FOLLOW_MIN_INTERVAL: Duration = Duration::from_millis(120);
+
+/// How far the target must move before a follow scroll is retried after one
+/// that produced no movement. `scroll_to` clamps to the scrollable's own
+/// content bounds, so a target a few pixels past the end can never be reached
+/// and must not be re-requested every tick.
+const FOLLOW_STUCK_STEP: f32 = 12.0;
+
+/// How much the followed inputs (content height, viewport height, playhead)
+/// must change before a follow scroll counts as a new situation rather than a
+/// retry of the same one. Render layout jitters by a pixel or two without
+/// anything actually happening.
+const FOLLOW_INPUT_STEP: f32 = 12.0;
+
 /// Logical 4:3 sizing for the window (default) and floors.
-const DEFAULT_W: f32 = 1024.0;
-const DEFAULT_H: f32 = 768.0; // 1024 * 3 / 4
-                              // The transcript header and bottom action row need this much horizontal room
-                              // for the fixed-width Time, Reveal and Rename buttons to keep their size.
+// The transcript header and bottom action row need this much horizontal room
+// for the fixed-width Time, Reveal and Rename buttons to keep their size.
 const MIN_W: f32 = 1024.0;
 const MIN_H: f32 = 768.0;
 
@@ -52,6 +72,35 @@ const LEFT_PANEL_WIDTH: f32 = 340.0;
 
 /// UI chrome never wraps; labels are shortened or ellipsized instead.
 const NO_WRAP: iced::widget::text::Wrapping = iced::widget::text::Wrapping::None;
+
+/// Width of the line editor dialog, including the card's own padding.
+const LINE_EDIT_DIALOG_WIDTH: f32 = 560.0;
+
+/// Lines of text the line editor shows at minimum and maximum, so the dialog
+/// neither collapses around a single word nor grows past the window for a long
+/// paste.
+const LINE_EDIT_MIN_LINES: usize = 1;
+const LINE_EDIT_MAX_LINES: usize = 14;
+
+/// Inner padding of the line editor's field, in logical pixels.
+const LINE_EDIT_PAD_Y: f32 = 6.0;
+const LINE_EDIT_PAD_X: f32 = 8.0;
+
+/// iced's default text line height, as a multiple of the font size.
+const LINE_HEIGHT_FACTOR: f32 = 1.3;
+
+/// Average advance of mixed-case Latin text, as a fraction of the font size.
+/// Used only to estimate how many lines a line editor wraps to.
+const LINE_EDIT_CHAR_WIDTH: f32 = 0.52;
+
+/// Padding inside every modal card (see `modal_card`).
+const MODAL_PADDING: f32 = 16.0;
+
+/// Mean token log-probability below which an utterance is treated as unsure.
+const LOW_CONFIDENCE: f32 = -0.55;
+
+/// Speaker-filter entry that shows only low-confidence utterances.
+const LOW_CONFIDENCE_FILTER: &str = "Low confidence";
 
 /// Number of RMS buckets requested when probing an audio file for the timeline.
 const TIMELINE_BUCKETS: usize = 2000;
@@ -163,6 +212,22 @@ struct ItemView {
     /// Where edits are written; None means the view is read-only.
     output: Option<PathBuf>,
 }
+
+/// Undo/redo for transcript edits made through the line editor.
+///
+/// A snapshot is the edited document's lines: [`DocLine`] carries each line's
+/// speaker label, so restoring the lines restores the speaker map with it.
+#[derive(Default)]
+struct LineHistory {
+    /// The document the stacks belong to: the selected view's queue index, or
+    /// `None` for the live transcript.
+    document: Option<usize>,
+    undo: Vec<Vec<DocLine>>,
+    redo: Vec<Vec<DocLine>>,
+}
+
+/// States kept for undo; the oldest falls off once the stack is full.
+const LINE_UNDO_LIMIT: usize = 50;
 
 fn is_audio(path: &Path) -> bool {
     path.extension()
@@ -296,6 +361,14 @@ struct Settings {
     window_y: Option<f32>,
     output_dir: Option<String>,
     theme: Option<String>,
+    #[serde(default)]
+    eta_throughput: Option<f32>,
+    /// Wall seconds of diarization per audio second, blended across runs.
+    #[serde(default)]
+    eta_diarize: Option<f32>,
+    /// Wall seconds of post-ASR work per audio second, blended across runs.
+    #[serde(default)]
+    eta_prepare: Option<f32>,
 }
 
 fn notifications_default() -> bool {
@@ -326,6 +399,9 @@ impl Default for Settings {
             window_y: None,
             output_dir: None,
             theme: None,
+            eta_throughput: None,
+            eta_diarize: None,
+            eta_prepare: None,
         }
     }
 }
@@ -352,6 +428,8 @@ struct ModelDownload {
 enum SummaryLine {
     File(String),
     Body(String),
+    /// A fixed-column table: header cells, then one row per file and a total.
+    Table(Vec<String>, Vec<Vec<String>>),
 }
 
 #[derive(Debug, Clone)]
@@ -369,6 +447,9 @@ pub enum Message {
     EnterSubmit,
     ShiftEnterSubmit,
     SelectLine(usize),
+    LineClicked(usize),
+    LineHover(Option<usize>),
+    TogglePlayheadLock,
     SelectRelative(i32),
     SelectRelativeChecked(i32, bool),
     EditActiveLine,
@@ -376,6 +457,7 @@ pub enum Message {
     ZoomOut,
     ZoomReset,
     ToggleFollowPlayhead,
+    ToggleConfidenceView,
     ToggleTheme,
     SetTheme(AppTheme),
     OpenSettings,
@@ -413,6 +495,8 @@ pub enum Message {
     /// Open the folder holding the log files in Explorer.
     OpenLogFolder,
     TimestampsToggled(bool),
+    TranscriptHover(bool),
+    ToggleJoinLines,
     SpeakerCountChanged(SpeakerOpt),
     LanguageChanged(LanguageOpt),
     TranscriptScrolled(scrollable::Viewport),
@@ -434,18 +518,23 @@ pub enum Message {
     ImportLoaded(Option<(PathBuf, String)>),
     ImportChoice(ImportKind),
     CopyTranscript,
-    SaveTranscript,
+    SaveTranscriptAs,
+    SaveTranscriptAsPicked(Option<PathBuf>),
     RevealOutput,
     AudioPicked(Option<PathBuf>),
     OpenRename,
     EditLine(usize),
-    LineEditSpeaker(String),
-    LineEditAction(text_editor::Action),
+    FlipLineSpeaker(usize),
+    LineEditSpeaker(usize, String),
+    LineEditAction(usize, text_editor::Action),
     SaveLineEdit,
     CancelLineEdit,
     CopyLineEdit,
     MergeNextLine,
-    SplitLineAtPlayhead,
+    MergePrevLine,
+    SplitLineAtCursor,
+    UndoLineEdit,
+    RedoLineEdit,
     DeleteLineEdit,
     ConfirmDeleteLine,
     CancelDeleteLine,
@@ -464,7 +553,6 @@ pub enum Message {
         Option<(f64, Vec<f32>)>,
     ),
     QueueWaveformLoaded(PathBuf, Option<(f64, Vec<f32>)>),
-    RequeueItem(usize),
     RetryItem(usize),
     QueueDragStart(usize),
     QueueDrop(usize),
@@ -473,6 +561,41 @@ pub enum Message {
     QueuePointerLeft,
     ResetOutputDir,
     OpenModelsFolder,
+}
+
+/// One programmatic follow scroll: where it was asked to go, the offset the
+/// scrollable reported at that moment, and the inputs it was computed from.
+///
+/// Follow is edge-triggered off this record. Remembering the inputs is what
+/// keeps it quiet: with a static playhead and static content the same target
+/// must never be re-requested, however far the scrollable settled from it.
+#[derive(Debug, Clone, Copy)]
+struct FollowIssue {
+    at: Instant,
+    target: f32,
+    offset: f32,
+    active: Option<usize>,
+    playhead: f32,
+    content: f32,
+    viewport: f32,
+    /// The same situation already got its one retry and still did not move.
+    retried: bool,
+}
+
+impl FollowIssue {
+    /// True when nothing that decides the target has changed since `self`.
+    fn same_situation(
+        &self,
+        active: Option<usize>,
+        playhead: f32,
+        content: f32,
+        viewport: f32,
+    ) -> bool {
+        self.active == active
+            && (self.playhead - playhead).abs() <= 0.01
+            && (self.content - content).abs() <= FOLLOW_INPUT_STEP
+            && (self.viewport - viewport).abs() <= FOLLOW_INPUT_STEP
+    }
 }
 
 pub struct App {
@@ -489,8 +612,23 @@ pub struct App {
     run_start: Option<Instant>,
     elapsed_final: Option<f64>,
     eta_shown: Option<f32>,
-    eta_rate: Option<f32>,
-    eta_sample: Option<(Instant, f32)>,
+    /// Audio seconds transcribed in the current file, and its duration.
+    work_done: f64,
+    work_total: f64,
+    /// Wall clock plus audio seconds done, for measuring throughput.
+    eta_samples: VecDeque<(Instant, f64)>,
+    /// Median audio-seconds transcribed per wall-second.
+    eta_throughput: Option<f32>,
+    /// Throughput persisted across runs.
+    eta_prior: Option<f32>,
+    /// Fraction of the current file's diarization completed, 0..1.
+    diarize_fraction: f32,
+    /// Diarization wall seconds per audio second, persisted across runs.
+    diarize_prior: Option<f32>,
+    /// Post-ASR wall seconds per audio second, persisted across runs.
+    prepare_prior: Option<f32>,
+    /// Pending-file count at the previous tick, to notice a growing queue.
+    eta_pending: usize,
     status: Status,
     transcript: String,
     lines: Vec<DocLine>,
@@ -529,17 +667,39 @@ pub struct App {
     speaker_order_cache: RefCell<Option<Vec<String>>>,
     transcript_viewport: f32,
     transcript_content: f32,
+    transcript_offset: f32,
     transcript_at_bottom: bool,
+    transcript_hover: bool,
     transcript_dirty: bool,
     follow_offset: Option<f32>,
     /// Horizontal target of the last programmatic transcript scroll, used to
     /// distinguish it from a user scroll.
     scroll_target: Option<f32>,
+    /// Last follow scroll we asked for and the offset reported then. Without
+    /// it, a target the scrollable cannot reach (clamped, or computed from a
+    /// content height that arrived a frame late) was re-issued every tick and
+    /// the pane shimmered.
+    follow_issue: Option<FollowIssue>,
+    /// Row height used to centre the followed line. Re-derived only when the
+    /// row count changes or the content height jumps materially, so streamed
+    /// growth does not nudge the estimate on every frame.
+    follow_row_height: RefCell<Option<(usize, f32)>>,
+    /// Spacers the virtualised transcript window asked for last frame:
+    /// (first line, end line, top spacer, bottom spacer). Used to measure how
+    /// tall the rendered window really is.
+    pane_window: Cell<(usize, usize, f32, f32)>,
+    /// Latched row height for the transcript spacers.
+    pane_row_height: Cell<Option<f32>>,
+    /// First line of the virtualised window, kept while the view stays inside
+    /// it so rows do not shift on every scroll event.
+    pane_start: Cell<Option<usize>>,
     /// True after the user scroll-seeks the live transcript: the highlight then
     /// follows the playhead instead of the newest streamed line.
     scroll_seek: bool,
     font_scale: f32,
     follow_playhead: bool,
+    /// Mark low-confidence utterances and expose the confidence filter.
+    confidence_view: bool,
     console_open: bool,
     console_lines: Vec<String>,
     toast: Option<(String, Instant)>,
@@ -581,8 +741,22 @@ pub struct App {
     selected_view: Option<ItemView>,
     /// Error shown in the transcript pane when a completed item cannot load.
     view_error: Option<String>,
+    /// Display adjacent same-speaker lines as one block.
+    join_lines: bool,
+    joined_lines: Vec<DocLine>,
+    joined_transcript: String,
+    /// The current view differs from the default transcript file.
+    modified: bool,
+    /// Last line click, used to detect a double click.
+    last_line_click: Option<(usize, Instant)>,
+    /// Transcript line currently under the pointer.
+    transcript_line_hover: Option<usize>,
+    /// Line clicks no longer seek while this is on.
+    playhead_locked: bool,
     /// Right-clicked line currently being edited.
     line_edit: Option<LineEdit>,
+    /// Undo/redo for transcript edits made through the line editor.
+    line_history: LineHistory,
     /// The line editor asked to delete; confirmation is required before saving.
     delete_confirm: bool,
     /// Background waveform backfill for completed items without cached peaks.
@@ -605,34 +779,9 @@ impl Default for App {
     }
 }
 
-/// Primary display height in iced's logical pixels.
-#[cfg(windows)]
-fn screen_height() -> Option<f32> {
-    use windows_sys::Win32::UI::HiDpi::GetDpiForSystem;
-    use windows_sys::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_CYSCREEN};
-
-    unsafe {
-        let dpi = GetDpiForSystem();
-        if dpi == 0 {
-            return None;
-        }
-        Some(GetSystemMetrics(SM_CYSCREEN) as f32 * 96.0 / dpi as f32)
-    }
-}
-
-#[cfg(not(windows))]
-fn screen_height() -> Option<f32> {
-    None
-}
-
-/// Default window: 85% of the display height, kept inside the 4:3 grid.
+/// Default window: start at the minimum supported size (4:3).
 fn default_window_size() -> Size {
-    let Some(height) = screen_height() else {
-        return Size::new(DEFAULT_W, DEFAULT_H);
-    };
-    let height = (height * 0.85).max(MIN_H);
-    let width = height * ASPECT;
-    aspect_clamp(Size::new(width, height), Size::new(width, height))
+    Size::new(MIN_W, MIN_H)
 }
 
 /// Snap a requested window size to the 4:3 grid, honoring `MIN_W`/`MIN_H`.
@@ -713,8 +862,15 @@ impl App {
             run_start: None,
             elapsed_final: None,
             eta_shown: None,
-            eta_rate: None,
-            eta_sample: None,
+            work_done: 0.0,
+            work_total: 0.0,
+            eta_samples: VecDeque::new(),
+            eta_throughput: None,
+            eta_prior: settings.eta_throughput,
+            diarize_fraction: 0.0,
+            diarize_prior: settings.eta_diarize,
+            prepare_prior: settings.eta_prepare,
+            eta_pending: 0,
             status: Status::Idle,
             transcript: String::new(),
             lines: Vec::new(),
@@ -751,13 +907,23 @@ impl App {
             speaker_order_cache: RefCell::new(None),
             transcript_viewport: 0.0,
             transcript_content: 0.0,
+            transcript_offset: 0.0,
             transcript_at_bottom: true,
+            transcript_hover: false,
             transcript_dirty: false,
             follow_offset: None,
             scroll_target: None,
+            follow_issue: None,
+            follow_row_height: RefCell::new(None),
+            pane_window: Cell::new((0, 0, 0.0, 0.0)),
+            pane_row_height: Cell::new(None),
+            pane_start: Cell::new(None),
             scroll_seek: false,
             font_scale: settings.font_scale.unwrap_or(1.0),
             follow_playhead: settings.follow_playhead.unwrap_or(true),
+            // Low-confidence lines are marked from the moment a transcript with
+            // confidence data is opened; the toggle is there to quiet them.
+            confidence_view: true,
             console_open: false,
             console_lines: Vec::new(),
             toast: None,
@@ -793,7 +959,15 @@ impl App {
             selected: None,
             selected_view: None,
             view_error: None,
+            join_lines: false,
+            joined_lines: Vec::new(),
+            joined_transcript: String::new(),
+            modified: false,
+            last_line_click: None,
+            transcript_line_hover: None,
+            playhead_locked: false,
             line_edit: None,
+            line_history: LineHistory::default(),
             delete_confirm: false,
             backfill_active: false,
             waveform_tried: HashSet::new(),
@@ -943,6 +1117,9 @@ impl App {
                 .as_ref()
                 .map(|path| path.display().to_string()),
             theme: Some(self.theme_mode.arg().to_string()),
+            eta_throughput: self.eta_prior,
+            eta_diarize: self.diarize_prior,
+            eta_prepare: self.prepare_prior,
         };
         if let Ok(text) = serde_json::to_string_pretty(&settings) {
             let _ = std::fs::write(path, text);
@@ -1075,9 +1252,15 @@ impl App {
     fn invalidate_derived(&mut self) {
         self.display_order_cache.replace(None);
         self.speaker_order_cache.replace(None);
+        if self.join_lines {
+            self.rebuild_joined_preview();
+        }
     }
 
     fn shown_lines(&self) -> &[DocLine] {
+        if self.join_lines {
+            return &self.joined_lines;
+        }
         match &self.selected_view {
             Some(view) => &view.lines,
             None => &self.lines,
@@ -1127,10 +1310,32 @@ impl App {
     }
 
     fn shown_transcript(&self) -> &str {
+        if self.join_lines {
+            return &self.joined_transcript;
+        }
         match &self.selected_view {
             Some(view) => &view.transcript,
             None => &self.transcript,
         }
+    }
+
+    fn rebuild_joined_preview(&mut self) {
+        let base = match &self.selected_view {
+            Some(view) => &view.lines,
+            None => &self.lines,
+        };
+        self.joined_lines = join_adjacent(base);
+        self.joined_transcript = self
+            .joined_lines
+            .iter()
+            .map(|line| line.raw.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        if !self.joined_transcript.is_empty() {
+            self.joined_transcript.push('\n');
+        }
+        self.display_order_cache.replace(None);
+        self.speaker_order_cache.replace(None);
     }
 
     /// True when the queue holds at least one completed transcript.
@@ -1178,11 +1383,115 @@ impl App {
                 .is_some_and(|player| player.is_playing() || player.finished())
     }
 
+    /// True while a completed transcript is on screen. Pro builds keep that view
+    /// instead of snapping to the file that is being transcribed.
+    fn viewing_completed_item(&self) -> bool {
+        self.selected_view.is_some()
+            && self
+                .selected
+                .and_then(|index| self.queue.get(index))
+                .is_some_and(|item| matches!(item.status, ItemStatus::Done))
+    }
+
+    /// Pro builds keep a finished transcript on screen during a new run.
+    fn keeps_finished_view(&self) -> bool {
+        !self.shows(license::Audience::FreeOnly) && self.viewing_completed_item()
+    }
+
     fn completed_count(&self) -> usize {
         self.queue
             .iter()
             .filter(|item| matches!(item.status, ItemStatus::Done))
             .count()
+    }
+
+    fn select_line(&mut self, index: usize) -> Task<Message> {
+        if !self.can(license::Feature::Playback) {
+            return Task::none();
+        }
+        if let Some(line) = self.shown_lines().get(index) {
+            if let Some(start) = line.start {
+                let max = self.shown_duration().unwrap_or(start);
+                self.playhead = start.clamp(0.0, max);
+                self.follow_offset = None;
+                self.follow_issue = None;
+                self.scroll_seek = true;
+                if let Some(player) = &self.player {
+                    player.seek(self.playhead);
+                }
+            }
+        }
+        Task::none()
+    }
+
+    /// Right-click a split line to cycle it through the transcript speakers.
+    fn flip_line_speaker(&mut self, index: usize) -> Task<Message> {
+        if self.join_lines {
+            self.toast = Some(("Split the view to edit lines".to_string(), Instant::now()));
+            return Task::none();
+        }
+        if !self.can(license::Feature::Editing) {
+            self.toast = Some(("Editing is a Pro feature".to_string(), Instant::now()));
+            return Task::none();
+        }
+        if self.shown_output().is_none() {
+            self.toast = Some(("This transcript is read-only".to_string(), Instant::now()));
+            return Task::none();
+        }
+        let speakers = self.speaker_order();
+        if speakers.len() < 2 {
+            self.toast = Some((
+                "Only one speaker in this transcript".to_string(),
+                Instant::now(),
+            ));
+            return Task::none();
+        }
+        let Some(line) = self.shown_lines().get(index) else {
+            return Task::none();
+        };
+        let current = line.speaker.clone();
+        let text = line_text(line);
+        let position = speakers
+            .iter()
+            .position(|name| *name == current)
+            .unwrap_or(0);
+        let next = speakers[(position + 1) % speakers.len()].clone();
+
+        // A flip outside the dialog must not be undone by its history.
+        self.line_history = LineHistory::default();
+        let mut write: Option<(PathBuf, String)> = None;
+        if let Some(view) = self.selected_view.as_mut() {
+            if let Some(line) = view.lines.get_mut(index) {
+                rewrite_line(line, &next, &text);
+                view.transcript = view
+                    .lines
+                    .iter()
+                    .map(|line| line.raw.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                if !view.transcript.is_empty() {
+                    view.transcript.push('\n');
+                }
+                write = view
+                    .output
+                    .clone()
+                    .map(|path| (path, view.transcript.clone()));
+            }
+        } else if let Some(line) = self.lines.get_mut(index) {
+            rewrite_line(line, &next, &text);
+            self.refresh_transcript();
+            write = self
+                .output_txt
+                .clone()
+                .map(|path| (path, self.transcript.clone()));
+        }
+        if let Some((path, text)) = write {
+            let _ = write_transcript_file(&path, &text);
+        }
+        self.modified = true;
+        self.invalidate_derived();
+        self.toast = Some((format!("Speaker: {next}"), Instant::now()));
+        Task::none()
     }
 
     // ---- completed-item selection ----
@@ -1196,6 +1505,103 @@ impl App {
             return Task::none();
         }
         self.open_item_view(index, None)
+    }
+
+    fn install_transcript_view(
+        &mut self,
+        index: usize,
+        source: PathBuf,
+        text: String,
+        lines: Vec<DocLine>,
+        output: Option<PathBuf>,
+    ) -> Task<Message> {
+        let Some(item) = self.queue.get(index) else {
+            return Task::none();
+        };
+        let audio = item.audio.clone();
+        let duration = item.duration.map(|seconds| seconds as f32);
+        let mut turns = item.turns.clone();
+        let peaks = item.peaks.clone();
+
+        if turns.is_empty() {
+            turns = lines
+                .iter()
+                .enumerate()
+                .filter_map(|(line_index, line)| {
+                    let start = line.start?;
+                    if line.speaker.is_empty() {
+                        return None;
+                    }
+                    let end = lines
+                        .iter()
+                        .skip(line_index + 1)
+                        .find_map(|next| next.start)
+                        .or(duration)
+                        .unwrap_or(start + 2.0);
+                    Some(backend::Turn {
+                        start,
+                        end: end.max(start + 0.2),
+                        speaker: line.speaker.clone(),
+                    })
+                })
+                .collect();
+        }
+
+        self.view_error = None;
+        self.join_lines = false;
+        self.joined_lines.clear();
+        self.joined_transcript.clear();
+        self.modified = false;
+        self.selected = Some(index);
+        self.selected_view = Some(ItemView {
+            index,
+            source: source.clone(),
+            transcript: text,
+            lines,
+            turns,
+            peaks,
+            duration,
+            audio: audio.clone(),
+            output,
+        });
+
+        self.transcript_offset = 0.0;
+        self.scroll_target = Some(0.0);
+        // A freshly installed view has no line-editor history yet.
+        self.line_history = LineHistory::default();
+        let mut tasks = vec![scrollable::snap_to(
+            transcript_id(),
+            scrollable::RelativeOffset { x: 0.0, y: 0.0 },
+        )];
+
+        let needs_probe = self
+            .selected_view
+            .as_ref()
+            .is_some_and(|view| view.peaks.is_empty() || view.duration.unwrap_or(0.0) <= 0.0);
+        let needs_turns = self
+            .selected_view
+            .as_ref()
+            .is_some_and(|view| view.turns.is_empty());
+        if let Some(audio) = audio {
+            let num_speakers = self.queue[index]
+                .stats
+                .as_ref()
+                .and_then(|stats| stats.num_speakers);
+            if needs_probe {
+                tasks.push(Task::perform(
+                    async move { backend::load_completed(audio, num_speakers, TIMELINE_BUCKETS) },
+                    move |(turns, probe)| {
+                        Message::ViewDetailsLoaded(index, source.clone(), turns, probe)
+                    },
+                ));
+            } else if needs_turns {
+                tasks.push(Task::perform(
+                    async move { backend::load_turns(&audio, num_speakers) },
+                    move |turns| Message::ViewDetailsLoaded(index, source.clone(), turns, None),
+                ));
+            }
+        }
+        Task::batch(tasks)
     }
 
     fn open_item_view(
@@ -1218,6 +1624,10 @@ impl App {
             self.search_query.clear();
             self.search_index = 0;
             self.view_error = None;
+            self.join_lines = false;
+            self.joined_lines.clear();
+            self.joined_transcript.clear();
+            self.modified = false;
             self.selected = Some(index);
             self.selected_view = Some(ItemView {
                 index,
@@ -1252,128 +1662,56 @@ impl App {
         self.search_query.clear();
         self.search_index = 0;
         self.follow_offset = None;
+        self.follow_issue = None;
+        *self.follow_row_height.borrow_mut() = None;
+        self.reset_pane_geometry();
         self.scroll_seek = false;
         self.transcript_viewport = 0.0;
         self.transcript_content = 0.0;
+        self.transcript_offset = 0.0;
         self.transcript_at_bottom = true;
 
-        let loaded = match preloaded {
-            Some((text, output)) => Some((text, output)),
-            None => match backend::read_transcript(&source) {
-                Some(text) => {
-                    // JSON imports are displayed read-only; only plain .txt
-                    // transcripts are safe to edit in place.
-                    let editable = source
-                        .extension()
-                        .and_then(|ext| ext.to_str())
-                        .map(|ext| ext.eq_ignore_ascii_case("txt"))
-                        .unwrap_or(false);
-                    Some((text, editable.then(|| source.clone())))
-                }
-                None => {
-                    self.selected = Some(index);
-                    self.selected_view = Some(ItemView {
-                        index,
-                        source: source.clone(),
-                        transcript: String::new(),
-                        lines: Vec::new(),
-                        turns: Vec::new(),
-                        peaks: Arc::new(Vec::new()),
-                        duration,
-                        audio,
-                        output: None,
-                    });
-                    self.view_error = Some(format!("Could not read {}", source.display()));
-                    return scrollable::snap_to(
-                        transcript_id(),
-                        scrollable::RelativeOffset { x: 0.0, y: 0.0 },
-                    );
-                }
-            },
-        };
-        let Some((text, output)) = loaded else {
+        let output = source
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .map(|ext| ext.eq_ignore_ascii_case("txt"))
+            .unwrap_or(false)
+            .then(|| source.clone());
+
+        if let Some((text, output)) = preloaded {
+            let confidences = backend::read_confidences(&source);
+            return self.install_transcript_view(
+                index,
+                source,
+                text.clone(),
+                attach_confidences(parse_lines(&text), &confidences),
+                output,
+            );
+        }
+        let Some(text) = backend::read_transcript(&source) else {
+            self.selected = Some(index);
+            self.selected_view = Some(ItemView {
+                index,
+                source: source.clone(),
+                transcript: String::new(),
+                lines: Vec::new(),
+                turns,
+                peaks,
+                duration,
+                audio,
+                output,
+            });
+            self.view_error = Some(format!("Could not read {}", source.display()));
             return Task::none();
         };
-
-        let lines = parse_lines(&text);
-        // Older queue entries did not persist turns, and the diarization cache
-        // may belong to a different model set. Derive speaker bands from the
-        // transcript labels so both speakers still appear after a restart.
-        let turns = if turns.is_empty() {
-            lines
-                .iter()
-                .enumerate()
-                .filter_map(|(line_index, line)| {
-                    let start = line.start?;
-                    if line.speaker.is_empty() {
-                        return None;
-                    }
-                    let end = lines
-                        .iter()
-                        .skip(line_index + 1)
-                        .find_map(|next| next.start)
-                        .or(duration)
-                        .unwrap_or(start + 2.0);
-                    Some(backend::Turn {
-                        start,
-                        end: end.max(start + 0.2),
-                        speaker: line.speaker.clone(),
-                    })
-                })
-                .collect()
-        } else {
-            turns
-        };
-        self.view_error = None;
-        self.selected = Some(index);
-        self.selected_view = Some(ItemView {
+        let confidences = backend::read_confidences(&source);
+        self.install_transcript_view(
             index,
-            source: source.clone(),
-            transcript: text,
-            lines,
-            turns,
-            peaks,
-            duration,
-            audio: audio.clone(),
+            source,
+            text.clone(),
+            attach_confidences(parse_lines(&text), &confidences),
             output,
-        });
-
-        self.scroll_target = Some(0.0);
-        let mut tasks = vec![scrollable::snap_to(
-            transcript_id(),
-            scrollable::RelativeOffset { x: 0.0, y: 0.0 },
-        )];
-
-        // A persisted waveform (and duration) renders immediately; only the
-        // speaker turns still need to be re-derived from the diarization cache.
-        let needs_probe = self
-            .selected_view
-            .as_ref()
-            .is_some_and(|view| view.peaks.is_empty() || view.duration.unwrap_or(0.0) <= 0.0);
-        let needs_turns = self
-            .selected_view
-            .as_ref()
-            .is_some_and(|view| view.turns.is_empty());
-        if let Some(audio) = audio {
-            let num_speakers = self.queue[index]
-                .stats
-                .as_ref()
-                .and_then(|stats| stats.num_speakers);
-            if needs_probe {
-                tasks.push(Task::perform(
-                    async move { backend::load_completed(audio, num_speakers, TIMELINE_BUCKETS) },
-                    move |(turns, probe)| {
-                        Message::ViewDetailsLoaded(index, source.clone(), turns, probe)
-                    },
-                ));
-            } else if needs_turns {
-                tasks.push(Task::perform(
-                    async move { backend::load_turns(&audio, num_speakers) },
-                    move |turns| Message::ViewDetailsLoaded(index, source.clone(), turns, None),
-                ));
-            }
-        }
-        Task::batch(tasks)
+        )
     }
 
     /// Drop a pinned completed-item view and show the live run again.
@@ -1381,13 +1719,22 @@ impl App {
         self.invalidate_derived();
         self.selected = None;
         self.selected_view = None;
+        self.line_history = LineHistory::default();
         self.view_error = None;
+        self.join_lines = false;
+        self.joined_lines.clear();
+        self.joined_transcript.clear();
+        self.modified = false;
         self.player = None;
         self.playhead = 0.0;
         self.last_tick = None;
         self.follow_offset = None;
         self.scroll_target = None;
+        self.follow_issue = None;
+        *self.follow_row_height.borrow_mut() = None;
+        self.reset_pane_geometry();
         self.scroll_seek = false;
+        self.transcript_offset = 0.0;
         self.search_index = 0;
     }
 
@@ -1983,9 +2330,27 @@ impl App {
         }
     }
 
+    /// Idle views do not need a 10 Hz rebuild. Only subscribe to the tick while
+    /// something is actually animating or draining a background queue.
+    fn needs_ticks(&self) -> bool {
+        matches!(self.status, Status::Running)
+            || self.player.as_ref().is_some_and(Player::is_playing)
+            || self.toast.is_some()
+            || self.model_download.is_some()
+            || self.calibration.is_some()
+            || self.window_dirty
+            || self.feature_deck_visible()
+            || self.completion_pending
+    }
+
     pub fn subscription(&self) -> Subscription<Message> {
+        let tick = if self.needs_ticks() {
+            iced::time::every(Duration::from_millis(100)).map(|_| Message::Tick)
+        } else {
+            Subscription::none()
+        };
         Subscription::batch([
-            iced::time::every(Duration::from_millis(100)).map(|_| Message::Tick),
+            tick,
             keyboard::on_key_press(Self::key_press),
             iced::window::events().map(|(_id, event)| Message::WindowEvent(event)),
         ])
@@ -2028,6 +2393,8 @@ impl App {
         match message {
             Message::SmsToggled(value) => {
                 self.sms_mode = value;
+                // Bubble rows are a different shape: re-measure the spacers.
+                self.reset_pane_geometry();
                 self.save_settings();
                 Task::none()
             }
@@ -2143,6 +2510,29 @@ impl App {
                 self.save_settings();
                 Task::none()
             }
+            Message::TranscriptHover(hovered) => {
+                // A dialog owns the pointer: the transcript's hover chrome must
+                // not appear behind its scrim.
+                if self.popup_open() {
+                    return Task::none();
+                }
+                self.transcript_hover = hovered;
+                Task::none()
+            }
+            Message::ToggleJoinLines => {
+                if self.shown_lines().is_empty() {
+                    return Task::none();
+                }
+                self.join_lines = !self.join_lines;
+                self.modified = true;
+                self.reset_pane_geometry();
+                if self.join_lines {
+                    self.rebuild_joined_preview();
+                } else {
+                    self.invalidate_derived();
+                }
+                Task::none()
+            }
             Message::SpeakerCountChanged(option) => {
                 if matches!(self.status, Status::Running) {
                     return Task::none();
@@ -2160,35 +2550,30 @@ impl App {
                 Task::none()
             }
             Message::TranscriptScrolled(viewport) => {
+                let previous_content = self.transcript_content;
                 self.transcript_viewport = viewport.bounds().height;
                 self.transcript_content = viewport.content_bounds().height;
                 let offset = viewport.absolute_offset().y;
+                self.transcript_offset = offset;
                 let viewport_h = viewport.bounds().height;
                 let content_h = viewport.content_bounds().height;
                 self.transcript_at_bottom = offset + viewport_h >= content_h - 8.0;
 
-                let following = self.follow_playhead;
-                let programmatic = self
+                // Our own scroll landing (or close to it) needs no follow-up.
+                if self
                     .scroll_target
                     .take()
-                    .is_some_and(|target| (offset - target).abs() <= 6.0);
-
-                // A user scroll disengages Follow instead of snapping the
-                // transcript back to the playhead. Scrolling never moves the
-                // playhead; only the timeline, line selection and playback do.
-                if following && !programmatic {
-                    if let Some(expected) = self.follow_offset {
-                        if (offset - expected).abs() > 6.0 {
-                            self.follow_playhead = false;
-                            self.follow_offset = None;
-                            self.scroll_target = None;
-                            self.scroll_seek = false;
-                            self.save_settings();
-                            return Task::none();
-                        }
-                    }
+                    .is_some_and(|target| (offset - target).abs() <= 6.0)
+                {
+                    return Task::none();
                 }
-                Task::none()
+                match self.correct_follow_offset(previous_content, offset, viewport_h, content_h) {
+                    Some(y) => scrollable::scroll_to(
+                        transcript_id(),
+                        scrollable::AbsoluteOffset { x: 0.0, y },
+                    ),
+                    None => Task::none(),
+                }
             }
             Message::WindowEvent(event) => {
                 match event {
@@ -2302,28 +2687,6 @@ impl App {
                 }
                 self.backfill_next_waveform()
             }
-            Message::RequeueItem(index) => {
-                if index >= self.queue.len() || self.queue[index].audio.is_none() {
-                    self.toast = Some(("No audio file to transcribe".to_string(), Instant::now()));
-                    return Task::none();
-                }
-                let item = &mut self.queue[index];
-                item.status = ItemStatus::Pending;
-                item.transcript = None;
-                item.stats = None;
-                item.turns.clear();
-                item.peaks = Arc::new(Vec::new());
-                self.invalidate_derived();
-                self.selected = None;
-                self.selected_view = None;
-                self.view_error = None;
-                self.save_queue();
-                self.toast = Some(("Queued for transcription".to_string(), Instant::now()));
-                if !matches!(self.status, Status::Running) && self.can(license::Feature::Batch) {
-                    self.begin_batch(false);
-                }
-                Task::none()
-            }
             Message::RetryItem(index) => {
                 if matches!(self.status, Status::Running) {
                     return Task::none();
@@ -2343,8 +2706,35 @@ impl App {
                 Task::none()
             }
             Message::QueueDragStart(index) => {
-                if !matches!(self.status, Status::Running) && index < self.queue.len() {
+                if index >= self.queue.len() {
+                    return Task::none();
+                }
+                if !matches!(self.status, Status::Running) {
                     self.queue_drag = Some(index);
+                    return Task::none();
+                }
+                // Reordering stays locked during a run, but a click on a
+                // finished row opens it again in Pro.
+                let Some(item) = self.queue.get(index) else {
+                    return Task::none();
+                };
+                let done = matches!(item.status, ItemStatus::Done);
+                let has_transcript = item.transcript.is_some();
+                let running_row = matches!(item.status, ItemStatus::Running);
+                let locked_previous =
+                    self.shows(license::Audience::FreeOnly) && self.current_index != Some(index);
+                if running_row {
+                    // From a pinned transcript, clicking the row that is being
+                    // transcribed returns to the live view.
+                    return self.view_item(index);
+                }
+                if done && locked_previous {
+                    self.toast = Some((
+                        "Reviewing during active transcription is a Pro feature".to_string(),
+                        Instant::now(),
+                    ));
+                } else if done && has_transcript && !self.shows(license::Audience::FreeOnly) {
+                    return self.view_item(index);
                 }
                 Task::none()
             }
@@ -2421,7 +2811,12 @@ impl App {
                 if let Some(player) = &self.player {
                     player.seek(self.playhead);
                 }
-                Task::none()
+                // Scrubbing the timeline jumps the transcript to that moment.
+                self.scroll_seek = true;
+                match self.line_for_playhead(self.playhead) {
+                    Some(line) => self.scroll_to_line(line),
+                    None => Task::none(),
+                }
             }
             Message::PlayerToggle => {
                 self.toggle_playback();
@@ -2443,14 +2838,11 @@ impl App {
                     self.speaker_filter = next;
                     self.search_index = 0;
                     self.invalidate_derived();
-                    let first = self.display_order().first().copied();
-                    match first {
-                        Some(index) => self.scroll_to_line(index),
-                        None => Task::none(),
-                    }
-                } else {
-                    Task::none()
+                    // Keep the reader where they are; filtering should not
+                    // jump the transcript back to the top (or to that
+                    // speaker's first line).
                 }
+                Task::none()
             }
             Message::FindNext => {
                 let matches = self.matching_lines();
@@ -2475,21 +2867,36 @@ impl App {
                 }
                 Task::none()
             }
-            Message::SelectLine(index) => {
-                if !self.can(license::Feature::Playback) {
+            Message::SelectLine(index) => self.select_line(index),
+            Message::LineClicked(index) => {
+                let double = self.last_line_click.is_some_and(|(last, at)| {
+                    last == index && at.elapsed() <= Duration::from_millis(400)
+                });
+                if double {
+                    self.last_line_click = None;
+                    // Double-click opens the editor; dispatch it directly so the
+                    // dialog is ready before the task loop resumes.
+                    return self.update(Message::EditLine(index));
+                }
+                self.last_line_click = Some((index, Instant::now()));
+                if self.playhead_locked {
+                    Task::none()
+                } else {
+                    self.select_line(index)
+                }
+            }
+            Message::LineHover(index) => {
+                // As with the transcript chrome: no per-line affordances while
+                // a dialog covers the transcript.
+                if self.popup_open() {
                     return Task::none();
                 }
-                if let Some(line) = self.shown_lines().get(index) {
-                    if let Some(start) = line.start {
-                        let max = self.shown_duration().unwrap_or(start);
-                        self.playhead = start.clamp(0.0, max);
-                        self.follow_offset = None;
-                        self.scroll_seek = true;
-                        if let Some(player) = &self.player {
-                            player.seek(self.playhead);
-                        }
-                    }
-                }
+                self.transcript_line_hover = index;
+                Task::none()
+            }
+            Message::TogglePlayheadLock => {
+                self.playhead_locked = !self.playhead_locked;
+                self.last_line_click = None;
                 Task::none()
             }
             Message::SelectRelative(delta) => {
@@ -2601,22 +3008,30 @@ impl App {
             }
             Message::ZoomIn => {
                 self.font_scale = (self.font_scale + 0.1).min(2.5);
+                self.reset_pane_geometry();
                 self.save_settings();
                 Task::none()
             }
             Message::ZoomOut => {
                 self.font_scale = (self.font_scale - 0.1).max(0.6);
+                self.reset_pane_geometry();
                 self.save_settings();
                 Task::none()
             }
             Message::ZoomReset => {
                 self.font_scale = 1.0;
+                self.reset_pane_geometry();
                 self.save_settings();
+                Task::none()
+            }
+            Message::ToggleConfidenceView => {
+                self.confidence_view = !self.confidence_view;
                 Task::none()
             }
             Message::ToggleFollowPlayhead => {
                 let turning_off = self.follow_playhead;
-                self.follow_playhead = !self.follow_playhead;
+                let turning_on = !turning_off;
+                self.follow_playhead = turning_on;
                 // Turning Follow off while the live transcript is streaming:
                 // keep the playhead on the newest line so the highlight stays
                 // where the text is.
@@ -2634,8 +3049,22 @@ impl App {
                 }
                 self.follow_offset = None;
                 self.scroll_target = None;
+                self.follow_issue = None;
                 self.scroll_seek = false;
                 self.save_settings();
+                if turning_on {
+                    // Same rules as the tick path: follow the playhead line,
+                    // never the first-row fallback, and never to the top.
+                    let active = self.follow_line_index();
+                    if let Some(y) = self.next_follow_target(active) {
+                        self.scroll_target = Some(y);
+                        self.note_follow_issue(y, active);
+                        return scrollable::scroll_to(
+                            transcript_id(),
+                            scrollable::AbsoluteOffset { x: 0.0, y },
+                        );
+                    }
+                }
                 Task::none()
             }
             Message::ToggleTheme => {
@@ -3130,6 +3559,9 @@ impl App {
                     self.timeline_duration = None;
                     self.player = None;
                     self.scroll_target = None;
+                    self.follow_issue = None;
+                    *self.follow_row_height.borrow_mut() = None;
+                    self.reset_pane_geometry();
                     self.scroll_seek = false;
                     self.output_txt = None;
                     self.summary_open = false;
@@ -3180,7 +3612,12 @@ impl App {
                 Task::none()
             }
             Message::OpenRename => self.open_rename(),
+            Message::FlipLineSpeaker(index) => self.flip_line_speaker(index),
             Message::EditLine(index) => {
+                if self.join_lines {
+                    self.toast = Some(("Split the view to edit lines".to_string(), Instant::now()));
+                    return Task::none();
+                }
                 if !self.can(license::Feature::Editing) {
                     self.toast = Some(("Editing is a Pro feature".to_string(), Instant::now()));
                     return Task::none();
@@ -3193,30 +3630,34 @@ impl App {
                     self.toast = Some(("This transcript is read-only".to_string(), Instant::now()));
                     return Task::none();
                 }
-                let Some(line) = self.shown_lines().get(index) else {
+                // Rows come from the document the editor writes to, not from
+                // the joined preview, so their indices stay valid on save.
+                let Some(edit) = LineEdit::new(index, self.edit_lines()) else {
                     return Task::none();
                 };
-                let speaker = line.speaker.clone();
-                let text = line_text(line);
-                self.line_edit = Some(LineEdit {
-                    index,
-                    speaker,
-                    content: text_editor::Content::with_text(&text),
-                });
+                self.line_edit = Some(edit);
                 self.summary_open = false;
                 self.rename_open = false;
                 self.toast = None;
                 Task::none()
             }
-            Message::LineEditSpeaker(value) => {
-                if let Some(edit) = &mut self.line_edit {
-                    edit.speaker = value;
+            Message::LineEditSpeaker(position, value) => {
+                if let Some(row) = self
+                    .line_edit
+                    .as_mut()
+                    .and_then(|edit| edit.rows.get_mut(position))
+                {
+                    row.speaker = value;
                 }
                 Task::none()
             }
-            Message::LineEditAction(action) => {
-                if let Some(edit) = &mut self.line_edit {
-                    edit.content.perform(action);
+            Message::LineEditAction(position, action) => {
+                if let Some(row) = self
+                    .line_edit
+                    .as_mut()
+                    .and_then(|edit| edit.rows.get_mut(position))
+                {
+                    row.content.perform(action);
                 }
                 Task::none()
             }
@@ -3225,15 +3666,15 @@ impl App {
                 Task::none()
             }
             Message::CopyLineEdit => {
-                let Some(edit) = &self.line_edit else {
+                let Some(row) = self.line_edit.as_ref().and_then(|edit| edit.current_row()) else {
                     return Task::none();
                 };
-                let text = edit.content.text();
+                let text = row.content.text();
                 let text = text.trim_end().replace(['\n', '\r'], " ");
-                let line = if edit.speaker.trim().is_empty() {
+                let line = if row.speaker.trim().is_empty() {
                     text
                 } else {
-                    format!("{}: {text}", edit.speaker.trim())
+                    format!("{}: {text}", row.speaker.trim())
                 };
                 self.toast = Some(("Copied line".to_string(), Instant::now()));
                 iced::clipboard::write(line)
@@ -3244,9 +3685,27 @@ impl App {
                 }
                 Task::none()
             }
-            Message::SplitLineAtPlayhead => {
+            Message::MergePrevLine => {
                 if self.can(license::Feature::Editing) {
-                    self.split_line_at_playhead();
+                    self.merge_prev_line();
+                }
+                Task::none()
+            }
+            Message::SplitLineAtCursor => {
+                if self.can(license::Feature::Editing) {
+                    self.split_line_at_cursor();
+                }
+                Task::none()
+            }
+            Message::UndoLineEdit => {
+                if self.can(license::Feature::Editing) {
+                    self.undo_line_edit();
+                }
+                Task::none()
+            }
+            Message::RedoLineEdit => {
+                if self.can(license::Feature::Editing) {
+                    self.redo_line_edit();
                 }
                 Task::none()
             }
@@ -3280,22 +3739,55 @@ impl App {
                 self.reveal_output();
                 Task::none()
             }
-            Message::SaveTranscript => {
-                match (self.shown_output(), self.shown_transcript()) {
-                    (Some(path), text) => {
-                        if write_transcript_file(path, text).is_ok() {
-                            self.toast =
-                                Some((format!("Saved {}", path.display()), Instant::now()));
-                        }
+            Message::SaveTranscriptAs => {
+                if self.shown_transcript().trim().is_empty() {
+                    self.toast = Some(("No transcript to save".to_string(), Instant::now()));
+                    return Task::none();
+                }
+                // Prefer the filename of the transcript currently on screen.
+                // It already carries the stem, preset and speaker count in the
+                // same order as the generated output.
+                let mut default_name = self
+                    .selected_view
+                    .as_ref()
+                    .map(|view| view.source.as_path())
+                    .or_else(|| self.shown_output())
+                    .or_else(|| self.shown_audio())
+                    .and_then(|path| path.file_name())
+                    .and_then(|name| name.to_str())
+                    .map(|name| Path::new(name).with_extension("txt").display().to_string())
+                    .unwrap_or_else(|| "transcript.txt".to_string());
+                if self.join_lines {
+                    let stem = Path::new(&default_name)
+                        .file_stem()
+                        .and_then(|stem| stem.to_str())
+                        .unwrap_or("transcript");
+                    default_name = format!("{stem}-joined.txt");
+                }
+                Task::perform(
+                    async move {
+                        rfd::FileDialog::new()
+                            .add_filter("Text", &["txt"])
+                            .set_file_name(default_name)
+                            .save_file()
+                    },
+                    Message::SaveTranscriptAsPicked,
+                )
+            }
+            Message::SaveTranscriptAsPicked(path) => {
+                if let Some(mut path) = path {
+                    if path.extension().is_none() {
+                        path.set_extension("txt");
                     }
-                    (None, text) if !text.is_empty() => {
-                        self.toast = Some((
-                            "Imported transcript is read-only".to_string(),
-                            Instant::now(),
-                        ));
-                    }
-                    _ => {
-                        self.toast = Some(("No output file yet".to_string(), Instant::now()));
+                    let text = self.shown_transcript();
+                    if text.trim().is_empty() {
+                        self.toast = Some(("No transcript to save".to_string(), Instant::now()));
+                    } else if write_transcript_file(&path, text).is_ok() {
+                        self.modified = false;
+                        self.toast = Some((format!("Saved {}", path.display()), Instant::now()));
+                    } else {
+                        self.toast =
+                            Some((format!("Could not save {}", path.display()), Instant::now()));
                     }
                 }
                 Task::none()
@@ -3483,74 +3975,48 @@ impl App {
                 self.overall_shown += (target_overall - self.overall_shown) * 0.25;
                 self.overall_shown = self.overall_shown.clamp(0.0, 1.0);
 
-                // Estimate remaining wall-clock time from the observed work
-                // rate, not from elapsed / fraction. Chunked progress gives
-                // frequent samples, and a short EMA rejects outliers.
+                // Estimate remaining wall-clock time from measured throughput:
+                // audio seconds actually transcribed per wall second.
                 if matches!(self.status, Status::Running) {
-                    if let Some(start) = self.run_start {
-                        // Keep the estimate monotonic: a phase change or a
-                        // newly probed duration can move the weighted target
-                        // backwards, which would otherwise spike the ETA.
-                        let target = self.overall_progress_target();
-                        let fraction = self
-                            .eta_sample
-                            .map_or(target, |(_, previous)| target.max(previous));
-                        let now = Instant::now();
-                        // Only advance the sampling window when there is a
-                        // usable amount of progress; overwriting it every
-                        // 100ms tick would make `dt` too small to ever
-                        // produce a rate sample.
-                        match self.eta_sample {
-                            Some((last, previous)) => {
-                                let dt = (now - last).as_secs_f32();
-                                let df = fraction - previous;
-                                if dt >= 0.5 && df > 0.0005 {
-                                    let sample = df / dt;
-                                    self.eta_rate = Some(match self.eta_rate {
-                                        Some(rate) => rate * 0.75 + sample * 0.25,
-                                        None => sample,
-                                    });
-                                    self.eta_sample = Some((now, fraction));
-                                } else if dt >= 5.0 {
-                                    // Stalled (decoding, phase change): drop
-                                    // the stale window instead of averaging
-                                    // the pause into the next sample.
-                                    self.eta_sample = Some((now, fraction));
-                                }
-                            }
-                            None => self.eta_sample = Some((now, fraction)),
+                    let pending_now = self
+                        .queue
+                        .iter()
+                        .filter(|item| matches!(item.status, ItemStatus::Pending))
+                        .count();
+                    let queue_grew = pending_now > self.eta_pending;
+                    self.eta_pending = pending_now;
+                    match self.estimate_remaining() {
+                        Some(raw) => {
+                            // Median of the last two estimates smooths the
+                            // readout without lagging a phase change the way
+                            // an average over the whole run would.
+                            let smoothed = match self.eta_shown {
+                                Some(previous) => (previous + raw) * 0.5,
+                                None => raw,
+                            };
+                            // A shrinking workload can drop the estimate fast;
+                            // letting it climb more than 10% per tick would
+                            // spike on a stalled sample, unless new files were
+                            // queued.
+                            let ceiling = self
+                                .eta_shown
+                                .map(|previous| previous * 1.1)
+                                .unwrap_or(f32::INFINITY);
+                            let shown = if smoothed > ceiling && !queue_grew {
+                                ceiling
+                            } else {
+                                smoothed
+                            };
+                            self.eta_shown = Some(shown.max(0.0));
                         }
-                        if fraction > 0.01 && fraction < 0.995 {
-                            // Prefer the measured rate. Before one exists,
-                            // only extrapolate once enough of the run has
-                            // completed that `elapsed / fraction` is sane.
-                            let raw = self
-                                .eta_rate
-                                .filter(|rate| *rate > 0.0001)
-                                .map(|rate| ((1.0 - fraction) / rate).max(0.0))
-                                .or_else(|| {
-                                    (fraction > 0.1).then(|| {
-                                        let elapsed = start.elapsed().as_secs_f32();
-                                        (elapsed * (1.0 - fraction) / fraction).max(0.0)
-                                    })
-                                });
-                            match raw {
-                                Some(raw) => {
-                                    self.eta_shown = Some(match self.eta_shown {
-                                        Some(previous) => previous + (raw - previous) * 0.15,
-                                        None => raw,
-                                    });
-                                }
-                                None => self.eta_shown = None,
-                            }
-                        } else {
-                            self.eta_shown = None;
-                        }
+                        None => self.eta_shown = None,
                     }
                 } else {
                     self.eta_shown = None;
-                    self.eta_rate = None;
-                    self.eta_sample = None;
+                    self.work_done = 0.0;
+                    self.work_total = 0.0;
+                    self.diarize_fraction = 0.0;
+                    self.eta_samples.clear();
                 }
 
                 // Once the bar has eased to 100%, present the completion dialogs.
@@ -3580,33 +4046,25 @@ impl App {
                         }
                     }
                 }
-                let content = self.transcript_content;
-                let viewport = self.transcript_viewport;
                 // Follow tracks the active line on whichever transcript is
                 // shown (streamed text while live, the audio playhead
-                // otherwise). Manual scrolling disengages it.
+                // otherwise). Manual scrolling disengages it. The target is
+                // only re-issued when it actually moved, so the pane sits
+                // still while nothing changes.
                 if self.follow_playhead {
-                    if let Some(active) = self.active_line_index() {
-                        if let Some(y) = self.follow_target(active) {
-                            self.follow_offset = Some(y);
-                            self.scroll_target = Some(y);
-                            tasks.push(scrollable::scroll_to(
-                                transcript_id(),
-                                scrollable::AbsoluteOffset { x: 0.0, y },
-                            ));
-                        }
+                    let active = self.follow_line_index();
+                    if let Some(y) = self.follow_scroll(active) {
+                        self.follow_offset = Some(y);
+                        tasks.push(scrollable::scroll_to(
+                            transcript_id(),
+                            scrollable::AbsoluteOffset { x: 0.0, y },
+                        ));
                     }
                 } else {
                     self.follow_offset = None;
                     // Keep the live view pinned to the bottom as text is added,
                     // as long as the user hasn't scrolled away from the bottom.
-                    if self.selected_view.is_none()
-                        && self.transcript_at_bottom
-                        && content > 0.0
-                        && viewport > 0.0
-                    {
-                        let y = (content - viewport).max(0.0);
-                        self.scroll_target = Some(y);
+                    if let Some(y) = self.follow_scroll(None) {
                         tasks.push(scrollable::scroll_to(
                             transcript_id(),
                             scrollable::AbsoluteOffset { x: 0.0, y },
@@ -3671,15 +4129,7 @@ impl App {
     }
 
     fn refresh_transcript(&mut self) {
-        self.transcript = self
-            .lines
-            .iter()
-            .map(|line| line.raw.as_str())
-            .collect::<Vec<_>>()
-            .join("\n");
-        if !self.transcript.is_empty() {
-            self.transcript.push('\n');
-        }
+        self.transcript = lines_text(&self.lines);
         if let Some(path) = &self.output_txt {
             let _ = write_transcript_file(path, &self.transcript);
         }
@@ -3885,17 +4335,26 @@ impl App {
             .iter()
             .any(|item| matches!(item.status, ItemStatus::Pending));
         if !has_pending {
-            // Re-run the queue, including files transcribed with a previous
-            // preset or files that failed.
-            for item in &mut self.queue {
-                if matches!(item.status, ItemStatus::Done | ItemStatus::Failed(_)) {
-                    item.status = ItemStatus::Pending;
-                    item.transcript = None;
-                    item.stats = None;
-                    item.turns.clear();
-                    item.peaks = Arc::new(Vec::new());
-                }
-            }
+            // Nothing is waiting: transcribe again only the finished file the
+            // user has selected. The queue itself is never re-run wholesale.
+            let target = self.selected.filter(|index| {
+                self.queue.get(*index).is_some_and(|item| {
+                    matches!(item.status, ItemStatus::Done | ItemStatus::Failed(_))
+                })
+            });
+            let Some(index) = target else {
+                self.toast = Some((
+                    "Select a finished file to transcribe it again".to_string(),
+                    Instant::now(),
+                ));
+                return;
+            };
+            let item = &mut self.queue[index];
+            item.status = ItemStatus::Pending;
+            item.transcript = None;
+            item.stats = None;
+            item.turns.clear();
+            item.peaks = Arc::new(Vec::new());
             self.invalidate_derived();
             self.save_queue();
         }
@@ -4000,17 +4459,25 @@ impl App {
         self.run_start = Some(Instant::now());
         self.elapsed_final = None;
         self.eta_shown = None;
-        self.eta_rate = None;
-        self.eta_sample = None;
+        self.work_done = 0.0;
+        self.work_total = 0.0;
+        self.diarize_fraction = 0.0;
+        self.eta_samples.clear();
+        self.eta_pending = 0;
         self.transcript.clear();
         self.lines.clear();
         self.pending_lines.clear();
+        // A new run is a new document; no earlier edits can be undone onto it.
+        self.line_history = LineHistory::default();
         self.reveal_accum = 0.0;
         self.completion_pending = false;
         self.current_index = None;
         self.transcript_dirty = false;
         self.follow_offset = None;
         self.scroll_target = None;
+        self.follow_issue = None;
+        *self.follow_row_height.borrow_mut() = None;
+        self.reset_pane_geometry();
         self.scroll_seek = false;
         self.transcript_at_bottom = true;
         // Each explicit transcription starts in follow mode; only the user's
@@ -4029,9 +4496,12 @@ impl App {
         if !preserve {
             self.playhead = 0.0;
             self.player = None;
-            self.selected = None;
-            self.selected_view = None;
-            self.view_error = None;
+            // Pro keeps a finished transcript on screen while a new run starts.
+            if !self.keeps_finished_view() {
+                self.selected = None;
+                self.selected_view = None;
+                self.view_error = None;
+            }
         }
         self.cancelled.store(false, Ordering::SeqCst);
         let use_gpu = self.gpu_selected();
@@ -4093,8 +4563,11 @@ impl App {
         self.run_start = None;
         self.elapsed_final = None;
         self.eta_shown = None;
-        self.eta_rate = None;
-        self.eta_sample = None;
+        self.work_done = 0.0;
+        self.work_total = 0.0;
+        self.diarize_fraction = 0.0;
+        self.eta_samples.clear();
+        self.eta_pending = 0;
         self.pending_lines.clear();
         self.reveal_accum = 0.0;
         self.completion_pending = false;
@@ -4124,6 +4597,9 @@ impl App {
     }
 
     fn apply_rename(&mut self) {
+        self.modified = true;
+        // Rows edited outside the dialog are not part of its undo scope.
+        self.line_history = LineHistory::default();
         let mapping: Vec<(String, String)> = self
             .rename_fields
             .iter()
@@ -4160,89 +4636,263 @@ impl App {
         self.rename_open = false;
     }
 
-    /// Apply the right-click line editor: only that line's speaker and text
-    /// change; the rest of the transcript is untouched.
+    /// Apply the right-click line editor: every row rewrites its own line and
+    /// the rest of the transcript is untouched. Rows the user left alone are
+    /// not rewritten, and the whole save is a single undo step.
     fn apply_line_edit(&mut self) {
         let Some(edit) = self.line_edit.as_ref() else {
             return;
         };
-        let index = edit.index;
-        let speaker = edit.speaker.trim().to_string();
-        // One transcript line must stay one physical line: collapse any
-        // newlines typed into the editor into spaces.
-        let text = edit.content.text().trim_end().replace(['\n', '\r'], " ");
+        let edits = edit
+            .rows
+            .iter()
+            .map(|row| (row.index, line_edit_row_fields(&row.speaker, &row.content)))
+            .collect::<Vec<_>>();
         self.line_edit = None;
-
-        if let Some(view) = self.selected_view.as_mut() {
-            let Some(line) = view.lines.get_mut(index) else {
-                return;
-            };
-            rewrite_line(line, &speaker, &text);
-            view.transcript = view
-                .lines
-                .iter()
-                .map(|line| line.raw.as_str())
-                .collect::<Vec<_>>()
-                .join("\n");
-            if !view.transcript.is_empty() {
-                view.transcript.push('\n');
+        let lines = self.edit_lines();
+        let changed = edits.iter().any(|(index, (speaker, text))| {
+            !lines
+                .get(*index)
+                .is_some_and(|line| line.speaker == *speaker && line_text(line) == *text)
+        });
+        if !changed {
+            return;
+        }
+        let mut lines = self.edit_lines().to_vec();
+        self.modified = true;
+        self.push_line_undo();
+        for (index, (speaker, text)) in edits {
+            if let Some(line) = lines.get_mut(index) {
+                rewrite_line(line, &speaker, &text);
             }
+        }
+        self.replace_edit_lines(lines);
+    }
+
+    /// Write back the rows that differ from the transcript, ahead of an
+    /// operation that moves line indices around. Returns whether anything was
+    /// written; when it was, the undo snapshot is taken before the write so a
+    /// single undo steps back over the flush and the operation together.
+    fn flush_line_edit_rows(&mut self) -> bool {
+        let Some(edit) = self.line_edit.as_ref() else {
+            return false;
+        };
+        let edits = edit
+            .rows
+            .iter()
+            .map(|row| (row.index, line_edit_row_fields(&row.speaker, &row.content)))
+            .collect::<Vec<_>>();
+        let mut lines = self.edit_lines().to_vec();
+        let mut changed = false;
+        for (index, (speaker, text)) in edits {
+            let Some(line) = lines.get_mut(index) else {
+                continue;
+            };
+            if line.speaker == speaker && line_text(line) == text {
+                continue;
+            }
+            rewrite_line(line, &speaker, &text);
+            changed = true;
+        }
+        if !changed {
+            return false;
+        }
+        self.modified = true;
+        self.push_line_undo();
+        self.replace_edit_lines(lines);
+        true
+    }
+
+    // ---- line editor history ----
+
+    /// Key identifying the document the line editor writes to: the selected
+    /// view's queue index, or `None` for the live transcript.
+    fn edit_document(&self) -> Option<usize> {
+        self.selected_view.as_ref().map(|view| view.index)
+    }
+
+    /// The lines of the document the line editor writes to.
+    fn edit_lines(&self) -> &[DocLine] {
+        match &self.selected_view {
+            Some(view) => &view.lines,
+            None => &self.lines,
+        }
+    }
+
+    fn edit_history_is_current(&self) -> bool {
+        self.line_history.document == self.edit_document()
+    }
+
+    fn line_undo_available(&self) -> bool {
+        self.edit_history_is_current() && !self.line_history.undo.is_empty()
+    }
+
+    fn line_redo_available(&self) -> bool {
+        self.edit_history_is_current() && !self.line_history.redo.is_empty()
+    }
+
+    /// Record the current lines before mutating them. A new edit clears the
+    /// redo stack, and a change of document starts a fresh history.
+    fn push_line_undo(&mut self) {
+        let document = self.edit_document();
+        if !self.edit_history_is_current() {
+            self.line_history = LineHistory {
+                document,
+                ..LineHistory::default()
+            };
+        }
+        self.line_history.undo.push(self.edit_lines().to_vec());
+        if self.line_history.undo.len() > LINE_UNDO_LIMIT {
+            self.line_history.undo.remove(0);
+        }
+        self.line_history.redo.clear();
+    }
+
+    /// Replace the edited document's lines and rewrite its transcript file.
+    fn replace_edit_lines(&mut self, lines: Vec<DocLine>) {
+        if let Some(view) = self.selected_view.as_mut() {
+            view.lines = lines;
+            view.transcript = lines_text(&view.lines);
             if let Some(path) = &view.output {
                 let _ = write_transcript_file(path, &view.transcript);
             }
-        } else if let Some(line) = self.lines.get_mut(index) {
-            rewrite_line(line, &speaker, &text);
+        } else {
+            self.lines = lines;
             self.refresh_transcript();
         }
         self.invalidate_derived();
     }
 
-    /// Append the next line to the one open in the editor.
-    fn merge_next_line(&mut self) {
-        let Some(edit) = self.line_edit.take() else {
+    /// Re-point the open editor at a line that still exists and rebuild its
+    /// rows from the transcript, so the dialog never shows stale text.
+    fn sync_line_edit(&mut self) {
+        let Some(index) = self.line_edit.as_ref().map(|edit| edit.index) else {
+            return;
+        };
+        let len = self.edit_lines().len();
+        if len == 0 {
+            self.line_edit = None;
+            return;
+        }
+        self.point_line_edit(index.min(len - 1));
+    }
+
+    /// Keep the dialog open on `index`, rebuilding the whole row window around
+    /// it: a merge or split shifts every later index, so rows are rebuilt from
+    /// the transcript rather than patched field by field.
+    fn point_line_edit(&mut self, index: usize) {
+        if self.line_edit.is_none() {
+            return;
+        }
+        self.line_edit = LineEdit::new(index, self.edit_lines());
+    }
+
+    /// Restore the document as it was before the last line edit.
+    fn undo_line_edit(&mut self) {
+        if self.shown_output().is_none() || !self.line_undo_available() {
+            return;
+        }
+        let Some(previous) = self.line_history.undo.pop() else {
+            return;
+        };
+        self.line_history.redo.push(self.edit_lines().to_vec());
+        self.modified = true;
+        self.replace_edit_lines(previous);
+        self.sync_line_edit();
+        self.toast = Some(("Undid the last line edit".to_string(), Instant::now()));
+    }
+
+    /// Re-apply the line edit undone most recently.
+    fn redo_line_edit(&mut self) {
+        if self.shown_output().is_none() || !self.line_redo_available() {
+            return;
+        }
+        let Some(next) = self.line_history.redo.pop() else {
+            return;
+        };
+        self.line_history.undo.push(self.edit_lines().to_vec());
+        self.modified = true;
+        self.replace_edit_lines(next);
+        self.sync_line_edit();
+        self.toast = Some(("Redid the line edit".to_string(), Instant::now()));
+    }
+
+    /// Prepend the line open in the editor to the previous one. The dialog
+    /// stays open on the surviving line so its context can update.
+    fn merge_prev_line(&mut self) {
+        // Save what was typed into the other rows first: the merge shifts the
+        // indices around, and unflushed text would go with them.
+        let flushed = self.flush_line_edit_rows();
+        let Some(edit) = self.line_edit.as_ref() else {
             return;
         };
         let index = edit.index;
-        let speaker = edit.speaker.trim().to_string();
-        let text = edit.content.text().trim_end().replace(['\n', '\r'], " ");
-        let mut merged = false;
-
-        if let Some(view) = self.selected_view.as_mut() {
-            if index < view.lines.len() {
-                rewrite_line(&mut view.lines[index], &speaker, &text);
-                if index + 1 < view.lines.len() {
-                    let next = line_text(&view.lines[index + 1]);
-                    let joined = join_line_text(&text, &next);
-                    rewrite_line(&mut view.lines[index], &speaker, &joined);
-                    view.lines.remove(index + 1);
-                    merged = true;
-                }
-                view.transcript = view
-                    .lines
-                    .iter()
-                    .map(|line| line.raw.as_str())
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                if !view.transcript.is_empty() {
-                    view.transcript.push('\n');
-                }
-                if let Some(path) = &view.output {
-                    let _ = write_transcript_file(path, &view.transcript);
-                }
-            }
-        } else if index < self.lines.len() {
-            rewrite_line(&mut self.lines[index], &speaker, &text);
-            if index + 1 < self.lines.len() {
-                let next = line_text(&self.lines[index + 1]);
-                let joined = join_line_text(&text, &next);
-                rewrite_line(&mut self.lines[index], &speaker, &joined);
-                self.lines.remove(index + 1);
-                merged = true;
-            }
-            self.refresh_transcript();
+        let Some(row) = edit.current_row() else {
+            return;
+        };
+        let (speaker, text) = line_edit_row_fields(&row.speaker, &row.content);
+        let mut lines = self.edit_lines().to_vec();
+        if index >= lines.len() {
+            return;
         }
+        if index == 0 {
+            // Nothing above the first line; the flush already kept the edits.
+            self.toast = Some(("No previous line to merge".to_string(), Instant::now()));
+            return;
+        }
+        if !flushed {
+            self.push_line_undo();
+        }
+        self.modified = true;
+        let previous = line_text(&lines[index - 1]);
+        let joined = join_line_text(&previous, &text);
+        rewrite_line(&mut lines[index - 1], &speaker, &joined);
+        lines.remove(index);
+        self.replace_edit_lines(lines);
+        // The merged line now sits where the previous one was, so the rows are
+        // rebuilt around the new index rather than patched in place.
+        self.point_line_edit(index - 1);
+        self.toast = Some(("Merged with previous line".to_string(), Instant::now()));
+    }
 
-        self.invalidate_derived();
+    /// Append the next line to the one open in the editor.
+    fn merge_next_line(&mut self) {
+        let flushed = self.flush_line_edit_rows();
+        let Some(edit) = self.line_edit.as_ref() else {
+            return;
+        };
+        let index = edit.index;
+        let Some(row) = edit.current_row() else {
+            return;
+        };
+        let (speaker, text) = line_edit_row_fields(&row.speaker, &row.content);
+        let mut lines = self.edit_lines().to_vec();
+        if index >= lines.len() {
+            return;
+        }
+        let merged = index + 1 < lines.len();
+        let joined = if merged {
+            join_line_text(&text, &line_text(&lines[index + 1]))
+        } else {
+            text
+        };
+        if !merged && lines[index].speaker == speaker && line_text(&lines[index]) == joined {
+            // Nothing to merge; the flush above already kept any edit.
+            self.toast = Some(("No next line to merge".to_string(), Instant::now()));
+            return;
+        }
+        if !flushed {
+            self.push_line_undo();
+        }
+        self.modified = true;
+        rewrite_line(&mut lines[index], &speaker, &joined);
+        if merged {
+            lines.remove(index + 1);
+        }
+        self.replace_edit_lines(lines);
+        // The next line's row is gone, so the window is rebuilt rather than
+        // left pointing at an index that no longer exists.
+        self.point_line_edit(index);
         self.toast = Some((
             if merged {
                 "Merged with next line".to_string()
@@ -4253,134 +4903,100 @@ impl App {
         ));
     }
 
-    /// Split the edited line at the current playhead position.
-    fn split_line_at_playhead(&mut self) {
+    /// Split the edited line at the editor's caret.
+    fn split_line_at_cursor(&mut self) {
+        // Neighbouring rows are saved first: the split inserts a line and
+        // shifts every later index.
+        let flushed = self.flush_line_edit_rows();
         let Some(edit) = self.line_edit.as_ref() else {
             return;
         };
         let index = edit.index;
-        let speaker = edit.speaker.trim().to_string();
-        let text = edit.content.text().trim_end().replace(['\n', '\r'], " ");
-        let (line_start, next_start) = if let Some(view) = self.selected_view.as_ref() {
+        let Some(row) = edit.current_row() else {
+            return;
+        };
+        let speaker = row.speaker.trim().to_string();
+        // The caret is reported against the raw editor text; normalising the
+        // newlines keeps the offset valid because each one becomes one space.
+        let text = row.content.text();
+        let cursor = cursor_byte_index(&text, row.content.cursor_position());
+        let text = text.trim_end().replace(['\n', '\r'], " ");
+        let Some((left, right)) = split_words_at(&text, cursor.min(text.len())) else {
+            self.toast = Some(("Cannot split here".to_string(), Instant::now()));
+            return;
+        };
+        let left = left.to_string();
+        let right = right.to_string();
+        let (line_start, next_start) = {
+            let lines = self.edit_lines();
+            if index >= lines.len() {
+                return;
+            }
             (
-                view.lines.get(index).and_then(|line| line.start),
-                view.lines.get(index + 1).and_then(|line| line.start),
-            )
-        } else {
-            (
-                self.lines.get(index).and_then(|line| line.start),
-                self.lines.get(index + 1).and_then(|line| line.start),
+                lines[index].start,
+                lines.get(index + 1).and_then(|line| line.start),
             )
         };
         let start = line_start.unwrap_or(0.0);
         let end = next_start
-            .or(self.timeline_duration)
+            .or(self.shown_duration())
             .unwrap_or(start + 5.0)
             .max(start + 0.1);
-        let ratio = ((self.playhead - start) / (end - start)).clamp(0.15, 0.85);
-        let chars: Vec<(usize, char)> = text.char_indices().collect();
-        if chars.len() < 2 {
-            self.toast = Some(("Line is too short to split".to_string(), Instant::now()));
-            return;
+        // The split lands between this line's start and the next line's start,
+        // in proportion to how much of the text stays on the left.
+        let total = text.chars().count().max(1) as f32;
+        let ratio = (left.chars().count() as f32 / total).clamp(0.05, 0.95);
+        let right_start = line_start.map(|_| start + (end - start) * ratio);
+
+        if !flushed {
+            self.push_line_undo();
         }
-        let target = ((chars.len() as f32) * ratio).round() as usize;
-        let mut split_at = None;
-        let mut best = usize::MAX;
-        for (count, (byte, ch)) in chars.iter().enumerate() {
-            if ch.is_whitespace() {
-                let distance = count.abs_diff(target);
-                if distance < best {
-                    best = distance;
-                    split_at = Some(*byte);
-                }
-            }
-        }
-        let split_at = split_at
-            .filter(|byte| *byte > 0 && *byte < text.len())
-            .or_else(|| chars.get(target).map(|(byte, _)| *byte))
-            .unwrap_or(text.len());
-        let left = text[..split_at].trim_end();
-        let right = text[split_at..].trim_start();
-        if left.is_empty() || right.is_empty() {
-            self.toast = Some(("Cannot split here".to_string(), Instant::now()));
-            return;
-        }
-        self.line_edit = None;
-        let prefix = if line_start.is_some() {
-            format!("[{}] ", format_timestamp(self.playhead as f64))
-        } else {
-            String::new()
+        self.modified = true;
+        let mut lines = self.edit_lines().to_vec();
+        rewrite_line(&mut lines[index], &speaker, &left);
+        let prefix = match right_start {
+            Some(right_start) => format!("{} ", format_timestamp(right_start as f64)),
+            None => String::new(),
         };
-        let new_raw = if speaker.is_empty() {
+        let raw = if speaker.is_empty() {
             format!("{prefix}{right}")
         } else {
             format!("{prefix}{speaker}: {right}")
         };
-        let new_line = DocLine {
-            raw: new_raw,
-            speaker: speaker.clone(),
-            start: line_start.map(|_| self.playhead.max(start)),
-        };
-
-        if let Some(view) = self.selected_view.as_mut() {
-            if index < view.lines.len() {
-                rewrite_line(&mut view.lines[index], &speaker, left);
-                view.lines.insert(index + 1, new_line);
-                view.transcript = view
-                    .lines
-                    .iter()
-                    .map(|line| line.raw.as_str())
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                if !view.transcript.is_empty() {
-                    view.transcript.push('\n');
-                }
-                if let Some(path) = &view.output {
-                    let _ = write_transcript_file(path, &view.transcript);
-                }
-            }
-        } else if index < self.lines.len() {
-            rewrite_line(&mut self.lines[index], &speaker, left);
-            self.lines.insert(index + 1, new_line);
-            self.refresh_transcript();
-        }
-        self.invalidate_derived();
-        self.toast = Some(("Split line at playhead".to_string(), Instant::now()));
+        lines.insert(
+            index + 1,
+            DocLine {
+                raw,
+                speaker: speaker.clone(),
+                start: right_start,
+                confidence: None,
+            },
+        );
+        self.replace_edit_lines(lines);
+        // The split line is still the current one; its new neighbour appears
+        // below it because the rows are rebuilt from the transcript.
+        self.point_line_edit(index);
+        self.toast = Some(("Split line at cursor".to_string(), Instant::now()));
     }
 
     /// Delete the line currently open in the right-click editor.
     fn delete_edit_line(&mut self) {
-        let Some(edit) = self.line_edit.take() else {
+        let flushed = self.flush_line_edit_rows();
+        let Some(index) = self.line_edit.as_ref().map(|edit| edit.index) else {
             return;
         };
-        let index = edit.index;
-        let mut removed = false;
-        if let Some(view) = self.selected_view.as_mut() {
-            if index < view.lines.len() {
-                view.lines.remove(index);
-                view.transcript = view
-                    .lines
-                    .iter()
-                    .map(|line| line.raw.as_str())
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                if !view.transcript.is_empty() {
-                    view.transcript.push('\n');
-                }
-                if let Some(path) = &view.output {
-                    let _ = write_transcript_file(path, &view.transcript);
-                }
-                removed = true;
-            }
-        } else if index < self.lines.len() {
-            self.lines.remove(index);
-            self.refresh_transcript();
-            removed = true;
+        if index >= self.edit_lines().len() {
+            return;
         }
-        if removed {
-            self.invalidate_derived();
-            self.toast = Some(("Line deleted".to_string(), Instant::now()));
+        if !flushed {
+            self.push_line_undo();
         }
+        self.modified = true;
+        let mut lines = self.edit_lines().to_vec();
+        lines.remove(index);
+        self.line_edit = None;
+        self.replace_edit_lines(lines);
+        self.toast = Some(("Line deleted".to_string(), Instant::now()));
     }
 
     fn drain_events(&mut self) -> Task<Message> {
@@ -4416,6 +5032,43 @@ impl App {
                         self.disable_gpu_after_failure(&reason);
                     }
                 }
+                Event::Work { done, total } => {
+                    self.work_done = done;
+                    self.work_total = total;
+                    let now = Instant::now();
+                    let sample = match self.eta_samples.back() {
+                        Some((last, audio)) => {
+                            let wall = now.duration_since(*last).as_secs_f32();
+                            (wall >= 0.5 && done - *audio > 0.5).then_some((now, done))
+                        }
+                        None => Some((now, done)),
+                    };
+                    if let Some(sample) = sample {
+                        self.eta_samples.push_back(sample);
+                        // Three deltas reject a stalled phase without lagging
+                        // behind a real change in speed.
+                        while self.eta_samples.len() > 4 {
+                            self.eta_samples.pop_front();
+                        }
+                        let points: Vec<(Instant, f64)> =
+                            self.eta_samples.iter().copied().collect();
+                        let mut rates: Vec<f32> = points
+                            .windows(2)
+                            .filter_map(|pair| {
+                                let wall = pair[1].0.duration_since(pair[0].0).as_secs_f32();
+                                let audio = (pair[1].1 - pair[0].1) as f32;
+                                (wall > 0.0 && audio > 0.0).then(|| audio / wall)
+                            })
+                            .collect();
+                        if !rates.is_empty() {
+                            rates.sort_by(f32::total_cmp);
+                            self.eta_throughput = Some(median(&rates));
+                        }
+                    }
+                }
+                Event::Diarize { fraction } => {
+                    self.diarize_fraction = fraction.clamp(0.0, 1.0);
+                }
                 Event::Log { message } => {
                     self.console_lines.push(message);
                     if self.console_lines.len() > 500 {
@@ -4433,7 +5086,7 @@ impl App {
                     let path = PathBuf::from(audio);
                     // Keep a completed view (and its audio) alive when the user
                     // is listening to it; otherwise return to the live file.
-                    let keep_view = self.keep_pinned_view();
+                    let keep_view = self.keep_pinned_view() || self.keeps_finished_view();
                     self.current = self.find_queue_index(&path);
                     self.current_index = self.current;
                     if let Some(index) = self.current {
@@ -4449,6 +5102,11 @@ impl App {
                     self.progress = 0.0;
                     self.progress_shown = 0.0;
                     self.eta_shown = None;
+                    self.work_done = 0.0;
+                    self.work_total = 0.0;
+                    self.diarize_fraction = 0.0;
+                    self.eta_samples.clear();
+                    self.eta_pending = 0;
                     self.elapsed_final = None;
                     self.transcript.clear();
                     self.lines.clear();
@@ -4458,6 +5116,9 @@ impl App {
                     self.transcript_dirty = false;
                     self.follow_offset = None;
                     self.scroll_target = None;
+                    self.follow_issue = None;
+                    *self.follow_row_height.borrow_mut() = None;
+                    self.reset_pane_geometry();
                     self.scroll_seek = false;
                     self.transcript_at_bottom = true;
                     self.turns.clear();
@@ -4498,7 +5159,7 @@ impl App {
                     start,
                     speaker,
                     text,
-                    confidence: _,
+                    confidence,
                 } => {
                     let raw = format!("[{}] {speaker}: {text}", format_secs(start as f64));
                     // Queue it; the textbox reveals lines at a speech-like pace.
@@ -4506,9 +5167,44 @@ impl App {
                         raw,
                         speaker,
                         start: Some(start),
+                        confidence: Some(confidence),
                     });
                 }
                 Event::Done { txt, stats, .. } => {
+                    // The file itself is the best throughput sample: audio
+                    // seconds per ASR second, blended into the persisted prior.
+                    let mut learned = false;
+                    if stats.asr_seconds > 0.0 && stats.audio_seconds > 0.0 {
+                        let sample = (stats.audio_seconds / stats.asr_seconds) as f32;
+                        self.eta_prior = Some(match self.eta_prior {
+                            Some(prior) => prior * 0.5 + sample * 0.5,
+                            None => sample,
+                        });
+                        learned = true;
+                    }
+                    // Diarization cost is measured the same way, so an
+                    // ASR-first run still has a rate to wait against.
+                    if stats.diarize_seconds > 0.0 && stats.audio_seconds > 0.0 {
+                        let sample = (stats.diarize_seconds / stats.audio_seconds) as f32;
+                        self.diarize_prior = Some(match self.diarize_prior {
+                            Some(prior) => prior * 0.5 + sample * 0.5,
+                            None => sample,
+                        });
+                        learned = true;
+                    }
+                    // The post-ASR tail (attribution, writing) is the last
+                    // phase, so it needs its own rate to estimate.
+                    if stats.prepare_seconds > 0.0 && stats.audio_seconds > 0.0 {
+                        let sample = (stats.prepare_seconds / stats.audio_seconds) as f32;
+                        self.prepare_prior = Some(match self.prepare_prior {
+                            Some(prior) => prior * 0.5 + sample * 0.5,
+                            None => sample,
+                        });
+                        learned = true;
+                    }
+                    if learned {
+                        self.save_settings();
+                    }
                     // Finish revealing any queued utterances immediately.
                     while let Some(line) = self.pending_lines.pop_front() {
                         self.reveal_line(line);
@@ -4611,8 +5307,20 @@ impl App {
                         self.begin_batch(true);
                     } else if self.has_results() {
                         self.status = Status::Done;
-                        // Present the summary / rename only once the bar hits 100%.
-                        self.completion_pending = true;
+                        // Ticks stop as soon as the run leaves `Status::Running`,
+                        // so there is no later frame to ease the bars in or run
+                        // the deferred completion. Snap them and present now.
+                        self.progress = 1.0;
+                        self.progress_shown = 1.0;
+                        self.overall_shown = 1.0;
+                        self.current_index = None;
+                        self.completion_pending = false;
+                        if self.present_completion() {
+                            tasks.push(scrollable::snap_to(
+                                summary_id(),
+                                scrollable::RelativeOffset { x: 0.0, y: 0.0 },
+                            ));
+                        }
                     } else {
                         // Nothing succeeded: no dialogs, just settle at 100%.
                         self.progress = 1.0;
@@ -4625,14 +5333,92 @@ impl App {
         Task::batch(tasks)
     }
 
+    /// Completed items from this run, in queue order, with their display name.
+    fn batch_runs(&self) -> Vec<(String, &backend::Stats)> {
+        self.queue
+            .iter()
+            .filter(|item| matches!(item.status, ItemStatus::Done))
+            // Restrict the automatic summary to the files this run processed,
+            // not every completed item left in the queue from earlier runs.
+            .filter(|item| self.batch_paths.is_empty() || self.batch_paths.contains(&item.path))
+            .filter_map(|item| {
+                let stats = item.stats.as_ref()?;
+                let name = item
+                    .audio
+                    .as_ref()
+                    .or(item.transcript.as_ref())
+                    .or(Some(&item.path))
+                    .and_then(|path| path.file_name())
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("file")
+                    .to_string();
+                Some((name, stats))
+            })
+            .collect()
+    }
+
+    /// Cross-run tabulation shown ahead of the per-file blocks when a queue
+    /// processed more than one file. Speaker labels are per file, so speaker
+    /// counts are listed per row rather than summed into a meaningless total.
+    fn aggregate_table(runs: &[(String, &backend::Stats)]) -> (Vec<String>, Vec<Vec<String>>) {
+        let headers = ["File", "Length", "Run", "Speed", "Spk", "Words"]
+            .iter()
+            .map(|cell| cell.to_string())
+            .collect();
+        let mut audio_total = 0.0;
+        let mut run_total = 0.0;
+        let mut word_total = 0usize;
+        let mut rows = Vec::new();
+        for (name, stats) in runs {
+            let speed = if stats.run_seconds > 0.0 {
+                stats.audio_seconds / stats.run_seconds
+            } else {
+                0.0
+            };
+            let speakers = match stats.num_speakers {
+                Some(count) => count.to_string(),
+                None => stats.speakers.to_string(),
+            };
+            let words: usize = stats.speaker_stats.values().map(|stat| stat.words).sum();
+            audio_total += stats.audio_seconds;
+            run_total += stats.run_seconds;
+            word_total += words;
+            rows.push(vec![
+                ellipsize_middle(name, 18),
+                format_secs(stats.audio_seconds),
+                format_secs(stats.run_seconds),
+                format!("{speed:.1}\u{00d7}"),
+                speakers,
+                words.to_string(),
+            ]);
+        }
+        let speed = if run_total > 0.0 {
+            audio_total / run_total
+        } else {
+            0.0
+        };
+        rows.push(vec![
+            format!("{} files", runs.len()),
+            format_secs(audio_total),
+            format_secs(run_total),
+            format!("{speed:.1}\u{00d7}"),
+            String::new(),
+            word_total.to_string(),
+        ]);
+        (headers, rows)
+    }
+
     fn stats_lines(&self) -> Vec<SummaryLine> {
         let mut lines: Vec<SummaryLine> = Vec::new();
+        let runs = self.batch_runs();
+        if runs.len() > 1 {
+            let (headers, rows) = Self::aggregate_table(&runs);
+            lines.push(SummaryLine::Table(headers, rows));
+        }
         for item in &self.queue {
             if !matches!(item.status, ItemStatus::Done) {
                 continue;
             }
-            // Restrict the automatic summary to the files this run processed,
-            // not every completed item left in the queue from earlier runs.
             if !self.batch_paths.is_empty() && !self.batch_paths.contains(&item.path) {
                 continue;
             }
@@ -4645,7 +5431,7 @@ impl App {
                 .and_then(|name| name.to_str())
                 .unwrap_or("file")
                 .to_string();
-            if !lines.is_empty() {
+            if !lines.is_empty() && !matches!(lines.last(), Some(SummaryLine::Table(..))) {
                 lines.push(SummaryLine::Body(String::new()));
             }
             lines.push(SummaryLine::File(name));
@@ -4776,16 +5562,97 @@ impl App {
         (completed / total).clamp(0.0, 1.0)
     }
 
+    /// Estimated wall-clock seconds left, derived from measured throughput
+    /// (audio seconds transcribed per wall second).
+    fn estimate_remaining(&self) -> Option<f32> {
+        let throughput = self.eta_throughput.or(self.eta_prior)?;
+        if !throughput.is_finite() || throughput <= 0.0 {
+            return None;
+        }
+        // Remaining audio in the current file.
+        // Diarization runs beside ASR in the overlap schedule and can finish
+        // after it, so the wait is whichever phase is still behind.
+        let diarize_rate = self.diarize_prior.unwrap_or(0.08).max(0.0);
+        let current_remaining = if self.work_total > 0.0 {
+            let asr_remaining = (self.work_total - self.work_done).max(0.0) as f32 / throughput;
+            let duration = self
+                .work_total
+                .max(self.shown_duration().unwrap_or(0.0) as f64) as f32;
+            let diarize_remaining =
+                (1.0 - self.diarize_fraction).max(0.0) * duration * diarize_rate;
+            // Once the decoder is spent, attribution and writing decide the
+            // wait; before that they are small beside ASR.
+            let asr_finished = self.work_done >= self.work_total - 1.0;
+            let prepare_rate = self.prepare_prior.unwrap_or(0.01).max(0.0);
+            let prepare_remaining = if asr_finished {
+                duration * prepare_rate
+            } else {
+                0.0
+            };
+            asr_remaining
+                .max(diarize_remaining)
+                .max(prepare_remaining)
+        } else if let Some(duration) = self.shown_duration() {
+            let audio = (duration * (1.0 - self.progress.clamp(0.0, 1.0))).max(0.0);
+            audio / throughput
+        } else {
+            0.0
+        };
+        let current_remaining = current_remaining.max(0.0);
+
+        // Files queued after the current one. Unknown durations use the same
+        // average as `queue_weight`, and 0.08 covers decode + diarize.
+        let start = self.current_index.map_or(0, |index| index + 1);
+        let pending: Vec<&QueueItem> = self
+            .queue
+            .iter()
+            .skip(start)
+            .filter(|item| matches!(item.status, ItemStatus::Pending))
+            .collect();
+        let known: Vec<f32> = pending
+            .iter()
+            .filter_map(|item| item.duration.map(|duration| duration as f32))
+            .filter(|duration| *duration > 0.0)
+            .collect();
+        let fallback = if known.is_empty() {
+            1.0
+        } else {
+            known.iter().sum::<f32>() / known.len() as f32
+        };
+        let queued: f32 = pending
+            .iter()
+            .map(|item| queue_weight(item, fallback) * (1.0 / throughput + diarize_rate))
+            .sum();
+
+        let estimate = current_remaining + queued;
+        estimate.is_finite().then_some(estimate.max(0.0))
+    }
+
     fn timer_text(&self) -> String {
         let elapsed = self.elapsed().unwrap_or_else(|| "00:00".to_string());
-        if matches!(self.status, Status::Running) {
-            if let Some(eta) = self.eta_shown {
-                if eta >= 1.0 && eta.is_finite() {
-                    return format!("{elapsed} \u{00b7} ~{} left", format_secs(eta as f64));
-                }
-            }
+        if !matches!(self.status, Status::Running) {
+            return elapsed;
         }
-        elapsed
+        let Some(eta) = self.eta_shown.filter(|eta| eta.is_finite()) else {
+            return elapsed;
+        };
+        // Coarse buckets: the underlying throughput is only good to about
+        // this resolution, so finer digits would be false precision.
+        if eta < 5.0 {
+            // The estimate collapses to zero at the end of a phase, while the
+            // tail still runs; the elapsed clock is the only honest number.
+            return format!("{elapsed} \u{00b7} finishing\u{2026}");
+        }
+        if eta > 600.0 {
+            let minutes = ((eta / 60.0) / 5.0).round().max(1.0) * 5.0;
+            return format!("{elapsed} \u{00b7} ~{minutes:.0} min left");
+        }
+        if eta >= 60.0 {
+            let seconds = ((eta / 5.0).round() * 5.0).max(5.0);
+            return format!("{elapsed} \u{00b7} ~{} left", format_secs(seconds as f64));
+        }
+        let seconds = ((eta / 5.0).round() * 5.0).max(5.0);
+        format!("{elapsed} \u{00b7} ~{seconds:.0}s left")
     }
 
     /// Collapsible console showing backend log output.
@@ -4839,6 +5706,13 @@ impl App {
         order
     }
 
+    /// True when the visible transcript carries ASR confidence values.
+    fn has_confidence(&self) -> bool {
+        self.shown_lines()
+            .iter()
+            .any(|line| line.confidence.is_some())
+    }
+
     /// Line indices sorted by start time (untimed lines last), stable.
     fn display_order(&self) -> Vec<usize> {
         if let Some(order) = self.display_order_cache.borrow().as_ref() {
@@ -4847,11 +5721,15 @@ impl App {
         let lines = self.shown_lines();
         let mut order = sorted_display_order(lines);
         if let Some(speaker) = &self.speaker_filter {
-            order.retain(|index| {
-                lines
-                    .get(*index)
-                    .is_some_and(|line| line.speaker == *speaker)
-            });
+            if speaker == LOW_CONFIDENCE_FILTER {
+                order.retain(|index| lines.get(*index).is_some_and(is_low_confidence));
+            } else {
+                order.retain(|index| {
+                    lines
+                        .get(*index)
+                        .is_some_and(|line| line.speaker == *speaker)
+                });
+            }
         }
         *self.display_order_cache.borrow_mut() = Some(order.clone());
         order
@@ -4875,14 +5753,293 @@ impl App {
         )
     }
 
+    /// Row height used to place the virtualisation spacers.
+    ///
+    /// Measured from the height the rendered window actually had last frame
+    /// (`content - spacers`) and latched while it stays in the same ballpark.
+    /// Deriving it from `content / rows` on every frame is self-referential —
+    /// the reported content already contains the spacers built from it — so
+    /// the smallest difference between the estimate and the real rows was
+    /// amplified by `rows / window` and crept the pane by tens of pixels on
+    /// every scroll event, with no scroll of its own.
+    fn pane_line_height(&self, fallback: f32) -> f32 {
+        let (start, end, top, bottom) = self.pane_window.get();
+        let rendered = end.saturating_sub(start);
+        let measured = if rendered > 0 && self.transcript_content > top + bottom {
+            (self.transcript_content - top - bottom) / rendered as f32
+        } else {
+            0.0
+        };
+        let mut latched = self.pane_row_height.get();
+        if measured > 1.0 {
+            match latched {
+                // A real size change (zoom, bubble mode, re-wrap) recalibrates;
+                // a pixel of drift while scrolling must not.
+                Some(height) if (measured - height).abs() <= height * 0.5 => {}
+                _ => latched = Some(measured),
+            }
+        }
+        self.pane_row_height.set(latched);
+        latched.unwrap_or(fallback).max(12.0)
+    }
+
+    /// Forget the virtualisation geometry after anything that changes row
+    /// heights (new view, zoom, bubble or joined mode).
+    fn reset_pane_geometry(&mut self) {
+        self.pane_window.set((0, 0, 0.0, 0.0));
+        self.pane_row_height.set(None);
+        self.pane_start.set(None);
+    }
+
+    /// True while the live transcript is streaming into the pane.
+    fn live_streaming(&self) -> bool {
+        self.selected_view.is_none() && matches!(self.status, Status::Running)
+    }
+
+    /// The line Follow should keep in view. Unlike [`Self::active_line_index`]
+    /// there is no first-line fallback: falling back centres the top of the
+    /// transcript, which is the "Follow scrolled to the top" jump. No match
+    /// means the playhead is before the first line, so there is nothing above
+    /// the viewport to follow.
+    fn follow_line_index(&self) -> Option<usize> {
+        if self.live_streaming() && !self.scroll_seek {
+            self.display_order().last().copied()
+        } else {
+            self.line_for_playhead(self.playhead)
+        }
+    }
+
+    /// Pixel offset the follow logic wants, or `None` when the transcript is
+    /// already close enough that another programmatic `scroll_to` would only
+    /// make the pane shimmer.
+    ///
+    /// `scroll_to` is a one-shot jump, so every call that is not strictly
+    /// needed shows up as a visible step. Three things kept it firing:
+    ///
+    /// * the centred target was derived from `content / rows`, an average row
+    ///   height that drifts as streamed text grows, so the target kept moving
+    ///   even with nothing else changing — hence the cached, stable estimate in
+    ///   [`Self::centred_follow_target`];
+    /// * a target the scrollable clamps (or rounds) can never be matched by the
+    ///   reported offset, so comparing against `transcript_offset` alone was
+    ///   permanently out of the deadband — hence [`FollowIssue`];
+    /// * the offset arrives a frame after the scroll, so the same target was
+    ///   requested again in the meantime.
+    ///
+    /// Follow is therefore edge-triggered: a scroll is emitted only when the
+    /// desired target moved beyond [`FOLLOW_DEADBAND`] away from the last one,
+    /// and a retry at an unchanged situation is allowed once and then never
+    /// again. With a paused player — static playhead, line, content and
+    /// viewport — this returns `None` on every tick.
+    ///
+    /// `active` is the line to centre while following playback. The live
+    /// streamed transcript pins to the bottom instead, because centring the
+    /// newest line with the average-height estimate makes it jump as rows are
+    /// added.
+    fn next_follow_target(&self, active: Option<usize>) -> Option<f32> {
+        let content = self.transcript_content;
+        let viewport = self.transcript_viewport;
+        // Nothing can scroll while the content fits the pane. Checked before
+        // `content - viewport` on purpose: a transient shrink during a re-wrap
+        // or a joined-preview rebuild used to make the bottom 0, which looked
+        // like "scroll to the top".
+        if viewport <= 0.0 || content <= viewport {
+            return None;
+        }
+        let bottom = content - viewport;
+        let desired = if self.follow_playhead {
+            if self.live_streaming() && !self.scroll_seek {
+                bottom
+            } else {
+                self.centred_follow_target(active?)?
+            }
+        } else if self.selected_view.is_none() && self.transcript_at_bottom {
+            // The live view has not been scrolled away: stay at the bottom.
+            bottom
+        } else {
+            return None;
+        };
+        // Follow never jumps to the top of the transcript. A clamped 0 comes
+        // from centring the first row (the playhead sits before it, or no line
+        // matches the playhead), and that yanks the pane away from wherever
+        // the playhead actually is. When the pane is already at the top the
+        // offset check below settles it.
+        if self.follow_playhead && desired <= FOLLOW_DEADBAND {
+            return None;
+        }
+        let settled = |at: f32| (at - desired).abs() <= FOLLOW_DEADBAND;
+        // Nothing to do when the view already sits on the target, or a scroll
+        // towards it is still in flight.
+        if settled(self.transcript_offset) || self.scroll_target.is_some_and(settled) {
+            return None;
+        }
+        let Some(issue) = self.follow_issue else {
+            return Some(desired);
+        };
+        // Edge-triggered. If the target is the one we last asked for there is
+        // nothing to do: either the scroll landed (the reported offset is only
+        // approximate) or the scrollable clamped it away. Re-requesting it
+        // cannot move the view, so the tick goes quiet — which is what makes a
+        // paused player stay still however badly the last target settled.
+        if settled(issue.target) {
+            return None;
+        }
+        // The target moved. Only a genuine change of inputs is worth another
+        // scroll; with the same line, playhead, content and viewport this is a
+        // retry, and a retry is allowed once and then never again.
+        let same = issue.same_situation(active, self.playhead, content, viewport);
+        if same && (issue.retried || issue.at.elapsed() < FOLLOW_MIN_INTERVAL) {
+            return None;
+        }
+        Some(desired)
+    }
+
+    /// Centred target for a playback line, using a row height that only moves
+    /// when the row count changes (or the content height jumps materially).
+    /// Recomputed from `content / rows` it would drift with every streamed
+    /// character and nudge the view.
+    fn centred_follow_target(&self, active: usize) -> Option<f32> {
+        let content = self.transcript_content;
+        let viewport = self.transcript_viewport;
+        if content <= 0.0 || viewport <= 0.0 {
+            return None;
+        }
+        let order = self.display_order();
+        let rows = order.len().max(1);
+        let rank = order.iter().position(|index| *index == active)?;
+        // The first row has nothing above it, so centring it can only pull the
+        // pane towards the top. Follow declines instead of jumping up.
+        if rank == 0 {
+            return None;
+        }
+        let average = content / rows as f32;
+        let mut cached = self.follow_row_height.borrow_mut();
+        let row_height = match *cached {
+            Some((cached_rows, height))
+                if cached_rows == rows && (average - height).abs() <= height * 0.25 =>
+            {
+                height
+            }
+            _ => {
+                *cached = Some((rows, average));
+                average
+            }
+        };
+        Some(
+            ((rank as f32 + 0.5) * row_height - viewport / 2.0)
+                .clamp(0.0, (content - viewport).max(0.0)),
+        )
+    }
+
+    /// Record a follow scroll we are about to issue.
+    fn note_follow_issue(&mut self, target: f32, active: Option<usize>) {
+        let content = self.transcript_content;
+        let viewport = self.transcript_viewport;
+        // A retry is a second attempt at the same situation that has not moved
+        // the view. It is allowed once; after that the tick stays put until an
+        // input changes.
+        let retried = self.follow_issue.is_some_and(|prev| {
+            (self.transcript_offset - prev.offset).abs() <= FOLLOW_DEADBAND
+                && prev.same_situation(active, self.playhead, content, viewport)
+        });
+        self.follow_issue = Some(FollowIssue {
+            at: Instant::now(),
+            target,
+            offset: self.transcript_offset,
+            active,
+            playhead: self.playhead,
+            content,
+            viewport,
+            retried,
+        });
+    }
+
+    /// Ask the follow logic for the next scroll and record it. Returns the
+    /// offset to send to the scrollable, or `None` when the view must not move.
+    fn follow_scroll(&mut self, active: Option<usize>) -> Option<f32> {
+        let target = self.next_follow_target(active)?;
+        self.scroll_target = Some(target);
+        self.note_follow_issue(target, active);
+        Some(target)
+    }
+
     fn scroll_to_line(&mut self, line: usize) -> Task<Message> {
         match self.follow_target(line) {
             Some(y) => {
+                let active = self.follow_line_index();
                 self.scroll_target = Some(y);
+                self.note_follow_issue(y, active);
                 scrollable::scroll_to(transcript_id(), scrollable::AbsoluteOffset { x: 0.0, y })
             }
             None => Task::none(),
         }
+    }
+
+    /// Bring the view straight back to the playhead after a viewport report
+    /// while Follow is on. Returns the offset to scroll to in this same update
+    /// so the pane never sits away from the playhead waiting for the next tick.
+    ///
+    /// `offset` is where the scrollable says it is; `follow_offset` is where
+    /// Follow asked it to go.
+    fn correct_follow_offset(
+        &mut self,
+        previous_content: f32,
+        offset: f32,
+        viewport_h: f32,
+        content_h: f32,
+    ) -> Option<f32> {
+        if !self.follow_playhead {
+            return None;
+        }
+        let expected = self.follow_offset?;
+        // Near enough: the scrollable clamps and rounds, so a few pixels off is
+        // a landing, not a user scroll.
+        if (offset - expected).abs() <= FOLLOW_STUCK_STEP {
+            return None;
+        }
+        // Re-wrapping changes the content height and clamps the offset without
+        // any user scroll (scrollbar appears, zoom, window resize, streamed
+        // lines). That must not disengage Follow.
+        let relayout = (content_h - previous_content).abs() > 0.5;
+        // A remounted scrollable starts at 0 even though the content still
+        // overflows. Changing the widget tree above it (a toast appearing or
+        // expiring, a dialog opening or closing) does exactly that.
+        let remount = offset <= FOLLOW_DEADBAND && content_h > viewport_h + FOLLOW_DEADBAND;
+        // Correcting only makes sense while the playhead target still exists;
+        // a genuine shrink clamps the offset and is adopted instead.
+        let reachable = expected <= (content_h - viewport_h).max(0.0) + FOLLOW_DEADBAND;
+        if remount || (relayout && reachable) {
+            self.scroll_target = Some(expected);
+            // Re-issue the playhead target and record the situation we are
+            // back in, so the tick does not pile another scroll on top of it.
+            self.follow_issue = Some(FollowIssue {
+                at: Instant::now(),
+                target: expected,
+                offset,
+                active: self.follow_line_index(),
+                playhead: self.playhead,
+                content: content_h,
+                viewport: viewport_h,
+                retried: false,
+            });
+            return Some(expected);
+        }
+        if relayout {
+            // The content really did get shorter: keep following from the
+            // clamped position.
+            self.follow_offset = Some(offset);
+            return None;
+        }
+        // A user scroll disengages Follow instead of snapping the transcript
+        // back to the playhead. Scrolling never moves the playhead; only the
+        // timeline, line selection and playback do.
+        self.follow_playhead = false;
+        self.follow_offset = None;
+        self.scroll_target = None;
+        self.follow_issue = None;
+        self.scroll_seek = false;
+        self.save_settings();
+        None
     }
 
     /// True when the transcript pane is showing the global empty state.
@@ -5078,31 +6235,6 @@ impl App {
             )
         };
 
-        let mut actions = row![].spacing(8).align_y(iced::Alignment::Center);
-        if !has_queue {
-            actions = actions.push(
-                action_text("Add File(s)")
-                    .on_press(Message::AddFiles)
-                    .style(color_button(scheme.blue, scheme.on_accent)),
-            );
-            actions = actions.push(
-                action_text("Add Folder")
-                    .on_press(Message::AddFolder)
-                    .style(pill_button_secondary),
-            );
-        } else if pending && !has_done {
-            actions = actions.push(
-                action_text("Transcribe")
-                    .on_press_maybe(self.models_ready().then_some(Message::Start))
-                    .style(color_button(scheme.green, scheme.on_accent)),
-            );
-            actions = actions.push(
-                action_text("Add File(s)")
-                    .on_press(Message::AddFiles)
-                    .style(pill_button_secondary),
-            );
-        }
-
         let icon = container(icon_colored(glyph, 26.0, scheme.blue))
             .width(Length::Fixed(56.0))
             .height(Length::Fixed(56.0))
@@ -5114,7 +6246,7 @@ impl App {
                 ..container::Style::default()
             });
 
-        let mut content = column![
+        let content = column![
             icon,
             text(title).size(22).font(Font {
                 weight: font::Weight::Bold,
@@ -5128,10 +6260,6 @@ impl App {
         ]
         .spacing(10)
         .align_x(iced::Alignment::Center);
-
-        if !has_queue || (pending && !has_done) {
-            content = content.push(container(actions).padding([8, 0]));
-        }
 
         container(container(content).center_x(Length::Fill).max_width(380.0))
             .center(Length::Fill)
@@ -5313,9 +6441,11 @@ impl App {
         .width(Length::Fill)
         .height(Length::Fixed(28.0))
         .style(move |_theme| container::Style {
-            background: Some(scheme.track.into()),
+            // Slightly darker than the panel it sits on, so the track reads as
+            // an inset well and the selected thumb can sit proud of it.
+            background: Some(theme::darken(scheme.panel_bg, 0.14).into()),
             border: iced::border::Border {
-                color: scheme.border,
+                color: theme::mix(scheme.border, scheme.text, 0.12),
                 width: 1.0,
                 radius: PILL.into(),
             },
@@ -5442,7 +6572,7 @@ impl App {
                         .placeholder("Import")
                         .style(greyed_pick(scheme))
                         .handle(caret_handle(false))
-                        .width(Length::Fixed(126.0)),
+                        .width(Length::Fixed(122.0)),
                     mouse_area(
                         container(horizontal_space())
                             .width(Length::Fill)
@@ -5731,12 +6861,22 @@ impl App {
         };
 
         let badge: Element<'static, Message> = match &item.status {
-            ItemStatus::Pending => queue_status_icon(ICON_CIRCLE, 18.0, scheme.text),
+            // Queued, nothing has happened yet: an unfilled ring at the lowest
+            // emphasis in the ladder (queued < running < done).
+            ItemStatus::Pending => queue_status_icon(ICON_CIRCLE, 15.0, scheme.muted),
             ItemStatus::Running => {
                 queue_status_badge(ICON_HOURGLASS, 14.0, scheme.track, scheme.text)
             }
-            ItemStatus::Done => {
+            // A check while the run is still going; once the whole queue has
+            // finished, the row marks itself as a finished transcript instead.
+            ItemStatus::Done if running => {
                 queue_status_badge(ICON_CHECK, 18.0, scheme.green, scheme.on_accent)
+            }
+            ItemStatus::Done => {
+                // Styled like the transcript pane's "choose transcript" chip:
+                // a light disc with the page drawn in the accent blue, rather
+                // than a solid fill.
+                queue_status_badge(ICON_FILE_TEXT, 15.0, scheme.track, scheme.blue)
             }
             ItemStatus::Failed(_) => {
                 queue_status_badge(ICON_X, 15.0, scheme.danger, scheme.on_accent)
@@ -5883,26 +7023,12 @@ impl App {
             return self.empty_transcript_state(&scheme);
         }
         if let Some(error) = &self.view_error {
-            let mut col = column![
+            let col = column![
                 text("Transcript unavailable").size(20),
                 text(error.clone()).size(14),
             ]
             .spacing(8)
             .padding(16);
-            if let Some(index) = self.selected {
-                let has_audio = self
-                    .queue
-                    .get(index)
-                    .and_then(|item| item.audio.as_ref())
-                    .is_some();
-                if has_audio {
-                    col = col.push(
-                        action_text("Transcribe again")
-                            .on_press(Message::RequeueItem(index))
-                            .style(color_button(scheme.green, scheme.on_accent)),
-                    );
-                }
-            }
             return col.into();
         }
         if self.shown_transcript().trim().is_empty() && self.shown_lines().is_empty() {
@@ -5922,8 +7048,53 @@ impl App {
         let display: Vec<usize> = self.display_order();
         let playhead_line = self.active_line_index();
         let lines = self.shown_lines();
+
+        // Virtualize the long list. The buffer keeps a few screens of text
+        // ready while the spacer heights preserve the scrollbar range. A large
+        // scroll jump temporarily renders a wider window so a fast drag does
+        // not expose empty space.
+        let total = display.len();
+        let line_height = self.pane_line_height((size * 1.8).max(24.0));
+        let viewport = if self.transcript_viewport > 0.0 {
+            self.transcript_viewport
+        } else {
+            600.0
+        };
+        const BUFFER_LINES: usize = 16;
+        let visible = (viewport / line_height).ceil() as usize + BUFFER_LINES * 2 + 2;
+        // Re-anchor the window only when the view leaves it. Moving the anchor
+        // shifts every rendered row by (estimate - real height), so re-anchoring
+        // on every scroll event is what made the pane creep under the pointer.
+        let mut start = ((self.transcript_offset / line_height).floor() as usize)
+            .saturating_sub(BUFFER_LINES)
+            .min(total);
+        if let Some(anchor) = self.pane_start.get().filter(|anchor| *anchor <= total) {
+            let band_top = anchor as f32 * line_height;
+            let band_bottom =
+                ((anchor + visible).min(total) as f32 * line_height - viewport).max(band_top);
+            if self.transcript_offset >= band_top && self.transcript_offset <= band_bottom {
+                start = anchor;
+            }
+        }
+        self.pane_start.set(Some(start));
+        let end = (start + visible).min(total);
+        let top_height = start as f32 * line_height;
+        let bottom_height = (total - end) as f32 * line_height;
+        // Remember the geometry we asked for so the next frame can measure the
+        // real height of the rendered window.
+        self.pane_window
+            .set((start, end, top_height, bottom_height));
+
+        if top_height > 0.0 {
+            col = col.push(
+                container(horizontal_space())
+                    .width(Length::Fill)
+                    .height(Length::Fixed(top_height)),
+            );
+        }
+
         // Each speaker keeps a fixed side of the transcript in bubble mode.
-        for idx in display {
+        for &idx in &display[start..end] {
             let line = &lines[idx];
             if line.raw.trim().is_empty() {
                 continue;
@@ -5963,6 +7134,8 @@ impl App {
                         speaker_palette(index, &scheme),
                         scheme.ink,
                         tint,
+                        self.confidence_view && is_low_confidence(line),
+                        &scheme,
                         &query,
                         false,
                         false,
@@ -5976,8 +7149,8 @@ impl App {
                             .height(Length::Fill),
                     )
                     .interaction(mouse::Interaction::Pointer)
-                    .on_press(Message::SelectLine(idx))
-                    .on_right_press(Message::EditLine(idx)),
+                    .on_press(Message::LineClicked(idx))
+                    .on_right_press(Message::FlipLineSpeaker(idx)),
                 ]);
             } else {
                 let accent = speaker_order
@@ -6005,9 +7178,18 @@ impl App {
                     size,
                     active,
                     self.show_timestamps,
-                    !self.popup_open(),
+                    self.transcript_line_hover == Some(idx) && !self.popup_open(),
+                    self.confidence_view,
                 ));
             }
+        }
+
+        if bottom_height > 0.0 {
+            col = col.push(
+                container(horizontal_space())
+                    .width(Length::Fill)
+                    .height(Length::Fixed(bottom_height)),
+            );
         }
 
         scrollable(col)
@@ -6056,7 +7238,7 @@ impl App {
             (
                 ICON_FILE_TEXT,
                 scheme.blue,
-                ellipsize_middle(name, 28),
+                ellipsize_middle(name, 20),
                 meta.join(" \u{00b7} "),
             )
         } else if running {
@@ -6086,13 +7268,79 @@ impl App {
                 border: iced::border::rounded(13.0),
                 ..container::Style::default()
             });
+        let meta = if self.modified {
+            let prefix = if meta.is_empty() {
+                String::new()
+            } else {
+                format!("{meta} \u{00b7} ")
+            };
+            format!(
+                "{prefix}{} \u{00b7} Save As to keep",
+                if self.join_lines {
+                    "Joined"
+                } else {
+                    "Modified"
+                }
+            )
+        } else {
+            meta
+        };
         let mut label = column![text(title).size(13).wrapping(NO_WRAP)].spacing(1);
         if !meta.is_empty() {
-            label = label.push(text(meta).size(11).wrapping(NO_WRAP).color(scheme.muted));
+            label = label.push(
+                text(meta)
+                    .size(11)
+                    .wrapping(NO_WRAP)
+                    .color(if self.modified {
+                        scheme.text
+                    } else {
+                        scheme.muted
+                    }),
+            );
         }
 
         let controls: Element<Message> = if has_lines {
             self.transcript_controls(&scheme)
+        } else {
+            horizontal_space().into()
+        };
+        let join: Element<Message> = if has_lines {
+            let label = if self.join_lines { "Split" } else { "Join" };
+            self.tip(
+                action(text(label).wrapping(NO_WRAP))
+                    .width(Length::Fixed(76.0))
+                    .on_press(Message::ToggleJoinLines)
+                    .style(if self.join_lines {
+                        pill_button_active
+                    } else {
+                        pill_button_secondary
+                    }),
+                if self.join_lines {
+                    "Show the saved line breaks"
+                } else {
+                    "Join lines spoken by the same speaker"
+                },
+                &scheme,
+            )
+        } else {
+            horizontal_space().into()
+        };
+
+        let document_controls: Element<Message> = if has_lines {
+            let divider = container(horizontal_space())
+                .width(Length::Fixed(1.0))
+                .height(Length::Fixed(18.0))
+                .style(move |_theme| container::Style {
+                    background: Some(scheme.border.into()),
+                    ..container::Style::default()
+                });
+            let summary = action_text("Summary")
+                .on_press_maybe((!running && self.has_results()).then_some(Message::OpenSummary))
+                .style(pill_button_secondary);
+            row![divider, summary]
+                .spacing(6)
+                .align_y(iced::Alignment::Center)
+                .into()
         } else {
             horizontal_space().into()
         };
@@ -6104,7 +7352,10 @@ impl App {
                     .align_y(iced::Alignment::Center),
                 horizontal_space(),
                 controls,
+                join,
+                document_controls,
             ]
+            .spacing(6)
             .align_y(iced::Alignment::Center),
         )
         .width(Length::Fill)
@@ -6119,107 +7370,116 @@ impl App {
         Some(column![header, divider].spacing(4).into())
     }
 
-    /// Zoom / Follow / SMS controls in the transcript header.
+    /// Timestamp control in the transcript header.
     fn transcript_controls(&self, scheme: &Scheme) -> Element<'_, Message> {
-        let follow: Element<Message> = if self.follow_playhead {
-            row![icon(ICON_CHECK, 12.0), text("Follow").wrapping(NO_WRAP)]
-                .spacing(4)
-                .align_y(iced::Alignment::Center)
-                .into()
-        } else {
-            text("Follow").wrapping(NO_WRAP).into()
-        };
-        let sms: Element<Message> = if self.sms_mode {
-            row![icon(ICON_CHECK, 12.0), text("SMS").wrapping(NO_WRAP)]
-                .spacing(4)
-                .align_y(iced::Alignment::Center)
-                .into()
-        } else {
-            text("SMS").wrapping(NO_WRAP).into()
-        };
-        let timestamps: Element<Message> = if self.show_timestamps {
-            row![icon(ICON_CHECK, 12.0), text("Time").wrapping(NO_WRAP)]
-                .spacing(4)
-                .align_y(iced::Alignment::Center)
-                .into()
-        } else {
-            text("Time").wrapping(NO_WRAP).into()
-        };
-        let follow_style: fn(&iced::Theme, button::Status) -> button::Style =
-            if self.follow_playhead {
-                pill_button_active
-            } else {
-                pill_button_secondary
-            };
-        let sms_style: fn(&iced::Theme, button::Status) -> button::Style = if self.sms_mode {
-            pill_button_active
-        } else {
-            pill_button_secondary
-        };
         let time_style: fn(&iced::Theme, button::Status) -> button::Style = if self.show_timestamps
         {
-            pill_button_active
+            pill_button_toggled
         } else {
             pill_button_secondary
         };
-        let follow_tip = if self.follow_playhead {
-            "Stop keeping the active line in view"
-        } else {
-            "Keep the active line in view"
-        };
+        self.tip(
+            action(toggle_label("Timestamps", self.show_timestamps))
+                .on_press(Message::TimestampsToggled(!self.show_timestamps))
+                .style(time_style)
+                .width(Length::Fixed(122.0)),
+            if self.show_timestamps {
+                "Hide timestamps"
+            } else {
+                "Show timestamps"
+            },
+            scheme,
+        )
+    }
+
+    /// Hover-only zoom / SMS controls at the bottom-left of the transcript.
+    fn transcript_float_controls(&self, scheme: &Scheme) -> Element<'_, Message> {
+        let scheme = *scheme;
+        let sms = toggle_label("SMS", self.sms_mode);
         let sms_tip = if self.sms_mode {
             "Show transcripts as lines"
         } else {
             "Show the transcript as chat bubbles"
         };
-        row![
+        let follow = toggle_label("Follow", self.follow_playhead);
+        let mut controls = row![
             self.tip(
                 action(icon(ICON_ZOOM_OUT, 14.0))
                     .on_press(Message::ZoomOut)
                     .style(pill_button_secondary),
                 "Zoom text out",
-                scheme,
+                &scheme,
             ),
             self.tip(
                 action(icon(ICON_ZOOM_IN, 14.0))
                     .on_press(Message::ZoomIn)
                     .style(pill_button_secondary),
                 "Zoom text in",
-                scheme,
-            ),
-            self.tip(
-                action(follow)
-                    .on_press(Message::ToggleFollowPlayhead)
-                    .style(follow_style)
-                    .width(Length::Fixed(92.0)),
-                follow_tip,
-                scheme,
+                &scheme,
             ),
             self.tip(
                 action(sms)
                     .on_press(Message::SmsToggled(!self.sms_mode))
-                    .style(sms_style)
-                    // Wide enough for the check icon shown while toggled on.
-                    .width(Length::Fixed(74.0)),
+                    .style(if self.sms_mode {
+                        pill_button_toggled
+                    } else {
+                        pill_button_secondary
+                    })
+                    .width(Length::Fixed(78.0)),
                 sms_tip,
-                scheme,
+                &scheme,
             ),
             self.tip(
-                action(timestamps)
-                    .on_press(Message::TimestampsToggled(!self.show_timestamps))
-                    .style(time_style)
-                    .width(Length::Fixed(76.0)),
-                if self.show_timestamps {
-                    "Hide timestamps"
+                action(follow)
+                    .on_press(Message::ToggleFollowPlayhead)
+                    .style(if self.follow_playhead {
+                        pill_button_toggled
+                    } else {
+                        pill_button_secondary
+                    })
+                    .width(Length::Fixed(96.0)),
+                if self.follow_playhead {
+                    "Stop keeping the active line in view"
                 } else {
-                    "Show timestamps"
+                    "Keep the active line in view"
                 },
-                scheme,
+                &scheme,
             ),
         ]
-        .spacing(6)
-        .align_y(iced::Alignment::Center)
-        .into()
+        .spacing(4)
+        .align_y(iced::Alignment::Center);
+        if self.can(license::Feature::Playback) {
+            controls = controls.push(
+                self.tip(
+                    action(toggle_label("Lock", self.playhead_locked))
+                        .on_press(Message::TogglePlayheadLock)
+                        .style(if self.playhead_locked {
+                            pill_button_toggled
+                        } else {
+                            pill_button_secondary
+                        })
+                        .width(Length::Fixed(82.0)),
+                    if self.playhead_locked {
+                        "Clicking a transcript line won\u{2019}t move the audio"
+                    } else {
+                        "Clicking a transcript line moves the audio to that line"
+                    },
+                    &scheme,
+                ),
+            );
+        }
+        container(controls)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .align_x(iced::Alignment::Start)
+            .align_y(iced::Alignment::End)
+            .padding(iced::Padding {
+                top: 0.0,
+                right: 0.0,
+                bottom: 12.0,
+                left: 12.0,
+            })
+            .into()
     }
 
     /// Index of the last line whose start time is at or before `t`.
@@ -6243,7 +7503,7 @@ impl App {
         if self.shown_lines().is_empty() {
             return None;
         }
-        let live_streaming = self.selected_view.is_none() && matches!(self.status, Status::Running);
+        let live_streaming = self.live_streaming();
         if live_streaming && !self.scroll_seek {
             // The newest streamed utterance is the live playhead.
             self.display_order().last().copied()
@@ -6330,20 +7590,62 @@ impl App {
 
     fn speaker_turns(&self, scheme: &Scheme) -> Vec<TimelineTurn> {
         let order = self.speaker_order();
-        self.shown_turns()
-            .iter()
-            .map(|turn| {
-                let index = order
-                    .iter()
-                    .position(|name| *name == turn.speaker)
-                    .unwrap_or(0);
-                TimelineTurn {
-                    start: turn.start,
-                    end: turn.end,
-                    color: speaker_palette(index, scheme),
-                }
-            })
-            .collect()
+        let turns = self.shown_turns();
+        // Diarization turns carry exact ranges, but they are absent after a
+        // reload (the clip cache is keyed on the diarizer) and never existed
+        // for imported transcripts. Only trust them when every label they
+        // mention is one the transcript actually shows.
+        let turns_are_complete = !turns.is_empty()
+            && turns
+                .iter()
+                .all(|turn| order.iter().any(|name| *name == turn.speaker));
+        if turns_are_complete {
+            return turns
+                .iter()
+                .map(|turn| {
+                    let index = order
+                        .iter()
+                        .position(|name| *name == turn.speaker)
+                        .unwrap_or(0);
+                    TimelineTurn {
+                        start: turn.start,
+                        end: turn.end,
+                        color: speaker_palette(index, scheme),
+                    }
+                })
+                .collect();
+        }
+        // Otherwise rebuild the bands from the transcript itself so the strip
+        // keeps the colours the text and the legend are already using.
+        let lines = self.shown_lines();
+        let duration = self.shown_duration();
+        let order_lines = self.display_order();
+        let mut spans = Vec::new();
+        for (rank, index) in order_lines.iter().enumerate() {
+            let Some(line) = lines.get(*index) else {
+                continue;
+            };
+            let Some(start) = line.start else {
+                continue;
+            };
+            // The band runs to the next timed line, or to the end of the
+            // audio for the last one.
+            let end = order_lines[rank + 1..]
+                .iter()
+                .find_map(|next| lines.get(*next).and_then(|line| line.start))
+                .or(duration)
+                .unwrap_or(start);
+            if end <= start {
+                continue;
+            }
+            let palette = order.iter().position(|name| *name == line.speaker);
+            spans.push(TimelineTurn {
+                start,
+                end,
+                color: speaker_palette(palette.unwrap_or(0), scheme),
+            });
+        }
+        spans
     }
 
     /// Playback controls: play/pause, time, and a speed selector.
@@ -6490,7 +7792,7 @@ impl App {
         let query_input = text_input("Find", &self.search_query)
             .id(find_id())
             .on_input(Message::SearchChanged)
-            .width(Length::Fixed(90.0))
+            .width(Length::Fixed(80.0))
             .style(pill_input);
         let prev = action(icon(ICON_ARROW_UP, 14.0))
             .on_press(Message::FindPrev)
@@ -6509,9 +7811,13 @@ impl App {
         .spacing(6)
         .align_y(iced::Alignment::Center);
         let speaker_order = self.speaker_order();
-        if speaker_order.len() > 1 {
+        let has_confidence = self.has_confidence();
+        if speaker_order.len() > 1 || has_confidence {
             let mut speakers = vec!["All speakers".to_string()];
             speakers.extend(speaker_order);
+            if has_confidence {
+                speakers.push(LOW_CONFIDENCE_FILTER.to_string());
+            }
             let selected = self
                 .speaker_filter
                 .clone()
@@ -6519,9 +7825,60 @@ impl App {
             controls = controls.push(
                 pick_list(speakers, Some(selected), Message::SpeakerFilterChanged)
                     .style(pill_pick)
-                    .width(Length::Fixed(140.0)),
+                    .width(Length::Fixed(124.0)),
             );
         }
+        let running = matches!(self.status, Status::Running);
+        let rename = if self.can(license::Feature::Editing) {
+            self.tip(
+                fit_action("Rename")
+                    .on_press_maybe(
+                        (!running
+                            && self.shown_output().is_some()
+                            && !self.shown_lines().is_empty())
+                        .then_some(Message::OpenRename),
+                    )
+                    .style(pill_button_secondary),
+                "Rename speakers in this transcript",
+                scheme,
+            )
+        } else {
+            self.tip(
+                fit_action("Rename")
+                    .on_press(Message::LockedRename)
+                    .style(greyed_button(*scheme)),
+                "Rename speakers in this transcript",
+                scheme,
+            )
+        };
+        controls = controls.push(rename);
+        let confidence: Element<Message> = if self.has_confidence() {
+            self.tip(
+                action(toggle_label("Confidence", self.confidence_view))
+                    .on_press(Message::ToggleConfidenceView)
+                    .style(if self.confidence_view {
+                        pill_button_toggled
+                    } else {
+                        pill_button_secondary
+                    })
+                    .width(Length::Fixed(122.0)),
+                if self.confidence_view {
+                    "Stop marking uncertain utterances"
+                } else {
+                    "Mark utterances the model was unsure about"
+                },
+                scheme,
+            )
+        } else {
+            self.tip(
+                action(toggle_label("Confidence", self.confidence_view))
+                    .style(greyed_button(*scheme))
+                    .width(Length::Fixed(122.0)),
+                "No confidence data for this transcript",
+                scheme,
+            )
+        };
+        controls = controls.push(confidence);
         controls.into()
     }
 
@@ -7212,56 +8569,67 @@ impl App {
     }
 
     /// Bottom-right notification layer for the right pane.
+    ///
+    /// The returned tree keeps the same shape whether or not a toast is up.
+    /// Swapping between a bare panel and a stack remounts everything below it,
+    /// including the transcript scrollable, whose fresh state reports offset 0
+    /// — which is why every line edit (all of them raise a toast) looked like
+    /// Follow jumping to the top and back.
     fn with_toast<'a>(
         &'a self,
         base: Element<'a, Message>,
         scheme: Scheme,
         bottom: f32,
     ) -> Element<'a, Message> {
-        let Some((message, _)) = &self.toast else {
-            return base;
-        };
-        let tone = toast_tone(message);
-        let dot_color = match tone {
-            ToastTone::Success => scheme.green,
-            ToastTone::Info => scheme.blue,
-            ToastTone::Danger => scheme.danger,
-        };
-        let toast_text = ellipsize(message, 44);
-        let width =
-            ((toast_text.chars().count() as f32 * 7.2 + 46.0).clamp(180.0, 320.0)).max(180.0);
-        let dot = container(horizontal_space())
-            .width(Length::Fixed(6.0))
-            .height(Length::Fixed(6.0))
-            .style(move |_theme| container::Style {
-                background: Some(dot_color.into()),
-                border: iced::border::rounded(3.0),
-                ..container::Style::default()
-            });
-        let toast = mouse_area(
-            container(
-                row![dot, text(toast_text).size(13).wrapping(NO_WRAP)]
-                    .spacing(8)
-                    .align_y(iced::Alignment::Center),
+        let toast: Option<Element<'a, Message>> = self.toast.as_ref().map(|(message, _)| {
+            let dot_color = match toast_tone(message) {
+                ToastTone::Success => scheme.green,
+                ToastTone::Info => scheme.blue,
+                ToastTone::Danger => scheme.danger,
+            };
+            let toast_text = ellipsize(message, 44);
+            let width =
+                ((toast_text.chars().count() as f32 * 7.2 + 46.0).clamp(180.0, 320.0)).max(180.0);
+            let dot = container(horizontal_space())
+                .width(Length::Fixed(6.0))
+                .height(Length::Fixed(6.0))
+                .style(move |_theme| container::Style {
+                    background: Some(dot_color.into()),
+                    border: iced::border::rounded(3.0),
+                    ..container::Style::default()
+                });
+            mouse_area(
+                container(
+                    row![dot, text(toast_text).size(13).wrapping(NO_WRAP)]
+                        .spacing(8)
+                        .align_y(iced::Alignment::Center),
+                )
+                .width(Length::Fixed(width))
+                .height(Length::Fixed(36.0))
+                .align_y(iced::Alignment::Center)
+                .padding([0, 12])
+                .style(move |_theme| container::Style {
+                    background: Some(scheme.dialog_bg.into()),
+                    text_color: Some(scheme.text),
+                    border: iced::border::Border {
+                        color: scheme.border,
+                        width: 1.0,
+                        radius: 12.0.into(),
+                    },
+                    shadow: soft_shadow(),
+                    ..container::Style::default()
+                }),
             )
-            .width(Length::Fixed(width))
-            .height(Length::Fixed(36.0))
-            .align_y(iced::Alignment::Center)
-            .padding([0, 12])
-            .style(move |_theme| container::Style {
-                background: Some(scheme.dialog_bg.into()),
-                text_color: Some(scheme.text),
-                border: iced::border::Border {
-                    color: scheme.border,
-                    width: 1.0,
-                    radius: 12.0.into(),
-                },
-                shadow: soft_shadow(),
-                ..container::Style::default()
-            }),
-        )
-        .on_press(Message::DismissToast);
-        let overlay = container(toast)
+            .on_press(Message::DismissToast)
+            .into()
+        });
+        // No toast: an empty, non-interactive filler so the stack shape (and
+        // therefore the scrollable's state) is identical either way.
+        let layer: Element<'a, Message> = match toast {
+            Some(toast) => toast,
+            None => horizontal_space().into(),
+        };
+        let overlay = container(layer)
             .width(Length::Fill)
             .height(Length::Fill)
             .align_x(iced::Alignment::End)
@@ -7283,8 +8651,11 @@ impl App {
 
         let clock = row![
             icon_colored(ICON_CLOCK, 14.0, scheme.text),
+            // The wall clock must never wrap or be squeezed out by the ETA
+            // suffix: it keeps its intrinsic width and the bar takes the rest.
             text(self.timer_text())
                 .size(12)
+                .wrapping(NO_WRAP)
                 .width(Length::Shrink)
                 .style(move |_theme| text::Style {
                     color: Some(scheme.text),
@@ -7306,7 +8677,9 @@ impl App {
 
         // The file name leads the status, including while "Decoding" animates.
         // A fixed five-dot block keeps the left side stationary.
-        let label_el: Element<Message> = if self.stage.eq_ignore_ascii_case("Decoding") {
+        let label_el: Element<Message> = if let Some(raw) = decoding_label(&self.stage, &label) {
+            text(raw).into()
+        } else if self.stage.eq_ignore_ascii_case("Decoding") {
             let active = 1 + (self.activity_frame / 5) % 5;
             let mut dots = vec![text::Span::new(".".repeat(active)).color(scheme.text)];
             if active < 5 {
@@ -7367,49 +8740,8 @@ impl App {
             .align_y(iced::Alignment::Center);
 
         let mut middle = column![status_row].spacing(8).width(Length::Fill);
-        let editing = self.can(license::Feature::Editing);
         middle = middle.push(self.timeline_element(&scheme));
-        let mut controls: Vec<Element<Message>> = Vec::new();
-        controls.push(self.player_element(&scheme));
-        controls.push(horizontal_space().into());
-        controls.push(
-            action_text("Summary")
-                .on_press_maybe((!running && self.has_results()).then_some(Message::OpenSummary))
-                .style(pill_button_secondary)
-                .into(),
-        );
-        if editing {
-            controls.push(
-                self.tip(
-                    action_text("Rename")
-                        .on_press_maybe(
-                            (!running
-                                && self.shown_output().is_some()
-                                && !self.shown_lines().is_empty())
-                            .then_some(Message::OpenRename),
-                        )
-                        .style(pill_button_secondary),
-                    "Rename speakers in this transcript",
-                    &scheme,
-                ),
-            );
-        } else {
-            controls.push(
-                self.tip(
-                    action_text("Rename")
-                        .on_press(Message::LockedRename)
-                        .style(greyed_button(scheme)),
-                    "Rename speakers in this transcript",
-                    &scheme,
-                ),
-            );
-        }
-        middle = middle.push(
-            row(controls)
-                .spacing(4)
-                .align_y(iced::Alignment::Center)
-                .width(Length::Fill),
-        );
+        middle = middle.push(self.player_element(&scheme));
 
         let middle = container(middle)
             .width(Length::Fill)
@@ -7421,30 +8753,42 @@ impl App {
                 ..container::Style::default()
             });
 
-        let mut transcript_box = column![]
-            .spacing(6)
+        // Fixed slots, fixed indices: the header appears and disappears with
+        // the run, and anything that changes the scrollable's child index
+        // remounts it and resets its offset. The 6 px gap is padding on the
+        // slot so the layout is unchanged.
+        let header = self.transcript_header(&scheme);
+        let has_header = header.is_some();
+        let header_slot = container(match header {
+            Some(header) => header,
+            None => horizontal_space().into(),
+        })
+        .width(Length::Fill)
+        .padding(iced::Padding {
+            top: 0.0,
+            right: 0.0,
+            bottom: if has_header { 6.0 } else { 0.0 },
+            left: 0.0,
+        });
+        let transcript_box = column![header_slot, self.transcript_element()]
+            .spacing(0)
             .width(Length::Fill)
             .height(Length::Fill);
-        if let Some(header) = self.transcript_header(&scheme) {
-            transcript_box = transcript_box.push(header);
-        }
-        transcript_box = transcript_box.push(self.transcript_element());
 
         let left_panel: Element<Message> = self.queue_panel(&scheme, LEFT_PANEL_WIDTH);
 
         let actions_row = row![
-            action_text("Copy")
+            fit_action("Copy")
                 .on_press_maybe(
                     (!self.shown_transcript().is_empty()).then_some(Message::CopyTranscript)
                 )
                 .style(pill_button_secondary),
-            action_text("Save")
+            fit_action("Save As")
                 .on_press_maybe(
-                    (self.shown_output().is_some() && !self.shown_transcript().is_empty())
-                        .then_some(Message::SaveTranscript)
+                    (!self.shown_transcript().is_empty()).then_some(Message::SaveTranscriptAs)
                 )
                 .style(pill_button_secondary),
-            action_text("Reveal")
+            fit_action("Reveal")
                 .on_press_maybe(
                     (self.shown_output().is_some()
                         || self.shown_audio().is_some()
@@ -7461,39 +8805,82 @@ impl App {
             horizontal_space(),
             actions_row
         ]
-        .spacing(6)
+        .spacing(4)
         .align_y(iced::Alignment::Center)
         .width(Length::Fill)
         .into();
 
-        let mut right = column![]
-            .spacing(12)
-            .width(Length::Fill)
-            .height(Length::Fill);
+        // The transcript card keeps a fixed child index. Anything that appears
+        // or disappears above it (model notice, progress chrome) or below it
+        // (search row) would shift that index, which remounts the scrollable
+        // and resets its offset to the top. The conditional content lives in
+        // slots instead, and the 12 px gaps are slot padding, so the layout is
+        // unchanged.
+        let show_middle = has_queue || self.selected_view.is_some() || running;
+        let mut top_slot_col = column![].spacing(12).width(Length::Fill);
+        let mut has_top = false;
         if let Some(notice) = self.model_notice(&scheme) {
-            right = right.push(notice);
+            top_slot_col = top_slot_col.push(notice);
+            has_top = true;
         }
         // In the empty state the progress/timeline/player chrome has nothing to
         // act on; let the welcome card own the panel instead.
-        let show_middle = has_queue || self.selected_view.is_some() || running;
         if show_middle {
-            right = right.push(middle);
+            top_slot_col = top_slot_col.push(middle);
+            has_top = true;
         }
-        right = right.push(
-            container(transcript_box)
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .style(move |_theme| container::Style {
-                    background: Some(scheme.panel_bg.into()),
-                    border: iced::border::rounded(16.0),
-                    shadow: soft_shadow(),
-                    ..container::Style::default()
-                }),
-        );
-        if has_queue {
-            right = right.push(search_actions_row);
-        }
-        let right_panel: Element<Message> = right.into();
+        let top_slot = container(top_slot_col)
+            .width(Length::Fill)
+            .padding(iced::Padding {
+                top: 0.0,
+                right: 0.0,
+                bottom: if has_top { 12.0 } else { 0.0 },
+                left: 0.0,
+            });
+        // Keep the stack structure stable across hover changes. Swapping
+        // between a bare column and a stack remounts the scrollable and resets
+        // its scroll position to the top.
+        let float_controls: Element<Message> =
+            if self.transcript_hover && !self.popup_open() && !self.shown_lines().is_empty() {
+                self.transcript_float_controls(&scheme)
+            } else {
+                container(horizontal_space())
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .into()
+            };
+        let transcript_content: Element<Message> = stack![transcript_box, float_controls].into();
+        let transcript_card = container(transcript_content)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .style(move |_theme| container::Style {
+                background: Some(scheme.panel_bg.into()),
+                border: iced::border::rounded(16.0),
+                shadow: soft_shadow(),
+                ..container::Style::default()
+            });
+        let bottom_slot = container(match has_queue {
+            true => search_actions_row,
+            false => horizontal_space().into(),
+        })
+        .width(Length::Fill)
+        .padding(iced::Padding {
+            top: if has_queue { 12.0 } else { 0.0 },
+            right: 0.0,
+            bottom: 0.0,
+            left: 0.0,
+        });
+        let right_panel: Element<Message> = column![
+            top_slot,
+            mouse_area(transcript_card)
+                .on_enter(Message::TranscriptHover(true))
+                .on_exit(Message::TranscriptHover(false)),
+            bottom_slot,
+        ]
+        .spacing(0)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into();
         let right_panel = self.with_toast(right_panel, scheme, if has_queue { 48.0 } else { 20.0 });
 
         let (theme_icon, theme_tip) = match self.theme_mode {
@@ -7566,15 +8953,14 @@ impl App {
         }
 
         let mut base: Element<Message> = base.into();
-        if self.drag_hover {
-            base = drop_overlay(base, scheme);
-        }
+        // Always wrapped: see `drop_overlay` for why its shape must not change.
+        base = drop_overlay(base, scheme, self.drag_hover);
 
         if self.delete_confirm {
-            if let Some(edit) = &self.line_edit {
-                let preview = edit.content.text().trim_end().replace(['\n', '\r'], " ");
+            if let Some(row) = self.line_edit.as_ref().and_then(|edit| edit.current_row()) {
+                let preview = row.content.text().trim_end().replace(['\n', '\r'], " ");
                 let preview = ellipsize(preview.trim(), 72);
-                let speaker = edit.speaker.trim();
+                let speaker = row.speaker.trim();
                 let preview = if speaker.is_empty() {
                     preview
                 } else {
@@ -7619,46 +9005,92 @@ impl App {
         }
 
         if let Some(edit) = &self.line_edit {
-            let mut col = column![
-                text("Edit line").size(20),
-                column![text("Speaker").size(12), {
-                    let mut speakers = self.speaker_order();
-                    if !speakers.iter().any(|name| name == &edit.speaker) {
-                        speakers.push(edit.speaker.clone());
-                    }
-                    pick_list(
-                        speakers,
-                        Some(edit.speaker.clone()),
-                        Message::LineEditSpeaker,
-                    )
-                    .style(pill_pick)
-                    .width(Length::Fill)
-                },]
-                .spacing(4),
-                column![
-                    text("Transcribed text").size(12),
-                    text_editor(&edit.content)
-                        .on_action(Message::LineEditAction)
-                        .height(Length::Fixed(160.0))
-                        .padding(6),
-                ]
-                .spacing(4),
-            ]
-            .spacing(10);
+            // Every row is read from the transcript as it stands now, so a
+            // merge, split, delete, or undo/redo refreshes the whole stack
+            // while the dialog is open.
+            let order = self.speaker_order();
+            let accent_for = |speaker: &str| line_accent(&order, speaker, &scheme);
+            let size = self.font_scale * 16.0;
+
+            let mut col = column![text("Edit line").size(20)].spacing(10);
+            // Previous, current and next, in transcript order: each line reads
+            // exactly as it does in the transcript, and each is its own field.
+            // The rows sit in a stable column, which is what keeps the three
+            // text editors apart for iced (state is keyed by tree position).
+            let mut rows = column![].spacing(theme::SPACE_XS);
+            for (position, line) in edit.rows.iter().enumerate() {
+                let mut speakers = order.clone();
+                if !speakers.iter().any(|name| name == &line.speaker) {
+                    speakers.push(line.speaker.clone());
+                }
+                rows = rows.push(line_edit_row(
+                    position,
+                    speakers,
+                    &line.speaker,
+                    &line.content,
+                    accent_for(&line.speaker),
+                    scheme,
+                    size,
+                ));
+            }
             col = col.push(
-                row![
-                    action_text("Merge next")
-                        .on_press(Message::MergeNextLine)
-                        .style(pill_button_secondary),
-                    action_text("Split at playhead")
-                        .on_press(Message::SplitLineAtPlayhead)
-                        .style(pill_button_secondary),
-                ]
-                .spacing(8),
+                column![text("Transcribed text").size(12), rows].spacing(theme::SPACE_XS),
             );
+            // One width for all three, so the row reads as a single control
+            // group instead of three differently sized buttons.
+            let merge_width = line_edit_actions_width();
             col = col.push(
                 container(
                     row![
+                        centred_action("Merge previous", merge_width)
+                            .on_press(Message::MergePrevLine)
+                            .style(pill_button_secondary),
+                        centred_action("Merge next", merge_width)
+                            .on_press(Message::MergeNextLine)
+                            .style(pill_button_secondary),
+                        centred_action("Split at cursor", merge_width)
+                            .on_press(Message::SplitLineAtCursor)
+                            .style(pill_button_secondary),
+                    ]
+                    .spacing(8),
+                )
+                .width(Length::Fill)
+                .align_x(iced::Alignment::Center),
+            );
+            // Same gate as the dialog itself: only a build that can edit lines
+            // has a reason to mention the transcript shortcut.
+            if self.can(license::Feature::Editing) {
+                col = col.push(
+                    text("Pro tip: right-click a line in the transcript to cycle its speaker.")
+                        .size(11)
+                        .color(scheme.muted)
+                        .wrapping(NO_WRAP),
+                );
+            }
+            // Undo and redo cover this dialog's edits only, and never a
+            // transcript the app cannot write back to.
+            let writable = self.shown_output().is_some();
+            let undo: Element<Message> = if writable && self.line_undo_available() {
+                fit_action("Undo")
+                    .on_press(Message::UndoLineEdit)
+                    .style(pill_button_secondary)
+                    .into()
+            } else {
+                fit_action("Undo").style(greyed_button(scheme)).into()
+            };
+            let redo: Element<Message> = if writable && self.line_redo_available() {
+                fit_action("Redo")
+                    .on_press(Message::RedoLineEdit)
+                    .style(pill_button_secondary)
+                    .into()
+            } else {
+                fit_action("Redo").style(greyed_button(scheme)).into()
+            };
+            col = col.push(
+                container(
+                    row![
+                        undo,
+                        redo,
                         action_text("Delete")
                             .on_press(Message::DeleteLineEdit)
                             .style(color_button(scheme.danger, scheme.on_accent)),
@@ -7673,12 +9105,13 @@ impl App {
                             .on_press(Message::CancelLineEdit)
                             .style(pill_button_secondary),
                     ]
-                    .spacing(8),
+                    .spacing(8)
+                    .align_y(iced::Alignment::Center),
                 )
                 .width(Length::Fill)
                 .align_x(iced::Alignment::End),
             );
-            let dialog = modal_card(col, 560.0, scheme);
+            let dialog = modal_card(col, LINE_EDIT_DIALOG_WIDTH, scheme);
             return modal_overlay(base, dialog, scheme);
         }
 
@@ -7686,49 +9119,73 @@ impl App {
             let lines = self.stats_lines();
             // Same typography and section treatment as the About dialog: a
             // 20 px title, muted body copy, section labels and dividers.
-            let mut groups: Vec<(String, Vec<String>)> = Vec::new();
+            enum Block {
+                Section(String, Vec<String>),
+                Table(Vec<String>, Vec<Vec<String>>),
+            }
+            let mut blocks: Vec<Block> = Vec::new();
             for line in &lines {
                 match line {
-                    SummaryLine::File(name) => groups.push((name.clone(), Vec::new())),
-                    SummaryLine::Body(text_line) => {
-                        if let Some((_, rows)) = groups.last_mut() {
-                            rows.push(text_line.clone());
-                        } else {
-                            groups.push((String::new(), vec![text_line.clone()]));
+                    SummaryLine::File(name) => {
+                        blocks.push(Block::Section(name.clone(), Vec::new()))
+                    }
+                    SummaryLine::Body(text_line) => match blocks.last_mut() {
+                        Some(Block::Section(_, rows)) => rows.push(text_line.clone()),
+                        Some(Block::Table(..)) | None => {
+                            blocks.push(Block::Section(String::new(), vec![text_line.clone()]))
                         }
+                    },
+                    SummaryLine::Table(headers, rows) => {
+                        blocks.push(Block::Table(headers.clone(), rows.clone()))
                     }
                 }
             }
 
             let mut body = column![text("Summary").size(20)].spacing(8);
-            for (index, (name, rows)) in groups.iter().enumerate() {
+            for (index, block) in blocks.iter().enumerate() {
                 if index > 0 {
                     body = body.push(settings_divider(scheme));
                 }
-                let mut section = column![].spacing(4);
-                if !name.is_empty() {
-                    // Owned string: the dialog outlives the local group list.
-                    section = section.push(
-                        text(name.clone())
-                            .size(11)
-                            .wrapping(NO_WRAP)
-                            .font(Font {
-                                weight: font::Weight::Bold,
-                                ..Font::DEFAULT
-                            })
-                            .color(scheme.muted),
-                    );
+                match block {
+                    Block::Section(name, rows) => {
+                        let mut section = column![].spacing(4);
+                        if !name.is_empty() {
+                            // Owned string: the dialog outlives the local list.
+                            section = section.push(
+                                text(name.clone())
+                                    .size(11)
+                                    .wrapping(NO_WRAP)
+                                    .font(Font {
+                                        weight: font::Weight::Bold,
+                                        ..Font::DEFAULT
+                                    })
+                                    .color(scheme.muted),
+                            );
+                        }
+                        for row in rows {
+                            section = section.push(
+                                text(row.clone()).size(theme::TEXT_SM).color(scheme.muted),
+                            );
+                        }
+                        body = body.push(section);
+                    }
+                    Block::Table(headers, rows) => {
+                        body = body.push(summary_table(headers, rows, scheme));
+                    }
                 }
-                for row in rows {
-                    section =
-                        section.push(text(row.clone()).size(theme::TEXT_SM).color(scheme.muted));
-                }
-                body = body.push(section);
             }
 
             // Cap the scrollable height so long queues stay usable.
             let cap = (self.window_size.height * 0.8).max(300.0);
-            let estimated = (lines.len() as f32 + groups.len() as f32 + 1.0) * 22.0 + 24.0;
+            let table_rows: f32 = blocks
+                .iter()
+                .map(|block| match block {
+                    Block::Table(_, rows) => rows.len() as f32 + 1.0,
+                    Block::Section(..) => 0.0,
+                })
+                .sum();
+            let estimated =
+                (lines.len() as f32 + blocks.len() as f32 + table_rows + 1.0) * 22.0 + 24.0;
             let height = estimated.min(cap);
 
             let scroll = scrollable(body)
@@ -7749,7 +9206,10 @@ impl App {
             ]
             .spacing(8);
 
-            let dialog = modal_card(col, 460.0, scheme);
+            // The tabulation needs six columns; the plain per-file summary
+            // does not.
+            let wide = blocks.iter().any(|block| matches!(block, Block::Table(..)));
+            let dialog = modal_card(col, if wide { 520.0 } else { 460.0 }, scheme);
             return modal_overlay(base, dialog, scheme);
         }
 
@@ -8125,6 +9585,25 @@ impl canvas::Program<Message> for Timeline {
     }
 }
 
+/// An utterance the ASR was unsure about: mean token log-probability below the
+/// threshold.
+fn is_low_confidence(line: &DocLine) -> bool {
+    line.confidence
+        .is_some_and(|confidence| confidence < LOW_CONFIDENCE)
+}
+
+/// Attach per-line confidences from the transcript's JSON sidecar. A count
+/// mismatch means the transcript was edited since the sidecar was written, so
+/// the values are dropped rather than misattributed.
+fn attach_confidences(mut lines: Vec<DocLine>, confidences: &[Option<f32>]) -> Vec<DocLine> {
+    if confidences.len() == lines.len() {
+        for (line, confidence) in lines.iter_mut().zip(confidences) {
+            line.confidence = *confidence;
+        }
+    }
+    lines
+}
+
 fn speaker_palette(index: usize, scheme: &Scheme) -> Color {
     scheme.speaker_colors[index % scheme.speaker_colors.len()]
 }
@@ -8155,7 +9634,7 @@ impl PitchSource {
         )
         .ok()?;
         let buffer = vec![0.0; stretch.min_output_buff_size() * 4];
-        let mut source = Self {
+        Some(Self {
             decoder,
             stretch,
             speed,
@@ -8165,15 +9644,7 @@ impl PitchSource {
             sample_rate,
             draining: false,
             done: false,
-        };
-        // Pre-roll roughly half a second so the output callback never waits for
-        // the first WSOLA pass.
-        for _ in 0..8 {
-            if !source.fill() {
-                break;
-            }
-        }
-        Some(source)
+        })
     }
 
     fn fill(&mut self) -> bool {
@@ -8652,7 +10123,7 @@ fn feature_vignette_queue(scheme: Scheme) -> Element<'static, Message> {
 
     let rows = column![
         feature_queue_row(
-            queue_status_badge(ICON_CHECK, 15.0, scheme.green, scheme.on_accent),
+            queue_status_badge(ICON_FILE_TEXT, 15.0, scheme.track, scheme.blue),
             "Done",
             scheme,
         ),
@@ -8662,7 +10133,7 @@ fn feature_vignette_queue(scheme: Scheme) -> Element<'static, Message> {
             scheme,
         ),
         feature_queue_row(
-            queue_status_icon(ICON_CIRCLE, 15.0, scheme.text),
+            queue_status_icon(ICON_CIRCLE, 15.0, scheme.muted),
             "Queued",
             scheme,
         ),
@@ -8908,6 +10379,7 @@ const ICON_HOURGLASS: char = '\u{f421}';
 const ICON_CHECK: char = '\u{f633}';
 const ICON_X: char = '\u{f659}';
 const ICON_CARET_DOWN: char = '\u{f229}';
+const ICON_PENCIL: char = '\u{f4cb}';
 const ICON_CARET_UP: char = '\u{f235}';
 const ICON_ZOOM_IN: char = '\u{f62c}';
 const ICON_ZOOM_OUT: char = '\u{f62d}';
@@ -8925,8 +10397,29 @@ const ICON_TRASH: char = '\u{f5de}';
 const ICON_RETRY: char = '\u{f116}';
 const ICON_DISPLAY: char = '\u{f302}';
 
-/// Full-window drop target shown while a file hovers over the app.
-fn drop_overlay<'a>(base: impl Into<Element<'a, Message>>, scheme: Scheme) -> Element<'a, Message> {
+/// Full-window drop target, kept in the widget tree at all times.
+///
+/// The wrapper is unconditional for the same reason as the toast layer:
+/// swapping between a bare base and a stack shifts the index of every
+/// descendant, which remounts the transcript scrollable and resets its offset
+/// to 0. Only the overlay's contents vary, and an inert filler keeps the empty
+/// case from touching layout or input.
+fn drop_overlay<'a>(
+    base: impl Into<Element<'a, Message>>,
+    scheme: Scheme,
+    hovering: bool,
+) -> Element<'a, Message> {
+    let overlay: Element<'a, Message> = if hovering {
+        drop_card(scheme)
+    } else {
+        horizontal_space().into()
+    };
+
+    stack![base.into(), overlay].into()
+}
+
+/// The card shown while a file is dragged over the window.
+fn drop_card<'a>(scheme: Scheme) -> Element<'a, Message> {
     let card = container(
         column![
             icon_colored(ICON_DOWNLOAD, 32.0, scheme.blue),
@@ -8963,7 +10456,7 @@ fn drop_overlay<'a>(base: impl Into<Element<'a, Message>>, scheme: Scheme) -> El
             ..container::Style::default()
         });
 
-    stack![base.into(), overlay].into()
+    overlay.into()
 }
 
 /// Standard dialog surface shared by every modal.
@@ -8974,7 +10467,7 @@ fn modal_card<'a>(
 ) -> Element<'a, Message> {
     container(content)
         .width(Length::Fixed(width))
-        .padding(16)
+        .padding(MODAL_PADDING)
         .style(move |_theme| container::Style {
             background: Some(scheme.dialog_bg.into()),
             border: iced::border::rounded(16.0),
@@ -9033,8 +10526,84 @@ fn settings_divider<'a>(scheme: Scheme) -> Element<'a, Message> {
         .into()
 }
 
-/// Layer `dialog` over `base` behind a dimming backdrop that swallows clicks,
-/// so a visible modal blocks everything outside it.
+/// A fixed-column table for the cross-run summary: bold muted header, one
+/// right-aligned row per file, then a separated total row.
+fn summary_table(
+    headers: &[String],
+    rows: &[Vec<String>],
+    scheme: Scheme,
+) -> Element<'static, Message> {
+    // The name column absorbs the remaining width; every numeric column has a
+    // fixed width so the figures line up without a monospace font.
+    let column_width = |index: usize| -> Length {
+        match index {
+            0 => Length::Fill,
+            3 => Length::Fixed(44.0),
+            4 => Length::Fixed(30.0),
+            5 => Length::Fixed(42.0),
+            _ => Length::Fixed(56.0),
+        }
+    };
+    let mut table = column![].spacing(3);
+    let header = headers
+        .iter()
+        .enumerate()
+        .fold(row![].spacing(6), |line, (index, cell)| {
+            let label = text(cell.clone())
+                .size(10)
+                .wrapping(NO_WRAP)
+                .width(column_width(index))
+                .align_x(if index == 0 {
+                    iced::Alignment::Start
+                } else {
+                    iced::Alignment::End
+                })
+                .font(Font {
+                    weight: font::Weight::Bold,
+                    ..Font::DEFAULT
+                })
+                .color(scheme.muted);
+            line.push(label)
+        });
+    table = table.push(header);
+    let total_index = rows.len().saturating_sub(1);
+    for (index, cells) in rows.iter().enumerate() {
+        if index == total_index && rows.len() > 1 {
+            table = table.push(settings_divider(scheme));
+        }
+        let is_total = index == total_index && rows.len() > 1;
+        let line = cells
+            .iter()
+            .enumerate()
+            .fold(row![].spacing(6), |line, (column, cell)| {
+                let width = column_width(column);
+                let mut label = text(cell.clone())
+                    .size(theme::TEXT_SM)
+                    .wrapping(NO_WRAP)
+                    .width(width)
+                    .align_x(if column == 0 {
+                        iced::Alignment::Start
+                    } else {
+                        iced::Alignment::End
+                    })
+                    .color(if is_total { scheme.text } else { scheme.muted });
+                if is_total {
+                    label = label.font(Font {
+                        weight: font::Weight::Bold,
+                        ..Font::DEFAULT
+                    });
+                }
+                line.push(label)
+            });
+        table = table.push(line);
+    }
+    table.into()
+}
+
+/// Layer `dialog` over `base` behind a dimming backdrop that swallows pointer
+/// input, so a visible modal blocks everything outside it. The backdrop covers
+/// the whole window and takes the cursor for itself, so the widgets underneath
+/// never see a hover or a click.
 fn modal_overlay<'a>(
     base: impl Into<Element<'a, Message>>,
     dialog: impl Into<Element<'a, Message>>,
@@ -9051,12 +10620,19 @@ fn modal_overlay<'a>(
                 ..container::Style::default()
             }),
     )
-    .on_press(Message::Noop);
+    // `Idle` keeps the arrow cursor over the scrim instead of inheriting the
+    // text or pointer cursor of whatever sits underneath.
+    .interaction(mouse::Interaction::Idle)
+    .on_press(Message::Noop)
+    .on_right_press(Message::Noop)
+    .on_middle_press(Message::Noop);
     // The dialog itself also consumes stray clicks and keeps an arrow cursor
     // on its non-interactive areas, so nothing behind it is clickable.
     let dialog = mouse_area(dialog)
         .interaction(mouse::Interaction::Idle)
-        .on_press(Message::Noop);
+        .on_press(Message::Noop)
+        .on_right_press(Message::Noop)
+        .on_middle_press(Message::Noop);
     let centered = container(dialog)
         .center(Length::Fill)
         .width(Length::Fill)
@@ -9069,6 +10645,16 @@ fn queue_weight(item: &QueueItem, fallback: f32) -> f32 {
         .map(|duration| duration as f32)
         .filter(|duration| *duration > 0.0)
         .unwrap_or(fallback)
+}
+
+/// Median of an already-sorted slice.
+fn median(sorted: &[f32]) -> f32 {
+    let mid = sorted.len() / 2;
+    if sorted.len() % 2 == 0 {
+        (sorted[mid - 1] + sorted[mid]) * 0.5
+    } else {
+        sorted[mid]
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -9127,6 +10713,21 @@ fn toast_ttl(message: &str) -> Duration {
         ToastTone::Info => Duration::from_secs(3),
         ToastTone::Success => Duration::from_millis(2400),
     }
+}
+
+/// Label to render verbatim while decoding, or `None` for the plain
+/// "Decoding" placeholder whose animated dots are drawn instead.
+fn decoding_label(stage: &str, label: &str) -> Option<String> {
+    let stage = stage.trim();
+    let lower = stage.to_ascii_lowercase();
+    if !lower.starts_with("decoding") {
+        return None;
+    }
+    // A bare "Decoding" keeps the animation; "Decoding 42%" carries detail.
+    if lower.len() == "decoding".len() {
+        return None;
+    }
+    Some(label.to_string())
 }
 
 /// Progress-bar text: phase (with detail) plus overall percentage.
@@ -9241,6 +10842,203 @@ fn speaker_chip(label: &str, accent: Color, ink: Color, size: f32) -> Element<'s
     .into()
 }
 
+/// The speaker and text a row would write: one transcript line must stay one
+/// physical line, so newlines typed into the editor collapse into spaces.
+fn line_edit_row_fields(speaker: &str, content: &text_editor::Content) -> (String, String) {
+    (
+        speaker.trim().to_string(),
+        content.text().trim_end().replace(['\n', '\r'], " "),
+    )
+}
+
+/// The accent colour of a speaker, resolved through the transcript's speaker
+/// order so the line editor tints a line exactly as the transcript pane does.
+fn line_accent(order: &[String], speaker: &str, scheme: &Scheme) -> Color {
+    let position = order.iter().position(|name| name == speaker).unwrap_or(0);
+    speaker_palette(position, scheme)
+}
+
+/// The speaker dropdown of the line editor, drawn as the transcript's speaker
+/// label: the speaker's own colour, no field chrome, and a small highlight on
+/// hover so it still reads as something that opens a list.
+fn speaker_pick(
+    accent: Color,
+    scheme: Scheme,
+) -> impl Fn(&iced::Theme, pick_list::Status) -> pick_list::Style {
+    move |_theme, status| {
+        let open = matches!(
+            status,
+            pick_list::Status::Hovered | pick_list::Status::Opened
+        );
+        pick_list::Style {
+            text_color: accent,
+            placeholder_color: accent,
+            handle_color: accent,
+            background: if open {
+                scheme.track.into()
+            } else {
+                Color::TRANSPARENT.into()
+            },
+            border: iced::border::Border {
+                color: Color::TRANSPARENT,
+                width: 0.0,
+                radius: 4.0.into(),
+            },
+        }
+    }
+}
+
+/// The editor's own chrome is transparent: the surrounding field draws the
+/// fill and border, while the text stays the transcript's ink at the
+/// transcript's size.
+fn line_editor_style(
+    scheme: Scheme,
+) -> impl Fn(&iced::Theme, text_editor::Status) -> text_editor::Style {
+    move |_theme, _status| text_editor::Style {
+        background: Color::TRANSPARENT.into(),
+        border: iced::border::Border {
+            color: Color::TRANSPARENT,
+            width: 0.0,
+            radius: 0.0.into(),
+        },
+        icon: scheme.muted,
+        placeholder: scheme.muted,
+        value: scheme.ink,
+        selection: Color {
+            a: 0.35,
+            ..scheme.blue
+        },
+    }
+}
+
+/// One editable line, laid out like the line it becomes: the speaker's accent
+/// stripe, the speaker where the transcript prints its label, then the text in
+/// a bordered field that is only as tall as the text it holds.
+fn line_edit_row<'a>(
+    position: usize,
+    speakers: Vec<String>,
+    selected: &str,
+    content: &'a text_editor::Content,
+    accent: Color,
+    scheme: Scheme,
+    size: f32,
+) -> Element<'a, Message> {
+    let height = line_edit_height(&content.text(), size);
+    let stripe = container(horizontal_space())
+        .width(Length::Fixed(3.0))
+        .height(Length::Fixed(height))
+        .style(move |_theme| container::Style {
+            background: Some(accent.into()),
+            border: iced::border::rounded(2.0),
+            ..container::Style::default()
+        });
+    // Wide enough for "SPEAKER 1" at the transcript's size; longer names clip
+    // inside the pick list instead of widening the dialog.
+    let label_width = (size * 9.0).clamp(120.0, 240.0);
+    let label = pick_list(
+        speakers,
+        Some(selected.to_string()),
+        move |speaker| Message::LineEditSpeaker(position, speaker),
+    )
+    .style(speaker_pick(accent, scheme))
+    .text_size(size)
+    .font(Font {
+        weight: font::Weight::Bold,
+        ..Font::DEFAULT
+    })
+    // Matches the editor's inner padding so the label sits on the first line.
+    .padding([LINE_EDIT_PAD_Y, 4.0])
+    .width(Length::Fixed(label_width));
+    // The field is visibly a field: a muted fill, a hairline border and rounded
+    // corners around transparent editor chrome, so the text itself still reads
+    // as the transcript's ink rather than as form text.
+    let field = container(
+        text_editor(content)
+            .on_action(move |action| Message::LineEditAction(position, action))
+            .size(size)
+            .wrapping(iced::widget::text::Wrapping::Word)
+            .height(Length::Fill)
+            .padding(0)
+            .style(line_editor_style(scheme)),
+    )
+    .width(Length::Fill)
+    .height(Length::Fixed(height))
+    .padding([LINE_EDIT_PAD_Y, LINE_EDIT_PAD_X])
+    // Long text scrolls inside the field instead of spilling past its border.
+    .clip(true)
+    .style(move |_theme| container::Style {
+        background: Some(scheme.track.into()),
+        border: iced::border::Border {
+            color: scheme.border,
+            width: 1.0,
+            radius: 8.0.into(),
+        },
+        ..container::Style::default()
+    });
+    row![stripe, label, field]
+        .spacing(theme::SPACE_SM)
+        .align_y(iced::Alignment::Start)
+        .width(Length::Fill)
+        .into()
+}
+
+/// Width of the text area inside the line editor's field, i.e. the dialog's
+/// content width minus everything the row spends before the text.
+fn line_edit_text_width(size: f32) -> f32 {
+    let label_width = (size * 9.0).clamp(120.0, 240.0);
+    let field = LINE_EDIT_DIALOG_WIDTH
+        - 2.0 * MODAL_PADDING
+        - 3.0 // accent stripe
+        - 2.0 * theme::SPACE_SM // either side of the speaker label
+        - label_width;
+    field - 2.0 * LINE_EDIT_PAD_X - 2.0 // field padding and border
+}
+
+/// Height of the line editor's field for `text` at `size`, wrapped to the width
+/// the field actually has.
+fn line_edit_height(text: &str, size: f32) -> f32 {
+    let lines = visual_line_count(text, size, line_edit_text_width(size));
+    lines as f32 * size * LINE_HEIGHT_FACTOR + 2.0 * LINE_EDIT_PAD_Y
+}
+
+/// Visual lines `text` occupies when wrapped to `width`, clamped to the
+/// editor's floor and ceiling.
+fn visual_line_count(text: &str, size: f32, width: f32) -> usize {
+    let columns = (width / (size * LINE_EDIT_CHAR_WIDTH)).floor().max(1.0) as usize;
+    text.split('\n')
+        .map(|line| wrapped_line_count(line, columns))
+        .sum::<usize>()
+        .clamp(LINE_EDIT_MIN_LINES, LINE_EDIT_MAX_LINES)
+}
+
+/// Lines one paragraph takes when wrapped greedily on spaces at `columns`.
+fn wrapped_line_count(line: &str, columns: usize) -> usize {
+    let columns = columns.max(1);
+    if line.is_empty() {
+        return 1;
+    }
+    let mut rows = 1;
+    let mut used = 0;
+    for word in line.split(' ') {
+        let width = word.chars().count();
+        let gap = usize::from(used > 0);
+        if used + gap + width <= columns {
+            used += gap + width;
+        } else {
+            // The word starts a new row and may still be wider than one row.
+            rows += 1;
+            let mut remaining = width;
+            while remaining > columns {
+                remaining -= columns;
+                rows += 1;
+            }
+            used = remaining;
+        }
+    }
+    rows
+}
+
+#[allow(clippy::too_many_arguments)]
 fn sms_row(
     content: &str,
     speaker: &str,
@@ -9250,6 +11048,8 @@ fn sms_row(
     color: Color,
     ink: Color,
     tint: Option<Color>,
+    unsure: bool,
+    scheme: &Scheme,
     query: &str,
     case_sensitive: bool,
     whole_word: bool,
@@ -9257,10 +11057,32 @@ fn sms_row(
     size: f32,
     active: bool,
 ) -> Element<'static, Message> {
-    let background = tint.unwrap_or(color);
+    // A low-confidence bubble keeps its speaker hue but desaturates and takes a
+    // muted outline, so it reads as tentative next to a confident neighbour.
+    let background = tint.unwrap_or_else(|| {
+        if unsure {
+            theme::mix(color, scheme.panel_bg, 0.74)
+        } else {
+            color
+        }
+    });
+    let ink = if unsure {
+        theme::mix(ink, scheme.panel_bg, 0.42)
+    } else {
+        ink
+    };
     let border = if active {
         iced::border::Border {
             color: ink,
+            width: 2.0,
+            radius: 10.0.into(),
+        }
+    } else if unsure {
+        iced::border::Border {
+            color: Color {
+                a: 0.85,
+                ..scheme.muted
+            },
             width: 2.0,
             radius: 10.0.into(),
         }
@@ -9330,9 +11152,18 @@ fn line_element(
     size: f32,
     active: bool,
     show_timestamps: bool,
-    show_tip: bool,
+    hovered: bool,
+    mark_confidence: bool,
 ) -> Element<'static, Message> {
-    let ink = scheme.ink;
+    // A low-confidence line keeps its speaker hue but desaturates and dims its
+    // text, so the difference survives next to a confident line of the same
+    // speaker rather than reading as a slightly different shade.
+    let unsure = mark_confidence && is_low_confidence(line);
+    let ink = if unsure {
+        theme::mix(scheme.ink, scheme.panel_bg, 0.40)
+    } else {
+        scheme.ink
+    };
 
     let speaker = line.speaker.clone();
     let rest = line_text(line);
@@ -9367,11 +11198,34 @@ fn line_element(
         size,
     )));
     content = content.push(horizontal_space());
+    // Reserved right-edge slot so revealing the pencil never rewraps the text.
+    content = content.push(horizontal_space().width(Length::Fixed(size * 1.4)));
 
-    let background = search_tint.unwrap_or(accent);
+    // The whole line carries the speaker's colour, matching the fill behind
+    // the speaker label and the timeline swatch.
+    let background = search_tint.unwrap_or_else(|| {
+        if unsure {
+            // Dulled to a desaturated version of the speaker hue, so the line
+            // stays attributable but visibly tentative.
+            theme::mix(accent, scheme.panel_bg, 0.74)
+        } else {
+            accent
+        }
+    });
     let border = if active {
         iced::border::Border {
-            color: ink,
+            color: scheme.ink,
+            width: 2.0,
+            radius: 6.0.into(),
+        }
+    } else if unsure {
+        // A distinct outline, not just a paler fill: the row reads as flagged
+        // even when several dull lines neighbour each other.
+        iced::border::Border {
+            color: Color {
+                a: 0.85,
+                ..scheme.muted
+            },
             width: 2.0,
             radius: 6.0.into(),
         }
@@ -9396,7 +11250,28 @@ fn line_element(
         border: iced::border::Border::default(),
         ..button::Style::default()
     })
-    .on_press(Message::SelectLine(idx));
+    .on_press(Message::LineClicked(idx));
+
+    let pencil: Element<'static, Message> = if hovered {
+        button(icon_colored(ICON_PENCIL, size * 0.82, scheme.muted))
+            .padding([0, 2])
+            .style(|_theme, _status| button::Style {
+                background: None,
+                border: iced::border::Border::default(),
+                ..button::Style::default()
+            })
+            .on_press(Message::EditLine(idx))
+            .into()
+    } else {
+        horizontal_space().into()
+    };
+    let pencil_overlay: Element<'static, Message> = container(pencil)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .padding([0, 6])
+        .align_x(iced::Alignment::End)
+        .align_y(iced::Alignment::Center)
+        .into();
 
     let line: Element<'static, Message> = stack![
         container(content)
@@ -9413,34 +11288,15 @@ fn line_element(
                 .height(Length::Fill),
         )
         .interaction(mouse::Interaction::Pointer)
-        .on_right_press(Message::EditLine(idx)),
+        .on_right_press(Message::FlipLineSpeaker(idx)),
         keyboard_hit,
+        pencil_overlay,
     ]
     .into();
-    if !show_tip {
-        return line;
-    }
-    let tip_bg = scheme.tip_bg;
-    let tip_text = scheme.tip_text;
-    let tip_border = scheme.border;
-    tooltip(
-        line,
-        container(text("Right-click to edit").size(12))
-            .padding(6)
-            .style(move |_theme| container::Style {
-                background: Some(tip_bg.into()),
-                text_color: Some(tip_text),
-                border: iced::border::Border {
-                    color: tip_border,
-                    width: 1.0,
-                    radius: 6.0.into(),
-                },
-                shadow: soft_shadow(),
-                ..container::Style::default()
-            }),
-        tooltip::Position::Top,
-    )
-    .into()
+    mouse_area(line)
+        .on_enter(Message::LineHover(Some(idx)))
+        .on_exit(Message::LineHover(None))
+        .into()
 }
 
 const PILL: f32 = 1000.0;
@@ -9460,6 +11316,50 @@ fn action_width(label: &str) -> f32 {
 /// A button with a single-line text label.
 fn action_text<'a>(label: &'a str) -> iced::widget::Button<'a, Message> {
     action(text(label).wrapping(NO_WRAP)).width(Length::Fixed(action_width(label)))
+}
+
+/// One width for a row of text buttons, so the row reads as a single group
+/// instead of buttons sized to their own labels.
+fn equal_action_width(labels: &[&str]) -> f32 {
+    labels
+        .iter()
+        .map(|label| action_width(label))
+        .fold(0.0, f32::max)
+}
+
+/// Width shared by the line editor's merge and split buttons.
+fn line_edit_actions_width() -> f32 {
+    equal_action_width(&["Merge previous", "Merge next", "Split at cursor"])
+}
+
+/// A fixed-width text button with its label centred in the button.
+fn centred_action<'a>(label: &'a str, width: f32) -> iced::widget::Button<'a, Message> {
+    action(
+        container(text(label).wrapping(NO_WRAP))
+            .width(Length::Fill)
+            .align_x(iced::Alignment::Center),
+    )
+    .width(Length::Fixed(width))
+}
+
+/// Text action that sizes to its label, so a tight row can never squeeze the
+/// label into a wrap.
+fn fit_action<'a>(label: &'a str) -> iced::widget::Button<'a, Message> {
+    action(text(label).wrapping(NO_WRAP))
+        .width(Length::Shrink)
+        .padding([5, 10])
+}
+
+/// A toggle label with its check mark trailing at the right edge.
+fn toggle_label<'a>(label: &'a str, enabled: bool) -> Element<'a, Message> {
+    if enabled {
+        row![text(label).wrapping(NO_WRAP), icon(ICON_CHECK, 12.0)]
+            .spacing(4)
+            .align_y(iced::Alignment::Center)
+            .into()
+    } else {
+        text(label).wrapping(NO_WRAP).into()
+    }
 }
 
 /// A subtle drop shadow that gives surfaces a soft, raised look.
@@ -9562,7 +11462,44 @@ fn pill_button_active(theme: &iced::Theme, status: button::Status) -> button::St
     }
 }
 
+/// Selected toggle: an opaque grey fill, so it reads as a pressed state rather
+/// than a translucent tint over the transcript.
+fn pill_button_toggled(theme: &iced::Theme, status: button::Status) -> button::Style {
+    let base = button::secondary(theme, status);
+    let color = style_background_color(&base).unwrap_or(theme.palette().background);
+    let text = theme.palette().text;
+    let (amount, border_alpha, shadow): (f32, f32, Shadow) = match status {
+        button::Status::Hovered => (0.24, 0.55, soft_shadow()),
+        button::Status::Pressed => (0.30, 0.65, Shadow::default()),
+        button::Status::Disabled => (0.10, 0.25, Shadow::default()),
+        button::Status::Active => (0.17, 0.45, soft_shadow()),
+    };
+    button::Style {
+        background: Some(linear_gradient(
+            theme::mix(color, text, (amount + 0.05).min(1.0)),
+            theme::mix(color, text, amount),
+        )),
+        text_color: text,
+        border: iced::border::Border {
+            color: Color {
+                a: border_alpha,
+                ..text
+            },
+            width: 1.0,
+            radius: PILL.into(),
+        },
+        shadow,
+    }
+}
+
 /// One half of the CPU/GPU segmented toggle.
+///
+/// The selected half is a solid accent thumb with an `on_accent` label — the
+/// same fill/label pairing as the filled primary buttons — plus a rim border
+/// and [`soft_shadow`], so the current choice is unmistakably the blue one.
+/// The other half stays a live-looking label (text at reduced alpha, not the
+/// muted grey) so the control reads as two options. `muted` (locked /
+/// unavailable) is never blue, so it cannot be mistaken for the selection.
 fn segment_button(
     scheme: Scheme,
     selected: bool,
@@ -9570,36 +11507,74 @@ fn segment_button(
 ) -> impl Fn(&iced::Theme, button::Status) -> button::Style {
     move |theme, status| {
         let text = theme.palette().text;
-        let (background, color, border) = if selected {
+        // Unselected but selectable: full-strength text at reduced alpha. This
+        // is the colour of a choice you can still make, as opposed to the
+        // muted grey of one you cannot.
+        let idle = Color { a: 0.75, ..scheme.text };
+
+        let (background, color, border, shadow) = if muted {
+            // Locked or unavailable: no blue at all. When it is nonetheless
+            // the saved setting it keeps a faint neutral pill, so the state
+            // still reads without looking like an active blue selection.
+            let (fill, color) = if selected {
+                (
+                    Color { a: 0.08, ..text },
+                    Color {
+                        a: 0.60,
+                        ..scheme.muted
+                    },
+                )
+            } else {
+                (Color::TRANSPARENT, scheme.muted)
+            };
+            (fill.into(), color, Color::TRANSPARENT, Shadow::default())
+        } else if selected {
+            // Solid accent fill. Hover and press only move the lightness, and
+            // the label is `on_accent`: dark on the light-theme sky blue,
+            // light on the dark-theme blue, in both cases well above 7:1.
+            let base = match status {
+                button::Status::Hovered => theme::lighten(scheme.blue, 0.12),
+                button::Status::Pressed => theme::darken(scheme.blue, 0.12),
+                _ => scheme.blue,
+            };
+            let shadow = match status {
+                button::Status::Pressed => Shadow::default(),
+                _ => soft_shadow(),
+            };
             (
-                Color {
-                    a: 0.22,
-                    ..scheme.blue
-                },
-                text,
-                Color {
-                    a: 0.55,
-                    ..scheme.blue
-                },
+                linear_gradient(theme::lighten(base, 0.08), theme::darken(base, 0.08)),
+                scheme.on_accent,
+                // Rim blended toward the label colour: a deeper blue edge on
+                // the solid fill in both themes.
+                theme::mix(scheme.blue, scheme.on_accent, 0.25),
+                shadow,
             )
-        } else if muted {
-            (Color::TRANSPARENT, scheme.muted, Color::TRANSPARENT)
         } else {
-            match status {
-                button::Status::Hovered => (Color { a: 0.06, ..text }, text, Color::TRANSPARENT),
-                button::Status::Pressed => (Color { a: 0.12, ..text }, text, Color::TRANSPARENT),
-                _ => (Color::TRANSPARENT, scheme.muted, Color::TRANSPARENT),
-            }
+            // Hover and press still read on the unselected side. `Disabled`
+            // here only means "not clickable right now" (the run is in
+            // progress), not locked, so it dims but stays a visible label.
+            let (fill, color) = match status {
+                button::Status::Hovered => (0.12, text),
+                button::Status::Pressed => (0.18, text),
+                button::Status::Disabled => (0.0, Color { a: 0.45, ..scheme.text }),
+                button::Status::Active => (0.0, idle),
+            };
+            (
+                Color { a: fill, ..text }.into(),
+                color,
+                Color::TRANSPARENT,
+                Shadow::default(),
+            )
         };
         button::Style {
-            background: Some(background.into()),
+            background: Some(background),
             text_color: color,
             border: iced::border::Border {
                 color: border,
                 width: if selected { 1.0 } else { 0.0 },
                 radius: PILL.into(),
             },
-            shadow: Shadow::default(),
+            shadow,
         }
     }
 }
@@ -9910,6 +11885,7 @@ fn styled_spans(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use iced::advanced::widget::tree::{Tag, Tree};
     use std::sync::Mutex;
 
     /// Serializes tests that mutate the process environment.
@@ -9991,6 +11967,48 @@ mod tests {
         let mut app = App::new();
         app.license.grant_pro(now);
         app
+    }
+
+    /// Open a completed item synchronously in tests, bypassing the async
+    /// transcript-loading task used by the UI.
+    /// Open the line editor on `index` exactly as a right-click does, with the
+    /// window of rows the dialog shows.
+    fn open_line_edit(app: &mut App, index: usize) {
+        app.line_edit = LineEdit::new(index, app.edit_lines());
+    }
+
+    /// The current row of the open line editor, mutably.
+    fn current_row_mut(app: &mut App) -> &mut LineEditRow {
+        let edit = app.line_edit.as_mut().unwrap();
+        let position = edit.current_position();
+        edit.rows.get_mut(position).unwrap()
+    }
+
+    fn open_test_item(app: &mut App, index: usize) {
+        let source = app.queue[index].transcript.clone().unwrap();
+        let Some(text) = backend::read_transcript(&source) else {
+            app.selected = Some(index);
+            app.selected_view = Some(ItemView {
+                index,
+                source: source.clone(),
+                transcript: String::new(),
+                lines: Vec::new(),
+                turns: Vec::new(),
+                peaks: Arc::new(Vec::new()),
+                duration: app.queue[index].duration.map(|seconds| seconds as f32),
+                audio: app.queue[index].audio.clone(),
+                output: None,
+            });
+            app.view_error = Some(format!("Could not read {}", source.display()));
+            return;
+        };
+        let output = source
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .map(|ext| ext.eq_ignore_ascii_case("txt"))
+            .unwrap_or(false)
+            .then(|| source.clone());
+        let _ = app.open_item_view(index, Some((text, output)));
     }
 
     #[test]
@@ -10096,6 +12114,16 @@ mod tests {
     }
 
     #[test]
+    fn low_confidence_marking_is_on_by_default() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("confidence-default");
+        let app = pro_app();
+        // The marker is a view-only affordance: it must be visible as soon as a
+        // transcript with confidence data is opened, not hidden behind a toggle.
+        assert!(app.confidence_view);
+    }
+
+    #[test]
     fn transcript_renders_line_and_bubble_modes_with_search() {
         let _guard = env_lock();
         let _config = ConfigEnv::new("render-config");
@@ -10121,7 +12149,7 @@ mod tests {
             turns: Vec::new(),
             peaks: Arc::new(vec![0.2; 16]),
         });
-        let _ = app.view_item(0);
+        open_test_item(&mut app, 0);
         assert!(app.transcript_header(&app.scheme()).is_some());
 
         app.search_query = "hello".to_string();
@@ -10173,27 +12201,474 @@ mod tests {
             turns: Vec::new(),
             peaks: Arc::new(vec![0.2; 16]),
         });
-        let _ = app.view_item(0);
-        app.line_edit = Some(LineEdit {
-            index: 0,
-            speaker: "SPEAKER 1".to_string(),
-            content: text_editor::Content::with_text("hello world"),
-        });
+        open_test_item(&mut app, 0);
+        open_line_edit(&mut app, 0);
         let _ = app.update(Message::MergeNextLine);
         assert_eq!(app.selected_view.as_ref().unwrap().lines.len(), 1);
         assert!(app.shown_transcript().contains("hello world again"));
 
-        app.timeline_duration = Some(10.0);
-        app.playhead = 5.0;
-        app.line_edit = Some(LineEdit {
-            index: 0,
-            speaker: "SPEAKER 1".to_string(),
-            content: text_editor::Content::with_text("hello world again"),
-        });
-        let _ = app.update(Message::SplitLineAtPlayhead);
-        assert_eq!(app.selected_view.as_ref().unwrap().lines.len(), 2);
+        // The dialog stays open on the surviving line with the caret at the end.
+        assert_eq!(app.line_edit.as_ref().unwrap().index, 0);
+        let row = current_row_mut(&mut app);
+        assert_eq!(row.index, 0);
+        assert_eq!(row.content.text().trim_end(), "hello world again");
+        for _ in 0..11 {
+            row.content
+                .perform(text_editor::Action::Move(text_editor::Motion::Left));
+        }
+        let _ = app.update(Message::SplitLineAtCursor);
+        let lines = &app.selected_view.as_ref().unwrap().lines;
+        assert_eq!(lines.len(), 2);
+        assert_eq!(line_text(&lines[0]), "hello");
+        assert_eq!(line_text(&lines[1]), "world again");
+        // The left half keeps the original start; the right half is placed
+        // between it and the end of the timeline by the character ratio.
+        assert_eq!(lines[0].start, Some(0.0));
+        let right = lines[1].start.unwrap();
+        assert!((2.9..3.0).contains(&right), "right start {right}");
+        assert!(lines[1].raw.starts_with("[00:02] SPEAKER 1: world again"));
 
         let _ = std::fs::remove_dir_all(&media);
+    }
+
+    #[test]
+    fn merge_previous_line_folds_into_the_earlier_line() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("merge-prev-config");
+        let media = temp_dir("merge-prev-media");
+
+        let audio = media.join("talk.mp3");
+        std::fs::write(&audio, b"audio").unwrap();
+        let transcript = media.join("talk.txt");
+        std::fs::write(
+            &transcript,
+            "[00:00] SPEAKER 1: hello world\n[00:05] SPEAKER 1: again\n",
+        )
+        .unwrap();
+
+        let mut app = pro_app();
+        app.queue.push(QueueItem {
+            path: audio.clone(),
+            audio: Some(audio),
+            status: ItemStatus::Done,
+            duration: Some(10.0),
+            transcript: Some(transcript),
+            stats: None,
+            turns: Vec::new(),
+            peaks: Arc::new(vec![0.2; 16]),
+        });
+        open_test_item(&mut app, 0);
+        open_line_edit(&mut app, 1);
+        let _ = app.update(Message::MergePrevLine);
+        let lines = &app.selected_view.as_ref().unwrap().lines;
+        assert_eq!(lines.len(), 1);
+        assert!(app.shown_transcript().contains("hello world again"));
+        assert!(lines[0].raw.starts_with("[00:00]"));
+
+        let before = app.selected_view.as_ref().unwrap().lines.len();
+        open_line_edit(&mut app, 0);
+        let _ = app.update(Message::MergePrevLine);
+        assert_eq!(app.selected_view.as_ref().unwrap().lines.len(), before);
+        assert_eq!(
+            app.toast.as_ref().map(|(text, _)| text.as_str()),
+            Some("No previous line to merge")
+        );
+
+        let _ = std::fs::remove_dir_all(&media);
+    }
+
+    #[test]
+    fn line_editor_tints_the_edited_line_with_its_speaker_colour() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("line-accent-config");
+        let media = temp_dir("line-accent-media");
+
+        let audio = media.join("talk.mp3");
+        std::fs::write(&audio, b"audio").unwrap();
+        let transcript = media.join("talk.txt");
+        std::fs::write(
+            &transcript,
+            "[00:00] SPEAKER 1: hello\n[00:05] SPEAKER 2: hi there\n",
+        )
+        .unwrap();
+
+        let mut app = pro_app();
+        app.queue.push(QueueItem {
+            path: audio.clone(),
+            audio: Some(audio),
+            status: ItemStatus::Done,
+            duration: Some(10.0),
+            transcript: Some(transcript),
+            stats: None,
+            turns: Vec::new(),
+            peaks: Arc::new(vec![0.2; 16]),
+        });
+        open_test_item(&mut app, 0);
+
+        let scheme = app.scheme();
+        let order = app.speaker_order();
+        assert_eq!(order, vec!["SPEAKER 1".to_string(), "SPEAKER 2".to_string()]);
+
+        // Editing line 0 tints the dialog with the first palette slot; editing
+        // line 1 tints it with the second. Same tokens as the transcript.
+        for (index, position) in [(0usize, 0usize), (1, 1)] {
+            open_line_edit(&mut app, index);
+            let edited = app.line_edit.as_ref().unwrap().current_row().unwrap();
+            assert_eq!(
+                line_accent(&order, &edited.speaker, &scheme),
+                speaker_palette(position, &scheme)
+            );
+            assert_eq!(
+                line_accent(&order, &app.shown_lines()[index].speaker, &scheme),
+                speaker_palette(position, &scheme)
+            );
+            let _ = app.view();
+        }
+        assert_ne!(speaker_palette(0, &scheme), speaker_palette(1, &scheme));
+
+        let _ = std::fs::remove_dir_all(&media);
+    }
+
+    #[test]
+    fn line_editor_undo_and_redo_rewrite_the_transcript() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("undo-config");
+        let media = temp_dir("undo-media");
+
+        let audio = media.join("talk.mp3");
+        std::fs::write(&audio, b"audio").unwrap();
+        let transcript = media.join("talk.txt");
+        let original = "[00:00] SPEAKER 1: hello world\n[00:05] SPEAKER 1: again\n";
+        std::fs::write(&transcript, original).unwrap();
+
+        let mut app = pro_app();
+        app.queue.push(QueueItem {
+            path: audio.clone(),
+            audio: Some(audio),
+            status: ItemStatus::Done,
+            duration: Some(10.0),
+            transcript: Some(transcript.clone()),
+            stats: None,
+            turns: Vec::new(),
+            peaks: Arc::new(vec![0.2; 16]),
+        });
+        open_test_item(&mut app, 0);
+
+        open_line_edit(&mut app, 0);
+        assert!(!app.line_undo_available());
+        let _ = app.update(Message::MergeNextLine);
+        assert_eq!(app.selected_view.as_ref().unwrap().lines.len(), 1);
+        assert_eq!(
+            std::fs::read_to_string(&transcript).unwrap(),
+            "[00:00] SPEAKER 1: hello world again\n"
+        );
+        assert!(app.line_undo_available());
+        assert!(!app.line_redo_available());
+
+        let _ = app.update(Message::UndoLineEdit);
+        let lines = &app.selected_view.as_ref().unwrap().lines;
+        assert_eq!(lines.len(), 2);
+        assert_eq!(line_text(&lines[0]), "hello world");
+        assert_eq!(line_text(&lines[1]), "again");
+        assert_eq!(std::fs::read_to_string(&transcript).unwrap(), original);
+        // The dialog stays open and shows the restored line and its neighbours.
+        let edit = app.line_edit.as_ref().unwrap();
+        assert_eq!(edit.index, 0);
+        assert_eq!(edit.rows.len(), 2);
+        let row = edit.current_row().unwrap();
+        assert_eq!(row.index, 0);
+        assert_eq!(row.content.text().trim_end(), "hello world");
+        assert!(app.line_redo_available());
+
+        let _ = app.update(Message::RedoLineEdit);
+        assert_eq!(app.selected_view.as_ref().unwrap().lines.len(), 1);
+        assert_eq!(
+            std::fs::read_to_string(&transcript).unwrap(),
+            "[00:00] SPEAKER 1: hello world again\n"
+        );
+
+        let _ = std::fs::remove_dir_all(&media);
+    }
+
+    #[test]
+    fn saving_the_row_window_rewrites_every_edited_line() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("multi-edit-config");
+        let media = temp_dir("multi-edit-media");
+
+        let audio = media.join("talk.mp3");
+        std::fs::write(&audio, b"audio").unwrap();
+        let transcript = media.join("talk.txt");
+        let original = "[00:00] SPEAKER 1: one\n[00:05] SPEAKER 2: two\n[00:09] SPEAKER 1: three\n";
+        std::fs::write(&transcript, original).unwrap();
+
+        let mut app = pro_app();
+        app.queue.push(QueueItem {
+            path: audio.clone(),
+            audio: Some(audio),
+            status: ItemStatus::Done,
+            duration: Some(12.0),
+            transcript: Some(transcript.clone()),
+            stats: None,
+            turns: Vec::new(),
+            peaks: Arc::new(vec![0.2; 16]),
+        });
+        open_test_item(&mut app, 0);
+
+        let _ = app.update(Message::EditLine(1));
+        {
+            let edit = app.line_edit.as_mut().unwrap();
+            assert_eq!(edit.rows.len(), 3);
+            assert_eq!(edit.current_position(), 1);
+            let speakers = ["SPEAKER 1", "SPEAKER 1", "SPEAKER 2"];
+            for (row, speaker) in edit.rows.iter_mut().zip(speakers) {
+                row.speaker = speaker.to_string();
+                row.content = text_editor::Content::with_text(&format!("edited {}", row.index));
+            }
+        }
+        // The three-row dialog lays out without panicking.
+        let _ = app.view();
+        let _ = app.update(Message::SaveLineEdit);
+        assert!(app.line_edit.is_none());
+        assert_eq!(
+            std::fs::read_to_string(&transcript).unwrap(),
+            "[00:00] SPEAKER 1: edited 0\n[00:05] SPEAKER 1: edited 1\n[00:09] SPEAKER 2: edited 2\n"
+        );
+        // Three lines rewritten, one undo step for the whole save.
+        assert_eq!(app.line_history.undo.len(), 1);
+
+        let _ = app.update(Message::UndoLineEdit);
+        assert_eq!(std::fs::read_to_string(&transcript).unwrap(), original);
+
+        let _ = std::fs::remove_dir_all(&media);
+    }
+
+    #[test]
+    fn merging_after_editing_a_neighbour_keeps_that_edit() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("flush-merge-config");
+        let media = temp_dir("flush-merge-media");
+
+        let audio = media.join("talk.mp3");
+        std::fs::write(&audio, b"audio").unwrap();
+        let transcript = media.join("talk.txt");
+        std::fs::write(
+            &transcript,
+            "[00:00] SPEAKER 1: one\n[00:05] SPEAKER 1: two\n[00:09] SPEAKER 1: three\n",
+        )
+        .unwrap();
+
+        let mut app = pro_app();
+        app.queue.push(QueueItem {
+            path: audio.clone(),
+            audio: Some(audio),
+            status: ItemStatus::Done,
+            duration: Some(12.0),
+            transcript: Some(transcript.clone()),
+            stats: None,
+            turns: Vec::new(),
+            peaks: Arc::new(vec![0.2; 16]),
+        });
+        open_test_item(&mut app, 0);
+
+        let _ = app.update(Message::EditLine(1));
+        {
+            let edit = app.line_edit.as_mut().unwrap();
+            // The previous row is edited and the merge then moves the indices,
+            // so the edit has to be in the transcript before it runs.
+            edit.rows[0].speaker = "SPEAKER 2".to_string();
+            edit.rows[0].content = text_editor::Content::with_text("one edited");
+            // The next row is edited too, and the merge consumes it.
+            edit.rows[2].content = text_editor::Content::with_text("three edited");
+        }
+        let _ = app.update(Message::MergeNextLine);
+
+        let lines = &app.selected_view.as_ref().unwrap().lines;
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].speaker, "SPEAKER 2");
+        assert_eq!(line_text(&lines[0]), "one edited");
+        assert_eq!(line_text(&lines[1]), "two three edited");
+        assert_eq!(
+            std::fs::read_to_string(&transcript).unwrap(),
+            "[00:00] SPEAKER 2: one edited\n[00:05] SPEAKER 1: two three edited\n"
+        );
+
+        let _ = std::fs::remove_dir_all(&media);
+    }
+
+    #[test]
+    fn speaker_turns_fall_back_to_the_transcript_lines() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("turns-config");
+        let media = temp_dir("turns-media");
+
+        let audio = media.join("talk.mp3");
+        std::fs::write(&audio, b"audio").unwrap();
+        let transcript = media.join("talk.txt");
+        std::fs::write(
+            &transcript,
+            "[00:00] SPEAKER 1: hello\n[00:04] SPEAKER 2: hi\n[00:08] SPEAKER 1: bye\n",
+        )
+        .unwrap();
+
+        let mut app = pro_app();
+        app.queue.push(QueueItem {
+            path: audio.clone(),
+            audio: Some(audio),
+            status: ItemStatus::Done,
+            duration: Some(12.0),
+            transcript: Some(transcript),
+            stats: None,
+            turns: Vec::new(),
+            peaks: Arc::new(vec![0.2; 16]),
+        });
+        open_test_item(&mut app, 0);
+
+        let scheme = app.scheme();
+        assert_eq!(
+            app.speaker_order(),
+            vec!["SPEAKER 1".to_string(), "SPEAKER 2".to_string()]
+        );
+        let first = speaker_palette(0, &scheme);
+        let second = speaker_palette(1, &scheme);
+        assert_ne!(first, second);
+
+        // No diarization turns: the strip is rebuilt from the transcript.
+        let spans = app.speaker_turns(&scheme);
+        assert!(spans.len() >= 3, "expected at least three spans");
+        assert_eq!((spans[0].start, spans[0].end), (0.0, 4.0));
+        assert_eq!((spans[1].start, spans[1].end), (4.0, 8.0));
+        assert_eq!((spans[2].start, spans[2].end), (8.0, 12.0));
+        assert_eq!(spans[0].color, first);
+        assert_eq!(spans[1].color, second);
+        assert_eq!(spans[2].color, first);
+
+        // Matching turns still win: exact ranges, painted verbatim.
+        app.selected_view.as_mut().unwrap().turns = vec![
+            backend::Turn {
+                start: 1.0,
+                end: 3.0,
+                speaker: "SPEAKER 2".to_string(),
+            },
+            backend::Turn {
+                start: 5.0,
+                end: 6.0,
+                speaker: "SPEAKER 1".to_string(),
+            },
+        ];
+        let spans = app.speaker_turns(&scheme);
+        assert_eq!(spans.len(), 2);
+        assert_eq!((spans[0].start, spans[0].end), (1.0, 3.0));
+        assert_eq!(spans[0].color, second);
+        assert_eq!((spans[1].start, spans[1].end), (5.0, 6.0));
+        assert_eq!(spans[1].color, first);
+
+        let _ = std::fs::remove_dir_all(&media);
+    }
+
+    #[test]
+    fn transcribing_only_covers_untranscribed_files() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("scope-config");
+        let dir = temp_dir("scope-media");
+
+        let mut app = pro_app();
+        for name in ["a.mp3", "b.mp3"] {
+            let path = dir.join(name);
+            std::fs::write(&path, b"audio").unwrap();
+            let transcript = dir.join(format!("{name}.txt"));
+            std::fs::write(&transcript, "[00:00] SPEAKER 1: hi\n").unwrap();
+            app.queue.push(QueueItem {
+                path: path.clone(),
+                audio: Some(path),
+                status: ItemStatus::Done,
+                duration: Some(4.0),
+                transcript: Some(transcript),
+                stats: None,
+                turns: Vec::new(),
+                peaks: Arc::new(vec![0.1]),
+            });
+        }
+
+        // Nothing selected, nothing queued: the queue is not re-run.
+        app.selected = None;
+        app.start();
+        assert_eq!(app.queue[0].status, ItemStatus::Done);
+        assert_eq!(app.queue[1].status, ItemStatus::Done);
+        assert_eq!(
+            app.toast.as_ref().map(|(text, _)| text.as_str()),
+            Some("Select a finished file to transcribe it again")
+        );
+
+        // A selected finished file is the only one queued again.
+        app.selected = Some(1);
+        app.start();
+        assert_eq!(app.queue[0].status, ItemStatus::Done);
+        assert!(matches!(app.queue[1].status, ItemStatus::Pending));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn scrubbing_the_timeline_jumps_the_transcript() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("seek-jump-config");
+        let media = temp_dir("seek-jump-media");
+        let audio = media.join("talk.mp3");
+        std::fs::write(&audio, b"audio").unwrap();
+        let transcript = media.join("talk.txt");
+        std::fs::write(
+            &transcript,
+            "[00:00] SPEAKER 1: one\n[00:05] SPEAKER 2: two\n[00:10] SPEAKER 1: three\n",
+        )
+        .unwrap();
+
+        let mut app = pro_app();
+        app.queue.push(QueueItem {
+            path: audio.clone(),
+            audio: Some(audio),
+            status: ItemStatus::Done,
+            duration: Some(20.0),
+            transcript: Some(transcript),
+            stats: None,
+            turns: Vec::new(),
+            peaks: Arc::new(vec![0.2; 16]),
+        });
+        open_test_item(&mut app, 0);
+        // A measured viewport is what makes scroll targets computable.
+        app.transcript_content = 1200.0;
+        app.transcript_viewport = 400.0;
+        app.scroll_target = None;
+
+        let expected = app.follow_target(1).unwrap();
+        let _ = app.update(Message::Seek(5.0));
+        assert_eq!(app.playhead, 5.0);
+        assert!(app.scroll_seek);
+        assert_eq!(app.scroll_target, Some(expected));
+
+        let _ = std::fs::remove_dir_all(&media);
+    }
+
+    #[test]
+    fn the_wall_clock_is_never_dropped_for_the_eta() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("clock-config");
+
+        let mut app = pro_app();
+        app.status = Status::Running;
+        app.run_start = Some(Instant::now() - Duration::from_secs(42));
+
+        // No estimate yet: elapsed only.
+        app.eta_shown = None;
+        let text = app.timer_text();
+        assert!(text.starts_with("0:4"), "elapsed missing: {text}");
+        assert!(!text.contains('\u{00b7}'));
+
+        // With an estimate the elapsed time still leads the string.
+        app.eta_shown = Some(900.0);
+        let text = app.timer_text();
+        assert!(text.starts_with("0:4"), "elapsed dropped: {text}");
+        assert!(text.contains("min left"), "estimate missing: {text}");
     }
 
     #[test]
@@ -10222,7 +12697,7 @@ mod tests {
             turns: Vec::new(),
             peaks: Arc::new(vec![0.2; 16]),
         });
-        let _ = app.view_item(0);
+        open_test_item(&mut app, 0);
         app.speaker_filter = Some("SPEAKER 1".to_string());
         app.invalidate_derived();
 
@@ -10231,6 +12706,12 @@ mod tests {
         assert!(order
             .iter()
             .all(|index| app.shown_lines()[*index].speaker == "SPEAKER 1"));
+
+        // Switching speakers keeps the current scroll position.
+        app.scroll_target = Some(321.0);
+        let _ = app.update(Message::SpeakerFilterChanged("All speakers".to_string()));
+        assert_eq!(app.scroll_target, Some(321.0));
+        assert!(app.speaker_filter.is_none());
 
         app.search_query = "hello".to_string();
         assert_eq!(app.matching_lines().len(), 2);
@@ -10306,7 +12787,7 @@ mod tests {
             peaks: Arc::new(Vec::new()),
         });
 
-        let _ = app.view_item(0);
+        open_test_item(&mut app, 0);
         assert!(app.shown_transcript().contains("[00:01] SPEAKER 1: hello"));
         assert!(!app.shown_transcript().contains("\"lines\""));
         assert!(app.selected_view.as_ref().unwrap().output.is_none());
@@ -10346,10 +12827,69 @@ mod tests {
             .into_iter()
             .filter_map(|line| match line {
                 SummaryLine::File(name) => Some(name),
-                SummaryLine::Body(_) => None,
+                SummaryLine::Body(_) | SummaryLine::Table(..) => None,
             })
             .collect();
         assert_eq!(files, vec!["first.mp3", "second.mp3"]);
+
+        let _ = std::fs::remove_dir_all(&media);
+    }
+
+    #[test]
+    fn summary_tabulates_every_run_when_the_queue_held_more_than_one() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("batch-summary-table-config");
+        let media = temp_dir("batch-summary-table-media");
+
+        let make_item = |name: &str, audio: f64, run: f64, words: usize| {
+            let path = media.join(name);
+            std::fs::write(&path, b"audio").unwrap();
+            let mut stats = backend::Stats {
+                audio_seconds: audio,
+                run_seconds: run,
+                speakers: 2,
+                ..Default::default()
+            };
+            stats
+                .speaker_stats
+                .insert("A".to_string(), backend::SpeakerStat { seconds: audio as f32, segments: 3, words });
+            QueueItem {
+                path: path.clone(),
+                audio: Some(path),
+                status: ItemStatus::Done,
+                duration: Some(audio),
+                transcript: None,
+                stats: Some(stats),
+                turns: Vec::new(),
+                peaks: Arc::new(Vec::new()),
+            }
+        };
+
+        let mut app = pro_app();
+        app.queue.push(make_item("first.mp3", 60.0, 30.0, 100));
+        app.queue.push(make_item("second.mp3", 120.0, 40.0, 250));
+        app.batch_paths = vec![media.join("first.mp3"), media.join("second.mp3")];
+
+        let lines = app.stats_lines();
+        let Some(SummaryLine::Table(headers, rows)) = lines.first() else {
+            panic!("expected the cross-run table first");
+        };
+        assert_eq!(headers.first().map(String::as_str), Some("File"));
+        // One row per file plus the total.
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0][0], "first.mp3");
+        assert_eq!(rows[2][0], "2 files");
+        assert_eq!(rows[2][1], "3:00");
+        assert_eq!(rows[2][3], "2.6\u{00d7}");
+        assert_eq!(rows[2][5], "350");
+
+        // A single file keeps the plain per-file block, with no table.
+        app.queue.remove(1);
+        app.batch_paths = vec![media.join("first.mp3")];
+        assert!(!app
+            .stats_lines()
+            .iter()
+            .any(|line| matches!(line, SummaryLine::Table(..))));
 
         let _ = std::fs::remove_dir_all(&media);
     }
@@ -10382,7 +12922,7 @@ mod tests {
         });
 
         // Clicking the completed row opens its transcript.
-        let _ = app.view_item(0);
+        open_test_item(&mut app, 0);
         assert_eq!(app.selected, Some(0));
         assert_eq!(app.shown_lines().len(), 2);
         assert!(app.shown_transcript().contains("SPEAKER 1: hello"));
@@ -10400,9 +12940,145 @@ mod tests {
         // A missing transcript surfaces the inline error state.
         std::fs::remove_file(&transcript).unwrap();
         app.return_to_live();
-        let _ = app.view_item(0);
+        open_test_item(&mut app, 0);
         assert!(app.view_error.is_some());
         assert!(app.shown_lines().is_empty());
+    }
+
+    #[test]
+    fn right_click_flips_and_double_click_edits_a_line() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("flip-speaker");
+        let media = temp_dir("flip-speaker-media");
+        let audio = media.join("talk.mp3");
+        std::fs::write(&audio, b"audio").unwrap();
+        let transcript = media.join("talk.txt");
+        std::fs::write(
+            &transcript,
+            "[00:00] SPEAKER 1: hello\n[00:05] SPEAKER 2: hi\n[00:09] SPEAKER 1: bye\n",
+        )
+        .unwrap();
+
+        let mut app = pro_app();
+        app.queue.push(QueueItem {
+            path: audio.clone(),
+            audio: Some(audio),
+            status: ItemStatus::Done,
+            duration: Some(10.0),
+            transcript: Some(transcript.clone()),
+            stats: None,
+            turns: Vec::new(),
+            peaks: Arc::new(vec![0.2; 16]),
+        });
+        open_test_item(&mut app, 0);
+
+        let _ = app.update(Message::FlipLineSpeaker(1));
+        assert_eq!(app.shown_lines()[1].speaker, "SPEAKER 1");
+        // Only the clicked line moves; its neighbours keep their speakers.
+        assert_eq!(app.shown_lines()[0].speaker, "SPEAKER 1");
+        assert_eq!(app.shown_lines()[2].speaker, "SPEAKER 1");
+        assert!(app.modified);
+        let written = std::fs::read_to_string(&transcript).unwrap();
+        assert!(written.contains("[00:05] SPEAKER 1: hi"));
+        assert!(written.contains("[00:09] SPEAKER 1: bye"));
+
+        let _ = app.update(Message::LineClicked(0));
+        assert!(app.line_edit.is_none());
+        let _ = app.update(Message::LineClicked(0));
+        assert!(app.line_edit.is_some());
+
+        let _ = std::fs::remove_dir_all(&media);
+    }
+
+    #[test]
+    fn locked_playhead_ignores_line_clicks() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("lock-playhead");
+        let media = temp_dir("lock-playhead-media");
+        let audio = media.join("talk.mp3");
+        std::fs::write(&audio, b"audio").unwrap();
+        let transcript = media.join("talk.txt");
+        std::fs::write(
+            &transcript,
+            "[00:00] SPEAKER 1: first\n[00:05] SPEAKER 2: second\n",
+        )
+        .unwrap();
+
+        let mut app = pro_app();
+        app.queue.push(QueueItem {
+            path: audio.clone(),
+            audio: Some(audio),
+            status: ItemStatus::Done,
+            duration: Some(10.0),
+            transcript: Some(transcript),
+            stats: None,
+            turns: Vec::new(),
+            peaks: Arc::new(vec![0.2; 16]),
+        });
+        open_test_item(&mut app, 0);
+        app.playhead = 5.0;
+
+        let _ = app.update(Message::TogglePlayheadLock);
+        let _ = app.update(Message::LineClicked(0));
+        assert_eq!(app.playhead, 5.0);
+
+        let _ = app.update(Message::TogglePlayheadLock);
+        let _ = app.update(Message::LineClicked(0));
+        assert_eq!(app.playhead, 0.0);
+
+        let _ = std::fs::remove_dir_all(&media);
+    }
+
+    #[test]
+    fn joining_adjacent_lines_and_save_as() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("join-config");
+        let media = temp_dir("join-media");
+
+        let audio = media.join("talk.mp3");
+        std::fs::write(&audio, b"audio").unwrap();
+        let transcript = media.join("talk.txt");
+        std::fs::write(
+            &transcript,
+            "[00:00] SPEAKER 1: hello there\n\
+             [00:05] SPEAKER 1: hello again\n\
+             [00:07] SPEAKER 2: hi\n",
+        )
+        .unwrap();
+
+        let mut app = pro_app();
+        app.queue.push(QueueItem {
+            path: audio.clone(),
+            audio: Some(audio),
+            status: ItemStatus::Done,
+            duration: Some(10.0),
+            transcript: Some(transcript),
+            stats: None,
+            turns: Vec::new(),
+            peaks: Arc::new(vec![0.2; 16]),
+        });
+        open_test_item(&mut app, 0);
+        assert_eq!(app.shown_lines().len(), 3);
+
+        let _ = app.update(Message::ToggleJoinLines);
+        assert!(app.join_lines);
+        assert!(app.modified);
+        assert_eq!(app.shown_lines().len(), 2);
+        assert!(app
+            .shown_transcript()
+            .contains("[00:00] SPEAKER 1: hello there hello again"));
+
+        let joined = media.join("talk-joined.txt");
+        let _ = app.update(Message::SaveTranscriptAsPicked(Some(joined.clone())));
+        let saved = std::fs::read_to_string(&joined).unwrap();
+        assert!(saved.contains("SPEAKER 1: hello there hello again"));
+        assert!(!app.modified);
+
+        let _ = app.update(Message::ToggleJoinLines);
+        assert!(!app.join_lines);
+        assert_eq!(app.shown_lines().len(), 3);
+
+        let _ = std::fs::remove_dir_all(&media);
     }
 
     #[test]
@@ -10459,15 +13135,15 @@ mod tests {
             turns: Vec::new(),
             peaks: Arc::new(Vec::new()),
         });
-        let _ = app.view_item(0);
+        open_test_item(&mut app, 0);
 
         let _ = app.update(Message::EditLine(0));
         {
-            let edit = app.line_edit.as_mut().unwrap();
-            assert_eq!(edit.speaker, "SPEAKER 1");
-            assert_eq!(edit.content.text().trim_end(), "hello");
-            edit.speaker = "ALICE".to_string();
-            edit.content = text_editor::Content::with_text("hello there");
+            let row = current_row_mut(&mut app);
+            assert_eq!(row.speaker, "SPEAKER 1");
+            assert_eq!(row.content.text().trim_end(), "hello");
+            row.speaker = "ALICE".to_string();
+            row.content = text_editor::Content::with_text("hello there");
         }
         // The editor dialog renders without panicking.
         let _ = app.view();
@@ -10480,7 +13156,7 @@ mod tests {
 
         // Enter saves the form from the line editor.
         let _ = app.update(Message::EditLine(1));
-        app.line_edit.as_mut().unwrap().content = text_editor::Content::with_text("hi there");
+        current_row_mut(&mut app).content = text_editor::Content::with_text("hi there");
         let _ = app.update(Message::EnterSubmit);
         assert!(app.line_edit.is_none());
         let saved = std::fs::read_to_string(&transcript).unwrap();
@@ -10551,7 +13227,7 @@ mod tests {
         assert!(!app.player_ready());
 
         // A completed item stays playable during that same run.
-        let _ = app.view_item(0);
+        open_test_item(&mut app, 0);
         assert!(app.player_ready());
 
         let _ = std::fs::remove_dir_all(&media);
@@ -10869,6 +13545,43 @@ mod tests {
     }
 
     #[test]
+    fn all_done_snaps_the_bars_and_clears_the_current_item() {
+        let _guard = env_lock();
+        let config = ConfigEnv::new("all-done-bars");
+        let mut app = pro_app();
+
+        let audio = config.dir.join("done.mp3");
+        std::fs::write(&audio, b"audio").unwrap();
+        let transcript = config.dir.join("done.txt");
+        std::fs::write(&transcript, b"transcript").unwrap();
+        app.queue.push(QueueItem {
+            path: audio.clone(),
+            audio: Some(audio.clone()),
+            status: ItemStatus::Done,
+            duration: Some(10.0),
+            transcript: Some(transcript),
+            stats: None,
+            turns: Vec::new(),
+            peaks: Arc::new(Vec::new()),
+        });
+        app.batch_paths = vec![audio];
+        app.current = Some(0);
+        app.current_index = Some(0);
+        app.status = Status::Running;
+        app.progress = 0.26;
+        app.progress_shown = 0.26;
+        app.overall_shown = 0.26;
+
+        app.events.lock().unwrap().push_back(Event::AllDone);
+        let _ = app.update(Message::Tick);
+
+        assert!(matches!(app.status, Status::Done));
+        assert_eq!(app.progress_shown, 1.0);
+        assert_eq!(app.overall_shown, 1.0);
+        assert!(app.current_index.is_none());
+    }
+
+    #[test]
     fn palette_has_distinct_colors_for_many_speakers() {
         for scheme in [Scheme::light(), Scheme::dark()] {
             let colors: Vec<Color> = (0..10)
@@ -10894,6 +13607,53 @@ mod tests {
         let unicode = "日本語のインタビュー録音ファイル";
         assert!(ellipsize(unicode, 8).chars().count() <= 8);
         assert!(ellipsize(unicode, 8).ends_with('\u{2026}'));
+    }
+
+    #[test]
+    fn line_edit_buttons_share_one_width() {
+        let labels = ["Merge previous", "Merge next", "Split at cursor"];
+        let width = line_edit_actions_width();
+        // The widest label decides the row, and every other label fits.
+        assert_eq!(width, equal_action_width(&labels));
+        assert_eq!(
+            width,
+            labels
+                .iter()
+                .map(|label| action_width(label))
+                .fold(0.0, f32::max)
+        );
+        for label in labels {
+            assert!(action_width(label) <= width, "{label} overflows {width}");
+        }
+    }
+
+    #[test]
+    fn line_edit_height_follows_the_text() {
+        let size = 16.0;
+        // A short line is one line tall: the field only covers its own text.
+        let short = line_edit_height("hello there", size);
+        assert_eq!(
+            visual_line_count("hello there", size, line_edit_text_width(size)),
+            1
+        );
+        assert_eq!(short, line_edit_height("", size));
+        assert_eq!(short, size * LINE_HEIGHT_FACTOR + 2.0 * LINE_EDIT_PAD_Y);
+
+        // Wrapping text grows the field.
+        let medium = "word ".repeat(48);
+        let medium_lines = visual_line_count(&medium, size, line_edit_text_width(size));
+        assert!(medium_lines > LINE_EDIT_MIN_LINES, "{medium_lines}");
+        assert!(line_edit_height(&medium, size) > short);
+
+        // A very long paste stops at the ceiling, keeping the dialog on screen.
+        let long = "word ".repeat(4000);
+        let long_lines = visual_line_count(&long, size, line_edit_text_width(size));
+        assert_eq!(long_lines, LINE_EDIT_MAX_LINES);
+        assert!(line_edit_height(&long, size) < 400.0);
+
+        // An empty paragraph still occupies a line, and hard breaks add up.
+        assert_eq!(wrapped_line_count("", 40), 1);
+        assert_eq!(visual_line_count("a\nb\nc\nd\ne", size, 10_000.0), 5);
     }
 
     #[test]
@@ -11081,6 +13841,92 @@ mod tests {
     }
 
     #[test]
+    fn clicking_a_finished_transcript_opens_it_during_a_run() {
+        let _guard = env_lock();
+        let dir = temp_dir("finished-click-media");
+
+        let done_audio = dir.join("done.mp3");
+        std::fs::write(&done_audio, b"audio").unwrap();
+        let transcript = dir.join("done.txt");
+        std::fs::write(&transcript, "[00:00] SPEAKER 1: hi\n").unwrap();
+        let pending_audio = dir.join("next.mp3");
+        std::fs::write(&pending_audio, b"audio").unwrap();
+
+        // A live run with one finished row and one waiting row.
+        let seed = |app: &mut App| {
+            app.queue.push(QueueItem {
+                path: done_audio.clone(),
+                audio: Some(done_audio.clone()),
+                status: ItemStatus::Done,
+                duration: Some(1.5),
+                transcript: Some(transcript.clone()),
+                stats: None,
+                turns: Vec::new(),
+                peaks: Arc::new(vec![0.1, 0.2, 0.3]),
+            });
+            app.queue.push(QueueItem {
+                path: pending_audio.clone(),
+                audio: Some(pending_audio.clone()),
+                status: ItemStatus::Pending,
+                duration: None,
+                transcript: None,
+                stats: None,
+                turns: Vec::new(),
+                peaks: Arc::new(Vec::new()),
+            });
+            app.status = Status::Running;
+            app.selected = None;
+            app.selected_view = None;
+        };
+
+        // Pro: the click opens the finished row even from the live run view.
+        {
+            let _config = ConfigEnv::new("finished-click-pro");
+            let mut app = pro_app();
+            seed(&mut app);
+
+            let _ = app.update(Message::QueueDragStart(0));
+            assert!(app.queue_drag.is_none());
+            assert_eq!(app.selected, Some(0));
+            assert!(app.selected_view.is_some());
+            // Retention keys on the open finished view, not on the click.
+            assert!(app.keeps_finished_view());
+
+            // The row being transcribed is still clickable: it returns to the
+            // live transcript from the pinned one.
+            app.queue[1].status = ItemStatus::Running;
+            app.current_index = Some(1);
+            let _ = app.update(Message::QueueDragStart(1));
+            assert!(app.selected.is_none());
+            assert!(app.selected_view.is_none());
+
+            // And the finished row can be opened again afterwards.
+            let _ = app.update(Message::QueueDragStart(0));
+            assert_eq!(app.selected, Some(0));
+            assert!(app.keeps_finished_view());
+            app.selected_view = None;
+            assert!(!app.keeps_finished_view());
+        }
+
+        // Free: the same click is an upsell, not a view.
+        {
+            let _config = ConfigEnv::new("finished-click-free");
+            let mut app = App::new();
+            seed(&mut app);
+            assert!(app.shows(license::Audience::FreeOnly));
+
+            let _ = app.update(Message::QueueDragStart(0));
+            assert!(app.queue_drag.is_none());
+            assert!(app.selected.is_none());
+            assert!(app.selected_view.is_none());
+            assert_eq!(
+                app.toast.as_ref().map(|(text, _)| text.as_str()),
+                Some("Reviewing during active transcription is a Pro feature")
+            );
+        }
+    }
+
+    #[test]
     fn cached_orders_match_direct_derivation_after_edit() {
         let _guard = env_lock();
         let _config = ConfigEnv::new("cache-order-config");
@@ -11106,7 +13952,7 @@ mod tests {
             turns: Vec::new(),
             peaks: Arc::new(Vec::new()),
         });
-        let _ = app.view_item(0);
+        open_test_item(&mut app, 0);
 
         // Populate both caches before mutating a line.
         assert_eq!(app.display_order(), sorted_display_order(app.shown_lines()));
@@ -11117,9 +13963,9 @@ mod tests {
 
         let _ = app.update(Message::EditLine(0));
         {
-            let edit = app.line_edit.as_mut().unwrap();
-            edit.speaker = "ZED".to_string();
-            edit.content = text_editor::Content::with_text("changed");
+            let row = current_row_mut(&mut app);
+            row.speaker = "ZED".to_string();
+            row.content = text_editor::Content::with_text("changed");
         }
         let _ = app.update(Message::SaveLineEdit);
 
@@ -11138,5 +13984,706 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&media);
+    }
+
+    /// One transcript row per line, opened as a completed item so the follow
+    /// logic takes the playback (centred) path rather than the live bottom one.
+    fn follow_app(tag: &str) -> (App, PathBuf) {
+        let media = temp_dir(tag);
+        let audio = media.join("talk.mp3");
+        std::fs::write(&audio, b"audio").unwrap();
+        let transcript = media.join("talk.txt");
+        std::fs::write(
+            &transcript,
+            "[00:00] SPEAKER 1: one\n[00:02] SPEAKER 2: two\n[00:04] SPEAKER 1: three\n[00:06] SPEAKER 2: four\n",
+        )
+        .unwrap();
+        let mut app = pro_app();
+        app.queue.push(QueueItem {
+            path: audio.clone(),
+            audio: Some(audio),
+            status: ItemStatus::Done,
+            duration: Some(8.0),
+            transcript: Some(transcript),
+            stats: None,
+            turns: Vec::new(),
+            peaks: Arc::new(vec![0.1; 16]),
+        });
+        open_test_item(&mut app, 0);
+        app.transcript_viewport = 400.0;
+        app.transcript_content = 1600.0;
+        app.follow_playhead = true;
+        (app, media)
+    }
+
+    #[test]
+    fn follow_target_is_not_reissued_for_an_unchanged_view() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("follow-target-config");
+        let (mut app, media) = follow_app("follow-target-media");
+
+        let order = app.display_order();
+        assert_eq!(order.len(), 4);
+
+        // The scrollable landed 10 px away from what we asked for (average row
+        // heights are estimates, and `scroll_to` clamps/rounds). The reported
+        // offset therefore never matches the desired target.
+        app.transcript_offset = 810.0;
+
+        // 2.5 rows * 400 px - 200 px viewport = 800.
+        assert_eq!(app.follow_scroll(Some(order[2])), Some(800.0));
+        // Every following tick used to re-issue, each time with a target that
+        // had drifted a little: that is the jitter.
+        for _ in 0..5 {
+            assert_eq!(app.follow_scroll(Some(order[2])), None);
+            // The offset does not move because the target is unreachable.
+            app.transcript_offset = 810.0;
+        }
+
+        // Streamed growth of a couple of pixels does not move the estimate.
+        app.transcript_content = 1602.0;
+        assert_eq!(app.follow_scroll(Some(order[2])), None);
+
+        // A different active line is a real move and still scrolls at once,
+        // even inside the frame budget.
+        let next = app.follow_scroll(Some(order[3])).unwrap();
+        assert!((next - 800.0).abs() > 6.0, "{next}");
+
+        // A user who scrolled away with Follow off gets no programmatic scroll.
+        app.follow_playhead = false;
+        app.transcript_at_bottom = false;
+        assert_eq!(app.follow_scroll(Some(order[3])), None);
+
+        let _ = std::fs::remove_dir_all(&media);
+    }
+
+    #[test]
+    fn follow_target_holds_back_small_drift() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("follow-drift-config");
+        let (mut app, media) = follow_app("follow-drift-media");
+        let order = app.display_order();
+
+        app.transcript_offset = 780.0;
+        assert_eq!(app.follow_scroll(Some(order[2])), Some(800.0));
+
+        // The scroll landed, so the pending offset is stale by the time the
+        // next tick runs; a few pixels of drift must not queue another jump.
+        app.transcript_offset = 802.0;
+        app.transcript_content = 1610.0;
+        assert_eq!(app.follow_scroll(Some(order[2])), None);
+
+        let _ = std::fs::remove_dir_all(&media);
+    }
+
+    /// Transcript whose first line starts later than 0, so a playhead of 0
+    /// matches no line and `active_line_index` falls back to the first row.
+    fn delayed_follow_app(tag: &str) -> (App, PathBuf) {
+        let media = temp_dir(tag);
+        let audio = media.join("late.mp3");
+        std::fs::write(&audio, b"audio").unwrap();
+        let transcript = media.join("late.txt");
+        std::fs::write(
+            &transcript,
+            "[00:20] SPEAKER 1: one\n[00:24] SPEAKER 2: two\n[00:28] SPEAKER 1: three\n[00:32] SPEAKER 2: four\n",
+        )
+        .unwrap();
+        let mut app = pro_app();
+        app.queue.push(QueueItem {
+            path: audio.clone(),
+            audio: Some(audio),
+            status: ItemStatus::Done,
+            duration: Some(40.0),
+            transcript: Some(transcript),
+            stats: None,
+            turns: Vec::new(),
+            peaks: Arc::new(vec![0.1; 16]),
+        });
+        open_test_item(&mut app, 0);
+        app.transcript_viewport = 400.0;
+        app.transcript_content = 2000.0;
+        app.follow_playhead = true;
+        (app, media)
+    }
+
+    #[test]
+    fn follow_never_scrolls_to_the_top() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("follow-top-config");
+        let (mut app, media) = delayed_follow_app("follow-top-media");
+
+        // The playhead sits before the first line, so nothing matches it.
+        app.playhead = 0.0;
+        app.transcript_offset = 900.0;
+
+        let first = app.display_order().first().copied().unwrap();
+        // The highlight still falls back to the first row...
+        assert_eq!(app.active_line_index(), Some(first));
+        // ...but Follow must not: no line to follow, no scroll.
+        assert_eq!(app.follow_line_index(), None);
+        assert_eq!(app.next_follow_target(app.follow_line_index()), None);
+
+        // Even handed the first row, centring it would clamp to 0. Follow
+        // declines instead of jumping to the top.
+        assert_eq!(app.next_follow_target(Some(first)), None);
+        assert_eq!(app.transcript_offset, 900.0);
+
+        // A playhead that does match a later line still scrolls.
+        app.playhead = 28.0;
+        app.follow_issue = None;
+        let target = app.follow_scroll(app.follow_line_index()).unwrap();
+        assert!(target > FOLLOW_DEADBAND, "{target}");
+
+        // Content that fits the pane cannot scroll, even if the estimate of
+        // the bottom lands on 0 after a transient re-layout shrink.
+        app.follow_playhead = false;
+        app.selected_view = None;
+        app.status = Status::Running;
+        app.transcript_at_bottom = true;
+        app.transcript_viewport = 400.0;
+        app.transcript_content = 300.0;
+        assert_eq!(app.next_follow_target(None), None);
+
+        let _ = std::fs::remove_dir_all(&media);
+    }
+
+    /// Collect the index path of every widget carrying `tag`.
+    fn tag_paths(tree: &Tree, tag: Tag, path: &mut Vec<usize>, out: &mut Vec<Vec<usize>>) {
+        if tree.tag == tag {
+            out.push(path.clone());
+        }
+        for (index, child) in tree.children.iter().enumerate() {
+            path.push(index);
+            tag_paths(child, tag, path, out);
+            path.pop();
+        }
+    }
+
+    /// Where every scrollable sits in the view tree. iced keys widget state
+    /// (including the scroll offset) off this position, so a changed path means
+    /// a remount back to the top.
+    fn scrollable_paths(app: &App) -> Vec<Vec<usize>> {
+        // The state type is private in iced, so learn its tag from a probe.
+        let probe: Element<'static, Message> = scrollable(horizontal_space()).into();
+        let tag = Tree::new(probe.as_widget()).tag;
+
+        let view = app.view();
+        let tree = Tree::new(view.as_widget());
+        let mut out = Vec::new();
+        tag_paths(&tree, tag, &mut Vec::new(), &mut out);
+        assert!(!out.is_empty(), "expected scrollables in the view");
+        out
+    }
+
+    #[test]
+    fn transcript_row_height_is_latched_not_self_referential() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("pane-height-config");
+        let (mut app, media) = follow_app("pane-height-media");
+
+        // Ten rendered rows filling 400 px: the window measured 40 px per row.
+        app.pane_window.set((0, 10, 0.0, 0.0));
+        app.transcript_content = 400.0;
+        assert_eq!(app.pane_line_height(24.0), 40.0);
+
+        // The reported content contains the spacers built from this estimate,
+        // so it drifts on its own while scrolling. A few pixels must not move
+        // the estimate — that feedback is what crept the pane.
+        for content in [410.0, 430.0, 460.0, 440.0] {
+            app.transcript_content = content;
+            assert_eq!(app.pane_line_height(24.0), 40.0, "content {content}");
+        }
+
+        // A real size change (bubble mode, zoom) recalibrates.
+        app.transcript_content = 900.0;
+        assert_eq!(app.pane_line_height(24.0), 90.0);
+
+        let _ = std::fs::remove_dir_all(&media);
+    }
+
+    #[test]
+    fn transcript_window_holds_still_while_scrolling_inside_it() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("pane-window-config");
+        let (mut app, media) = follow_app("pane-window-media");
+
+        // Long enough to need a virtualised window with room to scroll in.
+        let text: String = (0..200)
+            .map(|i| format!("[{:02}:{:02}] SPEAKER 1: line {i}\n", i / 60, i % 60))
+            .collect();
+        if let Some(view) = app.selected_view.as_mut() {
+            view.lines = parse_lines(&text);
+            view.transcript = text.clone();
+        }
+        app.invalidate_derived();
+
+        app.transcript_viewport = 400.0;
+        app.transcript_content = 2000.0;
+        app.transcript_offset = 800.0;
+        let _ = app.transcript_element();
+        let anchor = app.pane_start.get().expect("virtual window");
+
+        // Small scrolls stay inside the window: moving the anchor would shift
+        // every rendered row by (estimate - real height).
+        for offset in [810.0, 830.0, 860.0, 900.0, 700.0] {
+            app.transcript_offset = offset;
+            let _ = app.transcript_element();
+            assert_eq!(app.pane_start.get(), Some(anchor), "offset {offset}");
+        }
+
+        // A jump that leaves the window re-anchors.
+        app.transcript_offset = 1800.0;
+        let _ = app.transcript_element();
+        assert_ne!(app.pane_start.get(), Some(anchor));
+
+        let _ = std::fs::remove_dir_all(&media);
+    }
+
+    #[test]
+    fn scrollable_path_is_stable_across_transient_state() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("shape-audit-config");
+        let baseline = {
+            let (app, media) = follow_app("shape-audit-base");
+            let paths = scrollable_paths(&app);
+            let _ = std::fs::remove_dir_all(&media);
+            paths
+        };
+
+        let cases: Vec<(&str, Box<dyn Fn(&mut App)>)> = vec![
+            (
+                "transcript_hover",
+                Box::new(|app| app.transcript_hover = true),
+            ),
+            (
+                "line_hover",
+                Box::new(|app| app.transcript_line_hover = Some(1)),
+            ),
+            (
+                "at_bottom_off",
+                Box::new(|app| app.transcript_at_bottom = false),
+            ),
+            ("offset", Box::new(|app| app.transcript_offset = 640.0)),
+            (
+                "search",
+                Box::new(|app| {
+                    app.search_query = "e".to_string();
+                    app.search_index = 1;
+                }),
+            ),
+            ("console", Box::new(|app| app.console_open = true)),
+            (
+                "toast",
+                Box::new(|app| app.toast = Some(("Saved".to_string(), Instant::now()))),
+            ),
+            ("drag_hover", Box::new(|app| app.drag_hover = true)),
+            ("sms_mode", Box::new(|app| app.sms_mode = true)),
+            (
+                "join_lines",
+                Box::new(|app| {
+                    app.join_lines = true;
+                    app.invalidate_derived();
+                }),
+            ),
+            ("zoom", Box::new(|app| app.font_scale = 1.35)),
+            (
+                "live_view",
+                Box::new(|app| {
+                    app.selected_view = None;
+                    app.selected = None;
+                    app.status = Status::Running;
+                    app.lines = parse_lines("[00:00] A: one\n[00:02] B: two\n");
+                    app.transcript = "[00:00] A: one\n[00:02] B: two\n".to_string();
+                    app.invalidate_derived();
+                }),
+            ),
+            (
+                "model_error",
+                Box::new(|app| app.model_error = Some("offline".to_string())),
+            ),
+        ];
+
+        let mut unstable = Vec::new();
+        for (name, mutate) in cases {
+            let (mut app, media) = follow_app("shape-audit-case");
+            mutate(&mut app);
+            let paths = scrollable_paths(&app);
+            // Every scrollable that was there must still be at the same path.
+            let kept = baseline.iter().all(|path| paths.contains(path));
+            // A new scrollable is fine only when it is appended after the
+            // transcript (the console panel), never by shifting it.
+            let appended = name == "console" && paths.len() == baseline.len() + 1;
+            if !kept || (paths.len() != baseline.len() && !appended) {
+                unstable.push(name);
+            }
+            let _ = std::fs::remove_dir_all(&media);
+        }
+        assert!(
+            unstable.is_empty(),
+            "these states remount the transcript scrollable: {unstable:?}"
+        );
+    }
+
+    #[test]
+    fn toast_does_not_move_the_transcript_in_the_widget_tree() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("toast-shape-config");
+        let (mut app, media) = follow_app("toast-shape-media");
+
+        // Showing a toast must not change where the scrollable sits: any change
+        // of path remounts it and drops the scroll offset back to 0.
+        let without = scrollable_paths(&app);
+        app.toast = Some(("Speaker: SPEAKER 2".to_string(), Instant::now()));
+        assert_eq!(scrollable_paths(&app), without);
+
+        // Dismissing it must not either.
+        app.toast = None;
+        assert_eq!(scrollable_paths(&app), without);
+
+        // The file-drop scrim is the same kind of layer and must behave the
+        // same way: a drag over the window must not remount the transcript.
+        app.drag_hover = true;
+        assert_eq!(scrollable_paths(&app), without);
+        app.drag_hover = false;
+        assert_eq!(scrollable_paths(&app), without);
+
+        let _ = std::fs::remove_dir_all(&media);
+    }
+
+    #[test]
+    fn paused_follow_stays_put_after_one_scroll() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("follow-paused-config");
+        let (mut app, media) = follow_app("follow-paused-media");
+
+        let order = app.display_order();
+        app.follow_playhead = true;
+        app.playhead = 4.0;
+        // The scrollable settled 10 px away from the estimate and will never
+        // converge (clamping and rounding apply). The old level-triggered tick
+        // re-issued on every frame, which is a stutter that survives pausing.
+        app.transcript_offset = 810.0;
+
+        let active = app.follow_line_index();
+        assert_eq!(active, Some(order[2]));
+        assert_eq!(app.follow_scroll(active), Some(800.0));
+
+        // With the playhead, line, content and viewport unchanged, the tick
+        // must emit nothing at all.
+        for _ in 0..30 {
+            assert_eq!(app.follow_scroll(active), None);
+        }
+
+        // A different active line is a new situation and scrolls at once.
+        app.playhead = 6.0;
+        let next_active = app.follow_line_index();
+        assert_eq!(next_active, Some(order[3]));
+        let next = app.follow_scroll(next_active).unwrap();
+        assert!((next - 800.0).abs() > 6.0, "{next}");
+
+        // And it goes quiet again while that playhead holds still.
+        for _ in 0..30 {
+            assert_eq!(app.follow_scroll(next_active), None);
+        }
+
+        // A viewport change is an input change too, and a paused pane whose
+        // content still overflows follows the new geometry once.
+        app.transcript_viewport = 300.0;
+        assert!(app.follow_scroll(next_active).is_some());
+        assert_eq!(app.follow_scroll(next_active), None);
+
+        let _ = std::fs::remove_dir_all(&media);
+    }
+
+    #[test]
+    fn flip_during_follow_keeps_the_playhead_in_view() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("follow-flip-config");
+        let (mut app, media) = follow_app("follow-flip-media");
+
+        // Follow sits on the playhead target with the content unchanged.
+        app.follow_playhead = true;
+        app.transcript_offset = 800.0;
+        app.follow_offset = Some(800.0);
+        let active = app.follow_line_index();
+        app.note_follow_issue(800.0, active);
+        app.scroll_target = None;
+
+        // Right-clicking a line raises a toast, which used to remount the
+        // scrollable: the fresh state reports offset 0 for a frame.
+        let corrective = app.correct_follow_offset(1600.0, 0.0, 400.0, 1600.0);
+        assert_eq!(corrective, Some(800.0));
+        // Follow is untouched and still pinned to the playhead, not the top.
+        assert!(app.follow_playhead);
+        assert_eq!(app.follow_offset, Some(800.0));
+        assert_eq!(app.scroll_target, Some(800.0));
+        assert_eq!(app.follow_issue.map(|issue| issue.target), Some(800.0));
+
+        // A later re-wrap that clamps the offset keeps following from there
+        // instead of fighting the scrollable.
+        app.scroll_target = None;
+        app.follow_offset = Some(1600.0);
+        assert_eq!(
+            app.correct_follow_offset(2000.0, 900.0, 400.0, 1300.0),
+            None
+        );
+        assert_eq!(app.follow_offset, Some(900.0));
+        assert!(app.follow_playhead);
+
+        // A genuine user scroll with the content unchanged still disengages.
+        app.follow_offset = Some(900.0);
+        assert_eq!(
+            app.correct_follow_offset(1300.0, 300.0, 400.0, 1300.0),
+            None
+        );
+        assert!(!app.follow_playhead);
+        assert_eq!(app.follow_offset, None);
+
+        let _ = std::fs::remove_dir_all(&media);
+    }
+
+    #[test]
+    fn live_streaming_targets_the_bottom_not_the_newest_line() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("stream-bottom-config");
+
+        let mut app = pro_app();
+        app.selected_view = None;
+        app.status = Status::Running;
+        app.follow_playhead = false;
+        app.scroll_seek = false;
+        app.transcript_viewport = 400.0;
+        app.transcript_content = 1600.0;
+        app.transcript_offset = 1200.0;
+        app.transcript_at_bottom = true;
+
+        // Already at the bottom: no scroll at all.
+        assert_eq!(app.follow_scroll(None), None);
+
+        // Streamed text grows the content: pin to the bottom.
+        app.transcript_content = 1700.0;
+        assert_eq!(app.follow_scroll(None), Some(1300.0));
+        // The scroll landed; nothing else moved.
+        app.transcript_offset = 1300.0;
+        assert_eq!(app.follow_scroll(None), None);
+
+        // With Follow on the live stream pins there too, even though an active
+        // line is offered for centring.
+        app.follow_playhead = true;
+        app.transcript_content = 1750.0;
+        assert_eq!(app.follow_scroll(Some(0)), Some(1350.0));
+
+        // Scrolled away from the bottom with Follow off: leave it alone.
+        app.follow_playhead = false;
+        app.transcript_at_bottom = false;
+        app.transcript_offset = 700.0;
+        assert_eq!(app.follow_scroll(None), None);
+    }
+
+    /// Queue entry for ETA tests; the audio file need not exist.
+    fn eta_item(dir: &Path, name: &str, status: ItemStatus, duration: Option<f64>) -> QueueItem {
+        let path = dir.join(name);
+        QueueItem {
+            path: path.clone(),
+            audio: Some(path),
+            status,
+            duration,
+            transcript: None,
+            stats: None,
+            turns: Vec::new(),
+            peaks: Arc::new(Vec::new()),
+        }
+    }
+
+    #[test]
+    fn eta_is_absent_until_throughput_is_measured() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("eta-absent");
+        let mut app = pro_app();
+        app.status = Status::Running;
+        app.work_done = 10.0;
+        app.work_total = 100.0;
+        assert!(app.eta_prior.is_none());
+        assert!(app.estimate_remaining().is_none());
+    }
+
+    #[test]
+    fn eta_uses_measured_throughput() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("eta-throughput");
+        let mut app = pro_app();
+        app.status = Status::Running;
+        app.queue.clear();
+        app.current_index = None;
+        app.work_done = 100.0;
+        app.work_total = 400.0;
+        app.eta_throughput = Some(2.0);
+        let eta = app.estimate_remaining().expect("estimate");
+        assert!((eta - 150.0).abs() <= 1.0, "{eta}");
+    }
+
+    #[test]
+    fn eta_counts_queued_files() {
+        let _guard = env_lock();
+        let config = ConfigEnv::new("eta-queue");
+        let mut app = pro_app();
+        app.status = Status::Running;
+        app.queue.clear();
+        app.queue
+            .push(eta_item(&config.dir, "current.mp3", ItemStatus::Running, Some(400.0)));
+        app.queue
+            .push(eta_item(&config.dir, "next.mp3", ItemStatus::Pending, Some(200.0)));
+        app.queue
+            .push(eta_item(&config.dir, "last.mp3", ItemStatus::Pending, Some(300.0)));
+        app.current_index = Some(0);
+        app.work_done = 100.0;
+        app.work_total = 400.0;
+        app.eta_throughput = Some(2.0);
+
+        let eta = app.estimate_remaining().expect("estimate");
+        // 150 s left in this file, plus 500 s of queued audio at 0.58 wall
+        // seconds per audio second (ASR + fixed decode/diarize cost).
+        let expected = 150.0 + 500.0 * (1.0 / 2.0 + 0.08);
+        assert!((eta - expected).abs() <= 1.0, "{eta} vs {expected}");
+    }
+
+    #[test]
+    fn eta_prior_survives_a_run() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("eta-prior");
+        let mut app = pro_app();
+        app.status = Status::Running;
+        app.events.lock().unwrap().push_back(Event::Done {
+            txt: String::new(),
+            stats: backend::Stats {
+                audio_seconds: 600.0,
+                asr_seconds: 200.0,
+                prepare_seconds: 60.0,
+                ..Default::default()
+            },
+        });
+        let _ = app.update(Message::Tick);
+
+        assert_eq!(app.eta_prior, Some(3.0));
+        assert_eq!(App::load_settings().eta_throughput, Some(3.0));
+        assert_eq!(app.prepare_prior, Some(0.1));
+        assert_eq!(App::load_settings().eta_prepare, Some(0.1));
+    }
+
+    #[test]
+    fn eta_includes_the_prepare_tail() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("eta-prepare-tail");
+        let mut app = pro_app();
+        app.status = Status::Running;
+        app.queue.clear();
+        app.current_index = None;
+        app.work_done = 4800.0;
+        app.work_total = 4800.0;
+        app.timeline_duration = Some(4800.0);
+        app.diarize_fraction = 1.0;
+        app.diarize_prior = Some(0.1);
+        app.prepare_prior = Some(0.01);
+        app.eta_throughput = Some(2.0);
+
+        // Decoder and diarizer are spent; only the post-ASR tail is left.
+        let eta = app.estimate_remaining().expect("estimate");
+        assert!((eta - 48.0).abs() <= 2.0, "{eta}");
+    }
+
+    #[test]
+    fn eta_says_finishing_instead_of_one_second() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("eta-finishing");
+        let mut app = pro_app();
+        app.status = Status::Running;
+        app.run_start = Some(Instant::now() - Duration::from_secs(42));
+        app.eta_shown = Some(0.0);
+
+        let text = app.timer_text();
+        assert!(text.starts_with("0:4"), "elapsed dropped: {text}");
+        assert!(text.contains("finishing"), "{text}");
+        assert!(!text.contains("1s left"), "{text}");
+    }
+
+    #[test]
+    fn eta_waits_for_diarization_after_asr() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("eta-diarize-wait");
+        let mut app = pro_app();
+        app.status = Status::Running;
+        app.queue.clear();
+        app.current_index = None;
+        app.work_done = 600.0;
+        app.work_total = 600.0;
+        app.timeline_duration = Some(600.0);
+        app.diarize_fraction = 0.5;
+        app.diarize_prior = Some(0.1);
+        app.eta_throughput = Some(2.0);
+
+        // ASR is done but half of a 600 s file is still to diarize.
+        let eta = app.estimate_remaining().expect("estimate");
+        assert!((eta - 30.0).abs() <= 2.0, "{eta}");
+    }
+
+    #[test]
+    fn eta_ignores_finished_diarization() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("eta-diarize-done");
+        let mut app = pro_app();
+        app.status = Status::Running;
+        app.queue.clear();
+        app.current_index = None;
+        app.work_done = 100.0;
+        app.work_total = 400.0;
+        app.timeline_duration = Some(400.0);
+        app.diarize_fraction = 1.0;
+        app.diarize_prior = Some(0.1);
+        app.eta_throughput = Some(2.0);
+
+        let eta = app.estimate_remaining().expect("estimate");
+        assert!((eta - 150.0).abs() <= 1.0, "{eta}");
+    }
+
+    #[test]
+    fn diarize_prior_is_learned_from_stats() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("eta-diarize-prior");
+        let mut app = pro_app();
+        app.status = Status::Running;
+        app.events.lock().unwrap().push_back(Event::Done {
+            txt: String::new(),
+            stats: backend::Stats {
+                audio_seconds: 600.0,
+                diarize_seconds: 60.0,
+                ..Default::default()
+            },
+        });
+        let _ = app.update(Message::Tick);
+
+        assert_eq!(app.diarize_prior, Some(0.1));
+        assert_eq!(App::load_settings().eta_diarize, Some(0.1));
+    }
+
+    #[test]
+    fn decoding_label_shows_percentage_instead_of_dots() {
+        // A bare stage keeps the animated dots.
+        assert_eq!(
+            decoding_label("Decoding", "file.wav \u{2014} Decoding....."),
+            None
+        );
+        assert_eq!(decoding_label("decoding", "Decoding"), None);
+        // A percentage-carrying label is rendered verbatim.
+        assert_eq!(
+            decoding_label("Decoding 42%", "file.wav \u{2014} Decoding 42%").as_deref(),
+            Some("file.wav \u{2014} Decoding 42%")
+        );
+        assert_eq!(
+            decoding_label("decoding 7%", "Decoding 7%").as_deref(),
+            Some("Decoding 7%")
+        );
+        // Other stages never take the decoding path.
+        assert_eq!(decoding_label("transcribing", "Transcribing"), None);
+        assert_eq!(decoding_label("diarizing", "Diarizing 42%"), None);
     }
 }

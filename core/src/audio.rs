@@ -1,6 +1,7 @@
 //! Audio decode + resample to 16 kHz mono (replaces soundfile/torchaudio).
 
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 use rubato::Resampler;
 use symphonia::core::audio::SampleBuffer;
@@ -13,8 +14,24 @@ use symphonia::core::probe::Hint;
 
 pub const SAMPLE_RATE: u32 = 16000;
 
+/// Minimum spacing between two progress callbacks.
+const REPORT_INTERVAL: Duration = Duration::from_millis(100);
+
 /// Decode any supported audio file to mono f32 at 16 kHz.
 pub fn decode(path: &Path) -> Result<(Vec<f32>, u32), String> {
+    decode_with_progress(path, &mut |_| {})
+}
+
+/// Decode to mono f32 at 16 kHz, reporting progress in `0.0..=1.0`.
+///
+/// The callback fires at most once per [`REPORT_INTERVAL`] and once with `1.0`
+/// when the file is fully decoded. Packet decoding covers `0.0..=0.8` and
+/// resampling the rest. When the container carries no frame count the packet
+/// phase stays silent; resampling progress is still reported.
+pub fn decode_with_progress(
+    path: &Path,
+    progress: &mut dyn FnMut(f32),
+) -> Result<(Vec<f32>, u32), String> {
     let file = std::fs::File::open(path).map_err(|e| format!("open {}: {e}", path.display()))?;
     let mss = MediaSourceStream::new(Box::new(file), Default::default());
 
@@ -45,12 +62,15 @@ pub fn decode(path: &Path) -> Result<(Vec<f32>, u32), String> {
         .map_err(|e| format!("decoder: {e}"))?;
 
     let mut sample_rate = track.codec_params.sample_rate.unwrap_or(0);
+    // Container frame count drives decode progress; absent for some streams.
+    let total_frames = track.codec_params.n_frames;
     // Pre-allocate from container metadata: avoiding repeated growth copies is
     // a measurable win on hour-long files.
     let mut mono: Vec<f32> = Vec::with_capacity(track.codec_params.n_frames.unwrap_or(0) as usize);
     // Reuse one conversion buffer across packets instead of allocating per
     // packet (a one-hour MP3 is ~140k packets).
     let mut sample_buffer: Option<SampleBuffer<f32>> = None;
+    let mut last_report: Option<Instant> = None;
 
     loop {
         let packet = match format.next_packet() {
@@ -92,6 +112,13 @@ pub fn decode(path: &Path) -> Result<(Vec<f32>, u32), String> {
                     }
                 }
                 sample_buffer = Some(sbuf);
+                if let Some(total) = total_frames.filter(|total| *total > 0) {
+                    if last_report.is_none_or(|at| at.elapsed() >= REPORT_INTERVAL) {
+                        let fraction = (mono.len() as f32 / total as f32).clamp(0.0, 1.0);
+                        progress(0.8 * fraction);
+                        last_report = Some(Instant::now());
+                    }
+                }
             }
             Err(SymphoniaError::DecodeError(_)) => continue,
             Err(e) => return Err(format!("decode: {e}")),
@@ -103,12 +130,18 @@ pub fn decode(path: &Path) -> Result<(Vec<f32>, u32), String> {
     }
 
     if sample_rate != SAMPLE_RATE {
-        mono = resample(&mono, sample_rate, SAMPLE_RATE)?;
+        mono = resample(&mono, sample_rate, SAMPLE_RATE, progress)?;
     }
+    progress(1.0);
     Ok((mono, SAMPLE_RATE))
 }
 
-fn resample(input: &[f32], in_rate: u32, out_rate: u32) -> Result<Vec<f32>, String> {
+fn resample(
+    input: &[f32],
+    in_rate: u32,
+    out_rate: u32,
+    progress: &mut dyn FnMut(f32),
+) -> Result<Vec<f32>, String> {
     // A larger chunk cuts FFT setup overhead; 4096 frames is ~93 ms at 44.1 kHz.
     let chunk = 4096;
     let mut resampler =
@@ -119,6 +152,7 @@ fn resample(input: &[f32], in_rate: u32, out_rate: u32) -> Result<Vec<f32>, Stri
     // Reuse one input block for the whole file.
     let mut block = vec![0.0f32; resampler.input_frames_next()];
     let mut pos = 0;
+    let mut last_report = Instant::now();
     while pos < input.len() {
         let need = resampler.input_frames_next();
         if block.len() < need {
@@ -132,6 +166,11 @@ fn resample(input: &[f32], in_rate: u32, out_rate: u32) -> Result<Vec<f32>, Stri
             .process(&[&block[..need]], None)
             .map_err(|e| format!("resample: {e}"))?;
         output.extend_from_slice(&res[0]);
+        if last_report.elapsed() >= REPORT_INTERVAL {
+            let fraction = pos as f32 / input.len() as f32;
+            progress(0.8 + 0.2 * fraction.clamp(0.0, 1.0));
+            last_report = Instant::now();
+        }
     }
     Ok(output)
 }
@@ -345,4 +384,64 @@ pub fn duration_fast(path: &Path) -> Option<f64> {
 /// and decoding twice per file was the main avoidable cost.
 pub fn duration(path: &Path) -> Result<f64, String> {
     duration_fast(path).ok_or_else(|| "duration is not in the container metadata".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Writes a tiny PCM WAV so progress tests need no binary fixture.
+    fn write_test_wav(path: &Path, rate: u32, seconds: f32) {
+        let frames = (rate as f32 * seconds) as u32;
+        let mut data = Vec::with_capacity(frames as usize * 2);
+        for frame in 0..frames {
+            let t = frame as f32 / rate as f32;
+            let sample = (t * 440.0 * std::f32::consts::TAU).sin() * 0.5;
+            data.extend_from_slice(&((sample * i16::MAX as f32) as i16).to_le_bytes());
+        }
+        let mut wav = Vec::with_capacity(44 + data.len());
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&(36 + data.len() as u32).to_le_bytes());
+        wav.extend_from_slice(b"WAVEfmt ");
+        wav.extend_from_slice(&16u32.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes()); // PCM
+        wav.extend_from_slice(&1u16.to_le_bytes()); // mono
+        wav.extend_from_slice(&rate.to_le_bytes());
+        wav.extend_from_slice(&(rate * 2).to_le_bytes()); // byte rate
+        wav.extend_from_slice(&2u16.to_le_bytes()); // block align
+        wav.extend_from_slice(&16u16.to_le_bytes()); // bits per sample
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        wav.extend_from_slice(&data);
+        std::fs::write(path, wav).expect("write wav fixture");
+    }
+
+    fn temp_wav(name: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("hippo-audio-{name}-{}.wav", std::process::id()))
+    }
+
+    #[test]
+    fn decode_with_progress_is_monotonic_and_ends_at_one() {
+        let path = temp_wav("progress");
+        // 8 kHz forces the resample phase, so both callback ranges are used.
+        write_test_wav(&path, 8000, 0.3);
+
+        let mut fractions: Vec<f32> = Vec::new();
+        let decoded = decode_with_progress(&path, &mut |fraction| fractions.push(fraction));
+        let _ = std::fs::remove_file(&path);
+
+        let (samples, rate) = decoded.expect("decode test wav");
+        assert_eq!(rate, SAMPLE_RATE);
+        assert!(!samples.is_empty());
+        assert!(!fractions.is_empty(), "progress callback never fired");
+        assert!(
+            fractions.iter().all(|f| (0.0..=1.0).contains(f)),
+            "fraction out of range: {fractions:?}"
+        );
+        assert!(
+            fractions.windows(2).all(|pair| pair[1] >= pair[0]),
+            "fractions decreased: {fractions:?}"
+        );
+        assert_eq!(fractions.last().copied(), Some(1.0));
+    }
 }
