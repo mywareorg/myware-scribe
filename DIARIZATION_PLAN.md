@@ -1,6 +1,6 @@
 # Diarization Improvement Plan
 
-Status: Phase 0 complete; Phase 1 next.
+Status: Phase 0 complete; Phase 1 dropped; Phase 4 cache work landed; Phase 3 next.
 
 Goal: improve speaker isolation on long recordings without cloud services,
 without gated models, and without changing the local-only architecture.
@@ -79,20 +79,23 @@ Delivered:
 Open item: no single-speaker file in the repo, so the phantom-speaker assertion
 is implemented but unexercised.
 
-## Phase 1 - Turn geometry
+## Phase 1 - Turn geometry (dropped)
 
-Targets the part of the error the baseline does show: short interjections and
-spurious fragments.
+Was going to tighten `min_duration_on` / `min_duration_off` in
+`core/src/diarize.rs` and relabel sub-1s turns whose embedding matches both
+neighbours. Dropped for three reasons, recorded so it is not reopened:
 
-- `min_duration_on = 0.6`, `min_duration_off = 0.3` in `core/src/diarize.rs`
-  (currently `0.0`; the Rust side reimplements both downstream in
-  `clean_turns`).
-- Turn-level relabel: a turn under ~1 s whose embedding is closer to the
-  *neighbouring* speaker's centroid than its own, with both neighbours
-  agreeing, is relabelled.
-
-Acceptance: short-turn recall rises, confusion in the <1 s bucket falls, no
-change to turns over 3 s.
+- The baseline says this is not where the error is. Only 9.4% of confusion sits
+  in turns under 1 s (2.98 s of 31.73 s); 63.4% sits in turns over 3 s. Even a
+  perfect fix buys about 0.7 DER points, on the noisiest bucket, because the
+  reference's turn ends are estimated from ASR line starts.
+- `clean_turns` already merges same-speaker gaps up to 1.0 s and drops turns
+  under 0.4 s (`core/src/pipeline.rs`), so `min_duration_off = 0.3` is dominated
+  by the existing merge, and `min_duration_on = 0.6` only removes short regions
+  — the opposite of the short-turn recall it was meant to raise.
+- The relabel half needs per-turn embeddings. `core/src/sherpa_dynamic.rs` binds
+  no embedding extractor, so it is new FFI plus centroid code, not a tuning
+  change.
 
 ## Phase 2 - Decidability gate (answered)
 
@@ -153,12 +156,14 @@ speaker per line. The ceiling does not pay for the work.
 
 ## Phase 4 - UI, cache, progress
 
-- Add a `DIARIZER_VERSION` const to the cache key, mirroring `tokens-v3`.
+- (done) `DIARIZER_VERSION` in the cache key, mirroring `tokens-v3`.
   `models::diarizer_id()` only changes when model files change, so Phase 3 would
-  otherwise serve stale single-pass turns.
-- Fix the existing key mismatch: `gui/src/backend.rs` reads with `cache::key`
-  (file bytes) while the pipeline writes with `samples_hash` (decoded samples),
-  so GUI cache reads always miss.
+  otherwise serve stale single-pass turns. Landed in `534c79f`; bump the const
+  with any change to the turn map.
+- (done) The key mismatch: `gui/src/backend.rs` reads with `cache::key` (file
+  bytes) while the pipeline writes with `samples_hash` (decoded samples), so GUI
+  cache reads always missed. `e8c1c6f` writes the turns under both keys, since a
+  restored queue has the file and no samples.
 - Include block geometry and embedding model in per-block cache keys.
 - `Diarizing block 3/12`, with a correct base/span.
 - `Only one speaker detected` when the global result is one centroid.
@@ -176,10 +181,9 @@ speaker per line. The ceiling does not pay for the work.
 
 ## Recommended order
 
-1. Turn geometry (Phase 1).
-2. Blockwise with cluster-level assignment (Phase 3).
-3. Cache/progress corrections (Phase 4).
-4. Windows and performance validation (Phase 5).
+1. Blockwise with cluster-level assignment (Phase 3).
+2. Cache/progress corrections (Phase 4 remainder).
+3. Windows and performance validation (Phase 5).
 
 Viterbi smoothing, overlap research, forced alignment, and incremental
 attribution are deferred, each with a documented reason above.
