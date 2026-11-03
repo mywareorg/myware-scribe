@@ -66,18 +66,30 @@ pub fn audio_hash(audio: &Path) -> Option<String> {
     Some(hex(&hasher.finalize()))
 }
 
+/// Version of the diarization output the cache is allowed to serve.
+///
+/// Bump this whenever a change alters the turns produced from the same audio
+/// and the same model pair: turn geometry, cleanup thresholds, blockwise
+/// clustering. [`crate::models::diarizer_id`] only changes when the model
+/// files do, so without this the app would keep serving turns produced by a
+/// pipeline that no longer exists. The eval loop is unaffected — it calls
+/// [`crate::diarize::diarize`] directly and never touches this cache.
+pub const DIARIZER_VERSION: &str = "diar-v1";
+
 /// Cache key from the audio hash and the diarization parameters.
 pub fn key_from_hash(hash: &str, diarizer: &str, num_speakers: Option<i32>) -> String {
     let mut hasher = Sha256::new();
     hasher.update(hash.as_bytes());
     hasher.update(diarizer.as_bytes());
     hasher.update(num_speakers.unwrap_or(-1).to_string().as_bytes());
+    hasher.update(DIARIZER_VERSION.as_bytes());
     let digest = hasher.finalize();
     format!(
-        "{}-{}-{}",
+        "{}-{}-{}-{}",
         hex(&digest[..8]),
         diarizer,
-        num_speakers.unwrap_or(-1)
+        num_speakers.unwrap_or(-1),
+        DIARIZER_VERSION
     )
 }
 
@@ -157,5 +169,13 @@ mod tests {
         changed[2] = -0.4;
         assert_ne!(samples_hash(&a), samples_hash(&changed));
         assert_ne!(samples_hash(&a), samples_hash(&a[..3]));
+    }
+
+    #[test]
+    fn diarization_key_carries_the_pipeline_version() {
+        let key = key_from_hash("abc", "model-x", Some(2));
+        assert!(key.ends_with(DIARIZER_VERSION));
+        assert_ne!(key, key_from_hash("abd", "model-x", Some(2)));
+        assert_ne!(key, key_from_hash("abc", "model-x", None));
     }
 }

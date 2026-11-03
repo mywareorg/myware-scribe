@@ -76,13 +76,26 @@ matching its previous behaviour.
 Two caches, both under the config directory, both keyed from a SHA-256 of the
 decoded samples:
 
-- Diarization: samples hash + diarizer id + speaker count.
+- Diarization: samples hash + diarizer id + speaker count + `DIARIZER_VERSION`.
 - Segments: samples hash + model + language + sample range + `best_of` + `fast`
   + whether token timestamps were requested + a version tag.
 
 The version tag (`tokens-v3`) is bumped whenever the segmentation of audio into
 ASR calls changes, so stale entries cannot be reused with different boundaries.
 Bumping it is the correct response to any change in clip or window construction.
+
+`DIARIZER_VERSION` (`core/src/cache.rs`) does the same job for speaker turns. It
+exists because the diarizer id only tracks the model files: turn geometry,
+cleanup thresholds, and clustering changes all alter the output while the model
+pair stays the same. Bump it with any such change, or the app keeps serving
+turns from a pipeline that no longer exists. The scoring loop in
+`docs/diarization-eval.md` bypasses this cache entirely (`--diarize-only` calls
+`diarize::diarize` directly), so a cached run and a scored run do not conflict.
+
+The diarization entry is written under two keys: the samples hash above, and a
+hash of the file bytes. The second exists because a queue restored at startup
+has the file but no decoded samples (`gui/src/backend.rs::load_turns`). Both are
+written together, so they cannot disagree.
 
 ## Measuring a change
 
