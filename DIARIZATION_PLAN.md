@@ -169,9 +169,9 @@ wins on one file and loses by 25 points on another.
 - Gate on **diarize wall time < ASR wall time**, not on a fixed 1.10-1.15x
   factor: that factor is not achievable once 2-3 embeddings per turn are added,
   and the overlap schedule only needs the former.
-- Measure: end-to-end factor, diarize factor, peak memory (blockwise exists to
-  bound the O(n^2) clustering matrix — that is the number to prove), per-block
-  DER, speaker-attributed WER.
+- Measure: end-to-end factor, diarize factor, peak memory (the O(n^2) clustering
+  matrix is the reason peak memory is worth watching at all), per-block DER,
+  speaker-attributed WER.
 - Test matrix: CPU-only Windows, GPU with CPU fallback, 2 min / 30 min / 2 h
   files, paths with spaces, offline install, clean MSIX.
 
