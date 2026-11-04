@@ -9250,10 +9250,25 @@ impl App {
         // bar now sits on the raised status surface, and in the dark theme
         // `bar_track` is that same grey, so a darkened copy of it would vanish
         // into the box it is drawn on.
+        // In dark mode the run card and the bar's groove trade surfaces: the
+        // card becomes the darker timeline grey and the groove the lighter
+        // dialog grey, so the bar reads as a well inside the card. Light mode
+        // keeps the original pairing.
+        let dark = theme::is_dark_scheme(&scheme);
+        let island_bg = if dark {
+            scheme.timeline_bg
+        } else {
+            scheme.dialog_bg
+        };
+        let groove = if dark {
+            scheme.dialog_bg
+        } else {
+            scheme.timeline_bg
+        };
         let bar = canvas(ProgressTrack {
             fraction: global_progress.clamp(0.0, 1.0),
-            track: scheme.timeline_bg,
-            edge: theme::darken(scheme.timeline_bg, 0.12),
+            track: groove,
+            edge: theme::darken(groove, 0.12),
             fill: theme::lighten(scheme.progress, 0.16),
         })
         .width(Length::Fill)
@@ -9295,7 +9310,7 @@ impl App {
             .width(Length::Fill)
             .padding([8, 10])
             .style(move |_theme| container::Style {
-                background: Some(scheme.dialog_bg.into()),
+                background: Some(island_bg.into()),
                 text_color: Some(scheme.text),
                 border: iced::border::Border {
                     color: scheme.border,
