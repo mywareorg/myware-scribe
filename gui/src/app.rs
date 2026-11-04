@@ -178,6 +178,15 @@ const ICON_ONLY_SIZE: f32 = 15.0;
 /// whether the query is empty or not.
 const FIND_STATUS_WIDTH: f32 = 62.0;
 
+/// Width of the transcript's View menu, and where its top-left corner sits
+/// inside the transcript card: below the header (title, meta, divider and the
+/// slot's bottom gap) and inset from the card's right edge by the header's own
+/// padding. A fixed inset keeps the menu under its button without tracking a
+/// window coordinate.
+const VIEW_MENU_WIDTH: f32 = 212.0;
+const VIEW_MENU_TOP: f32 = 48.0;
+const VIEW_MENU_INSET: f32 = 8.0;
+
 /// Widest the panel's speaker picker may grow, and how many characters of a
 /// speaker name it shows. The picker sits in a row with nine other controls: it
 /// sizes to the names it holds and ellipsizes the middle past this point, so a
@@ -553,7 +562,6 @@ pub enum Message {
     /// Cycle the edited line through the transcript's speakers.
     CycleLineSpeaker,
     LineHover(Option<usize>),
-    TogglePlayheadLock,
     SelectRelative(i32),
     SelectRelativeChecked(i32, bool),
     EditActiveLine,
@@ -599,7 +607,10 @@ pub enum Message {
     /// Open the folder holding the log files in Explorer.
     OpenLogFolder,
     TimestampsToggled(bool),
-    TranscriptHover(bool),
+    /// The pointer left the transcript card. An open View menu closes with it.
+    TranscriptLeft,
+    ToggleViewMenu,
+    CloseViewMenu,
     ToggleJoinLines,
     SpeakerCountChanged(SpeakerOpt),
     LanguageChanged(LanguageOpt),
@@ -895,7 +906,8 @@ pub struct App {
     transcript_content: f32,
     transcript_offset: f32,
     transcript_at_bottom: bool,
-    transcript_hover: bool,
+    /// The transcript header's View menu is open.
+    view_menu_open: bool,
     transcript_dirty: bool,
     follow_offset: Option<f32>,
     /// Horizontal target of the last programmatic transcript scroll, used to
@@ -991,8 +1003,6 @@ pub struct App {
     last_line_click: Option<(usize, Instant)>,
     /// Transcript line currently under the pointer.
     transcript_line_hover: Option<usize>,
-    /// Line clicks no longer seek while this is on.
-    playhead_locked: bool,
     /// Transcript line open in the inline editor, if any.
     line_edit: Option<LineEdit>,
     /// Playback was running when the inline editor opened; Done resumes it.
@@ -1163,7 +1173,7 @@ impl App {
             transcript_content: 0.0,
             transcript_offset: 0.0,
             transcript_at_bottom: true,
-            transcript_hover: false,
+            view_menu_open: false,
             transcript_dirty: false,
             follow_offset: None,
             scroll_target: None,
@@ -1223,7 +1233,6 @@ impl App {
             modified: false,
             last_line_click: None,
             transcript_line_hover: None,
-            playhead_locked: false,
             line_edit: None,
             line_edit_resume: false,
             line_edit_caret: None,
@@ -1671,6 +1680,7 @@ impl App {
     /// editor. `point` is where inside the words the press landed, if it did;
     /// the editor then puts its caret there.
     fn line_pressed(&mut self, index: usize, point: Option<Point>) -> Task<Message> {
+        self.view_menu_open = false;
         let double = self.last_line_click.is_some_and(|(last, at)| {
             last == index && at.elapsed() <= Duration::from_millis(400)
         });
@@ -1690,11 +1700,7 @@ impl App {
             self.commit_inline_edit(false);
             return self.begin_inline_edit_at(index, point);
         }
-        if self.playhead_locked {
-            Task::none()
-        } else {
-            self.select_line_with(index, false)
-        }
+        self.select_line_with(index, false)
     }
 
     fn select_line(&mut self, index: usize) -> Task<Message> {
@@ -2836,13 +2842,23 @@ impl App {
                 self.save_settings();
                 Task::none()
             }
-            Message::TranscriptHover(hovered) => {
-                // A dialog owns the pointer: the transcript's hover chrome must
-                // not appear behind its scrim.
-                if self.popup_open() {
+            Message::TranscriptLeft => {
+                // A dialog owns the pointer: an open menu is already hidden
+                // behind its scrim, so leave the state alone.
+                if !self.popup_open() {
+                    self.view_menu_open = false;
+                }
+                Task::none()
+            }
+            Message::ToggleViewMenu => {
+                if self.shown_lines().is_empty() || self.popup_open() {
                     return Task::none();
                 }
-                self.transcript_hover = hovered;
+                self.view_menu_open = !self.view_menu_open;
+                Task::none()
+            }
+            Message::CloseViewMenu => {
+                self.view_menu_open = false;
                 Task::none()
             }
             Message::ToggleJoinLines => {
@@ -3249,11 +3265,6 @@ impl App {
                 self.transcript_line_hover = index;
                 Task::none()
             }
-            Message::TogglePlayheadLock => {
-                self.playhead_locked = !self.playhead_locked;
-                self.last_line_click = None;
-                Task::none()
-            }
             Message::SelectRelative(delta) => {
                 if self.rename_open
                     || self.line_edit.is_some()
@@ -3390,6 +3401,7 @@ impl App {
                 Task::none()
             }
             Message::ToggleFollowPlayhead => {
+                self.view_menu_open = false;
                 let turning_off = self.follow_playhead;
                 let turning_on = !turning_off;
                 self.follow_playhead = turning_on;
@@ -3456,6 +3468,7 @@ impl App {
                 Task::none()
             }
             Message::OpenSettings => {
+                self.view_menu_open = false;
                 self.settings_open = true;
                 self.help_open = None;
                 self.toast = None;
@@ -3648,6 +3661,10 @@ impl App {
                 }
                 if self.delete_confirm {
                     self.delete_confirm = false;
+                    return Task::none();
+                }
+                if self.view_menu_open {
+                    self.view_menu_open = false;
                     return Task::none();
                 }
                 if self.line_edit.is_some() {
@@ -3993,6 +4010,7 @@ impl App {
                 Task::none()
             }
             Message::OpenSummary => {
+                self.view_menu_open = false;
                 if self.has_results() {
                     self.summary_open = true;
                     self.pending_rename = false;
@@ -8560,33 +8578,10 @@ impl App {
             );
         }
 
-        let controls: Element<Message> = if has_lines {
-            self.transcript_controls(&scheme)
-        } else {
-            horizontal_space().into()
-        };
-        let join: Element<Message> = if has_lines {
-            let label = if self.join_lines { "Split" } else { "Join" };
-            self.tip(
-                action(text(label).wrapping(NO_WRAP))
-                    .width(Length::Fixed(76.0))
-                    .on_press(Message::ToggleJoinLines)
-                    .style(if self.join_lines {
-                        pill_button_active
-                    } else {
-                        pill_button_secondary
-                    }),
-                if self.join_lines {
-                    "Show the saved line breaks"
-                } else {
-                    "Join lines spoken by the same speaker"
-                },
-                &scheme,
-            )
-        } else {
-            horizontal_space().into()
-        };
-
+        // The right of the header is the document action, then the view
+        // controls. View is last so its menu hangs from the card's own right
+        // edge, which is a fixed inset; a window coordinate would move with
+        // the rest of the layout.
         let document_controls: Element<Message> = if has_lines {
             let divider = container(horizontal_space())
                 .width(Length::Fixed(1.0))
@@ -8598,10 +8593,36 @@ impl App {
             let summary = action_text("Summary")
                 .on_press_maybe((!running && self.has_results()).then_some(Message::OpenSummary))
                 .style(pill_button_secondary);
-            row![divider, summary]
+            row![summary, divider]
                 .spacing(6)
                 .align_y(iced::Alignment::Center)
                 .into()
+        } else {
+            horizontal_space().into()
+        };
+        let controls: Element<Message> = if has_lines {
+            row![
+                self.tip(
+                    action(toggle_label("Follow", self.follow_playhead))
+                        .on_press(Message::ToggleFollowPlayhead)
+                        .style(if self.follow_playhead {
+                            pill_button_toggled
+                        } else {
+                            pill_button_secondary
+                        })
+                        .width(Length::Fixed(96.0)),
+                    if self.follow_playhead {
+                        "Stop keeping the active line in view"
+                    } else {
+                        "Keep the active line in view"
+                    },
+                    &scheme,
+                ),
+                self.view_menu_button(),
+            ]
+            .spacing(6)
+            .align_y(iced::Alignment::Center)
+            .into()
         } else {
             horizontal_space().into()
         };
@@ -8612,9 +8633,8 @@ impl App {
                     .spacing(8)
                     .align_y(iced::Alignment::Center),
                 horizontal_space(),
-                controls,
-                join,
                 document_controls,
+                controls,
             ]
             .spacing(6)
             .align_y(iced::Alignment::Center),
@@ -8631,147 +8651,136 @@ impl App {
         Some(column![header, divider].spacing(4).into())
     }
 
-    /// Timestamp control in the transcript header.
-    fn transcript_controls(&self, scheme: &Scheme) -> Element<'_, Message> {
-        let time_style: fn(&iced::Theme, button::Status) -> button::Style = if self.show_timestamps
-        {
+    /// The transcript header's "View" control. One menu replaces the two
+    /// header toggles and the hover strip that used to carry the rest.
+    fn view_menu_button(&self) -> Element<'_, Message> {
+        let caret = if self.view_menu_open {
+            ICON_CARET_UP
+        } else {
+            ICON_CARET_DOWN
+        };
+        action(
+            row![
+                text("View").size(theme::TEXT_SM).wrapping(NO_WRAP),
+                icon(caret, 10.0),
+            ]
+            .spacing(5)
+            .align_y(iced::Alignment::Center),
+        )
+        .on_press(Message::ToggleViewMenu)
+        .padding([5, 10])
+        .style(if self.view_menu_open {
             pill_button_toggled
         } else {
             pill_button_secondary
-        };
-        let timestamps = self.tip(
-            action(toggle_label("Timestamps", self.show_timestamps))
-                .on_press(Message::TimestampsToggled(!self.show_timestamps))
-                .style(time_style)
-                .width(Length::Fixed(122.0)),
-            if self.show_timestamps {
-                "Hide timestamps"
-            } else {
-                "Show timestamps"
-            },
-            scheme,
-        );
-        // Confidence sits beside the other view toggles rather than in the
-        // search row, where it read as a filter on the query.
-        let confidence: Element<Message> = if self.has_confidence() {
-            self.tip(
-                action(toggle_label("Confidence", self.confidence_view))
-                    .on_press(Message::ToggleConfidenceView)
-                    .style(if self.confidence_view {
-                        pill_button_toggled
-                    } else {
-                        pill_button_secondary
-                    })
-                    .width(Length::Fixed(122.0)),
-                if self.confidence_view {
-                    "Stop marking uncertain utterances"
-                } else {
-                    "Mark utterances the model was unsure about"
-                },
-                scheme,
-            )
-        } else {
-            self.tip(
-                action(toggle_label("Confidence", self.confidence_view))
-                    .style(greyed_button(*scheme))
-                    .width(Length::Fixed(122.0)),
-                "No confidence data for this transcript",
-                scheme,
-            )
-        };
-        row![timestamps, confidence]
-            .spacing(6)
-            .align_y(iced::Alignment::Center)
-            .into()
+        })
+        .into()
     }
 
-    /// Hover-only zoom / SMS controls at the bottom-left of the transcript.
-    fn transcript_float_controls(&self, scheme: &Scheme) -> Element<'_, Message> {
+    /// The open View menu: the display toggles, then text zoom.
+    ///
+    /// Every row is a plain message, never a pick-list selection, so the menu
+    /// stays mounted while several are pressed. The zoom pair is the same: two
+    /// buttons with the percentage between them, so a long stretch can be sized
+    /// in one visit.
+    fn view_menu(&self, scheme: &Scheme) -> Element<'_, Message> {
         let scheme = *scheme;
-        let sms = toggle_label("SMS", self.sms_mode);
-        let sms_tip = if self.sms_mode {
-            "Show transcripts as lines"
-        } else {
-            "Show the transcript as chat bubbles"
-        };
-        let follow = toggle_label("Follow", self.follow_playhead);
-        let mut controls = row![
+        let confidence = self.has_confidence();
+        let items = column![
+            view_menu_item(
+                "Timestamps",
+                self.show_timestamps,
+                true,
+                Some(Message::TimestampsToggled(!self.show_timestamps)),
+                scheme,
+            ),
+            view_menu_item(
+                "SMS Mode",
+                self.sms_mode,
+                true,
+                Some(Message::SmsToggled(!self.sms_mode)),
+                scheme,
+            ),
+            view_menu_item(
+                "Join",
+                self.join_lines,
+                true,
+                Some(Message::ToggleJoinLines),
+                scheme,
+            ),
+            view_menu_item(
+                "Confidence",
+                self.confidence_view,
+                confidence,
+                confidence.then_some(Message::ToggleConfidenceView),
+                scheme,
+            ),
+        ]
+        .spacing(2)
+        .width(Length::Fill);
+
+        let font_on = self.font_scale;
+        let zoom = row![
             self.tip(
                 action(icon(ICON_ZOOM_OUT, 14.0))
-                    .on_press(Message::ZoomOut)
+                    .on_press_maybe((font_on > 0.6).then_some(Message::ZoomOut))
                     .style(pill_button_secondary),
                 "Zoom text out",
                 &scheme,
             ),
+            // Fixed slot: the percentage must not move the two buttons as the
+            // number changes width.
+            container(text(format!("{:.0}%", font_on * 100.0)).size(theme::TEXT_XS))
+                .width(Length::Fixed(44.0))
+                .center_x(Length::Fixed(44.0)),
             self.tip(
                 action(icon(ICON_ZOOM_IN, 14.0))
-                    .on_press(Message::ZoomIn)
+                    .on_press_maybe((font_on < 2.5).then_some(Message::ZoomIn))
                     .style(pill_button_secondary),
                 "Zoom text in",
                 &scheme,
             ),
-            self.tip(
-                action(sms)
-                    .on_press(Message::SmsToggled(!self.sms_mode))
-                    .style(if self.sms_mode {
-                        pill_button_toggled
-                    } else {
-                        pill_button_secondary
-                    })
-                    .width(Length::Fixed(78.0)),
-                sms_tip,
-                &scheme,
-            ),
-            self.tip(
-                action(follow)
-                    .on_press(Message::ToggleFollowPlayhead)
-                    .style(if self.follow_playhead {
-                        pill_button_toggled
-                    } else {
-                        pill_button_secondary
-                    })
-                    .width(Length::Fixed(96.0)),
-                if self.follow_playhead {
-                    "Stop keeping the active line in view"
-                } else {
-                    "Keep the active line in view"
-                },
-                &scheme,
-            ),
         ]
-        .spacing(4)
+        .spacing(6)
         .align_y(iced::Alignment::Center);
-        if self.can(license::Feature::Playback) {
-            controls = controls.push(
-                self.tip(
-                    action(toggle_label("Lock", self.playhead_locked))
-                        .on_press(Message::TogglePlayheadLock)
-                        .style(if self.playhead_locked {
-                            pill_button_toggled
-                        } else {
-                            pill_button_secondary
-                        })
-                        .width(Length::Fixed(82.0)),
-                    if self.playhead_locked {
-                        "Clicking a transcript line won\u{2019}t move the audio"
-                    } else {
-                        "Clicking a transcript line moves the audio to that line"
-                    },
-                    &scheme,
-                ),
-            );
-        }
-        container(controls)
+        let divider = container(horizontal_space())
             .width(Length::Fill)
-            .height(Length::Fill)
-            .align_x(iced::Alignment::Start)
-            .align_y(iced::Alignment::End)
-            .padding(iced::Padding {
-                top: 0.0,
-                right: 0.0,
-                bottom: 12.0,
-                left: 12.0,
-            })
+            .height(Length::Fixed(1.0))
+            .style(move |_theme| container::Style {
+                background: Some(scheme.border.into()),
+                ..container::Style::default()
+            });
+
+        let card = container(
+            column![
+                items,
+                container(divider).padding([4, 0]),
+                container(zoom)
+                    .width(Length::Fill)
+                    .align_x(iced::Alignment::Center),
+            ]
+            .spacing(6)
+            .width(Length::Fill),
+        )
+        .width(Length::Fixed(VIEW_MENU_WIDTH))
+        .padding(8)
+        .style(move |_theme| container::Style {
+            background: Some(scheme.dialog_bg.into()),
+            border: iced::border::Border {
+                color: scheme.border,
+                width: 1.0,
+                radius: theme::RADIUS_MD.into(),
+            },
+            shadow: soft_shadow(),
+            ..container::Style::default()
+        });
+        // The card consumes every press inside it, including its own padding,
+        // so only a press outside dismisses the menu.
+        mouse_area(card)
+            .interaction(mouse::Interaction::Idle)
+            .on_press(Message::Noop)
+            .on_right_press(Message::Noop)
+            .on_middle_press(Message::Noop)
             .into()
     }
 
@@ -10170,16 +10179,31 @@ impl App {
         // Keep the stack structure stable across hover changes. Swapping
         // between a bare column and a stack remounts the scrollable and resets
         // its scroll position to the top.
-        let float_controls: Element<Message> =
-            if self.transcript_hover && !self.popup_open() && !self.shown_lines().is_empty() {
-                self.transcript_float_controls(&scheme)
-            } else {
-                container(horizontal_space())
-                    .width(Length::Fill)
-                    .height(Length::Fill)
-                    .into()
-            };
-        let transcript_content: Element<Message> = stack![transcript_box, float_controls].into();
+        // The View menu hangs under its header button but inside the card, so
+        // its anchor is the card's right inset rather than a window coordinate.
+        // Closed, the slot is a same-size space: the stack keeps its shape, so
+        // the scrollable's tree index and offset never change.
+        let view_layer: Element<Message> =
+            if self.view_menu_open && !self.popup_open() && !self.shown_lines().is_empty() {
+            container(self.view_menu(&scheme))
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .align_x(iced::Alignment::End)
+                .align_y(iced::Alignment::Start)
+                .padding(iced::Padding {
+                    top: VIEW_MENU_TOP,
+                    right: VIEW_MENU_INSET,
+                    bottom: 0.0,
+                    left: 0.0,
+                })
+                .into()
+        } else {
+            container(horizontal_space())
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .into()
+        };
+        let transcript_content: Element<Message> = stack![transcript_box, view_layer].into();
         let transcript_card = container(transcript_content)
             .width(Length::Fill)
             .height(Length::Fill)
@@ -10207,8 +10231,8 @@ impl App {
         let right_panel: Element<Message> = column![
             top_slot,
             mouse_area(transcript_card)
-                .on_enter(Message::TranscriptHover(true))
-                .on_exit(Message::TranscriptHover(false)),
+                .on_press(Message::CloseViewMenu)
+                .on_exit(Message::TranscriptLeft),
             bottom_slot,
         ]
         .spacing(0)
@@ -13058,6 +13082,63 @@ fn fit_action<'a>(label: &'a str) -> iced::widget::Button<'a, Message> {
         .padding([5, 10])
 }
 
+/// One row of the transcript's View menu: a leading check slot that keeps every
+/// label on the same left edge, then the label. Disabled rows stay in place so
+/// the menu's height does not change with the transcript's data.
+fn view_menu_item<'a>(
+    label: &'a str,
+    checked: bool,
+    enabled: bool,
+    message: Option<Message>,
+    scheme: Scheme,
+) -> Element<'a, Message> {
+    let check: Element<'static, Message> = if checked && enabled {
+        icon(ICON_CHECK, 12.0)
+    } else {
+        horizontal_space().into()
+    };
+    action(
+        row![
+            container(check)
+                .width(Length::Fixed(16.0))
+                .center_x(Length::Fixed(16.0)),
+            text(label).size(theme::TEXT_SM).wrapping(NO_WRAP),
+        ]
+        .spacing(6)
+        .align_y(iced::Alignment::Center),
+    )
+    .width(Length::Fill)
+    .padding([5, 6])
+    .style(view_menu_item_style(scheme, enabled))
+    .on_press_maybe(message)
+    .into()
+}
+
+/// A menu row: no chrome until hovered, and no pointer feedback when the row
+/// cannot do anything.
+fn view_menu_item_style(
+    scheme: Scheme,
+    enabled: bool,
+) -> impl Fn(&iced::Theme, button::Status) -> button::Style {
+    move |_theme, status| {
+        let hot = enabled
+            && matches!(
+                status,
+                button::Status::Hovered | button::Status::Pressed
+            );
+        button::Style {
+            background: hot.then(|| scheme.track.into()),
+            text_color: if enabled { scheme.ink } else { scheme.muted },
+            border: iced::border::Border {
+                color: Color::TRANSPARENT,
+                width: 0.0,
+                radius: theme::RADIUS_SM.into(),
+            },
+            shadow: Shadow::default(),
+        }
+    }
+}
+
 /// A toggle label with its check mark trailing at the right edge.
 fn toggle_label<'a>(label: &'a str, enabled: bool) -> Element<'a, Message> {
     if enabled {
@@ -15523,45 +15604,6 @@ mod tests {
     }
 
     #[test]
-    fn locked_playhead_ignores_line_clicks() {
-        let _guard = env_lock();
-        let _config = ConfigEnv::new("lock-playhead");
-        let media = temp_dir("lock-playhead-media");
-        let audio = media.join("talk.mp3");
-        std::fs::write(&audio, b"audio").unwrap();
-        let transcript = media.join("talk.txt");
-        std::fs::write(
-            &transcript,
-            "[00:00] SPEAKER 1: first\n[00:05] SPEAKER 2: second\n",
-        )
-        .unwrap();
-
-        let mut app = pro_app();
-        app.queue.push(QueueItem {
-            path: audio.clone(),
-            audio: Some(audio),
-            status: ItemStatus::Done,
-            duration: Some(10.0),
-            transcript: Some(transcript),
-            stats: None,
-            turns: Vec::new(),
-            peaks: Arc::new(vec![0.2; 16]),
-        });
-        open_test_item(&mut app, 0);
-        app.playhead = 5.0;
-
-        let _ = app.update(Message::TogglePlayheadLock);
-        let _ = app.update(Message::LineClicked(0));
-        assert_eq!(app.playhead, 5.0);
-
-        let _ = app.update(Message::TogglePlayheadLock);
-        let _ = app.update(Message::LineClicked(0));
-        assert_eq!(app.playhead, 0.0);
-
-        let _ = std::fs::remove_dir_all(&media);
-    }
-
-    #[test]
     fn joining_adjacent_lines_and_save_as() {
         let _guard = env_lock();
         let _config = ConfigEnv::new("join-config");
@@ -17273,8 +17315,8 @@ mod tests {
 
         let cases: Vec<(&str, Box<dyn Fn(&mut App)>)> = vec![
             (
-                "transcript_hover",
-                Box::new(|app| app.transcript_hover = true),
+                "view_menu_open",
+                Box::new(|app| app.view_menu_open = true),
             ),
             (
                 "line_hover",
