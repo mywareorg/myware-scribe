@@ -2599,6 +2599,11 @@ impl App {
                 self.transcript_content = viewport.content_bounds().height;
                 let offset = viewport.absolute_offset().y;
                 self.transcript_offset = offset;
+                // Rows move under a stationary pointer while scrolling, and a
+                // virtualized row that mounts under the cursor never fires
+                // enter. Drop the remembered row rather than lighting up
+                // whatever now sits where it used to be.
+                self.transcript_line_hover = None;
                 let viewport_h = viewport.bounds().height;
                 let content_h = viewport.content_bounds().height;
                 self.transcript_at_bottom = offset + viewport_h >= content_h - 8.0;
@@ -11906,8 +11911,10 @@ fn line_element(
     .on_press(Message::LineClicked(idx));
 
     // Swap the speaker of this line. It replaces the old pencil in the same
-    // reserved slot, so revealing it never rewraps the line.
-    let swap: Element<'static, Message> = if hovered {
+    // reserved slot, so revealing it never rewraps the line. The playhead line
+    // shows it too: that line is the one being read, and requiring the pointer
+    // to sit on it made the control look intermittent.
+    let swap: Element<'static, Message> = if hovered || active {
         button(icon_colored(ICON_SWAP, size * 1.05, scheme.muted))
             .padding([0, 2])
             .style(|_theme, _status| button::Style {
