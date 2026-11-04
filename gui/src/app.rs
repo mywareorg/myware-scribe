@@ -73,12 +73,12 @@ const LEFT_PANEL_WIDTH: f32 = 340.0;
 /// UI chrome never wraps; labels are shortened or ellipsized instead.
 const NO_WRAP: iced::widget::text::Wrapping = iced::widget::text::Wrapping::None;
 
-/// Width of the line editor dialog, including the card's own padding.
-const LINE_EDIT_DIALOG_WIDTH: f32 = 560.0;
+/// Transcript text scale when nothing has been stored yet: 70 % of the base size.
+const DEFAULT_FONT_SCALE: f32 = 0.7;
 
-/// Lines of text the line editor shows at minimum and maximum, so the dialog
-/// neither collapses around a single word nor grows past the window for a long
-/// paste.
+/// Lines of text the inline editor shows at minimum and maximum, so the field
+/// neither collapses around a single word nor grows past the transcript for a
+/// long paste.
 const LINE_EDIT_MIN_LINES: usize = 1;
 const LINE_EDIT_MAX_LINES: usize = 14;
 
@@ -527,17 +527,20 @@ pub enum Message {
     FlipLineSpeaker(usize),
     LineEditSpeaker(usize, String),
     LineEditAction(usize, text_editor::Action),
-    SaveLineEdit,
+    /// Commit the inline editor and close it, resuming playback if it was
+    /// playing when the edit started.
+    DoneLineEdit,
+    /// Close the inline editor and drop what was typed.
     CancelLineEdit,
-    CopyLineEdit,
+    /// Ask before removing the line being edited.
+    DeleteLineEdit,
+    ConfirmDeleteLine,
+    CancelDeleteLine,
     MergeNextLine,
     MergePrevLine,
     SplitLineAtCursor,
     UndoLineEdit,
     RedoLineEdit,
-    DeleteLineEdit,
-    ConfirmDeleteLine,
-    CancelDeleteLine,
     CloseSummary,
     AddFiles,
     FilesPicked(Option<Vec<PathBuf>>),
@@ -753,12 +756,17 @@ pub struct App {
     transcript_line_hover: Option<usize>,
     /// Line clicks no longer seek while this is on.
     playhead_locked: bool,
-    /// Right-clicked line currently being edited.
+    /// Transcript line open in the inline editor, if any.
     line_edit: Option<LineEdit>,
-    /// Undo/redo for transcript edits made through the line editor.
-    line_history: LineHistory,
-    /// The line editor asked to delete; confirmation is required before saving.
+    /// Playback was running when the inline editor opened; Done resumes it.
+    line_edit_resume: bool,
+    /// A line delete is waiting on the confirmation dialog.
     delete_confirm: bool,
+    /// Document the open editor writes to, so a view change cannot commit its
+    /// text into a different transcript.
+    line_edit_document: Option<usize>,
+    /// Undo/redo for transcript edits made through the inline editor.
+    line_history: LineHistory,
     /// Background waveform backfill for completed items without cached peaks.
     backfill_active: bool,
     waveform_tried: HashSet<PathBuf>,
@@ -919,7 +927,7 @@ impl App {
             pane_row_height: Cell::new(None),
             pane_start: Cell::new(None),
             scroll_seek: false,
-            font_scale: settings.font_scale.unwrap_or(1.0),
+            font_scale: settings.font_scale.unwrap_or(DEFAULT_FONT_SCALE),
             follow_playhead: settings.follow_playhead.unwrap_or(true),
             // Low-confidence lines are marked from the moment a transcript with
             // confidence data is opened; the toggle is there to quiet them.
@@ -967,8 +975,10 @@ impl App {
             transcript_line_hover: None,
             playhead_locked: false,
             line_edit: None,
-            line_history: LineHistory::default(),
+            line_edit_resume: false,
             delete_confirm: false,
+            line_edit_document: None,
+            line_history: LineHistory::default(),
             backfill_active: false,
             waveform_tried: HashSet::new(),
             models: download::status(),
@@ -1446,7 +1456,13 @@ impl App {
             ));
             return Task::none();
         }
-        let Some(line) = self.shown_lines().get(index) else {
+        // A swap lands on the same undo stack as a text edit, so an open editor
+        // is committed first: its snapshot and the swap must not interleave.
+        if self.line_edit.is_some() {
+            self.commit_inline_edit(false);
+        }
+        let mut lines = self.edit_lines().to_vec();
+        let Some(line) = lines.get(index) else {
             return Task::none();
         };
         let current = line.speaker.clone();
@@ -1457,39 +1473,12 @@ impl App {
             .unwrap_or(0);
         let next = speakers[(position + 1) % speakers.len()].clone();
 
-        // A flip outside the dialog must not be undone by its history.
-        self.line_history = LineHistory::default();
-        let mut write: Option<(PathBuf, String)> = None;
-        if let Some(view) = self.selected_view.as_mut() {
-            if let Some(line) = view.lines.get_mut(index) {
-                rewrite_line(line, &next, &text);
-                view.transcript = view
-                    .lines
-                    .iter()
-                    .map(|line| line.raw.as_str())
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                if !view.transcript.is_empty() {
-                    view.transcript.push('\n');
-                }
-                write = view
-                    .output
-                    .clone()
-                    .map(|path| (path, view.transcript.clone()));
-            }
-        } else if let Some(line) = self.lines.get_mut(index) {
-            rewrite_line(line, &next, &text);
-            self.refresh_transcript();
-            write = self
-                .output_txt
-                .clone()
-                .map(|path| (path, self.transcript.clone()));
-        }
-        if let Some((path, text)) = write {
-            let _ = write_transcript_file(&path, &text);
-        }
         self.modified = true;
-        self.invalidate_derived();
+        self.push_line_undo();
+        if let Some(line) = lines.get_mut(index) {
+            rewrite_edited_line(line, &next, &text);
+        }
+        self.replace_edit_lines(lines);
         self.toast = Some((format!("Speaker: {next}"), Instant::now()));
         Task::none()
     }
@@ -1609,6 +1598,9 @@ impl App {
         index: usize,
         preloaded: Option<(String, Option<PathBuf>)>,
     ) -> Task<Message> {
+        // Changing what is on screen commits the open inline edit first: its
+        // row belongs to the document being left.
+        self.commit_inline_edit(false);
         let Some(item) = self.queue.get(index) else {
             return Task::none();
         };
@@ -1716,6 +1708,8 @@ impl App {
 
     /// Drop a pinned completed-item view and show the live run again.
     fn return_to_live(&mut self) {
+        // The edited row belongs to the view being dropped.
+        self.commit_inline_edit(false);
         self.invalidate_derived();
         self.selected = None;
         self.selected_view = None;
@@ -2392,6 +2386,9 @@ impl App {
     pub fn update(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::SmsToggled(value) => {
+                // Bubbles and lines are laid out differently: keep the edited
+                // row as a line and commit it before the view changes shape.
+                self.commit_inline_edit(false);
                 self.sms_mode = value;
                 // Bubble rows are a different shape: re-measure the spacers.
                 self.reset_pane_geometry();
@@ -2523,6 +2520,9 @@ impl App {
                 if self.shown_lines().is_empty() {
                     return Task::none();
                 }
+                // Joined lines cannot be edited, so an open editor is committed
+                // before the transcript is replaced by the joined preview.
+                self.commit_inline_edit(false);
                 self.join_lines = !self.join_lines;
                 self.modified = true;
                 self.reset_pane_geometry();
@@ -2874,11 +2874,24 @@ impl App {
                 });
                 if double {
                     self.last_line_click = None;
-                    // Double-click opens the editor; dispatch it directly so the
-                    // dialog is ready before the task loop resumes.
+                    // Double-click opens the inline editor, but only when the
+                    // transcript is not following the playhead: in Follow the
+                    // pane moves under the pointer and a field there would be
+                    // unusable. Dispatch directly so the field is mounted
+                    // before the task loop resumes.
+                    if self.follow_playhead {
+                        return Task::none();
+                    }
                     return self.update(Message::EditLine(index));
                 }
                 self.last_line_click = Some((index, Instant::now()));
+                // A click on another utterance commits the one being edited and
+                // moves the editor to the clicked line. Clicking the edited
+                // row itself never reaches here: the field owns those clicks.
+                if self.line_edit.as_ref().is_some_and(|edit| edit.index != index) {
+                    self.commit_inline_edit(false);
+                    return self.update(Message::EditLine(index));
+                }
                 if self.playhead_locked {
                     Task::none()
                 } else {
@@ -2915,7 +2928,6 @@ impl App {
                     || self.rename_open
                     || self.line_edit.is_some()
                     || self.settings_open
-                    || self.delete_confirm
                 {
                     return Task::none();
                 }
@@ -2935,7 +2947,6 @@ impl App {
             Message::EditActiveLine => {
                 if self.rename_open
                     || self.settings_open
-                    || self.delete_confirm
                     || self.calibration.is_some()
                 {
                     return Task::none();
@@ -2972,12 +2983,12 @@ impl App {
                 }
             }
             Message::EnterSubmit => {
-                if self.settings_open || self.delete_confirm {
+                if self.settings_open {
                     return Task::none();
                 }
                 if self.line_edit.is_some() {
-                    // Enter saves the line editor from any of its fields.
-                    self.apply_line_edit();
+                    // Enter commits the inline editor, as Done does.
+                    self.commit_inline_edit(true);
                     Task::none()
                 } else if self.rename_open {
                     self.apply_rename();
@@ -2992,7 +3003,7 @@ impl App {
                 }
             }
             Message::ShiftEnterSubmit => {
-                if self.settings_open || self.delete_confirm {
+                if self.settings_open {
                     return Task::none();
                 }
                 if self.line_edit.is_some() {
@@ -3019,7 +3030,7 @@ impl App {
                 Task::none()
             }
             Message::ZoomReset => {
-                self.font_scale = 1.0;
+                self.font_scale = DEFAULT_FONT_SCALE;
                 self.reset_pane_geometry();
                 self.save_settings();
                 Task::none()
@@ -3270,8 +3281,10 @@ impl App {
                 }
                 if self.delete_confirm {
                     self.delete_confirm = false;
-                } else if self.line_edit.is_some() {
-                    self.line_edit = None;
+                    return Task::none();
+                }
+                if self.line_edit.is_some() {
+                    self.cancel_inline_edit();
                 } else if self.rename_open {
                     self.rename_open = false;
                 } else if self.settings_open {
@@ -3496,6 +3509,8 @@ impl App {
             }
             Message::RemoveItem(index) => {
                 if !matches!(self.status, Status::Running) && index < self.queue.len() {
+                    // The edited document may be the row about to be removed.
+                    self.commit_inline_edit(false);
                     let was_viewing = self.selected_view.is_some();
                     self.queue.remove(index);
                     if let Some(current) = self.current.as_mut() {
@@ -3540,7 +3555,9 @@ impl App {
             }
             Message::ClearQueue => {
                 if !matches!(self.status, Status::Running) {
-                    // "Clear" is a full reset: queue, transcript and run state.
+                    // "Clear" is a full reset: queue, transcript and run state,
+                    // including the document an open editor was writing to.
+                    self.commit_inline_edit(false);
                     self.queue.clear();
                     self.batch_paths.clear();
                     self.gpu_retry_pending = false;
@@ -3611,36 +3628,13 @@ impl App {
                 }
                 Task::none()
             }
-            Message::OpenRename => self.open_rename(),
-            Message::FlipLineSpeaker(index) => self.flip_line_speaker(index),
-            Message::EditLine(index) => {
-                if self.join_lines {
-                    self.toast = Some(("Split the view to edit lines".to_string(), Instant::now()));
-                    return Task::none();
-                }
-                if !self.can(license::Feature::Editing) {
-                    self.toast = Some(("Editing is a Pro feature".to_string(), Instant::now()));
-                    return Task::none();
-                }
-                // Only transcripts we can write back to are editable, and the
-                // live transcript is left alone while it is still being built.
-                if self.shown_output().is_none()
-                    || (self.selected_view.is_none() && matches!(self.status, Status::Running))
-                {
-                    self.toast = Some(("This transcript is read-only".to_string(), Instant::now()));
-                    return Task::none();
-                }
-                // Rows come from the document the editor writes to, not from
-                // the joined preview, so their indices stay valid on save.
-                let Some(edit) = LineEdit::new(index, self.edit_lines()) else {
-                    return Task::none();
-                };
-                self.line_edit = Some(edit);
-                self.summary_open = false;
-                self.rename_open = false;
-                self.toast = None;
-                Task::none()
+            Message::OpenRename => {
+                // A rename rewrites the line the editor may be showing.
+                self.commit_inline_edit(false);
+                self.open_rename()
             }
+            Message::FlipLineSpeaker(index) => self.flip_line_speaker(index),
+            Message::EditLine(index) => self.begin_inline_edit(index),
             Message::LineEditSpeaker(position, value) => {
                 if let Some(row) = self
                     .line_edit
@@ -3661,23 +3655,28 @@ impl App {
                 }
                 Task::none()
             }
-            Message::SaveLineEdit => {
-                self.apply_line_edit();
+            Message::DoneLineEdit => {
+                self.commit_inline_edit(true);
                 Task::none()
             }
-            Message::CopyLineEdit => {
-                let Some(row) = self.line_edit.as_ref().and_then(|edit| edit.current_row()) else {
-                    return Task::none();
-                };
-                let text = row.content.text();
-                let text = text.trim_end().replace(['\n', '\r'], " ");
-                let line = if row.speaker.trim().is_empty() {
-                    text
-                } else {
-                    format!("{}: {text}", row.speaker.trim())
-                };
-                self.toast = Some(("Copied line".to_string(), Instant::now()));
-                iced::clipboard::write(line)
+            Message::CancelLineEdit => {
+                self.cancel_inline_edit();
+                Task::none()
+            }
+            Message::DeleteLineEdit => {
+                if self.line_edit.is_some() {
+                    self.delete_confirm = true;
+                }
+                Task::none()
+            }
+            Message::ConfirmDeleteLine => {
+                self.delete_confirm = false;
+                self.delete_edit_line();
+                Task::none()
+            }
+            Message::CancelDeleteLine => {
+                self.delete_confirm = false;
+                Task::none()
             }
             Message::MergeNextLine => {
                 if self.can(license::Feature::Editing) {
@@ -3707,25 +3706,6 @@ impl App {
                 if self.can(license::Feature::Editing) {
                     self.redo_line_edit();
                 }
-                Task::none()
-            }
-            Message::CancelLineEdit => {
-                self.line_edit = None;
-                Task::none()
-            }
-            Message::DeleteLineEdit => {
-                if self.line_edit.is_some() {
-                    self.delete_confirm = true;
-                }
-                Task::none()
-            }
-            Message::ConfirmDeleteLine => {
-                self.delete_confirm = false;
-                self.delete_edit_line();
-                Task::none()
-            }
-            Message::CancelDeleteLine => {
-                self.delete_confirm = false;
                 Task::none()
             }
             Message::CopyTranscript => {
@@ -4117,6 +4097,9 @@ impl App {
                 seen.push(line.speaker.clone());
             }
         }
+        // The dialog lists speakers in their natural order (SPEAKER 1, 2, 3 …)
+        // rather than the order they happen to speak.
+        sort_speaker_names(&mut seen);
         self.rename_fields = seen.into_iter().map(|name| (name, String::new())).collect();
         self.rename_focus = 0;
         self.rename_open = true;
@@ -4464,6 +4447,9 @@ impl App {
         self.diarize_fraction = 0.0;
         self.eta_samples.clear();
         self.eta_pending = 0;
+        // Whatever was being typed into the outgoing transcript is saved
+        // before its lines are replaced by the new run.
+        self.commit_inline_edit(false);
         self.transcript.clear();
         self.lines.clear();
         self.pending_lines.clear();
@@ -4598,7 +4584,7 @@ impl App {
 
     fn apply_rename(&mut self) {
         self.modified = true;
-        // Rows edited outside the dialog are not part of its undo scope.
+        // A speaker rename is not part of the line editor's undo scope.
         self.line_history = LineHistory::default();
         let mapping: Vec<(String, String)> = self
             .rename_fields
@@ -4636,69 +4622,178 @@ impl App {
         self.rename_open = false;
     }
 
-    /// Apply the right-click line editor: every row rewrites its own line and
-    /// the rest of the transcript is untouched. Rows the user left alone are
-    /// not rewritten, and the whole save is a single undo step.
-    fn apply_line_edit(&mut self) {
+    // ---- inline line editor lifecycle ----
+
+    /// Open the inline editor on `index`: the transcript row becomes a field,
+    /// playback pauses, and Follow turns off so the pane stops moving under the
+    /// caret. The same gates as before: Pro editing, a writable output, no live
+    /// run, and no joined view.
+    fn begin_inline_edit(&mut self, index: usize) -> Task<Message> {
+        if self.join_lines {
+            self.toast = Some(("Split the view to edit lines".to_string(), Instant::now()));
+            return Task::none();
+        }
+        if !self.can(license::Feature::Editing) {
+            self.toast = Some(("Editing is a Pro feature".to_string(), Instant::now()));
+            return Task::none();
+        }
+        // Only transcripts we can write back to are editable, and the live
+        // transcript is left alone while it is still being built.
+        if self.shown_output().is_none()
+            || (self.selected_view.is_none() && matches!(self.status, Status::Running))
+        {
+            self.toast = Some(("This transcript is read-only".to_string(), Instant::now()));
+            return Task::none();
+        }
+        if self.line_edit.as_ref().is_some_and(|edit| edit.index == index) {
+            return Task::none();
+        }
+        // Moving the editor from one line to another commits the first.
+        if self.line_edit.is_some() {
+            self.commit_inline_edit(false);
+        }
+        // Rows come from the document the editor writes to, not from the joined
+        // preview, so their indices stay valid on commit.
+        let Some(edit) = LineEdit::inline(index, self.edit_lines()) else {
+            return Task::none();
+        };
+        self.line_edit = Some(edit);
+        self.line_edit_document = self.edit_document();
+        // Editing while audio plays makes the caret fight the playhead; pause,
+        // remember that it was playing, and keep the position.
+        self.line_edit_resume = false;
+        if let Some(player) = &self.player {
+            if player.is_playing() {
+                player.toggle();
+                self.last_tick = Some(Instant::now());
+                self.line_edit_resume = true;
+            }
+        }
+        // Follow would scroll the edited row away while it is being typed into.
+        if self.follow_playhead {
+            self.follow_playhead = false;
+            self.follow_offset = None;
+            self.scroll_target = None;
+            self.follow_issue = None;
+            self.scroll_seek = false;
+        }
+        // The edited row is a field, not a line: the spacers must be re-measured.
+        self.reset_pane_geometry();
+        self.summary_open = false;
+        self.rename_open = false;
+        self.last_line_click = None;
+        self.toast = None;
+        Task::none()
+    }
+
+    /// Commit the inline editor into the transcript and close it. One changed
+    /// row is one undo step. `resume` restores playback when this commit is the
+    /// user pressing Done or Enter, not a side effect of moving elsewhere.
+    fn commit_inline_edit(&mut self, resume: bool) {
+        let Some(edit) = self.line_edit.take() else {
+            return;
+        };
+        let was_playing = std::mem::take(&mut self.line_edit_resume);
+        let resume = resume && was_playing;
+        // A view change that dropped the document without committing first
+        // must not write this row into whatever is on screen now.
+        if self.line_edit_document != self.edit_document() {
+            self.line_edit_document = None;
+            self.reset_pane_geometry();
+            return;
+        }
+        self.line_edit_document = None;
+        let Some(row) = edit.current_row() else {
+            self.reset_pane_geometry();
+            return;
+        };
+        let (speaker, text) = line_edit_row_fields(&row.speaker, &row.content);
+        let changed = !self.edit_lines().get(edit.index).is_some_and(|line| {
+            line.speaker == speaker && line_text(line) == text
+        });
+        if changed {
+            let mut lines = self.edit_lines().to_vec();
+            self.modified = true;
+            self.push_line_undo();
+            if let Some(line) = lines.get_mut(edit.index) {
+                rewrite_edited_line(line, &speaker, &text);
+            }
+            self.replace_edit_lines(lines);
+        }
+        self.reset_pane_geometry();
+        if resume {
+            // Same path as the play button, so a finished track restarts from
+            // the top instead of being left stopped.
+            self.toggle_playback();
+        }
+    }
+
+    /// Remove the line open in the editor and close it.
+    ///
+    /// Destructive, so it goes through the confirmation dialog; the removal
+    /// still lands on the undo stack like any other line edit, because a
+    /// misclick on a neighbouring row is one keystroke away.
+    fn delete_edit_line(&mut self) {
+        // Typed text goes first: the removal shifts every index below it.
+        let flushed = self.flush_line_edit_rows();
         let Some(edit) = self.line_edit.as_ref() else {
             return;
         };
-        let edits = edit
-            .rows
-            .iter()
-            .map(|row| (row.index, line_edit_row_fields(&row.speaker, &row.content)))
-            .collect::<Vec<_>>();
-        self.line_edit = None;
-        let lines = self.edit_lines();
-        let changed = edits.iter().any(|(index, (speaker, text))| {
-            !lines
-                .get(*index)
-                .is_some_and(|line| line.speaker == *speaker && line_text(line) == *text)
-        });
-        if !changed {
+        let index = edit.index;
+        let mut lines = self.edit_lines().to_vec();
+        if index >= lines.len() {
+            self.cancel_inline_edit();
             return;
         }
-        let mut lines = self.edit_lines().to_vec();
-        self.modified = true;
-        self.push_line_undo();
-        for (index, (speaker, text)) in edits {
-            if let Some(line) = lines.get_mut(index) {
-                rewrite_line(line, &speaker, &text);
-            }
+        if !flushed {
+            self.push_line_undo();
         }
+        self.modified = true;
+        lines.remove(index);
         self.replace_edit_lines(lines);
+        self.line_edit = None;
+        self.line_edit_resume = false;
+        self.line_edit_document = None;
+        self.reset_pane_geometry();
+        self.toast = Some(("Deleted line".to_string(), Instant::now()));
     }
 
-    /// Write back the rows that differ from the transcript, ahead of an
-    /// operation that moves line indices around. Returns whether anything was
-    /// written; when it was, the undo snapshot is taken before the write so a
-    /// single undo steps back over the flush and the operation together.
+    /// Close the inline editor and drop what was typed. Used by Escape and by
+    /// anything that replaces the document under it.
+    fn cancel_inline_edit(&mut self) {
+        if self.line_edit.take().is_some() {
+            self.line_edit_resume = false;
+            self.line_edit_document = None;
+            self.reset_pane_geometry();
+        }
+    }
+
+    /// Write the edited row back to the transcript without closing the editor,
+    /// ahead of an operation that moves line indices around. Returns whether
+    /// anything was written; when it was, the undo snapshot is taken before the
+    /// write so a single undo steps back over the write and the operation
+    /// together.
     fn flush_line_edit_rows(&mut self) -> bool {
         let Some(edit) = self.line_edit.as_ref() else {
             return false;
         };
-        let edits = edit
-            .rows
-            .iter()
-            .map(|row| (row.index, line_edit_row_fields(&row.speaker, &row.content)))
-            .collect::<Vec<_>>();
-        let mut lines = self.edit_lines().to_vec();
-        let mut changed = false;
-        for (index, (speaker, text)) in edits {
-            let Some(line) = lines.get_mut(index) else {
-                continue;
-            };
-            if line.speaker == speaker && line_text(line) == text {
-                continue;
-            }
-            rewrite_line(line, &speaker, &text);
-            changed = true;
-        }
-        if !changed {
+        let Some(row) = edit.current_row() else {
+            return false;
+        };
+        let index = edit.index;
+        let (speaker, text) = line_edit_row_fields(&row.speaker, &row.content);
+        let unchanged = self.edit_lines().get(index).is_some_and(|line| {
+            line.speaker == speaker && line_text(line) == text
+        });
+        if unchanged {
             return false;
         }
+        let mut lines = self.edit_lines().to_vec();
         self.modified = true;
         self.push_line_undo();
+        if let Some(line) = lines.get_mut(index) {
+            rewrite_edited_line(line, &speaker, &text);
+        }
         self.replace_edit_lines(lines);
         true
     }
@@ -4755,36 +4850,42 @@ impl App {
             view.transcript = lines_text(&view.lines);
             if let Some(path) = &view.output {
                 let _ = write_transcript_file(path, &view.transcript);
+                backend::write_confidences(path, &view.lines);
             }
         } else {
             self.lines = lines;
             self.refresh_transcript();
+            if let Some(path) = &self.output_txt {
+                backend::write_confidences(path, &self.lines);
+            }
         }
         self.invalidate_derived();
     }
 
     /// Re-point the open editor at a line that still exists and rebuild its
-    /// rows from the transcript, so the dialog never shows stale text.
+    /// row from the transcript, so the field never shows stale text.
     fn sync_line_edit(&mut self) {
         let Some(index) = self.line_edit.as_ref().map(|edit| edit.index) else {
             return;
         };
         let len = self.edit_lines().len();
         if len == 0 {
-            self.line_edit = None;
+            self.cancel_inline_edit();
             return;
         }
         self.point_line_edit(index.min(len - 1));
     }
 
-    /// Keep the dialog open on `index`, rebuilding the whole row window around
-    /// it: a merge or split shifts every later index, so rows are rebuilt from
-    /// the transcript rather than patched field by field.
+    /// Keep the editor open on `index`, rebuilding its row from the transcript:
+    /// a merge or split shifts every later index, so the row is rebuilt rather
+    /// than patched field by field.
     fn point_line_edit(&mut self, index: usize) {
         if self.line_edit.is_none() {
             return;
         }
-        self.line_edit = LineEdit::new(index, self.edit_lines());
+        self.line_edit = LineEdit::inline(index, self.edit_lines());
+        // The window's line count changed: the spacers need fresh heights.
+        self.reset_pane_geometry();
     }
 
     /// Restore the document as it was before the last line edit.
@@ -4817,11 +4918,11 @@ impl App {
         self.toast = Some(("Redid the line edit".to_string(), Instant::now()));
     }
 
-    /// Prepend the line open in the editor to the previous one. The dialog
-    /// stays open on the surviving line so its context can update.
+    /// Prepend the line open in the editor to the previous one. The editor
+    /// stays open on the surviving line so its text can be seen to land.
     fn merge_prev_line(&mut self) {
-        // Save what was typed into the other rows first: the merge shifts the
-        // indices around, and unflushed text would go with them.
+        // Save what was typed first: the merge shifts the indices around, and
+        // unflushed text would go with them.
         let flushed = self.flush_line_edit_rows();
         let Some(edit) = self.line_edit.as_ref() else {
             return;
@@ -4846,7 +4947,7 @@ impl App {
         self.modified = true;
         let previous = line_text(&lines[index - 1]);
         let joined = join_line_text(&previous, &text);
-        rewrite_line(&mut lines[index - 1], &speaker, &joined);
+        rewrite_edited_line(&mut lines[index - 1], &speaker, &joined);
         lines.remove(index);
         self.replace_edit_lines(lines);
         // The merged line now sits where the previous one was, so the rows are
@@ -4885,7 +4986,7 @@ impl App {
             self.push_line_undo();
         }
         self.modified = true;
-        rewrite_line(&mut lines[index], &speaker, &joined);
+        rewrite_edited_line(&mut lines[index], &speaker, &joined);
         if merged {
             lines.remove(index + 1);
         }
@@ -4953,7 +5054,7 @@ impl App {
         }
         self.modified = true;
         let mut lines = self.edit_lines().to_vec();
-        rewrite_line(&mut lines[index], &speaker, &left);
+        rewrite_edited_line(&mut lines[index], &speaker, &left);
         let prefix = match right_start {
             Some(right_start) => format!("{} ", format_timestamp(right_start as f64)),
             None => String::new(),
@@ -4969,34 +5070,14 @@ impl App {
                 raw,
                 speaker: speaker.clone(),
                 start: right_start,
-                confidence: None,
+                confidence: Some(HUMAN_CONFIDENCE),
             },
         );
         self.replace_edit_lines(lines);
         // The split line is still the current one; its new neighbour appears
-        // below it because the rows are rebuilt from the transcript.
+        // below it because the row is rebuilt from the transcript.
         self.point_line_edit(index);
         self.toast = Some(("Split line at cursor".to_string(), Instant::now()));
-    }
-
-    /// Delete the line currently open in the right-click editor.
-    fn delete_edit_line(&mut self) {
-        let flushed = self.flush_line_edit_rows();
-        let Some(index) = self.line_edit.as_ref().map(|edit| edit.index) else {
-            return;
-        };
-        if index >= self.edit_lines().len() {
-            return;
-        }
-        if !flushed {
-            self.push_line_undo();
-        }
-        self.modified = true;
-        let mut lines = self.edit_lines().to_vec();
-        lines.remove(index);
-        self.line_edit = None;
-        self.replace_edit_lines(lines);
-        self.toast = Some(("Line deleted".to_string(), Instant::now()));
     }
 
     fn drain_events(&mut self) -> Task<Message> {
@@ -5093,6 +5174,8 @@ impl App {
                         self.queue[index].status = ItemStatus::Running;
                     }
                     if !keep_view {
+                        // The edited document is about to leave the screen.
+                        self.commit_inline_edit(false);
                         self.selected = None;
                         self.selected_view = None;
                         self.view_error = None;
@@ -6062,7 +6145,6 @@ impl App {
             && !self.summary_open
             && !self.rename_open
             && self.line_edit.is_none()
-            && !self.delete_confirm
     }
 
     /// Five-slide feature deck for the first-run empty state.
@@ -6777,7 +6859,16 @@ impl App {
                 .width(Length::Fill)
                 .height(Length::Fixed(30.0))
                 .on_press_maybe(can_start.then_some(Message::Start))
-                .style(color_button(scheme.green, scheme.on_accent)),
+                // Dark mode fills read better with a white label; light mode
+                // keeps the dark ink it has always used.
+                .style(color_button(
+                    scheme.green,
+                    if theme::is_dark_scheme(&scheme) {
+                        Color::WHITE
+                    } else {
+                        scheme.on_accent
+                    },
+                )),
                 button(
                     container(text("Cancel"))
                         .center_x(Length::Fill)
@@ -6786,7 +6877,14 @@ impl App {
                 .width(Length::Fill)
                 .height(Length::Fixed(30.0))
                 .on_press_maybe(running.then_some(Message::Cancel))
-                .style(color_button(scheme.danger, scheme.on_accent)),
+                .style(color_button(
+                    scheme.danger,
+                    if theme::is_dark_scheme(&scheme) {
+                        Color::WHITE
+                    } else {
+                        scheme.on_accent
+                    },
+                )),
             ]
             .spacing(8)
             .align_y(iced::Alignment::Center),
@@ -7045,9 +7143,16 @@ impl App {
         let mut col = column![].spacing(2).padding(8).width(Length::Fill);
         let speaker_order = self.speaker_order();
         let single_speaker = speaker_order.len() <= 1;
-        let display: Vec<usize> = self.display_order();
+        let mut display: Vec<usize> = self.display_order();
         let playhead_line = self.active_line_index();
         let lines = self.shown_lines();
+        // The edited row must stay in the rendered window: scrolling it out
+        // would unmount the field. It is also put back into the order when the
+        // speaker filter would hide it (the panel can change the speaker).
+        let editing = self.line_edit.as_ref().map(|edit| edit.index);
+        if let Some(index) = editing {
+            pin_display_index(&mut display, lines, index);
+        }
 
         // Virtualize the long list. The buffer keeps a few screens of text
         // ready while the spacer heights preserve the scrollbar range. A large
@@ -7076,31 +7181,44 @@ impl App {
                 start = anchor;
             }
         }
-        self.pane_start.set(Some(start));
         let end = (start + visible).min(total);
-        let top_height = start as f32 * line_height;
-        let bottom_height = (total - end) as f32 * line_height;
+        self.pane_start.set(Some(start));
+        // The edited row is rendered even when it sits outside the window: it
+        // goes in its own segment with spacers either side, so scrolling it out
+        // of view cannot unmount the field. The window itself is never widened,
+        // which would render thousands of rows for a distant edit.
+        let editor_rank = editing.and_then(|index| display.iter().position(|i| *i == index));
+        let above = editor_rank.filter(|rank| *rank < start);
+        let below = editor_rank.filter(|rank| *rank >= end);
+        let top_height = above.map_or(start, |rank| rank) as f32 * line_height;
+        let bottom_height =
+            below.map_or(total - end, |rank| total - rank - 1) as f32 * line_height;
         // Remember the geometry we asked for so the next frame can measure the
         // real height of the rendered window.
         self.pane_window
             .set((start, end, top_height, bottom_height));
 
-        if top_height > 0.0 {
-            col = col.push(
-                container(horizontal_space())
-                    .width(Length::Fill)
-                    .height(Length::Fixed(top_height)),
-            );
+        if let Some(rank) = above {
+            col = col.push(row_spacer(top_height));
+            col = col.push(self.inline_editor_element(size, scheme));
+            col = col.push(row_spacer((start - rank - 1) as f32 * line_height));
+        } else if top_height > 0.0 {
+            col = col.push(row_spacer(top_height));
         }
 
         // Each speaker keeps a fixed side of the transcript in bubble mode.
         for &idx in &display[start..end] {
             let line = &lines[idx];
+            let active = playhead_line == Some(idx);
+            // The edited row is a field where it stands, in either view.
+            if editing == Some(idx) {
+                col = col.push(self.inline_editor_element(size, scheme));
+                continue;
+            }
             if line.raw.trim().is_empty() {
                 continue;
             }
             let matched = !query.is_empty() && matches.contains(&idx);
-            let active = playhead_line == Some(idx);
             if self.sms_mode {
                 let index = speaker_order
                     .iter()
@@ -7124,7 +7242,7 @@ impl App {
                     String::new()
                 };
                 let content = line_text(line);
-                col = col.push(stack![
+                let mut layers = stack![
                     sms_row(
                         &content,
                         &line.speaker,
@@ -7151,7 +7269,14 @@ impl App {
                     .interaction(mouse::Interaction::Pointer)
                     .on_press(Message::LineClicked(idx))
                     .on_right_press(Message::FlipLineSpeaker(idx)),
-                ]);
+                ];
+                // The playhead row on the left carries the exchange arrow.
+                // Drawn last, after the full-width click overlay, or the
+                // overlay would swallow every click meant for it.
+                if active && left && !single_speaker {
+                    layers = layers.push(sms_swap_arrow(idx, &scheme));
+                }
+                col = col.push(layers);
             } else {
                 let accent = speaker_order
                     .iter()
@@ -7184,12 +7309,12 @@ impl App {
             }
         }
 
-        if bottom_height > 0.0 {
-            col = col.push(
-                container(horizontal_space())
-                    .width(Length::Fill)
-                    .height(Length::Fixed(bottom_height)),
-            );
+        if let Some(rank) = below {
+            col = col.push(row_spacer((rank - end) as f32 * line_height));
+            col = col.push(self.inline_editor_element(size, scheme));
+            col = col.push(row_spacer(bottom_height));
+        } else if bottom_height > 0.0 {
+            col = col.push(row_spacer(bottom_height));
         }
 
         scrollable(col)
@@ -7199,6 +7324,162 @@ impl App {
             .width(Length::Fill)
             .style(scrollbar_style)
             .into()
+    }
+
+    /// The inline editor for `index`, drawn where its transcript row was.
+    fn inline_editor_element(&self, size: f32, scheme: Scheme) -> Element<'_, Message> {
+        let Some(row) = self.line_edit.as_ref().and_then(|edit| edit.current_row()) else {
+            return horizontal_space().into();
+        };
+        let accent = line_accent(&self.speaker_order(), &row.speaker, &scheme);
+        inline_line_edit_row(
+            &row.content,
+            accent,
+            scheme,
+            size,
+            self.inline_text_width(),
+        )
+    }
+
+    /// Width the inline editor's text area has inside the transcript pane.
+    ///
+    /// An estimate: the pane is whatever the window has left after the queue
+    /// panel, the card padding and the scrollbar, and the field only uses it to
+    /// decide how many lines its own text wraps to.
+    fn inline_text_width(&self) -> f32 {
+        let pane = (self.window_size.width
+            - LEFT_PANEL_WIDTH
+            - PANEL_GAP
+            - 2.0 * OUTER_PADDING
+            - 2.0 * 8.0 // transcript column padding
+            - 12.0) // scrollbar
+            .max(240.0);
+        pane - 3.0 // accent stripe
+            - theme::SPACE_SM // between the stripe and the field
+            - 2.0 * LINE_EDIT_PAD_X
+            - 2.0 // field border
+    }
+
+    /// Controls for the line being edited: merge, split, undo/redo, the speaker
+    /// picker, and Done. Shown above the Find row while the editor is open.
+    fn line_edit_panel(&self, scheme: Scheme) -> Option<Element<'_, Message>> {
+        let row = self.line_edit.as_ref()?.current_row()?;
+        let order = self.speaker_order();
+        let accent = line_accent(&order, &row.speaker, &scheme);
+        let mut speakers = order.clone();
+        if !speakers.iter().any(|name| name == &row.speaker) {
+            speakers.push(row.speaker.clone());
+        }
+        let picker = pick_list(speakers, Some(row.speaker.clone()), |speaker| {
+            Message::LineEditSpeaker(0, speaker)
+        })
+        .style(speaker_pick(accent, scheme))
+        .text_size(theme::TEXT_SM)
+        .font(Font {
+            weight: font::Weight::Bold,
+            ..Font::DEFAULT
+        })
+        .padding([4, 6])
+        .width(Length::Fixed(140.0));
+
+        let icon_action = |code: char| {
+            action(icon_colored(code, 14.0, scheme.ink))
+                .padding([4, 6])
+                .style(pill_button_secondary)
+        };
+        let disabled = |code: char| {
+            action(icon_colored(code, 14.0, scheme.muted))
+                .padding([4, 6])
+                .style(greyed_button(scheme))
+        };
+        let writable = self.shown_output().is_some();
+        let undo: Element<Message> = if writable && self.line_undo_available() {
+            icon_action(ICON_UNDO).on_press(Message::UndoLineEdit).into()
+        } else {
+            disabled(ICON_UNDO).into()
+        };
+        let redo: Element<Message> = if writable && self.line_redo_available() {
+            icon_action(ICON_REDO).on_press(Message::RedoLineEdit).into()
+        } else {
+            disabled(ICON_REDO).into()
+        };
+        let cancel = action(icon_colored(ICON_X, 14.0, scheme.ink))
+            .on_press(Message::CancelLineEdit)
+            .padding([4, 6])
+            .style(pill_button_secondary);
+        let done = action(
+            row![icon(ICON_CHECK, 13.0), text("Done").wrapping(NO_WRAP)]
+                .spacing(4)
+                .align_y(iced::Alignment::Center),
+        )
+        .on_press(Message::DoneLineEdit)
+        .padding([4, 10])
+        .style(color_button(scheme.blue, scheme.on_accent));
+
+        let divider = container(horizontal_space())
+            .width(Length::Fixed(1.0))
+            .height(Length::Fixed(18.0))
+            .style(move |_theme| container::Style {
+                background: Some(scheme.border.into()),
+                ..container::Style::default()
+            });
+
+        let controls = row![
+            text("Editing line")
+                .size(11)
+                .wrapping(NO_WRAP)
+                .color(scheme.muted),
+            picker,
+            horizontal_space(),
+            self.tip(
+                icon_action(ICON_MERGE_PREV).on_press(Message::MergePrevLine),
+                "Merge into the previous line",
+                &scheme,
+            ),
+            self.tip(
+                icon_action(ICON_MERGE_NEXT).on_press(Message::MergeNextLine),
+                "Merge the next line into this one",
+                &scheme,
+            ),
+            self.tip(
+                icon_action(ICON_SPLIT).on_press(Message::SplitLineAtCursor),
+                "Split at the cursor",
+                &scheme,
+            ),
+            divider,
+            self.tip(undo, "Undo", &scheme),
+            self.tip(redo, "Redo", &scheme),
+            horizontal_space(),
+            self.tip(
+                action(icon_colored(ICON_TRASH, 14.0, scheme.ink))
+                    .padding([4, 6])
+                    .style(pill_button_secondary)
+                    .on_press(Message::DeleteLineEdit),
+                "Delete this line",
+                &scheme,
+            ),
+            self.tip(cancel, "Cancel (Esc)", &scheme),
+            done,
+        ]
+        .spacing(6)
+        .align_y(iced::Alignment::Center)
+        .width(Length::Fill);
+
+        Some(
+            container(controls)
+                .width(Length::Fill)
+                .padding([6, 8])
+                .style(move |_theme| container::Style {
+                    background: Some(scheme.track.into()),
+                    border: iced::border::Border {
+                        color: scheme.border,
+                        width: 1.0,
+                        radius: 10.0.into(),
+                    },
+                    ..container::Style::default()
+                })
+                .into(),
+        )
     }
 
     /// Header above the transcript: what is on screen plus reading controls.
@@ -7378,7 +7659,7 @@ impl App {
         } else {
             pill_button_secondary
         };
-        self.tip(
+        let timestamps = self.tip(
             action(toggle_label("Timestamps", self.show_timestamps))
                 .on_press(Message::TimestampsToggled(!self.show_timestamps))
                 .style(time_style)
@@ -7389,7 +7670,39 @@ impl App {
                 "Show timestamps"
             },
             scheme,
-        )
+        );
+        // Confidence sits beside the other view toggles rather than in the
+        // search row, where it read as a filter on the query.
+        let confidence: Element<Message> = if self.has_confidence() {
+            self.tip(
+                action(toggle_label("Confidence", self.confidence_view))
+                    .on_press(Message::ToggleConfidenceView)
+                    .style(if self.confidence_view {
+                        pill_button_toggled
+                    } else {
+                        pill_button_secondary
+                    })
+                    .width(Length::Fixed(122.0)),
+                if self.confidence_view {
+                    "Stop marking uncertain utterances"
+                } else {
+                    "Mark utterances the model was unsure about"
+                },
+                scheme,
+            )
+        } else {
+            self.tip(
+                action(toggle_label("Confidence", self.confidence_view))
+                    .style(greyed_button(*scheme))
+                    .width(Length::Fixed(122.0)),
+                "No confidence data for this transcript",
+                scheme,
+            )
+        };
+        row![timestamps, confidence]
+            .spacing(6)
+            .align_y(iced::Alignment::Center)
+            .into()
     }
 
     /// Hover-only zoom / SMS controls at the bottom-left of the transcript.
@@ -7852,45 +8165,19 @@ impl App {
             )
         };
         controls = controls.push(rename);
-        let confidence: Element<Message> = if self.has_confidence() {
-            self.tip(
-                action(toggle_label("Confidence", self.confidence_view))
-                    .on_press(Message::ToggleConfidenceView)
-                    .style(if self.confidence_view {
-                        pill_button_toggled
-                    } else {
-                        pill_button_secondary
-                    })
-                    .width(Length::Fixed(122.0)),
-                if self.confidence_view {
-                    "Stop marking uncertain utterances"
-                } else {
-                    "Mark utterances the model was unsure about"
-                },
-                scheme,
-            )
-        } else {
-            self.tip(
-                action(toggle_label("Confidence", self.confidence_view))
-                    .style(greyed_button(*scheme))
-                    .width(Length::Fixed(122.0)),
-                "No confidence data for this transcript",
-                scheme,
-            )
-        };
-        controls = controls.push(confidence);
         controls.into()
     }
 
     /// True while any modal dialog is showing.
+    ///
+    /// The inline line editor is deliberately not a popup: it lives in the
+    /// transcript, so hover chrome and tooltips keep working around it.
     fn popup_open(&self) -> bool {
         self.settings_open
             || self.paywall_open
             || self.summary_open
             || self.help_open.is_some()
             || self.rename_open
-            || self.line_edit.is_some()
-            || self.delete_confirm
             || self.calibration.is_some()
     }
 
@@ -8859,17 +9146,34 @@ impl App {
                 shadow: soft_shadow(),
                 ..container::Style::default()
             });
-        let bottom_slot = container(match has_queue {
-            true => search_actions_row,
-            false => horizontal_space().into(),
+        // Two fixed slots stacked below the transcript card. The line editor
+        // panel lives in the first and is zero-height while no line is being
+        // edited; adding it as a sibling of the card instead would shift the
+        // scrollable's child index and reset the transcript's scroll offset.
+        let editing = self.line_edit.is_some();
+        let panel_slot = container(match self.line_edit_panel(scheme) {
+            Some(panel) => panel,
+            None => horizontal_space().into(),
         })
         .width(Length::Fill)
         .padding(iced::Padding {
-            top: if has_queue { 12.0 } else { 0.0 },
+            top: 0.0,
             right: 0.0,
-            bottom: 0.0,
+            bottom: if editing { 8.0 } else { 0.0 },
             left: 0.0,
         });
+        let search_slot: Element<Message> = match has_queue {
+            true => search_actions_row,
+            false => horizontal_space().into(),
+        };
+        let bottom_slot = container(column![panel_slot, search_slot].spacing(0))
+            .width(Length::Fill)
+            .padding(iced::Padding {
+                top: if has_queue { 12.0 } else { 0.0 },
+                right: 0.0,
+                bottom: 0.0,
+                left: 0.0,
+            });
         let right_panel: Element<Message> = column![
             top_slot,
             mouse_area(transcript_card)
@@ -8881,7 +9185,10 @@ impl App {
         .width(Length::Fill)
         .height(Length::Fill)
         .into();
-        let right_panel = self.with_toast(right_panel, scheme, if has_queue { 48.0 } else { 20.0 });
+        // The toast sits above the bottom rows; the editing panel adds a row.
+        let toast_bottom = (if has_queue { 48.0 } else { 20.0 })
+            + if editing { 46.0 } else { 0.0 };
+        let right_panel = self.with_toast(right_panel, scheme, toast_bottom);
 
         let (theme_icon, theme_tip) = match self.theme_mode {
             AppTheme::Light => (ICON_MOON, "Switch to dark theme"),
@@ -8955,165 +9262,6 @@ impl App {
         let mut base: Element<Message> = base.into();
         // Always wrapped: see `drop_overlay` for why its shape must not change.
         base = drop_overlay(base, scheme, self.drag_hover);
-
-        if self.delete_confirm {
-            if let Some(row) = self.line_edit.as_ref().and_then(|edit| edit.current_row()) {
-                let preview = row.content.text().trim_end().replace(['\n', '\r'], " ");
-                let preview = ellipsize(preview.trim(), 72);
-                let speaker = row.speaker.trim();
-                let preview = if speaker.is_empty() {
-                    preview
-                } else {
-                    format!("{speaker}: {preview}")
-                };
-                let body = column![
-                    text("Delete line?").size(20),
-                    text(
-                        "This removes the line from the transcript and saves the file. \
-                         A backup is kept next to it."
-                    )
-                    .size(theme::TEXT_SM)
-                    .color(scheme.muted),
-                    container(
-                        text(preview)
-                            .size(theme::TEXT_SM)
-                            .color(scheme.text)
-                            .width(Length::Fill),
-                    )
-                    .width(Length::Fill)
-                    .padding(10)
-                    .style(move |_theme| container::Style {
-                        background: Some(scheme.track.into()),
-                        border: iced::border::rounded(8.0),
-                        ..container::Style::default()
-                    }),
-                    row![
-                        horizontal_space(),
-                        action_text("Cancel")
-                            .on_press(Message::CancelDeleteLine)
-                            .style(pill_button_secondary),
-                        action_text("Delete")
-                            .on_press(Message::ConfirmDeleteLine)
-                            .style(color_button(scheme.danger, scheme.on_accent)),
-                    ]
-                    .spacing(8),
-                ]
-                .spacing(10);
-                let dialog = modal_card(body, 440.0, scheme);
-                return modal_overlay(base, dialog, scheme);
-            }
-        }
-
-        if let Some(edit) = &self.line_edit {
-            // Every row is read from the transcript as it stands now, so a
-            // merge, split, delete, or undo/redo refreshes the whole stack
-            // while the dialog is open.
-            let order = self.speaker_order();
-            let accent_for = |speaker: &str| line_accent(&order, speaker, &scheme);
-            let size = self.font_scale * 16.0;
-
-            let mut col = column![text("Edit line").size(20)].spacing(10);
-            // Previous, current and next, in transcript order: each line reads
-            // exactly as it does in the transcript, and each is its own field.
-            // The rows sit in a stable column, which is what keeps the three
-            // text editors apart for iced (state is keyed by tree position).
-            let mut rows = column![].spacing(theme::SPACE_XS);
-            for (position, line) in edit.rows.iter().enumerate() {
-                let mut speakers = order.clone();
-                if !speakers.iter().any(|name| name == &line.speaker) {
-                    speakers.push(line.speaker.clone());
-                }
-                rows = rows.push(line_edit_row(
-                    position,
-                    speakers,
-                    &line.speaker,
-                    &line.content,
-                    accent_for(&line.speaker),
-                    scheme,
-                    size,
-                ));
-            }
-            col = col.push(
-                column![text("Transcribed text").size(12), rows].spacing(theme::SPACE_XS),
-            );
-            // One width for all three, so the row reads as a single control
-            // group instead of three differently sized buttons.
-            let merge_width = line_edit_actions_width();
-            col = col.push(
-                container(
-                    row![
-                        centred_action("Merge previous", merge_width)
-                            .on_press(Message::MergePrevLine)
-                            .style(pill_button_secondary),
-                        centred_action("Merge next", merge_width)
-                            .on_press(Message::MergeNextLine)
-                            .style(pill_button_secondary),
-                        centred_action("Split at cursor", merge_width)
-                            .on_press(Message::SplitLineAtCursor)
-                            .style(pill_button_secondary),
-                    ]
-                    .spacing(8),
-                )
-                .width(Length::Fill)
-                .align_x(iced::Alignment::Center),
-            );
-            // Same gate as the dialog itself: only a build that can edit lines
-            // has a reason to mention the transcript shortcut.
-            if self.can(license::Feature::Editing) {
-                col = col.push(
-                    text("Pro tip: right-click a line in the transcript to cycle its speaker.")
-                        .size(11)
-                        .color(scheme.muted)
-                        .wrapping(NO_WRAP),
-                );
-            }
-            // Undo and redo cover this dialog's edits only, and never a
-            // transcript the app cannot write back to.
-            let writable = self.shown_output().is_some();
-            let undo: Element<Message> = if writable && self.line_undo_available() {
-                fit_action("Undo")
-                    .on_press(Message::UndoLineEdit)
-                    .style(pill_button_secondary)
-                    .into()
-            } else {
-                fit_action("Undo").style(greyed_button(scheme)).into()
-            };
-            let redo: Element<Message> = if writable && self.line_redo_available() {
-                fit_action("Redo")
-                    .on_press(Message::RedoLineEdit)
-                    .style(pill_button_secondary)
-                    .into()
-            } else {
-                fit_action("Redo").style(greyed_button(scheme)).into()
-            };
-            col = col.push(
-                container(
-                    row![
-                        undo,
-                        redo,
-                        action_text("Delete")
-                            .on_press(Message::DeleteLineEdit)
-                            .style(color_button(scheme.danger, scheme.on_accent)),
-                        action_text("Copy line")
-                            .on_press(Message::CopyLineEdit)
-                            .style(pill_button_secondary),
-                        horizontal_space(),
-                        action_text("Save")
-                            .on_press(Message::SaveLineEdit)
-                            .style(color_button(scheme.blue, scheme.on_accent)),
-                        action_text("Cancel")
-                            .on_press(Message::CancelLineEdit)
-                            .style(pill_button_secondary),
-                    ]
-                    .spacing(8)
-                    .align_y(iced::Alignment::Center),
-                )
-                .width(Length::Fill)
-                .align_x(iced::Alignment::End),
-            );
-            let dialog = modal_card(col, LINE_EDIT_DIALOG_WIDTH, scheme);
-            return modal_overlay(base, dialog, scheme);
-        }
 
         if self.summary_open {
             let lines = self.stats_lines();
@@ -9211,6 +9359,54 @@ impl App {
             let wide = blocks.iter().any(|block| matches!(block, Block::Table(..)));
             let dialog = modal_card(col, if wide { 520.0 } else { 460.0 }, scheme);
             return modal_overlay(base, dialog, scheme);
+        }
+
+        if self.delete_confirm {
+            if let Some(row) = self.line_edit.as_ref().and_then(|edit| edit.current_row()) {
+                let preview = row.content.text().trim_end().replace(['\n', '\r'], " ");
+                let preview = ellipsize(preview.trim(), 72);
+                let speaker = row.speaker.trim();
+                let preview = if speaker.is_empty() {
+                    preview
+                } else {
+                    format!("{speaker}: {preview}")
+                };
+                let body = column![
+                    text("Delete line?").size(20),
+                    text(
+                        "This removes the line from the transcript and saves the file. \
+                         A backup is kept next to it, and Undo puts it back."
+                    )
+                    .size(theme::TEXT_SM)
+                    .color(scheme.muted),
+                    container(
+                        text(preview)
+                            .size(theme::TEXT_SM)
+                            .color(scheme.text)
+                            .width(Length::Fill),
+                    )
+                    .width(Length::Fill)
+                    .padding(10)
+                    .style(move |_theme| container::Style {
+                        background: Some(scheme.track.into()),
+                        border: iced::border::rounded(8.0),
+                        ..container::Style::default()
+                    }),
+                    row![
+                        horizontal_space(),
+                        action_text("Cancel")
+                            .on_press(Message::CancelDeleteLine)
+                            .style(pill_button_secondary),
+                        action_text("Delete")
+                            .on_press(Message::ConfirmDeleteLine)
+                            .style(color_button(scheme.danger, scheme.on_accent)),
+                    ]
+                    .spacing(8),
+                ]
+                .spacing(10);
+                let dialog = modal_card(body, 440.0, scheme);
+                return modal_overlay(base, dialog, scheme);
+            }
         }
 
         if self.calibration.is_some() {
@@ -9602,6 +9798,26 @@ fn attach_confidences(mut lines: Vec<DocLine>, confidences: &[Option<f32>]) -> V
         }
     }
     lines
+}
+
+/// Order speaker names the way the rename dialog shows them: by the number in
+/// a `SPEAKER n` label, then alphabetically for anything renamed by hand.
+fn sort_speaker_names(names: &mut [String]) {
+    names.sort_by(|a, b| speaker_sort_key(a).cmp(&speaker_sort_key(b)));
+}
+
+fn speaker_sort_key(name: &str) -> (u32, String) {
+    let number = name
+        .rsplit(|character: char| !character.is_ascii_digit())
+        .next()
+        .filter(|digits| !digits.is_empty())
+        .and_then(|digits| digits.parse::<u32>().ok());
+    let named = name.to_ascii_lowercase();
+    // Numbered labels sort before hand-renamed ones, which fall back to A-Z.
+    match number {
+        Some(index) => (index, named),
+        None => (u32::MAX, named),
+    }
 }
 
 fn speaker_palette(index: usize, scheme: &Scheme) -> Color {
@@ -10379,7 +10595,16 @@ const ICON_HOURGLASS: char = '\u{f421}';
 const ICON_CHECK: char = '\u{f633}';
 const ICON_X: char = '\u{f659}';
 const ICON_CARET_DOWN: char = '\u{f229}';
-const ICON_PENCIL: char = '\u{f4cb}';
+/// Two-way arrow: exchange, used to swap a line's speaker.
+const ICON_SWAP: char = '\u{f12b}';
+/// Merge this line into the one above.
+const ICON_MERGE_PREV: char = '\u{f115}';
+/// Merge the line below into this one.
+const ICON_MERGE_NEXT: char = '\u{f112}';
+/// Cut this line at the caret.
+const ICON_SPLIT: char = '\u{f528}';
+const ICON_UNDO: char = '\u{f117}';
+const ICON_REDO: char = '\u{f116}';
 const ICON_CARET_UP: char = '\u{f235}';
 const ICON_ZOOM_IN: char = '\u{f62c}';
 const ICON_ZOOM_OUT: char = '\u{f62d}';
@@ -10858,6 +11083,58 @@ fn line_accent(order: &[String], speaker: &str, scheme: &Scheme) -> Color {
     speaker_palette(position, scheme)
 }
 
+/// Put `index` back into a display order at the rank its start time gives it.
+///
+/// Used while a line is being edited: the speaker filter can hide the row the
+/// moment its speaker changes, and an unmounted row would close the editor.
+fn pin_display_index(display: &mut Vec<usize>, lines: &[DocLine], index: usize) {
+    if display.contains(&index) || index >= lines.len() {
+        return;
+    }
+    let time = |position: usize| {
+        lines
+            .get(position)
+            .and_then(|line| line.start)
+            .unwrap_or(f32::INFINITY)
+    };
+    let start = time(index);
+    let rank = display
+        .iter()
+        .position(|other| time(*other) > start)
+        .unwrap_or(display.len());
+    display.insert(rank, index);
+}
+
+/// A fixed-height, inert block standing in for transcript rows that are not
+/// rendered. The virtualised window keeps its scroll geometry with it.
+fn row_spacer(height: f32) -> Element<'static, Message> {
+    container(horizontal_space())
+        .width(Length::Fill)
+        .height(Length::Fixed(height))
+        .into()
+}
+
+/// Exchange arrow on the playhead bubble row.
+///
+/// The row's bubble is on the left, so the arrow sits in the empty half rather
+/// than on top of the text. It is stacked after the row's full-width click
+/// overlay, which would otherwise swallow the click meant for it.
+fn sms_swap_arrow(index: usize, scheme: &Scheme) -> Element<'static, Message> {
+    let scheme = *scheme;
+    container(
+        action(icon_colored(ICON_SWAP, 14.0, scheme.ink))
+            .on_press(Message::FlipLineSpeaker(index))
+            .padding([2, 4])
+            .style(pill_button_secondary),
+    )
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .padding([0, 4])
+    .align_x(iced::Alignment::End)
+    .align_y(iced::Alignment::Center)
+    .into()
+}
+
 /// The speaker dropdown of the line editor, drawn as the transcript's speaker
 /// label: the speaker's own colour, no field chrome, and a small highlight on
 /// hover so it still reads as something that opens a list.
@@ -10911,19 +11188,18 @@ fn line_editor_style(
     }
 }
 
-/// One editable line, laid out like the line it becomes: the speaker's accent
-/// stripe, the speaker where the transcript prints its label, then the text in
-/// a bordered field that is only as tall as the text it holds.
-fn line_edit_row<'a>(
-    position: usize,
-    speakers: Vec<String>,
-    selected: &str,
+/// The line being edited, drawn in the transcript as a field where the line
+/// stands: the speaker's accent stripe, then the text. The speaker itself is
+/// chosen from the panel below the transcript, so the field keeps the width it
+/// needs for the words being fixed.
+fn inline_line_edit_row<'a>(
     content: &'a text_editor::Content,
     accent: Color,
     scheme: Scheme,
     size: f32,
+    text_width: f32,
 ) -> Element<'a, Message> {
-    let height = line_edit_height(&content.text(), size);
+    let height = line_edit_height(&content.text(), size, text_width);
     let stripe = container(horizontal_space())
         .width(Length::Fixed(3.0))
         .height(Length::Fixed(height))
@@ -10932,29 +11208,12 @@ fn line_edit_row<'a>(
             border: iced::border::rounded(2.0),
             ..container::Style::default()
         });
-    // Wide enough for "SPEAKER 1" at the transcript's size; longer names clip
-    // inside the pick list instead of widening the dialog.
-    let label_width = (size * 9.0).clamp(120.0, 240.0);
-    let label = pick_list(
-        speakers,
-        Some(selected.to_string()),
-        move |speaker| Message::LineEditSpeaker(position, speaker),
-    )
-    .style(speaker_pick(accent, scheme))
-    .text_size(size)
-    .font(Font {
-        weight: font::Weight::Bold,
-        ..Font::DEFAULT
-    })
-    // Matches the editor's inner padding so the label sits on the first line.
-    .padding([LINE_EDIT_PAD_Y, 4.0])
-    .width(Length::Fixed(label_width));
-    // The field is visibly a field: a muted fill, a hairline border and rounded
-    // corners around transparent editor chrome, so the text itself still reads
-    // as the transcript's ink rather than as form text.
+    // The field is visibly a field: the theme's input well, a border in the
+    // speaker's colour and rounded corners around transparent editor chrome, so
+    // the text still reads as the transcript's ink rather than as form text.
     let field = container(
         text_editor(content)
-            .on_action(move |action| Message::LineEditAction(position, action))
+            .on_action(|action| Message::LineEditAction(0, action))
             .size(size)
             .wrapping(iced::widget::text::Wrapping::Word)
             .height(Length::Fill)
@@ -10967,37 +11226,29 @@ fn line_edit_row<'a>(
     // Long text scrolls inside the field instead of spilling past its border.
     .clip(true)
     .style(move |_theme| container::Style {
-        background: Some(scheme.track.into()),
+        background: Some(scheme.field_bg.into()),
         border: iced::border::Border {
-            color: scheme.border,
+            color: accent,
             width: 1.0,
             radius: 8.0.into(),
         },
         ..container::Style::default()
     });
-    row![stripe, label, field]
+    row![stripe, field]
         .spacing(theme::SPACE_SM)
         .align_y(iced::Alignment::Start)
         .width(Length::Fill)
         .into()
 }
 
-/// Width of the text area inside the line editor's field, i.e. the dialog's
-/// content width minus everything the row spends before the text.
-fn line_edit_text_width(size: f32) -> f32 {
-    let label_width = (size * 9.0).clamp(120.0, 240.0);
-    let field = LINE_EDIT_DIALOG_WIDTH
-        - 2.0 * MODAL_PADDING
-        - 3.0 // accent stripe
-        - 2.0 * theme::SPACE_SM // either side of the speaker label
-        - label_width;
-    field - 2.0 * LINE_EDIT_PAD_X - 2.0 // field padding and border
-}
-
-/// Height of the line editor's field for `text` at `size`, wrapped to the width
-/// the field actually has.
-fn line_edit_height(text: &str, size: f32) -> f32 {
-    let lines = visual_line_count(text, size, line_edit_text_width(size));
+/// Height of the editor's field for `text` at `size`, wrapped to `text_width`.
+///
+/// Trailing newlines are trimmed first: a row holds one transcript line, and
+/// the editor's own text can end with a newline that would otherwise buy the
+/// field an empty extra line.
+fn line_edit_height(text: &str, size: f32, text_width: f32) -> f32 {
+    let text = text.trim_end_matches(['\n', '\r']);
+    let lines = visual_line_count(text, size, text_width);
     lines as f32 * size * LINE_HEIGHT_FACTOR + 2.0 * LINE_EDIT_PAD_Y
 }
 
@@ -11198,7 +11449,7 @@ fn line_element(
         size,
     )));
     content = content.push(horizontal_space());
-    // Reserved right-edge slot so revealing the pencil never rewraps the text.
+    // Reserved right-edge slot so revealing the swap button never rewraps the text.
     content = content.push(horizontal_space().width(Length::Fixed(size * 1.4)));
 
     // The whole line carries the speaker's colour, matching the fill behind
@@ -11252,20 +11503,22 @@ fn line_element(
     })
     .on_press(Message::LineClicked(idx));
 
-    let pencil: Element<'static, Message> = if hovered {
-        button(icon_colored(ICON_PENCIL, size * 0.82, scheme.muted))
+    // Swap the speaker of this line. It replaces the old pencil in the same
+    // reserved slot, so revealing it never rewraps the line.
+    let swap: Element<'static, Message> = if hovered {
+        button(icon_colored(ICON_SWAP, size * 0.82, scheme.muted))
             .padding([0, 2])
             .style(|_theme, _status| button::Style {
                 background: None,
                 border: iced::border::Border::default(),
                 ..button::Style::default()
             })
-            .on_press(Message::EditLine(idx))
+            .on_press(Message::FlipLineSpeaker(idx))
             .into()
     } else {
         horizontal_space().into()
     };
-    let pencil_overlay: Element<'static, Message> = container(pencil)
+    let swap_overlay: Element<'static, Message> = container(swap)
         .width(Length::Fill)
         .height(Length::Fill)
         .padding([0, 6])
@@ -11290,7 +11543,7 @@ fn line_element(
         .interaction(mouse::Interaction::Pointer)
         .on_right_press(Message::FlipLineSpeaker(idx)),
         keyboard_hit,
-        pencil_overlay,
+        swap_overlay,
     ]
     .into();
     mouse_area(line)
@@ -11316,30 +11569,6 @@ fn action_width(label: &str) -> f32 {
 /// A button with a single-line text label.
 fn action_text<'a>(label: &'a str) -> iced::widget::Button<'a, Message> {
     action(text(label).wrapping(NO_WRAP)).width(Length::Fixed(action_width(label)))
-}
-
-/// One width for a row of text buttons, so the row reads as a single group
-/// instead of buttons sized to their own labels.
-fn equal_action_width(labels: &[&str]) -> f32 {
-    labels
-        .iter()
-        .map(|label| action_width(label))
-        .fold(0.0, f32::max)
-}
-
-/// Width shared by the line editor's merge and split buttons.
-fn line_edit_actions_width() -> f32 {
-    equal_action_width(&["Merge previous", "Merge next", "Split at cursor"])
-}
-
-/// A fixed-width text button with its label centred in the button.
-fn centred_action<'a>(label: &'a str, width: f32) -> iced::widget::Button<'a, Message> {
-    action(
-        container(text(label).wrapping(NO_WRAP))
-            .width(Length::Fill)
-            .align_x(iced::Alignment::Center),
-    )
-    .width(Length::Fixed(width))
 }
 
 /// Text action that sizes to its label, so a tight row can never squeeze the
@@ -11396,6 +11625,20 @@ fn dialog_shadow() -> Shadow {
     }
 }
 
+/// Label colour for neutral (unfilled) buttons.
+///
+/// Dark mode gets pure white so the label reads at full strength against the
+/// dark panels; light mode keeps the theme's primary text, since white on a
+/// near-white panel would vanish. Filled accent buttons do not use this — they
+/// keep `on_accent`, which is chosen for contrast against their own fill.
+fn button_label(theme: &iced::Theme) -> Color {
+    if theme::is_dark(theme) {
+        Color::WHITE
+    } else {
+        theme.palette().text
+    }
+}
+
 fn pill_button_secondary(theme: &iced::Theme, status: button::Status) -> button::Style {
     let base = button::secondary(theme, status);
     let color = style_background_color(&base).unwrap_or(theme.palette().background);
@@ -11417,9 +11660,15 @@ fn pill_button_secondary(theme: &iced::Theme, status: button::Status) -> button:
             soft_shadow(),
         ),
     };
+    // Disabled keeps iced's dimmed label; only the live states go white in
+    // dark mode, so a dead button never looks live.
+    let text_color = match status {
+        button::Status::Disabled => base.text_color,
+        _ => button_label(theme),
+    };
     button::Style {
         background: Some(linear_gradient(top, bottom)),
-        text_color: base.text_color,
+        text_color,
         border: iced::border::Border {
             color: theme::lighten(color, 0.28),
             width: 1.0,
@@ -11449,7 +11698,12 @@ fn pill_button_active(theme: &iced::Theme, status: button::Status) -> button::St
                 ..primary
             },
         )),
-        text_color: theme.palette().text,
+        text_color: match status {
+            // A disabled tinted pill keeps the label it had, so the state still
+            // reads as unavailable rather than switching to full-strength white.
+            button::Status::Disabled => theme.palette().text,
+            _ => button_label(theme),
+        },
         border: iced::border::Border {
             color: Color {
                 a: border_alpha,
@@ -11467,7 +11721,9 @@ fn pill_button_active(theme: &iced::Theme, status: button::Status) -> button::St
 fn pill_button_toggled(theme: &iced::Theme, status: button::Status) -> button::Style {
     let base = button::secondary(theme, status);
     let color = style_background_color(&base).unwrap_or(theme.palette().background);
-    let text = theme.palette().text;
+    // Drives the label and the fill tint alike: in dark mode the grey fill is
+    // mixed toward white, so the pressed state stays visible.
+    let text = button_label(theme);
     let (amount, border_alpha, shadow): (f32, f32, Shadow) = match status {
         button::Status::Hovered => (0.24, 0.55, soft_shadow()),
         button::Status::Pressed => (0.30, 0.65, Shadow::default()),
@@ -11506,11 +11762,11 @@ fn segment_button(
     muted: bool,
 ) -> impl Fn(&iced::Theme, button::Status) -> button::Style {
     move |theme, status| {
-        let text = theme.palette().text;
+        let text = button_label(theme);
         // Unselected but selectable: full-strength text at reduced alpha. This
         // is the colour of a choice you can still make, as opposed to the
         // muted grey of one you cannot.
-        let idle = Color { a: 0.75, ..scheme.text };
+        let idle = Color { a: 0.75, ..text };
 
         let (background, color, border, shadow) = if muted {
             // Locked or unavailable: no blue at all. When it is nonetheless
@@ -11581,21 +11837,22 @@ fn segment_button(
 
 /// Verb-phrase action used beside the toggle, not as a third segment.
 fn text_action_button(scheme: Scheme) -> impl Fn(&iced::Theme, button::Status) -> button::Style {
-    move |_theme, status| {
+    move |theme, status| {
+        let label = button_label(theme);
         let (background, color) = match status {
             button::Status::Hovered => (
                 Color {
                     a: 0.08,
-                    ..scheme.text
+                    ..label
                 },
-                scheme.text,
+                label,
             ),
             button::Status::Pressed => (
                 Color {
                     a: 0.16,
-                    ..scheme.text
+                    ..label
                 },
-                scheme.text,
+                label,
             ),
             button::Status::Disabled => (
                 Color::TRANSPARENT,
@@ -11604,7 +11861,7 @@ fn text_action_button(scheme: Scheme) -> impl Fn(&iced::Theme, button::Status) -
                     ..scheme.text
                 },
             ),
-            _ => (Color::TRANSPARENT, scheme.text),
+            _ => (Color::TRANSPARENT, label),
         };
         button::Style {
             background: Some(background.into()),
@@ -11651,10 +11908,13 @@ fn speed_pick(theme: &iced::Theme, status: pick_list::Status) -> pick_list::Styl
         pick_list::Status::Active => button::Status::Active,
     };
     let base = button::secondary(theme, button_status);
+    // The speed label is a button-level label, so it follows the same rule:
+    // pure white on a dark theme, the theme text otherwise.
+    let text = button_label(theme);
     pick_list::Style {
-        text_color: base.text_color,
-        placeholder_color: base.text_color,
-        handle_color: base.text_color,
+        text_color: text,
+        placeholder_color: text,
+        handle_color: text,
         background: base.background.unwrap_or_else(|| Color::TRANSPARENT.into()),
         border: iced::border::Border {
             color: Color::TRANSPARENT,
@@ -11724,18 +11984,19 @@ fn color_button(bg: Color, ink: Color) -> impl Fn(&iced::Theme, button::Status) 
                 2.0,
                 Shadow::default(),
             ),
-            // Filled buttons keep their hue when disabled, but the label must
-            // follow the active theme rather than the (possibly dark) accent ink.
+            // Filled buttons keep their hue when disabled, but they must read
+            // as unavailable: a dimmer fill and grey text rather than the full
+            // strength label.
             button::Status::Disabled => {
-                let faded = Color { a: 0.45, ..bg };
+                let faded = Color { a: 0.26, ..bg };
                 (
                     faded,
                     faded,
                     Color {
-                        a: 0.85,
+                        a: 0.55,
                         ..theme.palette().text
                     },
-                    Color { a: 0.20, ..bg },
+                    Color { a: 0.14, ..bg },
                     1.0,
                     Shadow::default(),
                 )
@@ -11969,12 +12230,10 @@ mod tests {
         app
     }
 
-    /// Open a completed item synchronously in tests, bypassing the async
-    /// transcript-loading task used by the UI.
-    /// Open the line editor on `index` exactly as a right-click does, with the
-    /// window of rows the dialog shows.
+    /// Open the inline editor on `index` through the real message path.
     fn open_line_edit(app: &mut App, index: usize) {
-        app.line_edit = LineEdit::new(index, app.edit_lines());
+        let _ = app.update(Message::EditLine(index));
+        assert!(app.line_edit.is_some(), "the editor did not open on {index}");
     }
 
     /// The current row of the open line editor, mutably.
@@ -12124,6 +12383,171 @@ mod tests {
     }
 
     #[test]
+    fn editing_a_low_confidence_line_vouches_for_it() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("confidence-edit-config");
+        let media = temp_dir("confidence-edit-media");
+
+        let audio = media.join("talk.mp3");
+        std::fs::write(&audio, b"audio").unwrap();
+        let transcript = media.join("talk.txt");
+        std::fs::write(
+            &transcript,
+            "[00:00] SPEAKER 1: hello there\n[00:05] SPEAKER 2: hi\n",
+        )
+        .unwrap();
+        std::fs::write(
+            media.join("talk.json"),
+            r#"{
+                "lines": [
+                    {"time":"00:00","speaker":"SPEAKER 1","text":"hello there","start":0.0,"confidence":-0.8},
+                    {"time":"00:05","speaker":"SPEAKER 2","text":"hi","start":5.0,"confidence":-0.2}
+                ],
+                "turns": [],
+                "duration": 10.0
+            }"#,
+        )
+        .unwrap();
+
+        let mut app = pro_app();
+        app.queue.push(QueueItem {
+            path: audio.clone(),
+            audio: Some(audio),
+            status: ItemStatus::Done,
+            duration: Some(10.0),
+            transcript: Some(transcript),
+            stats: None,
+            turns: Vec::new(),
+            peaks: Arc::new(vec![0.2; 16]),
+        });
+        open_test_item(&mut app, 0);
+        assert!(is_low_confidence(&app.selected_view.as_ref().unwrap().lines[0]));
+
+        let _ = app.update(Message::EditLine(0));
+        current_row_mut(&mut app).content = text_editor::Content::with_text("hello there, edited");
+        let _ = app.update(Message::DoneLineEdit);
+
+        let lines = &app.selected_view.as_ref().unwrap().lines;
+        assert_eq!(lines[0].confidence, Some(HUMAN_CONFIDENCE));
+        assert!(!is_low_confidence(&lines[0]));
+        // The neighbour was not part of the edit, so it keeps its ASR value.
+        assert_eq!(lines[1].confidence, Some(-0.2));
+
+        let _ = std::fs::remove_dir_all(&media);
+    }
+
+    #[test]
+    fn flipping_a_low_confidence_line_vouches_for_it() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("confidence-flip-config");
+        let media = temp_dir("confidence-flip-media");
+
+        let audio = media.join("talk.mp3");
+        std::fs::write(&audio, b"audio").unwrap();
+        let transcript = media.join("talk.txt");
+        std::fs::write(
+            &transcript,
+            "[00:00] SPEAKER 1: hello there\n[00:05] SPEAKER 2: hi\n",
+        )
+        .unwrap();
+        std::fs::write(
+            media.join("talk.json"),
+            r#"{
+                "lines": [
+                    {"time":"00:00","speaker":"SPEAKER 1","text":"hello there","start":0.0,"confidence":-0.8},
+                    {"time":"00:05","speaker":"SPEAKER 2","text":"hi","start":5.0,"confidence":-0.2}
+                ],
+                "turns": [],
+                "duration": 10.0
+            }"#,
+        )
+        .unwrap();
+
+        let mut app = pro_app();
+        app.queue.push(QueueItem {
+            path: audio.clone(),
+            audio: Some(audio),
+            status: ItemStatus::Done,
+            duration: Some(10.0),
+            transcript: Some(transcript),
+            stats: None,
+            turns: Vec::new(),
+            peaks: Arc::new(vec![0.2; 16]),
+        });
+        open_test_item(&mut app, 0);
+        assert!(is_low_confidence(&app.selected_view.as_ref().unwrap().lines[0]));
+
+        let _ = app.flip_line_speaker(0);
+
+        let lines = &app.selected_view.as_ref().unwrap().lines;
+        assert_eq!(lines[0].speaker, "SPEAKER 2");
+        assert_eq!(lines[0].confidence, Some(HUMAN_CONFIDENCE));
+        assert!(!is_low_confidence(&lines[0]));
+        assert_eq!(lines[1].confidence, Some(-0.2));
+
+        let _ = std::fs::remove_dir_all(&media);
+    }
+
+    #[test]
+    fn editing_rewrites_the_json_sidecar_confidence() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("confidence-sidecar-config");
+        let media = temp_dir("confidence-sidecar-media");
+
+        let audio = media.join("talk.mp3");
+        std::fs::write(&audio, b"audio").unwrap();
+        let transcript = media.join("talk.txt");
+        std::fs::write(
+            &transcript,
+            "[00:00] SPEAKER 1: hello there\n[00:05] SPEAKER 2: hi\n",
+        )
+        .unwrap();
+        std::fs::write(
+            media.join("talk.json"),
+            r#"{
+                "lines": [
+                    {"time":"00:00","speaker":"SPEAKER 1","text":"hello there","start":0.0,"confidence":-0.8},
+                    {"time":"00:05","speaker":"SPEAKER 2","text":"hi","start":5.0,"confidence":-0.2}
+                ],
+                "turns": [],
+                "duration": 10.0
+            }"#,
+        )
+        .unwrap();
+
+        let mut app = pro_app();
+        app.queue.push(QueueItem {
+            path: audio.clone(),
+            audio: Some(audio),
+            status: ItemStatus::Done,
+            duration: Some(10.0),
+            transcript: Some(transcript.clone()),
+            stats: None,
+            turns: Vec::new(),
+            peaks: Arc::new(vec![0.2; 16]),
+        });
+        open_test_item(&mut app, 0);
+
+        let _ = app.update(Message::EditLine(0));
+        current_row_mut(&mut app).content = text_editor::Content::with_text("hello there, edited");
+        let _ = app.update(Message::DoneLineEdit);
+
+        // Reloading through the same path the viewer uses sees the voucher.
+        let confidences = backend::read_confidences(&transcript);
+        assert_eq!(confidences[0], Some(HUMAN_CONFIDENCE));
+        assert_eq!(confidences[1], Some(-0.2));
+
+        // Only the confidences changed: the rest of the sidecar is intact.
+        let value: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(media.join("talk.json")).unwrap())
+                .unwrap();
+        assert_eq!(value["duration"].as_f64(), Some(10.0));
+        assert!(value["turns"].as_array().unwrap().is_empty());
+
+        let _ = std::fs::remove_dir_all(&media);
+    }
+
+    #[test]
     fn transcript_renders_line_and_bubble_modes_with_search() {
         let _guard = env_lock();
         let _config = ConfigEnv::new("render-config");
@@ -12207,7 +12631,7 @@ mod tests {
         assert_eq!(app.selected_view.as_ref().unwrap().lines.len(), 1);
         assert!(app.shown_transcript().contains("hello world again"));
 
-        // The dialog stays open on the surviving line with the caret at the end.
+        // The editor stays open on the surviving line with the caret at the end.
         assert_eq!(app.line_edit.as_ref().unwrap().index, 0);
         let row = current_row_mut(&mut app);
         assert_eq!(row.index, 0);
@@ -12309,7 +12733,7 @@ mod tests {
         let order = app.speaker_order();
         assert_eq!(order, vec!["SPEAKER 1".to_string(), "SPEAKER 2".to_string()]);
 
-        // Editing line 0 tints the dialog with the first palette slot; editing
+        // Editing line 0 tints the editor with the first palette slot; editing
         // line 1 tints it with the second. Same tokens as the transcript.
         for (index, position) in [(0usize, 0usize), (1, 1)] {
             open_line_edit(&mut app, index);
@@ -12371,10 +12795,10 @@ mod tests {
         assert_eq!(line_text(&lines[0]), "hello world");
         assert_eq!(line_text(&lines[1]), "again");
         assert_eq!(std::fs::read_to_string(&transcript).unwrap(), original);
-        // The dialog stays open and shows the restored line and its neighbours.
+        // The editor stays open and shows the restored line.
         let edit = app.line_edit.as_ref().unwrap();
         assert_eq!(edit.index, 0);
-        assert_eq!(edit.rows.len(), 2);
+        assert_eq!(edit.rows.len(), 1);
         let row = edit.current_row().unwrap();
         assert_eq!(row.index, 0);
         assert_eq!(row.content.text().trim_end(), "hello world");
@@ -12391,7 +12815,7 @@ mod tests {
     }
 
     #[test]
-    fn saving_the_row_window_rewrites_every_edited_line() {
+    fn done_writes_the_edited_row_and_undo_restores_it() {
         let _guard = env_lock();
         let _config = ConfigEnv::new("multi-edit-config");
         let media = temp_dir("multi-edit-media");
@@ -12418,23 +12842,22 @@ mod tests {
         let _ = app.update(Message::EditLine(1));
         {
             let edit = app.line_edit.as_mut().unwrap();
-            assert_eq!(edit.rows.len(), 3);
-            assert_eq!(edit.current_position(), 1);
-            let speakers = ["SPEAKER 1", "SPEAKER 1", "SPEAKER 2"];
-            for (row, speaker) in edit.rows.iter_mut().zip(speakers) {
-                row.speaker = speaker.to_string();
-                row.content = text_editor::Content::with_text(&format!("edited {}", row.index));
-            }
+            // One row only: the field replaces the line it edits.
+            assert_eq!(edit.rows.len(), 1);
+            assert_eq!(edit.index, 1);
+            assert_eq!(edit.current_position(), 0);
+            edit.rows[0].speaker = "SPEAKER 1".to_string();
+            edit.rows[0].content = text_editor::Content::with_text("edited");
         }
-        // The three-row dialog lays out without panicking.
+        // The inline field and the panel lay out without panicking.
         let _ = app.view();
-        let _ = app.update(Message::SaveLineEdit);
+        let _ = app.update(Message::DoneLineEdit);
         assert!(app.line_edit.is_none());
         assert_eq!(
             std::fs::read_to_string(&transcript).unwrap(),
-            "[00:00] SPEAKER 1: edited 0\n[00:05] SPEAKER 1: edited 1\n[00:09] SPEAKER 2: edited 2\n"
+            "[00:00] SPEAKER 1: one\n[00:05] SPEAKER 1: edited\n[00:09] SPEAKER 1: three\n"
         );
-        // Three lines rewritten, one undo step for the whole save.
+        // One row rewritten, one undo step.
         assert_eq!(app.line_history.undo.len(), 1);
 
         let _ = app.update(Message::UndoLineEdit);
@@ -12444,7 +12867,58 @@ mod tests {
     }
 
     #[test]
-    fn merging_after_editing_a_neighbour_keeps_that_edit() {
+    fn deleting_the_edited_line_asks_first_and_undo_restores_it() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("delete-line-config");
+        let media = temp_dir("delete-line-media");
+
+        let audio = media.join("talk.mp3");
+        std::fs::write(&audio, b"audio").unwrap();
+        let transcript = media.join("talk.txt");
+        let original = "[00:00] SPEAKER 1: one\n[00:05] SPEAKER 2: two\n[00:09] SPEAKER 1: three\n";
+        std::fs::write(&transcript, original).unwrap();
+
+        let mut app = pro_app();
+        app.queue.push(QueueItem {
+            path: audio.clone(),
+            audio: Some(audio),
+            status: ItemStatus::Done,
+            duration: Some(12.0),
+            transcript: Some(transcript.clone()),
+            stats: None,
+            turns: Vec::new(),
+            peaks: Arc::new(vec![0.2; 16]),
+        });
+        open_test_item(&mut app, 0);
+
+        let _ = app.update(Message::EditLine(1));
+        // Asking is not deleting: the file is untouched until confirmation.
+        let _ = app.update(Message::DeleteLineEdit);
+        assert!(app.delete_confirm);
+        assert_eq!(std::fs::read_to_string(&transcript).unwrap(), original);
+
+        // Escape closes the confirmation and leaves the editor open.
+        let _ = app.update(Message::Escape);
+        assert!(!app.delete_confirm);
+        assert!(app.line_edit.is_some());
+
+        let _ = app.update(Message::DeleteLineEdit);
+        let _ = app.update(Message::ConfirmDeleteLine);
+        assert!(app.line_edit.is_none());
+        assert_eq!(
+            std::fs::read_to_string(&transcript).unwrap(),
+            "[00:00] SPEAKER 1: one\n[00:09] SPEAKER 1: three\n"
+        );
+
+        // The removal is one undo step, like every other line edit.
+        let _ = app.update(Message::UndoLineEdit);
+        assert_eq!(std::fs::read_to_string(&transcript).unwrap(), original);
+
+        let _ = std::fs::remove_dir_all(&media);
+    }
+
+    #[test]
+    fn merging_next_folds_the_typed_text_into_the_line_below() {
         let _guard = env_lock();
         let _config = ConfigEnv::new("flush-merge-config");
         let media = temp_dir("flush-merge-media");
@@ -12473,25 +12947,26 @@ mod tests {
 
         let _ = app.update(Message::EditLine(1));
         {
-            let edit = app.line_edit.as_mut().unwrap();
-            // The previous row is edited and the merge then moves the indices,
-            // so the edit has to be in the transcript before it runs.
-            edit.rows[0].speaker = "SPEAKER 2".to_string();
-            edit.rows[0].content = text_editor::Content::with_text("one edited");
-            // The next row is edited too, and the merge consumes it.
-            edit.rows[2].content = text_editor::Content::with_text("three edited");
+            // Typed text is in the field only until the merge reads it; the
+            // merge combines it with the line below and moves the indices.
+            let row = current_row_mut(&mut app);
+            row.speaker = "SPEAKER 2".to_string();
+            row.content = text_editor::Content::with_text("two edited");
         }
         let _ = app.update(Message::MergeNextLine);
 
         let lines = &app.selected_view.as_ref().unwrap().lines;
         assert_eq!(lines.len(), 2);
-        assert_eq!(lines[0].speaker, "SPEAKER 2");
-        assert_eq!(line_text(&lines[0]), "one edited");
-        assert_eq!(line_text(&lines[1]), "two three edited");
+        assert_eq!(lines[0].speaker, "SPEAKER 1");
+        assert_eq!(line_text(&lines[0]), "one");
+        assert_eq!(lines[1].speaker, "SPEAKER 2");
+        assert_eq!(line_text(&lines[1]), "two edited three");
         assert_eq!(
             std::fs::read_to_string(&transcript).unwrap(),
-            "[00:00] SPEAKER 2: one edited\n[00:05] SPEAKER 1: two three edited\n"
+            "[00:00] SPEAKER 1: one\n[00:05] SPEAKER 2: two edited three\n"
         );
+        // One merge is one undo step, and it is the same stack as a save.
+        assert_eq!(app.line_history.undo.len(), 1);
 
         let _ = std::fs::remove_dir_all(&media);
     }
@@ -12669,6 +13144,54 @@ mod tests {
         let text = app.timer_text();
         assert!(text.starts_with("0:4"), "elapsed dropped: {text}");
         assert!(text.contains("min left"), "estimate missing: {text}");
+    }
+
+    #[test]
+    fn filled_buttons_dim_when_disabled() {
+        let scheme = Scheme::dark();
+        let theme = AppTheme::Dark.iced();
+        let style = color_button(scheme.green, scheme.on_accent);
+        let active = style(&theme, button::Status::Active);
+        let disabled = style(&theme, button::Status::Disabled);
+
+        // The label loses its strength, so the button reads as unavailable.
+        assert!(active.text_color.a > 0.9, "{}", active.text_color.a);
+        assert!(disabled.text_color.a < 0.7, "{}", disabled.text_color.a);
+        assert_ne!(disabled.text_color, active.text_color);
+    }
+
+    #[test]
+    fn default_zoom_is_seventy_percent() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("zoom-default");
+        let mut app = App::new();
+        assert!((app.font_scale - 0.7).abs() < 0.001, "{}", app.font_scale);
+        let _ = app.update(Message::ZoomIn);
+        let _ = app.update(Message::ZoomOut);
+        let _ = app.update(Message::ZoomReset);
+        assert!((app.font_scale - 0.7).abs() < 0.001, "{}", app.font_scale);
+    }
+
+    #[test]
+    fn rename_lists_speakers_in_numeric_order() {
+        let mut names = vec![
+            "SPEAKER 3".to_string(),
+            "Alice".to_string(),
+            "SPEAKER 2".to_string(),
+            "SPEAKER 10".to_string(),
+            "SPEAKER 1".to_string(),
+        ];
+        sort_speaker_names(&mut names);
+        assert_eq!(
+            names,
+            vec![
+                "SPEAKER 1".to_string(),
+                "SPEAKER 2".to_string(),
+                "SPEAKER 3".to_string(),
+                "SPEAKER 10".to_string(),
+                "Alice".to_string(),
+            ]
+        );
     }
 
     #[test]
@@ -12982,10 +13505,34 @@ mod tests {
         assert!(written.contains("[00:05] SPEAKER 1: hi"));
         assert!(written.contains("[00:09] SPEAKER 1: bye"));
 
+        // The swap joined the same undo stack as a text edit.
+        assert!(app.line_undo_available());
+        let _ = app.update(Message::UndoLineEdit);
+        assert_eq!(app.shown_lines()[1].speaker, "SPEAKER 2");
+        assert!(std::fs::read_to_string(&transcript)
+            .unwrap()
+            .contains("[00:05] SPEAKER 2: hi"));
+        let _ = app.update(Message::RedoLineEdit);
+        assert_eq!(app.shown_lines()[1].speaker, "SPEAKER 1");
+
+        // Double-click opens the inline editor, but not while Follow is on.
+        app.follow_playhead = true;
+        let _ = app.update(Message::LineClicked(0));
         let _ = app.update(Message::LineClicked(0));
         assert!(app.line_edit.is_none());
-        let _ = app.update(Message::LineClicked(0));
+
+        app.follow_playhead = false;
+        let _ = app.update(Message::LineClicked(2));
+        assert!(app.line_edit.is_none(), "a single click must not open it");
+        let _ = app.update(Message::LineClicked(2));
+        assert_eq!(app.line_edit.as_ref().map(|edit| edit.index), Some(2));
+
+        // Entering the editor turns Follow off.
+        let _ = app.update(Message::CancelLineEdit);
+        app.follow_playhead = true;
+        let _ = app.update(Message::EditLine(0));
         assert!(app.line_edit.is_some());
+        assert!(!app.follow_playhead);
 
         let _ = std::fs::remove_dir_all(&media);
     }
@@ -13145,10 +13692,10 @@ mod tests {
             row.speaker = "ALICE".to_string();
             row.content = text_editor::Content::with_text("hello there");
         }
-        // The editor dialog renders without panicking.
+        // The inline editor renders without panicking.
         let _ = app.view();
 
-        let _ = app.update(Message::SaveLineEdit);
+        let _ = app.update(Message::DoneLineEdit);
         assert!(app.line_edit.is_none());
         let saved = std::fs::read_to_string(&transcript).unwrap();
         assert!(saved.contains("[00:00] ALICE: hello there"));
@@ -13162,38 +13709,30 @@ mod tests {
         let saved = std::fs::read_to_string(&transcript).unwrap();
         assert!(saved.contains("[00:05] SPEAKER 2: hi there"));
 
-        // Delete asks for confirmation before removing the row.
+        // Escape closes the editor and drops what was typed.
         let _ = app.update(Message::EditLine(0));
-        let _ = app.update(Message::DeleteLineEdit);
-        assert!(app.delete_confirm);
-        assert!(app.line_edit.is_some());
-        let saved = std::fs::read_to_string(&transcript).unwrap();
-        assert!(saved.contains("ALICE: hello there"));
-
-        // Enter must not save the editor behind the confirmation dialog.
-        let _ = app.update(Message::EnterSubmit);
-        assert!(app.line_edit.is_some());
-        assert_eq!(std::fs::read_to_string(&transcript).unwrap(), saved);
-
-        let _ = app.update(Message::CancelDeleteLine);
-        assert!(!app.delete_confirm);
-        assert!(app.line_edit.is_some());
+        current_row_mut(&mut app).content = text_editor::Content::with_text("discarded");
+        let _ = app.update(Message::Escape);
+        assert!(app.line_edit.is_none());
         assert_eq!(
             std::fs::read_to_string(&transcript).unwrap(),
             "[00:00] ALICE: hello there\n[00:05] SPEAKER 2: hi there\n"
         );
 
-        let _ = app.update(Message::DeleteLineEdit);
-        let _ = app.update(Message::ConfirmDeleteLine);
-        assert!(!app.delete_confirm);
-        assert!(app.line_edit.is_none());
-        let saved = std::fs::read_to_string(&transcript).unwrap();
-        assert!(!saved.contains("ALICE: hello there"));
-        assert!(saved.contains("SPEAKER 2: hi there"));
+        // Done and Enter commits share one undo history: two steps back to the
+        // transcript as it was imported.
+        let _ = app.update(Message::UndoLineEdit);
+        assert!(std::fs::read_to_string(&transcript)
+            .unwrap()
+            .contains("[00:00] ALICE: hello there"));
+        let _ = app.update(Message::UndoLineEdit);
+        assert_eq!(
+            std::fs::read_to_string(&transcript).unwrap(),
+            "[00:00] SPEAKER 1: hello\n[00:05] SPEAKER 2: hi\n"
+        );
 
         let backup = transcript_backup_path(&transcript);
-        let saved_backup = std::fs::read_to_string(backup).unwrap();
-        assert!(saved_backup.contains("ALICE: hello there"));
+        assert!(backup.exists());
 
         let _ = std::fs::remove_dir_all(&media);
     }
@@ -13456,7 +13995,8 @@ mod tests {
         let reloaded = pro_app();
         assert_eq!(reloaded.theme_mode, AppTheme::Dark);
         assert_eq!(reloaded.preset, Preset::Accuracy);
-        assert!((reloaded.font_scale - 1.1).abs() < 0.001);
+        // One ZoomIn step from the 70 % default.
+        assert!((reloaded.font_scale - 0.8).abs() < 0.001);
         assert!(!reloaded.follow_playhead);
         assert!(!reloaded.notifications);
     }
@@ -13610,46 +14150,212 @@ mod tests {
     }
 
     #[test]
-    fn line_edit_buttons_share_one_width() {
-        let labels = ["Merge previous", "Merge next", "Split at cursor"];
-        let width = line_edit_actions_width();
-        // The widest label decides the row, and every other label fits.
-        assert_eq!(width, equal_action_width(&labels));
-        assert_eq!(
-            width,
-            labels
-                .iter()
-                .map(|label| action_width(label))
-                .fold(0.0, f32::max)
-        );
-        for label in labels {
-            assert!(action_width(label) <= width, "{label} overflows {width}");
+    fn pinning_the_edited_row_keeps_it_in_the_window() {
+        fn line(raw: &str, speaker: &str) -> DocLine {
+            DocLine {
+                raw: raw.to_string(),
+                speaker: speaker.to_string(),
+                start: parse_time_prefix(raw),
+                confidence: None,
+            }
         }
+        let lines = vec![
+            line("[00:00] A: one", "A"),
+            line("[00:05] B: two", "B"),
+            line("[00:10] A: three", "A"),
+        ];
+        // A filtered order that hides the middle row gets it back in place.
+        let mut display = vec![0, 2];
+        pin_display_index(&mut display, &lines, 1);
+        assert_eq!(display, vec![0, 1, 2]);
+
+        // Untimed lines sort last, so an untimed edited row goes to the end.
+        let mut untimed = lines.clone();
+        untimed.push(DocLine {
+            raw: "untimed".to_string(),
+            speaker: String::new(),
+            start: None,
+            confidence: None,
+        });
+        let mut display = vec![0, 1];
+        pin_display_index(&mut display, &untimed, 3);
+        assert_eq!(display, vec![0, 1, 3]);
+
+        // Already visible: nothing moves, and out-of-range indices are ignored.
+        let mut display = vec![0, 1, 2];
+        pin_display_index(&mut display, &lines, 1);
+        assert_eq!(display, vec![0, 1, 2]);
+        pin_display_index(&mut display, &lines, 9);
+        assert_eq!(display, vec![0, 1, 2]);
     }
 
     #[test]
-    fn line_edit_height_follows_the_text() {
-        let size = 16.0;
-        // A short line is one line tall: the field only covers its own text.
-        let short = line_edit_height("hello there", size);
+    fn clicking_another_utterance_commits_the_open_edit() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("click-switch-config");
+        let media = temp_dir("click-switch-media");
+
+        let audio = media.join("talk.mp3");
+        std::fs::write(&audio, b"audio").unwrap();
+        let transcript = media.join("talk.txt");
+        std::fs::write(
+            &transcript,
+            "[00:00] SPEAKER 1: one\n[00:05] SPEAKER 2: two\n",
+        )
+        .unwrap();
+
+        let mut app = pro_app();
+        app.queue.push(QueueItem {
+            path: audio.clone(),
+            audio: Some(audio),
+            status: ItemStatus::Done,
+            duration: Some(10.0),
+            transcript: Some(transcript.clone()),
+            stats: None,
+            turns: Vec::new(),
+            peaks: Arc::new(vec![0.2; 16]),
+        });
+        open_test_item(&mut app, 0);
+
+        open_line_edit(&mut app, 0);
+        current_row_mut(&mut app).content = text_editor::Content::with_text("one edited");
+        // The click on another utterance writes the open row first, then moves
+        // the field to the clicked line, all through the same message.
+        let _ = app.update(Message::LineClicked(1));
         assert_eq!(
-            visual_line_count("hello there", size, line_edit_text_width(size)),
-            1
+            std::fs::read_to_string(&transcript).unwrap(),
+            "[00:00] SPEAKER 1: one edited\n[00:05] SPEAKER 2: two\n"
         );
-        assert_eq!(short, line_edit_height("", size));
+        assert_eq!(app.line_edit.as_ref().map(|edit| edit.index), Some(1));
+        assert_eq!(app.line_edit.as_ref().unwrap().rows.len(), 1);
+        // The panel and the field lay out without panicking.
+        let _ = app.view();
+
+        let _ = std::fs::remove_dir_all(&media);
+    }
+
+    #[test]
+    fn the_inline_editor_renders_without_a_modal() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("inline-render-config");
+        let media = temp_dir("inline-render-media");
+
+        let audio = media.join("talk.mp3");
+        std::fs::write(&audio, b"audio").unwrap();
+        let transcript = media.join("talk.txt");
+        std::fs::write(
+            &transcript,
+            "[00:00] SPEAKER 1: one\n[00:05] SPEAKER 2: two\n",
+        )
+        .unwrap();
+
+        let mut app = pro_app();
+        app.queue.push(QueueItem {
+            path: audio,
+            audio: None,
+            status: ItemStatus::Done,
+            duration: Some(10.0),
+            transcript: Some(transcript),
+            stats: None,
+            turns: Vec::new(),
+            peaks: Arc::new(vec![0.2; 16]),
+        });
+        open_test_item(&mut app, 0);
+
+        open_line_edit(&mut app, 1);
+        // The editor is not a popup: hover chrome and tooltips stay live.
+        assert!(!app.popup_open());
+        assert!(app.line_edit_panel(app.scheme()).is_some());
+        let _ = app.view();
+        // Bubble mode renders the same field where the bubble was.
+        app.sms_mode = true;
+        let _ = app.view();
+        let _ = app.update(Message::CancelLineEdit);
+        assert!(app.line_edit_panel(app.scheme()).is_none());
+
+        let _ = std::fs::remove_dir_all(&media);
+    }
+
+    #[test]
+    fn the_edited_row_stays_rendered_when_it_is_scrolled_out() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("pinned-row-config");
+        let media = temp_dir("pinned-row-media");
+
+        let audio = media.join("talk.mp3");
+        std::fs::write(&audio, b"audio").unwrap();
+        let transcript = media.join("talk.txt");
+        let mut text = String::new();
+        for index in 0..200 {
+            text.push_str(&format!(
+                "[{:02}:{:02}] SPEAKER 1: line {index}\n",
+                index / 60,
+                index % 60
+            ));
+        }
+        std::fs::write(&transcript, text).unwrap();
+
+        let mut app = pro_app();
+        app.queue.push(QueueItem {
+            path: audio,
+            audio: None,
+            status: ItemStatus::Done,
+            duration: Some(400.0),
+            transcript: Some(transcript),
+            stats: None,
+            turns: Vec::new(),
+            peaks: Arc::new(vec![0.2; 16]),
+        });
+        open_test_item(&mut app, 0);
+        app.transcript_viewport = 600.0;
+
+        // The edited row is above the scrolled window: it is still rendered,
+        // in its own segment, so the field never loses its state.
+        open_line_edit(&mut app, 0);
+        app.transcript_offset = 3000.0;
+        app.pane_start.set(Some(120));
+        let _ = app.view();
+        assert_eq!(app.line_edit.as_ref().map(|edit| edit.index), Some(0));
+
+        // And below it.
+        let _ = app.update(Message::EditLine(150));
+        app.transcript_offset = 0.0;
+        app.pane_start.set(Some(0));
+        let _ = app.view();
+        assert_eq!(app.line_edit.as_ref().map(|edit| edit.index), Some(150));
+
+        let _ = std::fs::remove_dir_all(&media);
+    }
+
+    #[test]
+    fn line_edit_height_follows_the_text_and_the_width() {
+        let size = 16.0;
+        let width = 520.0;
+        // A short line is one line tall: the field only covers its own text.
+        let short = line_edit_height("hello there", size, width);
+        assert_eq!(visual_line_count("hello there", size, width), 1);
+        assert_eq!(short, line_edit_height("", size, width));
         assert_eq!(short, size * LINE_HEIGHT_FACTOR + 2.0 * LINE_EDIT_PAD_Y);
+        // A trailing newline from the editor is not an extra empty line.
+        assert_eq!(line_edit_height("hello there\n", size, width), short);
 
         // Wrapping text grows the field.
         let medium = "word ".repeat(48);
-        let medium_lines = visual_line_count(&medium, size, line_edit_text_width(size));
+        let medium_lines = visual_line_count(&medium, size, width);
         assert!(medium_lines > LINE_EDIT_MIN_LINES, "{medium_lines}");
-        assert!(line_edit_height(&medium, size) > short);
+        assert!(line_edit_height(&medium, size, width) > short);
 
-        // A very long paste stops at the ceiling, keeping the dialog on screen.
+        // The same text needs more lines in a narrower field, which is what
+        // lets the inline editor sit in the transcript instead of a dialog.
+        assert!(
+            line_edit_height(&medium, size, width / 2.0) > line_edit_height(&medium, size, width)
+        );
+
+        // A very long paste stops at the ceiling, keeping the row finite.
         let long = "word ".repeat(4000);
-        let long_lines = visual_line_count(&long, size, line_edit_text_width(size));
+        let long_lines = visual_line_count(&long, size, width);
         assert_eq!(long_lines, LINE_EDIT_MAX_LINES);
-        assert!(line_edit_height(&long, size) < 400.0);
+        assert!(line_edit_height(&long, size, width) < 400.0);
 
         // An empty paragraph still occupies a line, and hard breaks add up.
         assert_eq!(wrapped_line_count("", 40), 1);
@@ -13967,7 +14673,7 @@ mod tests {
             row.speaker = "ZED".to_string();
             row.content = text_editor::Content::with_text("changed");
         }
-        let _ = app.update(Message::SaveLineEdit);
+        let _ = app.update(Message::DoneLineEdit);
 
         assert_eq!(app.display_order(), sorted_display_order(app.shown_lines()));
         assert_eq!(
@@ -14685,5 +15391,23 @@ mod tests {
         // Other stages never take the decoding path.
         assert_eq!(decoding_label("transcribing", "Transcribing"), None);
         assert_eq!(decoding_label("diarizing", "Diarizing 42%"), None);
+    }
+
+    #[test]
+    fn button_label_is_white_only_on_dark_backgrounds() {
+        // Dark mode: neutral labels go pure white.
+        assert_eq!(button_label(&AppTheme::Dark.iced()), Color::WHITE);
+        // Light mode: unchanged, i.e. the scheme's primary text — never white
+        // on the near-white panel.
+        let light = AppTheme::Light.iced();
+        assert_eq!(button_label(&light), Scheme::light().text);
+        assert_ne!(button_label(&light), Color::WHITE);
+        // A custom dark palette is detected from the background, not from a
+        // hard-coded theme identity.
+        let custom = iced::Theme::custom("test".to_string(), iced::theme::Palette {
+            background: Color::from_rgb(0.05, 0.05, 0.05),
+            ..iced::theme::Palette::LIGHT
+        });
+        assert_eq!(button_label(&custom), Color::WHITE);
     }
 }

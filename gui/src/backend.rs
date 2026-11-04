@@ -6,6 +6,8 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use crate::documents::{line_prefix, line_text, DocLine};
+
 pub use hippo_transcribe_core::event::{Event, SpeakerStat, Stats, Turn};
 
 /// Stop Windows from giving a console-subsystem helper its own console window.
@@ -77,6 +79,76 @@ pub fn read_confidences(path: &Path) -> Vec<Option<f32>> {
                 .map(|value| value as f32)
         })
         .collect()
+}
+
+/// Best-effort rewrite of a transcript sidecar's per-line confidences.
+///
+/// The sidecar is `<stem>.json` beside the transcript, the same file
+/// [`read_confidences`] reads. When its line count still matches the edited
+/// document, only each line's `confidence` is updated; a merge, split or
+/// delete changes the count, so the whole `lines` array is rebuilt from the
+/// document instead. `turns` and `duration` are always left untouched, and a
+/// missing or unreadable sidecar is a no-op.
+pub fn write_confidences(path: &Path, lines: &[DocLine]) {
+    let json = path.with_extension("json");
+    let Ok(contents) = std::fs::read_to_string(&json) else {
+        return;
+    };
+    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&contents) else {
+        return;
+    };
+    let Some(entries) = value
+        .get_mut("lines")
+        .and_then(|lines| lines.as_array_mut())
+    else {
+        return;
+    };
+    if entries.len() == lines.len() {
+        // Same shape: touch only the confidences, leaving every other key.
+        for (entry, line) in entries.iter_mut().zip(lines) {
+            let Some(confidence) = line.confidence else {
+                continue;
+            };
+            if let Some(object) = entry.as_object_mut() {
+                object.insert("confidence".to_string(), serde_json::json!(confidence));
+            }
+        }
+    } else {
+        let rebuilt: Vec<serde_json::Value> = lines
+            .iter()
+            .map(|line| {
+                serde_json::json!({
+                    "time": sidecar_time(line),
+                    "speaker": line.speaker,
+                    "text": line_text(line),
+                    "start": line.start,
+                    "confidence": line.confidence,
+                })
+            })
+            .collect();
+        value["lines"] = serde_json::Value::Array(rebuilt);
+    }
+    if let Ok(text) = serde_json::to_string_pretty(&value) {
+        let _ = std::fs::write(&json, text);
+    }
+}
+
+/// The sidecar's `time` field for a line: the timestamp without brackets, the
+/// same shape the pipeline writes.
+fn sidecar_time(line: &DocLine) -> String {
+    if let Some(stamp) = line_prefix(&line.raw)
+        .trim()
+        .strip_prefix('[')
+        .and_then(|stamp| stamp.strip_suffix(']'))
+    {
+        return stamp.to_string();
+    }
+    match line.start {
+        Some(start) => crate::format::format_timestamp(start as f64)
+            .trim_matches(['[', ']'])
+            .to_string(),
+        None => String::new(),
+    }
 }
 
 /// Probe the duration (seconds) of an audio file.

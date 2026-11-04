@@ -64,6 +64,42 @@ pub fn mix(from: Color, to: Color, t: f32) -> Color {
     }
 }
 
+/// Whether a theme's window background reads as dark.
+///
+/// Resolved from the palette the widget is actually rendering with, so
+/// [`AppTheme::System`] follows whatever appearance the OS gave iced, not the
+/// user's stored preference. Uses WCAG relative luminance.
+/// Whether a resolved [`Scheme`] is the dark one, by the same luminance test
+/// [`is_dark`] applies to a theme.
+pub fn is_dark_scheme(scheme: &Scheme) -> bool {
+    fn channel(value: f32) -> f32 {
+        if value <= 0.039_28 {
+            value / 12.92
+        } else {
+            ((value + 0.055) / 1.055).powf(2.4)
+        }
+    }
+    let bg = scheme.bg;
+    let luminance =
+        0.2126 * channel(bg.r) + 0.7152 * channel(bg.g) + 0.0722 * channel(bg.b);
+    luminance < 0.5
+}
+
+pub fn is_dark(theme: &Theme) -> bool {
+    fn channel(value: f32) -> f32 {
+        if value <= 0.039_28 {
+            value / 12.92
+        } else {
+            ((value + 0.055) / 1.055).powf(2.4)
+        }
+    }
+
+    let bg = theme.palette().background;
+    let luminance =
+        0.2126 * channel(bg.r) + 0.7152 * channel(bg.g) + 0.0722 * channel(bg.b);
+    luminance < 0.5
+}
+
 /// The user-selectable appearance mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum AppTheme {
@@ -177,6 +213,9 @@ pub struct Scheme {
     /// Filled portion of progress bars.
     pub progress: Color,
     pub timeline_bg: Color,
+    /// Editable field well: a surface that reads as an input against the panel
+    /// in both palettes, not as plain white.
+    pub field_bg: Color,
     /// Hairline borders and separators.
     pub border: Color,
     /// Trans-flag accents.
@@ -218,6 +257,7 @@ impl Scheme {
             bar_track: Color::from_rgb(0.886, 0.894, 0.918),
             progress: Color::from_rgb(0.357, 0.808, 0.980),
             timeline_bg: Color::from_rgb(0.878, 0.886, 0.910),
+            field_bg: Color::from_rgb(0.918, 0.925, 0.945), // input well
             border: Color::from_rgb(0.827, 0.839, 0.878),
             blue: Color::from_rgb(0.357, 0.808, 0.980),
             pink: Color::from_rgb(0.961, 0.663, 0.722),
@@ -264,6 +304,7 @@ impl Scheme {
             bar_track: Color::from_rgb(0.224, 0.224, 0.224), // Gray 80
             progress: Color::from_rgb(0.471, 0.663, 1.0), // Blue 40  #78a9ff
             timeline_bg: Color::from_rgb(0.149, 0.149, 0.149), // Gray 90
+            field_bg: Color::from_rgb(0.224, 0.224, 0.224), // Gray 80
             border: Color::from_rgb(0.322, 0.322, 0.322), // Gray 70  #525252
             blue: Color::from_rgb(0.471, 0.663, 1.0), // Blue 40
             pink: Color::from_rgb(1.0, 0.494, 0.714), // Magenta 40
@@ -313,5 +354,11 @@ mod tests {
         assert_eq!(AppTheme::Light.toggled(), AppTheme::Dark);
         assert_eq!(AppTheme::Dark.toggled(), AppTheme::System);
         assert_eq!(AppTheme::System.toggled(), AppTheme::Light);
+    }
+
+    #[test]
+    fn is_dark_follows_the_resolved_palette() {
+        assert!(is_dark(&AppTheme::Dark.iced()));
+        assert!(!is_dark(&AppTheme::Light.iced()));
     }
 }

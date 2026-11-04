@@ -19,33 +19,27 @@ pub(crate) struct LineEditRow {
     pub(crate) content: text_editor::Content,
 }
 
-/// Right-click line editor: the line the dialog opened on, plus up to three
-/// editable rows (previous, current, next) in transcript order. `index` is
-/// always the index of one of the rows: the one this dialog acts on.
+/// Inline line editor: the line being edited in place, plus the single row
+/// that holds its text and speaker. `index` is the index of that row.
 pub(crate) struct LineEdit {
     pub(crate) index: usize,
     pub(crate) rows: Vec<LineEditRow>,
 }
 
 impl LineEdit {
-    /// Open the editor on `index`, showing that line and its neighbours so a
-    /// line can be fixed in context. `None` when `index` is out of range.
-    pub(crate) fn new(index: usize, lines: &[DocLine]) -> Option<Self> {
-        if index >= lines.len() {
-            return None;
-        }
-        let (previous, next) = neighbour_indices(lines.len(), index);
-        let rows = previous
-            .into_iter()
-            .chain(std::iter::once(index))
-            .chain(next)
-            .map(|index| LineEditRow {
+    /// Open the editor on `index` with no rows but that one, so a transcript
+    /// row can become a field where it stands. `None` when `index` is out of
+    /// range.
+    pub(crate) fn inline(index: usize, lines: &[DocLine]) -> Option<Self> {
+        let line = lines.get(index)?;
+        Some(Self {
+            index,
+            rows: vec![LineEditRow {
                 index,
-                speaker: lines[index].speaker.clone(),
-                content: content_at_end(&line_text(&lines[index])),
-            })
-            .collect();
-        Some(Self { index, rows })
+                speaker: line.speaker.clone(),
+                content: content_at_end(&line_text(line)),
+            }],
+        })
     }
 
     /// Position of the current row within `rows`, which the messages and the
@@ -178,14 +172,6 @@ pub(crate) fn split_words_at(text: &str, cursor: usize) -> Option<(&str, &str)> 
     (!left.is_empty() && !right.is_empty()).then_some((left, right))
 }
 
-/// The lines immediately before and after `index`, or `None` at either end.
-pub(crate) fn neighbour_indices(len: usize, index: usize) -> (Option<usize>, Option<usize>) {
-    if index >= len {
-        return (None, None);
-    }
-    (index.checked_sub(1), (index + 1 < len).then_some(index + 1))
-}
-
 /// Byte offset of a text editor caret given as `(line, column)` within `text`.
 ///
 /// The editor reports the column as a byte index into its line; joining the
@@ -228,6 +214,17 @@ pub(crate) fn rewrite_line(line: &mut DocLine, speaker: &str, text: &str) {
         format!("{prefix}{speaker}: {text}")
     };
     line.speaker = speaker.to_string();
+}
+
+/// Confidence given to a line whose text or speaker a human has rewritten.
+/// Well above the low-confidence threshold, so the line stops being flagged.
+pub(crate) const HUMAN_CONFIDENCE: f32 = 1.0;
+
+/// [`rewrite_line`] plus the human voucher: a manual edit is a person saying
+/// the line is right, so its ASR confidence no longer marks it as uncertain.
+pub(crate) fn rewrite_edited_line(line: &mut DocLine, speaker: &str, text: &str) {
+    rewrite_line(line, speaker, text);
+    line.confidence = Some(HUMAN_CONFIDENCE);
 }
 
 /// Parse "[time] Speaker: text" transcript lines into the render model.
@@ -339,47 +336,29 @@ mod tests {
     }
 
     #[test]
-    fn neighbour_indices_cover_start_middle_and_end() {
-        assert_eq!(neighbour_indices(3, 0), (None, Some(1)));
-        assert_eq!(neighbour_indices(3, 1), (Some(0), Some(2)));
-        assert_eq!(neighbour_indices(3, 2), (Some(1), None));
-        assert_eq!(neighbour_indices(1, 0), (None, None));
-        assert_eq!(neighbour_indices(0, 0), (None, None));
-        assert_eq!(neighbour_indices(3, 7), (None, None));
-    }
-
-    #[test]
-    fn line_edit_opens_on_the_window_around_a_line() {
+    fn inline_editor_holds_only_the_clicked_line() {
         let lines = vec![
             line("[00:00] A: one", "A"),
             line("[00:01] B: two", "B"),
             line("[00:02] A: three", "A"),
         ];
-        let indices = |edit: &LineEdit| edit.rows.iter().map(|row| row.index).collect::<Vec<_>>();
+        for index in 0..lines.len() {
+            let edit = LineEdit::inline(index, &lines).unwrap();
+            assert_eq!(edit.index, index);
+            assert_eq!(edit.rows.len(), 1);
+            assert_eq!(edit.current_position(), 0);
+            let row = edit.current_row().unwrap();
+            assert_eq!(row.index, index);
+            assert_eq!(row.speaker, lines[index].speaker);
+            assert_eq!(
+                row.content.text().trim_end(),
+                line_text(&lines[index]),
+                "the row carries the spoken text"
+            );
+        }
 
-        // Middle: one row each side, with the current row in the middle.
-        let middle = LineEdit::new(1, &lines).unwrap();
-        assert_eq!(middle.index, 1);
-        assert_eq!(indices(&middle), vec![0, 1, 2]);
-        assert_eq!(middle.current_position(), 1);
-        let current = middle.current_row().unwrap();
-        assert_eq!(current.speaker, "B");
-        assert_eq!(current.content.text().trim_end(), "two");
-
-        // Edges: two rows, and the current row's position moves with them.
-        let first = LineEdit::new(0, &lines).unwrap();
-        assert_eq!(indices(&first), vec![0, 1]);
-        assert_eq!(first.current_position(), 0);
-        let last = LineEdit::new(2, &lines).unwrap();
-        assert_eq!(indices(&last), vec![1, 2]);
-        assert_eq!(last.current_position(), 1);
-
-        // A single-line transcript has nowhere to look either side of it.
-        let single = LineEdit::new(0, &lines[..1]).unwrap();
-        assert_eq!(indices(&single), vec![0]);
-        assert_eq!(single.rows.len(), 1);
-
-        assert!(LineEdit::new(3, &lines).is_none());
+        assert!(LineEdit::inline(3, &lines).is_none());
+        assert!(LineEdit::inline(0, &[]).is_none());
     }
 
     #[test]
