@@ -8357,7 +8357,7 @@ impl App {
         let running = matches!(self.status, Status::Running);
         let rename = if self.can(license::Feature::Editing) {
             self.tip(
-                fit_action("Rename")
+                fit_action("Rename All")
                     .on_press_maybe(
                         (!running
                             && self.shown_output().is_some()
@@ -8365,15 +8365,15 @@ impl App {
                         .then_some(Message::OpenRename),
                     )
                     .style(pill_button_secondary),
-                "Rename speakers in this transcript",
+                "Rename speakers everywhere in this transcript",
                 scheme,
             )
         } else {
             self.tip(
-                fit_action("Rename")
+                fit_action("Rename All")
                     .on_press(Message::LockedRename)
                     .style(greyed_button(*scheme)),
-                "Rename speakers in this transcript",
+                "Rename speakers everywhere in this transcript",
                 scheme,
             )
         };
