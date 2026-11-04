@@ -8368,19 +8368,17 @@ impl App {
         let next = icon_pill(ICON_ARROW_DOWN, scheme.ink)
             .on_press(Message::FindNext)
             .style(pill_button_secondary);
-        // The match count gets its own slot. As a free-standing child it was 0
-        // px wide with an empty query and up to ~61 px with "999 / 9999", so
-        // every keystroke — and clearing the field — re-flowed the arrows and
-        // everything after them, which also flipped whatever button the pointer
-        // happened to be resting on. A fixed slot keeps the row's geometry
-        // still, and the count right-aligned against the arrows.
+        // The match count gets its own fixed slot so a growing "999 / 9999"
+        // cannot re-flow the row and flip whatever button the pointer is
+        // resting on. It sits after the arrows, not between them and the
+        // field: the field must run right up to the up arrow.
         let status = text(status)
             .size(11)
             .wrapping(NO_WRAP)
             .color(status_color)
             .width(Length::Fixed(FIND_STATUS_WIDTH))
             .align_x(iced::alignment::Horizontal::Right);
-        let mut controls = row![query_input, status, prev, next]
+        let mut controls = row![query_input, prev, next, status]
             .spacing(theme::SPACE_SM)
             .align_y(iced::Alignment::Center)
             .width(Length::Fill);
