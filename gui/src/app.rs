@@ -170,13 +170,6 @@ const PANEL_ICON_DIAMETER: f32 = CONTROL_HEIGHT;
 /// is the reference the panel was asked to follow.
 const ICON_ONLY_SIZE: f32 = 15.0;
 
-/// Width reserved for the Find row's match counter. Measured at 11 px: "no
-/// matches" is the widest it gets at 60.3 px, and "999 / 9999" reaches 53.9.
-/// It changes with every keystroke, and as a free-standing child it re-flowed
-/// the arrows beside it each time; the slot keeps the row's geometry fixed
-/// whether the query is empty or not.
-const FIND_STATUS_WIDTH: f32 = 62.0;
-
 /// Width of the transcript's header menus, and where their top edge sits inside
 /// the card: below the header (title, meta, divider and the slot's bottom gap).
 const VIEW_MENU_WIDTH: f32 = 212.0;
@@ -193,19 +186,19 @@ const FILE_BUTTON_WIDTH: f32 = 78.0;
 const EDIT_BUTTON_WIDTH: f32 = 78.0;
 const VIEW_BUTTON_WIDTH: f32 = 84.0;
 
-/// Right insets of the three menus. The header ends
-/// `[Follow][View] | [File][Edit]`, so Edit is the anchor at the card's padding,
-/// File sits one button and a gap to its left, and View sits beyond the divider.
-fn edit_menu_inset() -> f32 {
+/// Right insets of the three menus. The header ends `[File][Edit][View]`, so
+/// View is the anchor at the card's padding, Edit sits one button and a gap to
+/// its left, and File sits one more to its left.
+fn view_menu_inset() -> f32 {
     HEADER_PAD_X
+}
+
+fn edit_menu_inset() -> f32 {
+    view_menu_inset() + VIEW_BUTTON_WIDTH + theme::SPACE_SM
 }
 
 fn file_menu_inset() -> f32 {
     edit_menu_inset() + EDIT_BUTTON_WIDTH + theme::SPACE_SM
-}
-
-fn view_menu_inset() -> f32 {
-    file_menu_inset() + FILE_BUTTON_WIDTH + theme::SPACE_SM + 1.0 + theme::SPACE_SM
 }
 
 /// Widest the panel's speaker picker may grow, and how many characters of a
@@ -662,6 +655,10 @@ pub enum Message {
     /// Plain `f` outside a text field.
     ShortcutFollow,
     ShortcutFollowChecked(bool),
+    FindHover(bool),
+    /// The Find row is open: is its field still focused?
+    PollFindFocus,
+    FindFocusPolled(bool),
     SeekBy(f32),
     SeekByChecked(f32, bool),
     ImportPicked(Option<PathBuf>),
@@ -1006,6 +1003,9 @@ pub struct App {
     /// Ctrl+F asked for the Find field before it was mounted; focus it on the
     /// next frame, once it has a widget and a layout.
     find_focus_pending: bool,
+    /// The pointer is over the Find row. Its buttons are clicks outside the
+    /// field and drop its focus, so the row must not vanish mid-click.
+    find_hover: bool,
     speaker_filter: Option<String>,
     search_index: usize,
     playback_speed: f32,
@@ -1248,6 +1248,7 @@ impl App {
             search_query: String::new(),
             find_open: false,
             find_focus_pending: false,
+            find_hover: false,
             speaker_filter: None,
             search_index: 0,
             playback_speed: settings.playback_speed.unwrap_or(1.0),
@@ -1727,6 +1728,7 @@ impl App {
     /// editor. `point` is where inside the words the press landed, if it did;
     /// the editor then puts its caret there.
     fn line_pressed(&mut self, index: usize, point: Option<Point>) -> Task<Message> {
+        self.close_find();
         // A press on the transcript dismisses an open header menu rather than
         // acting on the row underneath it. The header buttons are above the row
         // and still take their own presses, so one menu can switch to another.
@@ -1886,8 +1888,7 @@ impl App {
         }
 
         self.header_menu = None;
-        self.find_open = false;
-        self.find_focus_pending = false;
+        self.close_find();
         self.view_error = None;
         self.join_lines = false;
         self.joined_lines.clear();
@@ -1953,8 +1954,7 @@ impl App {
         // Changing what is on screen commits the open inline edit first: its
         // row belongs to the document being left.
         self.header_menu = None;
-        self.find_open = false;
-        self.find_focus_pending = false;
+        self.close_find();
         self.commit_inline_edit(false);
         let Some(item) = self.queue.get(index) else {
             return Task::none();
@@ -2066,8 +2066,7 @@ impl App {
     fn return_to_live(&mut self) {
         // The edited row belongs to the view being dropped.
         self.header_menu = None;
-        self.find_open = false;
-        self.find_focus_pending = false;
+        self.close_find();
         self.commit_inline_edit(false);
         self.invalidate_derived();
         self.selected = None;
@@ -2712,9 +2711,18 @@ impl App {
         } else {
             Subscription::none()
         };
+        // The Find row closes when its field loses focus, and iced has no blur
+        // message: poll while it is open. One probe every 120 ms while the row
+        // is showing is cheap, and the row is short-lived.
+        let find_focus = if self.find_open && !self.find_focus_pending {
+            iced::time::every(Duration::from_millis(120)).map(|_| Message::PollFindFocus)
+        } else {
+            Subscription::none()
+        };
         Subscription::batch([
             tick,
             frames,
+            find_focus,
             keyboard::on_key_press(Self::key_press),
             iced::window::events().map(|(_id, event)| Message::WindowEvent(event)),
         ])
@@ -2792,6 +2800,11 @@ impl App {
         // than from a state the menu already hid.
         if !menu_was_open && self.menu_open() {
             self.transcript_line_hover = None;
+        }
+        // A dialog takes the keyboard: the Find field has lost focus even when a
+        // dialog input has taken it next.
+        if self.popup_open() && self.find_open {
+            self.close_find();
         }
         // The editor strip changes the height of the list, and that has to move the
         // scroll offset in the same update as the layout, before the frame is drawn.
@@ -3315,6 +3328,7 @@ impl App {
                 self.header_menu = None;
                 self.find_open = true;
                 self.find_focus_pending = true;
+                self.find_hover = false;
                 Task::none()
             }
             Message::SearchChanged(query) => {
@@ -3326,7 +3340,10 @@ impl App {
                 let matches = self.matching_lines();
                 if !matches.is_empty() {
                     self.search_index = (self.search_index + 1) % matches.len();
-                    return self.scroll_to_line(matches[self.search_index]);
+                    return Task::batch([
+                        self.scroll_to_line(matches[self.search_index]),
+                        text_input::focus(find_id()),
+                    ]);
                 }
                 Task::none()
             }
@@ -3334,7 +3351,10 @@ impl App {
                 let matches = self.matching_lines();
                 if !matches.is_empty() {
                     self.search_index = (self.search_index + matches.len() - 1) % matches.len();
-                    return self.scroll_to_line(matches[self.search_index]);
+                    return Task::batch([
+                        self.scroll_to_line(matches[self.search_index]),
+                        text_input::focus(find_id()),
+                    ]);
                 }
                 Task::none()
             }
@@ -3797,9 +3817,7 @@ impl App {
                         return self.open_rename();
                     }
                 } else if self.find_open {
-                    self.find_open = false;
-                    self.search_query.clear();
-                    self.search_index = 0;
+                    self.close_find();
                 } else if !self.search_query.is_empty() {
                     self.search_query.clear();
                     self.search_index = 0;
@@ -3831,6 +3849,20 @@ impl App {
                 } else {
                     Task::none()
                 }
+            }
+            Message::FindHover(hovered) => {
+                self.find_hover = hovered;
+                Task::none()
+            }
+            Message::PollFindFocus => Self::focus_probe().map(Message::FindFocusPolled),
+            Message::FindFocusPolled(focused) => {
+                // The row closes when its field loses focus. The pointer being
+                // over the row keeps it alive: clicking next/prev is a click
+                // outside the field, and its press must not take the row away.
+                if self.find_open && !self.find_focus_pending && !self.find_hover && !focused {
+                    self.close_find();
+                }
+                Task::none()
             }
             Message::ShortcutFollow => {
                 if self.line_edit_shortcut_blocked()
@@ -5295,6 +5327,8 @@ impl App {
     /// point in the text's own coordinates - once the editor exists and has
     /// been laid out.
     fn begin_inline_edit_at(&mut self, index: usize, caret: Option<Point>) -> Task<Message> {
+        // The editor takes the keyboard; Find is no longer focused.
+        self.close_find();
         if self.join_lines {
             self.toast = Some(("Split the view to edit lines".to_string(), Instant::now()));
             return Task::none();
@@ -8780,31 +8814,17 @@ impl App {
             );
         }
 
-        // The header reads left to right: the view control, then a hairline, then
-        // the document menus. Each menu hangs from its own button's right edge;
-        // the inset helpers subtract the fixed button widths to the right of it.
-        let controls: Element<Message> = if has_lines {
-            self.header_menu_button("View", HeaderMenu::View)
-        } else {
-            horizontal_space().into()
-        };
-        let document_menus: Element<Message> = {
-            let divider = container(horizontal_space())
-                .width(Length::Fixed(1.0))
-                .height(Length::Fixed(18.0))
-                .style(move |_theme| container::Style {
-                    background: Some(scheme.border.into()),
-                    ..container::Style::default()
-                });
-            row![
-                divider,
-                self.header_menu_button("File", HeaderMenu::File),
-                self.header_menu_button("Edit", HeaderMenu::Edit),
-            ]
-            .spacing(theme::SPACE_SM)
-            .align_y(iced::Alignment::Center)
-            .into()
-        };
+        // The header ends with the three menus, left to right File, Edit, View.
+        // Each menu hangs from its own button's right edge; the inset helpers
+        // subtract the fixed button widths to the right of it.
+        let menus: Element<Message> = row![
+            self.header_menu_button("File", HeaderMenu::File),
+            self.header_menu_button("Edit", HeaderMenu::Edit),
+            self.header_menu_button("View", HeaderMenu::View),
+        ]
+        .spacing(theme::SPACE_SM)
+        .align_y(iced::Alignment::Center)
+        .into();
 
         let header = container(
             row![
@@ -8812,8 +8832,7 @@ impl App {
                     .spacing(8)
                     .align_y(iced::Alignment::Center),
                 horizontal_space(),
-                controls,
-                document_menus,
+                menus,
             ]
             .spacing(theme::SPACE_SM)
             .align_y(iced::Alignment::Center),
@@ -8844,12 +8863,16 @@ impl App {
             HeaderMenu::View => VIEW_BUTTON_WIDTH,
         };
         action(
-            row![
-                text(label).wrapping(NO_WRAP),
-                icon(if open { ICON_CARET_UP } else { ICON_CARET_DOWN }, theme::TEXT_XS),
-            ]
-            .spacing(theme::SPACE_XS)
-            .align_y(iced::Alignment::Center),
+            container(
+                row![
+                    text(label).wrapping(NO_WRAP),
+                    icon(if open { ICON_CARET_UP } else { ICON_CARET_DOWN }, theme::TEXT_XS),
+                ]
+                .spacing(theme::SPACE_XS)
+                .align_y(iced::Alignment::Center),
+            )
+            .width(Length::Fill)
+            .center_x(Length::Fill),
         )
         .width(Length::Fixed(width))
         .on_press(Message::ToggleHeaderMenu(menu))
@@ -9334,7 +9357,8 @@ impl App {
             .into()
     }
 
-    /// Find controls, always shown on the player row.
+    /// The Find controls: the field, previous/next and the match count. The row
+    /// is hidden until Ctrl+F and capped at a third of the window by the caller.
     fn search_element(&self, scheme: &Scheme) -> Element<'_, Message> {
         let count = self.matching_lines().len();
         let (status, status_color) = if self.search_query.trim().is_empty() {
@@ -9347,9 +9371,8 @@ impl App {
                 scheme.muted,
             )
         };
-        // The field takes every pixel the row can spare, so the count and the
-        // arrows sit at its right edge instead of leaving dead space before the
-        // transcript actions.
+        // The field takes every pixel the row can spare, so the arrows and the
+        // count run up to its right edge.
         let query_input = text_input("Find", &self.search_query)
             .id(find_id())
             .on_input(Message::SearchChanged)
@@ -9363,16 +9386,13 @@ impl App {
         let next = icon_pill(ICON_ARROW_DOWN, scheme.ink)
             .on_press(Message::FindNext)
             .style(pill_button_secondary);
-        // The match count gets its own fixed slot so a growing "999 / 9999"
-        // cannot re-flow the row and flip whatever button the pointer is
-        // resting on. It sits after the arrows, not between them and the
-        // field: the field must run right up to the up arrow.
+        // Directly after the next arrow, with the row's normal gap: no reserved
+        // slot, so "3 / 12" reads as part of the navigation rather than as a
+        // label parked at the edge of the row.
         let status = text(status)
             .size(11)
             .wrapping(NO_WRAP)
-            .color(status_color)
-            .width(Length::Fixed(FIND_STATUS_WIDTH))
-            .align_x(iced::alignment::Horizontal::Right);
+            .color(status_color);
         let controls = row![query_input, prev, next, status]
             .spacing(theme::SPACE_SM)
             .align_y(iced::Alignment::Center)
@@ -9381,6 +9401,16 @@ impl App {
         // field part of a row it had to share; the field keeps the space, and
         // Rename All now lives in the Edit menu.
         controls.into()
+    }
+
+    /// Hide the Find row and drop what it was searching, so no invisible query
+    /// keeps filtering or highlighting.
+    fn close_find(&mut self) {
+        self.find_open = false;
+        self.find_focus_pending = false;
+        self.find_hover = false;
+        self.search_query.clear();
+        self.search_index = 0;
     }
 
     /// True while any modal dialog is showing.
@@ -10442,9 +10472,13 @@ impl App {
             .max(220.0)
             .min(self.pane_width());
         let search_slot: Element<Message> = if has_queue && self.find_open {
-            container(self.search_element(&scheme))
-                .width(Length::Fixed(find_width))
-                .into()
+            container(
+                mouse_area(self.search_element(&scheme))
+                    .on_enter(Message::FindHover(true))
+                    .on_exit(Message::FindHover(false)),
+            )
+            .width(Length::Fixed(find_width))
+            .into()
         } else {
             horizontal_space().into()
         };
@@ -15966,6 +16000,36 @@ mod tests {
             app.search_query.is_empty(),
             "closing the row clears what it was searching"
         );
+
+        let _ = std::fs::remove_dir_all(&media);
+    }
+
+    #[test]
+    fn the_find_row_closes_when_its_field_loses_focus() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("find-focus-config");
+        let original = "[00:00] SPEAKER 1: one\n[00:05] SPEAKER 2: two\n";
+        let (mut app, _transcript, media) = line_edit_fixture("find-focus", original);
+
+        let _ = app.update(Message::FocusFind);
+        // The frame that mounts the row clears this; the poll is off until then.
+        app.find_focus_pending = false;
+
+        // The pointer being over the row keeps it alive: next/prev are clicks
+        // outside the field.
+        app.find_hover = true;
+        let _ = app.update(Message::FindFocusPolled(false));
+        assert!(app.find_open, "the row closed under the pointer");
+
+        app.find_hover = false;
+        let _ = app.update(Message::FindFocusPolled(false));
+        assert!(!app.find_open, "losing focus must hide the row");
+
+        // A focused field keeps it open.
+        let _ = app.update(Message::FocusFind);
+        app.find_focus_pending = false;
+        let _ = app.update(Message::FindFocusPolled(true));
+        assert!(app.find_open);
 
         let _ = std::fs::remove_dir_all(&media);
     }
