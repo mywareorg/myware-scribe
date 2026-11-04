@@ -131,16 +131,27 @@ const LINE_EDIT_PAD_X: f32 = 8.0;
 /// the row under the pointer while the caret is being placed). The panel's own
 /// box is a little shorter: it sizes to its controls, and the difference is the
 /// gap to the Find row.
-const LINE_EDIT_PANEL_SLOT: f32 = 36.0;
+const LINE_EDIT_PANEL_SLOT: f32 = 40.0;
 
 /// Gap between the panel's controls, and between the two groups inside it
 /// (which line and speaker, then the edits and the commit pair).
 const LINE_EDIT_GAP: f32 = 4.0;
 const LINE_EDIT_GROUP_GAP: f32 = 8.0;
 
-/// Diameter of the panel's circular icon buttons. Equal to the row height the
-/// pills had (24 px), so the panel box and its reserved slot are unchanged.
-const PANEL_ICON_DIAMETER: f32 = 24.0;
+/// Outer height of a control that carries one line of text: iced's 1.3 line box
+/// at the 16 px UI size (20.8 px) plus the 5 px of vertical padding every
+/// `fit_action` uses. Icon-only controls take the same height so a row that
+/// mixes the two is one control height rather than as tall as its tallest
+/// child.
+const CONTROL_HEIGHT: f32 = 30.8;
+
+/// Diameter of the panel's circular icon buttons: a standard control height, so
+/// they line up with the text buttons around them.
+const PANEL_ICON_DIAMETER: f32 = CONTROL_HEIGHT;
+
+/// Glyph size for an icon-only control. Matches the queue's clear button, which
+/// is the reference the panel was asked to follow.
+const ICON_ONLY_SIZE: f32 = 15.0;
 
 /// Width reserved for the Find row's match counter. Measured at 11 px: "no
 /// matches" is the widest it gets at 60.3 px, and "999 / 9999" reaches 53.9.
@@ -8143,17 +8154,20 @@ impl App {
         let cancel = icon_circle(ICON_X, scheme.ink)
             .on_press(Message::CancelLineEdit)
             .style(panel_icon_button(scheme, true));
-        // Padding, not a height, so the label's line box decides the size.
+        // Same box as Reveal: the label sets the height, and the width is the
+        // width that label reserves, so the commit pair matches the row of
+        // transcript actions beneath the pane.
         let done = action(
             row![
-                icon(ICON_CHECK, 12.0),
-                text("Done").size(theme::TEXT_SM).wrapping(NO_WRAP)
+                icon(ICON_CHECK, 14.0),
+                text("Done").wrapping(NO_WRAP)
             ]
             .spacing(3)
             .align_y(iced::Alignment::Center),
         )
         .on_press_maybe(allowed.then_some(Message::DoneLineEdit))
-        .padding([theme::CONTROL_PADDING[0], 8])
+        .width(Length::Fixed(action_width("Reveal")))
+        .padding([5, 10])
         .style(color_button(scheme.blue, scheme.on_accent));
 
         // One left-aligned cluster, two small groups inside it: what is being
@@ -12592,8 +12606,8 @@ fn icon_pill(code: char, colour: Color) -> iced::widget::Button<'static, Message
 /// arrows and the cancel cross land on 7.00 px of a 14 px box, the trash and
 /// the undo arrows within 0.75 px). A line box the size of the glyph therefore
 /// centres the ink, which is what lets a circle centre it by layout.
-fn icon_line_height() -> iced::advanced::text::LineHeight {
-    iced::advanced::text::LineHeight::Absolute(Pixels(ICON_SIZE))
+fn icon_line_height(size: f32) -> iced::advanced::text::LineHeight {
+    iced::advanced::text::LineHeight::Absolute(Pixels(size))
 }
 
 /// A circular icon button: a square box whose radius is half its side, with the
@@ -12604,8 +12618,8 @@ fn icon_line_height() -> iced::advanced::text::LineHeight {
 fn icon_circle(code: char, colour: Color) -> iced::widget::Button<'static, Message> {
     let glyph = text(code.to_string())
         .font(Font::with_name("bootstrap-icons"))
-        .size(ICON_SIZE)
-        .line_height(icon_line_height())
+        .size(ICON_ONLY_SIZE)
+        .line_height(icon_line_height(ICON_ONLY_SIZE))
         .style(move |_theme| text::Style { color: Some(colour) });
     action(
         container(glyph)
@@ -16337,7 +16351,7 @@ mod tests {
 
         // Tightened to the em box: the glyph's node is exactly the glyph, so a
         // circle that centres the node centres the ink.
-        let tight = paragraph(icon_line_height());
+        let tight = paragraph(icon_line_height(ICON_SIZE));
         assert_eq!(tight.min_bounds().height, ICON_SIZE);
 
         // iced's default is 1.3 em, and the spare space goes below the baseline,
