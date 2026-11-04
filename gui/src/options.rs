@@ -213,7 +213,9 @@ impl fmt::Display for Speed {
     }
 }
 
-/// Options in the "Help…" dropdown.
+/// Entries in the Help menu that open a reference dialog or toggle a panel.
+///
+/// The menu itself adds the appearance choices; these are the actions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum HelpKind {
     About,
@@ -223,13 +225,6 @@ pub(crate) enum HelpKind {
 }
 
 impl HelpKind {
-    pub(crate) const ALL: [HelpKind; 4] = [
-        HelpKind::About,
-        HelpKind::Shortcuts,
-        HelpKind::Console,
-        HelpKind::Settings,
-    ];
-
     pub(crate) fn label(self) -> &'static str {
         match self {
             HelpKind::About => "About",
@@ -237,12 +232,6 @@ impl HelpKind {
             HelpKind::Console => "Console",
             HelpKind::Settings => "Settings",
         }
-    }
-}
-
-impl fmt::Display for HelpKind {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.label())
     }
 }
 

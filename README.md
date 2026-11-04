@@ -272,12 +272,12 @@ the Store does not resolve an add-on for an app that is not yet published.
 
 Run `hippo-transcribe` with no arguments. Add files/folders to the queue, or drag audio
 files and folders anywhere into the window, then choose a preset and speaker
-count and press Transcribe. The header theme button cycles light, dark and
-system themes. Files added while a run is active join the queue and are
-processed in a follow-up pass automatically. The gear button (or
-`Ctrl+,`) opens Settings for theme, transcript text size, preset, speaker count,
-language, playback speed, follow mode, notifications, save location, and model
-storage.
+count and press Transcribe. The Help menu holds the appearance choices (Light,
+Dark, System; System follows the desktop and is the default) and the header
+theme button cycles them. Files added while a run is active join the queue and
+are processed in a follow-up pass automatically. The gear button (or `Ctrl+,`)
+opens Settings for transcript text size, preset, speaker count, language,
+playback speed, follow mode, notifications, save location, and model storage.
 
 The Export picker writes the current transcript as plain text, SRT, WebVTT, or
 JSON. Failed queue items can be retried, and pending items can be reordered.

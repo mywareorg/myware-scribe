@@ -110,9 +110,11 @@ pub fn is_dark(theme: &Theme) -> bool {
 /// The user-selectable appearance mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum AppTheme {
-    #[default]
     Light,
     Dark,
+    /// Follows the OS appearance. The default: a fresh install matches the
+    /// desktop it lands on instead of forcing a light window into a dark one.
+    #[default]
     System,
 }
 

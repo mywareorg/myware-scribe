@@ -170,11 +170,25 @@ const PANEL_ICON_DIAMETER: f32 = CONTROL_HEIGHT;
 /// is the reference the panel was asked to follow.
 const ICON_ONLY_SIZE: f32 = 15.0;
 
-/// Where the transcript header menus' top edge sits inside the card: below the
-/// header (title, meta, divider and the slot's bottom gap). Their width is not
-/// fixed: each menu is as wide as its own widest row, so File, Edit and View no
-/// longer share the width chosen for the longest of them.
-const VIEW_MENU_TOP: f32 = 48.0;
+/// Gap above the header's controls, below them, and between them and the rule.
+/// One number for all three, so the strip is evenly inset instead of sitting
+/// nearer the rule than the card's top edge. It is the header row's own spacing
+/// too, which is why it takes the app's standard small space.
+const HEADER_GAP: f32 = theme::SPACE_SM;
+
+/// Height of the header's identity block when it carries a meta line: the 13 px
+/// title, its 1 px gap and the 11 px meta, at iced's 1.3 line height.
+const HEADER_LABEL_HEIGHT: f32 = 13.0 * 1.3 + 1.0 + 11.0 * 1.3;
+
+/// Gap the header's slot leaves under the header's rule.
+const HEADER_SLOT_GAP: f32 = theme::SPACE_SM;
+
+/// Where the transcript header menus' top edge sits inside the card: the
+/// header's gap above and below its controls, the identity block, the gap to the
+/// rule, the rule itself and the slot's gap. Their width is not fixed: each menu
+/// is as wide as its own widest row.
+const VIEW_MENU_TOP: f32 =
+    HEADER_GAP * 3.0 + HEADER_LABEL_HEIGHT + 1.0 + HEADER_SLOT_GAP;
 
 /// Width of a header menu row's leading check slot. Fixed, so every label in a
 /// menu starts on the same left edge whether its row is checked or not.
@@ -190,11 +204,12 @@ const HEADER_PAD_X: f32 = 8.0;
 const FILE_BUTTON_WIDTH: f32 = 78.0;
 const EDIT_BUTTON_WIDTH: f32 = 78.0;
 const VIEW_BUTTON_WIDTH: f32 = 84.0;
+const HELP_BUTTON_WIDTH: f32 = 78.0;
 
-/// Left offsets of the three menus. The header starts `[File][Edit][View]`, so
-/// File's menu hangs from the card's own padding, Edit's one button and a gap
-/// further right, and View's one more. The menu layer aligns its child to the
-/// start, so these are distances from the card's left edge.
+/// Left offsets of the four menus. The header starts `[File][Edit][View][Help]`,
+/// so File's menu hangs from the card's own padding and each later one sits a
+/// button and a gap further right. The menu layer aligns its child to the start,
+/// so these are distances from the card's left edge.
 fn file_menu_offset() -> f32 {
     HEADER_PAD_X
 }
@@ -205,6 +220,10 @@ fn edit_menu_offset() -> f32 {
 
 fn view_menu_offset() -> f32 {
     edit_menu_offset() + EDIT_BUTTON_WIDTH + theme::SPACE_SM
+}
+
+fn help_menu_offset() -> f32 {
+    view_menu_offset() + VIEW_BUTTON_WIDTH + theme::SPACE_SM
 }
 
 /// Widest the panel's speaker picker may grow, and how many characters of a
@@ -607,6 +626,7 @@ pub enum HeaderMenu {
     File,
     Edit,
     View,
+    Help,
 }
 
 #[derive(Debug, Clone)]
@@ -7898,11 +7918,14 @@ impl App {
         .spacing(8)
         .align_y(iced::Alignment::Center);
 
+        // All three take a 16 px line box, the app's normal control size, so the
+        // toolbar is the same height as every other button row: 20.8 + 10 of
+        // padding = `CONTROL_HEIGHT`.
         let add_button = self.tip(
             action(
                 row![
-                    icon_colored(ICON_PLUS, 14.0, scheme.on_accent),
-                    text("Add").size(12).wrapping(NO_WRAP),
+                    icon_colored(ICON_PLUS, 16.0, scheme.on_accent),
+                    text("Add").wrapping(NO_WRAP),
                 ]
                 .spacing(4)
                 .align_y(iced::Alignment::Center),
@@ -7915,7 +7938,7 @@ impl App {
 
         let folder_button: Element<Message> = if self.can(license::Feature::Batch) {
             self.tip(
-                action(icon(ICON_FOLDER_PLUS, 15.0))
+                action(icon(ICON_FOLDER_PLUS, 16.0))
                     .on_press(Message::AddFolder)
                     .style(pill_button_secondary),
                 "Add a folder",
@@ -7923,7 +7946,7 @@ impl App {
             )
         } else {
             self.tip(
-                action(icon_colored(ICON_FOLDER_PLUS, 15.0, scheme.muted))
+                action(icon_colored(ICON_FOLDER_PLUS, 16.0, scheme.muted))
                     .on_press(Message::AddFolder)
                     .style(greyed_button(scheme)),
                 "Folder import is a Pro feature",
@@ -7932,7 +7955,7 @@ impl App {
         };
 
         let clear_button = self.tip(
-            action(icon(ICON_TRASH, 15.0))
+            action(icon(ICON_TRASH, 16.0))
                 .on_press_maybe((!running && has_queue).then_some(Message::ClearQueue))
                 .style(pill_button_secondary),
             "Clear queue",
@@ -8872,36 +8895,36 @@ impl App {
             );
         }
 
-        // The header starts with the three menus, left to right File, Edit,
-        // View, and ends with the file's own identity. Each menu hangs from its
-        // own button's left edge; the offset helpers add the fixed button widths
-        // to its left.
+        // The header starts with the menus, left to right File, Edit, View and
+        // Help, immediately followed by the file's own identity. Each menu hangs
+        // from its own button's left edge; the offset helpers add the fixed
+        // button widths to its left.
         let menus: Element<Message> = row![
             self.header_menu_button("File", HeaderMenu::File),
             self.header_menu_button("Edit", HeaderMenu::Edit),
             self.header_menu_button("View", HeaderMenu::View),
+            self.header_menu_button("Help", HeaderMenu::Help),
         ]
-        .spacing(theme::SPACE_SM)
+        .spacing(HEADER_GAP)
         .align_y(iced::Alignment::Center)
         .into();
 
-        // The menus keep their fixed widths; the label group keeps its own, so
-        // the elastic space between them is the only thing that changes with the
-        // window. The group is last, so it is what sits against the card's right
-        // padding however long the filename is.
+        // The identity sits one row gap after Help, and the elastic space takes
+        // whatever is left: the menus and the label block keep their own widths,
+        // so only the space changes with the window.
         let header = container(
             row![
                 menus,
-                horizontal_space(),
                 row![badge, label]
                     .spacing(8)
                     .align_y(iced::Alignment::Center),
+                horizontal_space(),
             ]
-            .spacing(theme::SPACE_SM)
+            .spacing(HEADER_GAP)
             .align_y(iced::Alignment::Center),
         )
         .width(Length::Fill)
-        .padding([2, HEADER_PAD_X as u16]);
+        .padding([HEADER_GAP as u16, HEADER_PAD_X as u16]);
         let divider = container(horizontal_space())
             .width(Length::Fill)
             .height(Length::Fixed(1.0))
@@ -8909,7 +8932,7 @@ impl App {
                 background: Some(scheme.border.into()),
                 ..container::Style::default()
             });
-        Some(column![header, divider].spacing(4).into())
+        Some(column![header, divider].spacing(HEADER_GAP).into())
     }
 
     /// One of the transcript header's menu buttons. `label` is the menu's name;
@@ -8924,6 +8947,7 @@ impl App {
             HeaderMenu::File => FILE_BUTTON_WIDTH,
             HeaderMenu::Edit => EDIT_BUTTON_WIDTH,
             HeaderMenu::View => VIEW_BUTTON_WIDTH,
+            HeaderMenu::Help => HELP_BUTTON_WIDTH,
         };
         action(
             container(
@@ -9155,6 +9179,98 @@ impl App {
                     .align_x(iced::Alignment::Center),
             ]
             .spacing(6)
+            .width(Length::Fill),
+            &rows,
+            scheme,
+        )
+    }
+
+    /// The Help menu: the reference dialogs and the panel toggles, then the
+    /// appearance choices.
+    ///
+    /// Theme lives here rather than in Settings because a menu can mark the
+    /// current value with a check; the pick list this replaces reset to its
+    /// placeholder after every choice, so it could only ever act.
+    fn help_menu(&self, scheme: &Scheme) -> Element<'_, Message> {
+        let scheme = *scheme;
+        let actions = column![
+            header_menu_item(
+                "About",
+                false,
+                true,
+                Some(Message::HelpChoice(HelpKind::About)),
+                None,
+                scheme,
+            ),
+            header_menu_item(
+                "Shortcuts",
+                false,
+                true,
+                Some(Message::HelpChoice(HelpKind::Shortcuts)),
+                None,
+                scheme,
+            ),
+            header_menu_item(
+                "Console",
+                self.console_open,
+                true,
+                Some(Message::HelpChoice(HelpKind::Console)),
+                None,
+                scheme,
+            ),
+            header_menu_item(
+                "Settings",
+                false,
+                true,
+                Some(Message::HelpChoice(HelpKind::Settings)),
+                None,
+                scheme,
+            ),
+        ]
+        .spacing(2)
+        .width(Length::Fill);
+
+        // One row per mode, in the order `AppTheme::ALL` declares, checked when
+        // it is the mode in force.
+        let mut appearance = column![].spacing(2).width(Length::Fill);
+        for mode in AppTheme::ALL {
+            appearance = appearance.push(header_menu_item(
+                mode.label(),
+                self.theme_mode == mode,
+                true,
+                Some(Message::SetTheme(mode)),
+                None,
+                scheme,
+            ));
+        }
+
+        // The actions and the appearance are two kinds of entry, so they get a
+        // rule between them rather than reading as seven equal choices.
+        let divider = container(horizontal_space())
+            .width(Length::Fill)
+            .height(Length::Fixed(1.0))
+            .style(move |_theme| container::Style {
+                background: Some(scheme.border.into()),
+                ..container::Style::default()
+            });
+
+        // The same rows the card is built from, so its width follows the labels.
+        let mut rows = vec![
+            ("About", None),
+            ("Shortcuts", None),
+            ("Console", None),
+            ("Settings", None),
+        ];
+        for mode in AppTheme::ALL {
+            rows.push((mode.label(), None));
+        }
+        header_menu_card(
+            column![
+                actions,
+                container(divider).padding([4, 0]),
+                appearance,
+            ]
+            .spacing(theme::SPACE_SM)
             .width(Length::Fill),
             &rows,
             scheme,
@@ -9881,14 +9997,6 @@ impl App {
         let scheme = *scheme;
         let running = matches!(self.status, Status::Running);
 
-        let theme = settings_control(
-            pick_list(AppTheme::ALL, Some(self.theme_mode), Message::SetTheme)
-                .style(ink_pick(scheme))
-                .menu_style(pick_menu_style(scheme))
-                .handle(caret_handle())
-                .width(Length::Fixed(180.0)),
-        );
-
         let font_on = self.font_scale;
         let font_controls = settings_control(
             row![
@@ -10153,7 +10261,6 @@ impl App {
 
         let mut body = column![].spacing(theme::SPACE_SM).width(Length::Fill);
         body = body.push(settings_section_label("Appearance", scheme));
-        body = body.push(settings_row("Theme", theme, scheme));
         body = body.push(settings_row("Transcript text size", font_controls, scheme));
         body = body.push(settings_divider(scheme));
         body = body.push(settings_section_label("Transcription", scheme));
@@ -10475,7 +10582,7 @@ impl App {
         .padding(iced::Padding {
             top: 0.0,
             right: 0.0,
-            bottom: if has_header { 6.0 } else { 0.0 },
+            bottom: if has_header { HEADER_SLOT_GAP } else { 0.0 },
             left: 0.0,
         });
         // The editor strip sits between the header and the list, inside the card,
@@ -10538,6 +10645,7 @@ impl App {
                     HeaderMenu::File => (self.file_menu(&scheme), file_menu_offset()),
                     HeaderMenu::Edit => (self.edit_menu(&scheme), edit_menu_offset()),
                     HeaderMenu::View => (self.view_menu(&scheme), view_menu_offset()),
+                    HeaderMenu::Help => (self.help_menu(&scheme), help_menu_offset()),
                 };
                 // Start-aligned with a left offset: the container lays its child
                 // out inside the padding, so the menu's left edge sits exactly
@@ -10657,14 +10765,6 @@ impl App {
                     theme_tip,
                     &scheme,
                 ),
-            )
-            .push(
-                pick_list(HelpKind::ALL, None::<HelpKind>, Message::HelpChoice)
-                    .placeholder("Help")
-                    .style(pill_pick(scheme))
-                    .menu_style(pick_menu_style(scheme))
-                    .handle(caret_handle())
-                    .width(Length::Fixed(92.0)),
             );
 
         let mut base = column![
@@ -12100,23 +12200,6 @@ fn caret_handle() -> pick_list::Handle<Font> {
     pick_list::Handle::Dynamic {
         closed: icon(ICON_CARET_DOWN),
         open: icon(ICON_CARET_UP),
-    }
-}
-
-/// Pick-list style whose text/placeholder/handle use `ink` (button text colour).
-fn ink_pick(scheme: Scheme) -> impl Fn(&iced::Theme, pick_list::Status) -> pick_list::Style {
-    move |theme, status| {
-        let mut style = pick_list::default(theme, status);
-        style.text_color = scheme.ink;
-        style.placeholder_color = scheme.ink;
-        style.handle_color = scheme.ink;
-        style.border.radius = PILL.into();
-        // Open: the menu's surface and hairline, as `pill_pick` does.
-        if matches!(status, pick_list::Status::Opened) {
-            style.background = scheme.dialog_bg.into();
-            style.border.color = scheme.border;
-        }
-        style
     }
 }
 
@@ -15309,6 +15392,10 @@ mod tests {
             view_menu_offset() - edit_menu_offset(),
             EDIT_BUTTON_WIDTH + theme::SPACE_SM
         );
+        assert_eq!(
+            help_menu_offset() - view_menu_offset(),
+            VIEW_BUTTON_WIDTH + theme::SPACE_SM
+        );
     }
 
     #[test]
@@ -16558,18 +16645,30 @@ mod tests {
     }
 
     #[test]
+    fn a_fresh_profile_follows_the_system_theme() {
+        let _guard = env_lock();
+        let _dir = ConfigEnv::new("theme-default");
+
+        assert_eq!(AppTheme::default(), AppTheme::System);
+        let app = pro_app();
+        assert_eq!(app.theme_mode, AppTheme::System);
+    }
+
+    #[test]
     fn theme_toggle_round_trips_through_settings() {
         let _guard = env_lock();
         let _dir = ConfigEnv::new("theme");
 
         let mut app = pro_app();
+        // A fresh profile follows the desktop rather than forcing light.
+        assert_eq!(app.theme_mode, AppTheme::System);
+
+        // The cycle goes System -> Light -> Dark -> System.
+        let _ = app.update(Message::ToggleTheme);
         assert_eq!(app.theme_mode, AppTheme::Light);
 
-        let _ = app.update(Message::ToggleTheme);
-        assert_eq!(app.theme_mode, AppTheme::Dark);
-
         let reloaded = pro_app();
-        assert_eq!(reloaded.theme_mode, AppTheme::Dark);
+        assert_eq!(reloaded.theme_mode, AppTheme::Light);
     }
 
     #[test]
