@@ -6561,11 +6561,18 @@ impl App {
                     )
                 }
             } else {
-                button
+                // A stored failure must not be a dead end: the only other way
+                // back was editing the settings file. Clicking retests.
+                button.on_press_maybe((!running && can_test).then_some(Message::RetestGpu))
             }
         };
         let gpu_button: Element<Message> = if let Some(reason) = &reason {
-            self.tip(gpu_button, reason.as_str(), &scheme)
+            let hint = if can_test {
+                format!("{reason} Click to test this preset again.")
+            } else {
+                reason.clone()
+            };
+            self.tip(gpu_button, hint.as_str(), &scheme)
         } else if untested {
             self.tip(
                 gpu_button,
