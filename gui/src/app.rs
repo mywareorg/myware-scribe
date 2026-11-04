@@ -120,30 +120,41 @@ const DEFAULT_FONT_SCALE: f32 = 0.7;
 
 /// Gap the right-hand column puts between its islands. The column is built with
 /// `spacing(0)` and every gap is carried by a padding instead, so this one
-/// number is the distance from the transcript card to the run card, from the run
-/// card to the editor island and from the editor island to the Find row.
+/// number is the distance from the transcript card to the run card and from the
+/// transcript card to the Find row.
 const ISLAND_GAP: f32 = theme::SPACE_LG;
 
-/// Height of the line-editor island's own box. Its padding and border are inside
-/// it; the tallest control in it is the Done button at 30.8 px, so this leaves a
-/// little slack rather than clipping.
+/// Height of the editor strip, which is inserted between the transcript header
+/// and the list, inside the card. Its padding and bottom rule are inside it; the
+/// tallest control in it is the Done button at 30.8 px, so this leaves a little
+/// slack rather than clipping.
 const LINE_EDIT_PANEL_HEIGHT: f32 = 38.0;
 
-/// Height the editor island adds to the column while a line is being edited: the
-/// island plus the gap under it, on top of the column's own gap above it. Zero
-/// when no editor is open, so the transcript card runs down to the Find row.
-fn panel_slot_height(editing: bool) -> f32 {
+/// The strip's height: its own box while a line is being edited, nothing when no
+/// editor is open, so the list runs right up to the header.
+fn editor_strip_height(editing: bool) -> f32 {
     if editing {
-        LINE_EDIT_PANEL_HEIGHT + ISLAND_GAP
+        LINE_EDIT_PANEL_HEIGHT
     } else {
         0.0
     }
 }
 
-/// Gap between the panel's controls, and between the two groups inside it
-/// (which line and speaker, then the edits and the commit pair).
+/// Where the scroll offset has to go when the editor strip appears (`delta` is
+/// positive) or disappears, so the content does not jump on screen.
+///
+/// Inserting the strip above the list moves the list's top edge, and every row
+/// with it, so the offset moves the other way by the same amount. Two bounds: the
+/// document's top cannot be pulled in from above, so the offset stops at zero and
+/// the content simply starts lower; and `ceiling` is the highest offset that still
+/// leaves the edited row below the strip, because scrolled past that the field
+/// would sit under it.
+fn compensate_offset(offset: f32, delta: f32, ceiling: f32) -> f32 {
+    (offset + delta).min(ceiling).max(0.0)
+}
+
+/// Gap between the strip's controls.
 const LINE_EDIT_GAP: f32 = 4.0;
-const LINE_EDIT_GROUP_GAP: f32 = 8.0;
 
 /// Outer height of a control that carries one line of text: iced's 1.3 line box
 /// at the 16 px UI size (20.8 px) plus the 5 px of vertical padding every
@@ -902,6 +913,10 @@ pub struct App {
     /// The next follow move must land: switching Follow on can put the pane a
     /// screen away from the playhead, which must not be eased across.
     snap_next_follow: bool,
+    /// Height of the editor strip the scroll offset has already been shifted for.
+    /// Kept here rather than derived from `line_edit` because one message can close
+    /// and reopen the editor (moving it) without the strip ever leaving the screen.
+    strip_height: f32,
     /// When the pane was last moved by a seek. Seeks closer together than
     /// [`FOLLOW_SEEK_QUIET`] are one scrub and must not each start a glide.
     last_seek: Option<Instant>,
@@ -1155,6 +1170,7 @@ impl App {
             follow_issue: None,
             scroll_anim: None,
             snap_next_follow: false,
+            strip_height: 0.0,
             last_seek: None,
             follow_row_height: RefCell::new(None),
             pane_window: Cell::new((0, 0, 0.0, 0.0)),
@@ -2685,6 +2701,18 @@ impl App {
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
+        let task = self.dispatch(message);
+        // The editor strip changes the height of the list, and that has to move the
+        // scroll offset in the same update as the layout, before the frame is drawn.
+        match self.strip_scroll() {
+            Some(scroll) => Task::batch([scroll, task]),
+            None => task,
+        }
+    }
+
+    /// Handles one message. [`Self::update`] wraps this with the scroll the editor
+    /// strip's appearance or disappearance needs.
+    fn dispatch(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::SmsToggled(value) => {
                 // Bubbles and lines are laid out differently: keep the edited
@@ -5067,8 +5095,8 @@ impl App {
             return Task::none();
         }
         // Moving the editor from one line to another commits the first.
-        let island_was_open = self.line_edit.is_some();
-        if island_was_open {
+        let strip_was_open = self.line_edit.is_some();
+        if strip_was_open {
             self.commit_inline_edit(false);
         }
         // Rows come from the document the editor writes to, not from the joined
@@ -5107,41 +5135,93 @@ impl App {
         self.last_line_click = None;
         self.line_edit_picker_open = false;
         self.toast = None;
-        // The island takes its height out of the pane, so a row clicked near the
-        // bottom would be scrolled out from under itself. Moving an editor that is
-        // already open changes nothing about the pane's height.
-        let shrink = if island_was_open {
-            0.0
+        // With the strip appearing, `strip_scroll` shifts the offset and keeps the
+        // edited row below it. Nothing else moves the pane when the strip was
+        // already there, so moving the editor onto a row that is off the pane (the
+        // keyboard path can pick one) has to come into view here.
+        if strip_was_open {
+            self.reveal_edited_line(index)
         } else {
-            panel_slot_height(true)
-        };
-        self.reveal_edited_line(index, shrink)
+            Task::none()
+        }
     }
 
-    /// Keep the row being edited inside the pane after the editor island appears.
+    /// Bring the row being edited into view, when nothing else moves the pane.
     ///
-    /// The island is `pane_shrink` px of pane (zero when it was already open), so
-    /// a row clicked in the last row and a half of the viewport no longer fits. Its
-    /// place is the same average-row-height estimate the follow logic uses; when it
-    /// does not fit, `scroll_to_line` centres it, which is how every other "bring
-    /// this line into view" path works.
-    fn reveal_edited_line(&mut self, index: usize, pane_shrink: f32) -> Task<Message> {
-        let Some(target) = self.follow_target(index) else {
+    /// The row's place is the same average-row-height estimate the follow logic
+    /// uses. When the strip is appearing this never fires: `strip_scroll` holds the
+    /// clicked row where it was and stops before it can go under the strip.
+    fn reveal_edited_line(&mut self, index: usize) -> Task<Message> {
+        let Some((top, bottom)) = self.edited_row_place(index) else {
             return Task::none();
         };
-        let viewport = self.transcript_viewport;
-        if viewport <= 0.0 {
-            return Task::none();
-        }
-        let row = self.follow_row_estimate().max(1.0);
-        // Where the row's centre sits in the pane, given where the pane is.
-        let centre = target + viewport / 2.0 - self.transcript_offset;
-        let fits = centre - row / 2.0 >= 0.0 && centre + row / 2.0 <= viewport - pane_shrink;
-        if fits {
+        if top >= 0.0 && bottom <= self.transcript_viewport {
             Task::none()
         } else {
             self.scroll_to_line(index)
         }
+    }
+
+    /// The edited row's place in the pane, estimated the way the follow logic
+    /// estimates every row: its top and bottom in the list's own coordinates.
+    fn edited_row_place(&self, index: usize) -> Option<(f32, f32)> {
+        let viewport = self.transcript_viewport;
+        if viewport <= 0.0 {
+            return None;
+        }
+        let target = self.follow_target(index)?;
+        let row = self.follow_row_estimate().max(1.0);
+        let centre = target + viewport / 2.0 - self.transcript_offset;
+        Some((centre - row / 2.0, centre + row / 2.0))
+    }
+
+    /// The scroll the editor strip's appearance or disappearance needs, if any.
+    ///
+    /// The strip is inserted between the header and the list, so its height moves
+    /// the list's top edge and every row with it. Shifting the offset the other way
+    /// by the same amount holds the content still on screen; see
+    /// [`compensate_offset`] for the bounds that keeps it honest at the top of the
+    /// document and under the strip.
+    fn strip_scroll(&mut self) -> Option<Task<Message>> {
+        let height = editor_strip_height(self.line_edit.is_some());
+        let applied = self.strip_height;
+        if (height - applied).abs() < 0.5 {
+            return None;
+        }
+        self.strip_height = height;
+        if self.transcript_viewport <= 0.0 {
+            return None;
+        }
+        let delta = height - applied;
+        let viewport = self.transcript_viewport;
+        let place = self
+            .line_edit
+            .as_ref()
+            .and_then(|edit| self.edited_row_place(edit.index));
+        let target = match place {
+            // A row that was outside the pane altogether (only the keyboard can open
+            // the editor on one) has to be brought in; holding it still would hold it
+            // out of sight.
+            Some((top, bottom)) if top < 0.0 || bottom > viewport => self
+                .line_edit
+                .as_ref()
+                .and_then(|edit| self.follow_target(edit.index))
+                .unwrap_or_else(|| compensate_offset(self.transcript_offset, delta, f32::MAX)),
+            // Otherwise hold the content still, but never scroll so far that the row's
+            // top goes above the list's top edge.
+            Some((top, _)) => {
+                compensate_offset(self.transcript_offset, delta, self.transcript_offset + top)
+            }
+            None => compensate_offset(self.transcript_offset, delta, f32::MAX),
+        };
+        // A glide towards an older target would keep writing offsets over this one.
+        self.scroll_anim = None;
+        self.scroll_target = Some(target);
+        self.follow_offset = Some(target);
+        Some(scrollable::scroll_to(
+            transcript_id(),
+            scrollable::AbsoluteOffset { x: 0.0, y: target },
+        ))
     }
 
     /// Commit the inline editor into the transcript and close it. One changed
@@ -8162,9 +8242,9 @@ impl App {
         (pane - 30.0).min((size * 28.0).clamp(240.0, 620.0) - 20.0)
     }
 
-    /// Controls for the line being edited: which line it is, its speaker, the
-    /// structural edits (join, split, delete), undo/redo, and the commit pair.
-    /// Shown above the Find row while the editor is open.
+    /// Controls for the line being edited: its speaker, the structural edits
+    /// (join, split, delete), undo/redo, and the commit pair. Inserted between the
+    /// transcript header and the list while the editor is open.
     fn line_edit_panel(&self, scheme: Scheme) -> Option<Element<'_, Message>> {
         let edit = self.line_edit.as_ref()?;
         let row = edit.current_row()?;
@@ -8296,15 +8376,18 @@ impl App {
         .padding([5, 10])
         .style(color_button(scheme.blue, scheme.on_accent));
 
-        // One left-aligned cluster, two small groups inside it: what is being
-        // edited, then the edits and the way out. No elastic spacer, so the
-        // controls do not drift apart in a wide window.
+        // The strip is a full-width band inside the card, so it follows the same
+        // grammar as the header above it and the Find row below: the line's own
+        // identity and the edits stay left, and the commit pair sits at the far
+        // edge where a dialog's buttons would. One elastic gap, after everything
+        // that edits, so only the pair moves when the pane is wide.
         let mut identity = row![].spacing(LINE_EDIT_GAP).align_y(iced::Alignment::Center);
         if let Some(read_only) = read_only {
             identity = identity.push(read_only);
         }
         identity = identity.push(picker);
-        let editing = row![
+        let controls = row![
+            identity,
             text("Join")
                 .size(theme::TEXT_XS)
                 .wrapping(NO_WRAP)
@@ -8329,6 +8412,7 @@ impl App {
                 "Delete this line",
                 &scheme,
             ),
+            divider(),
             self.tip(
                 button(ICON_UNDO, undo, false, Message::UndoLineEdit),
                 "Undo the last line edit (Ctrl+Z inside the field undoes typing)",
@@ -8339,34 +8423,38 @@ impl App {
                 "Redo the last line edit",
                 &scheme,
             ),
-            divider(),
+            horizontal_space(),
             self.tip(cancel, "Cancel (Esc) and keep the line as it was", &scheme),
             self.tip(done, "Save this line (Enter)", &scheme),
         ]
         .spacing(LINE_EDIT_GAP)
-        .align_y(iced::Alignment::Center);
+        .align_y(iced::Alignment::Center)
+        .width(Length::Fill);
 
-        let controls = row![identity, editing]
-            .spacing(LINE_EDIT_GROUP_GAP)
-            .align_y(iced::Alignment::Center)
-            .width(Length::Fill);
-
+        // A band inside the card, not a card of its own: no fill, no radius, no
+        // shadow. It is closed off from the rows by one hairline along its bottom
+        // edge, and the header above it already ends in a rule, so the strip reads
+        // as a second toolbar row rather than as something dropped on top of the
+        // transcript. The rule is the shared `scheme.border` hairline, so both
+        // palettes get the same edge without a second colour.
         Some(
-            container(controls)
-                .width(Length::Fill)
-                .height(Length::Fixed(LINE_EDIT_PANEL_HEIGHT))
-                .padding([theme::CONTROL_PADDING[0], theme::SPACE_SM as u16])
-                .align_y(iced::Alignment::Center)
-                .style(move |_theme| container::Style {
-                    background: Some(scheme.panel_bg.into()),
-                    border: iced::border::Border {
-                        color: scheme.border,
-                        width: 1.0,
-                        radius: theme::RADIUS_MD.into(),
-                    },
-                    ..container::Style::default()
-                })
-                .into(),
+            column![
+                container(controls)
+                    .width(Length::Fill)
+                    .height(Length::Fixed(LINE_EDIT_PANEL_HEIGHT - 1.0))
+                    .padding([theme::CONTROL_PADDING[0], theme::SPACE_MD as u16])
+                    .align_y(iced::Alignment::Center),
+                container(horizontal_space())
+                    .width(Length::Fill)
+                    .height(Length::Fixed(1.0))
+                    .style(move |_theme| container::Style {
+                        background: Some(scheme.border.into()),
+                        ..container::Style::default()
+                    }),
+            ]
+            .spacing(0)
+            .width(Length::Fill)
+            .into(),
         )
     }
 
@@ -10000,7 +10088,21 @@ impl App {
             bottom: if has_header { 6.0 } else { 0.0 },
             left: 0.0,
         });
-        let transcript_box = column![header_slot, self.transcript_element()]
+        // The editor strip sits between the header and the list, inside the card,
+        // and only its *height* changes: nothing when no editor is open, so the
+        // list runs up to the header. It is always the middle child, so the
+        // scrollable stays child 2 in both states and `Tree::diff` matches it by
+        // index — the strip's node swaps between a `Space` and a `Row` (a
+        // `Container` has no node of its own), but the scrollable's node and its
+        // absolute pixel offset are untouched, which is why its offset is not
+        // reset. Shifting the offset to match is `strip_scroll`.
+        let strip_slot = container(match self.line_edit_panel(scheme) {
+            Some(panel) => panel,
+            None => horizontal_space().into(),
+        })
+        .width(Length::Fill)
+        .height(Length::Fixed(editor_strip_height(self.line_edit.is_some())));
+        let transcript_box = column![header_slot, strip_slot, self.transcript_element()]
             .spacing(0)
             .width(Length::Fill)
             .height(Length::Fill);
@@ -10040,11 +10142,10 @@ impl App {
         .into();
 
         // The transcript card keeps a fixed child index. Anything that appears or
-        // disappears above it (model notice, progress chrome) or below it (editor
-        // island, search row) would shift that index, which remounts the
-        // scrollable and resets its offset to the top. The conditional content
-        // lives in slots instead, and the island gaps are slot padding, so the
-        // child indices never change even though the heights now do.
+        // disappears above it (model notice, progress chrome) or below it (search
+        // row) would shift that index, which remounts the scrollable and resets its
+        // offset to the top. The conditional content lives in slots instead, and the
+        // gaps between islands are slot padding, so the child indices never change.
         let show_middle = has_queue || self.selected_view.is_some() || running;
         let mut top_slot_col = column![].spacing(ISLAND_GAP).width(Length::Fill);
         let mut has_top = false;
@@ -10088,26 +10189,14 @@ impl App {
                 shadow: soft_shadow(),
                 ..container::Style::default()
             });
-        // Two slots stacked below the transcript card. The line editor panel
-        // lives in the first, at a fixed child index, and only its *height*
-        // changes: nothing when no editor is open, so the card runs down to the
-        // Find row, and the island plus the gap under it while one is. Resizing a
-        // container in place does not touch the widget tree (a `Container`
-        // delegates its tag, state, children and diff to its content, so the
-        // scrollable's node and its absolute pixel offset survive), which is why
-        // the transcript's scroll position is not reset.
-        let editing = self.line_edit.is_some();
-        let panel_slot = container(match self.line_edit_panel(scheme) {
-            Some(panel) => panel,
-            None => horizontal_space().into(),
-        })
-        .width(Length::Fill)
-        .height(Length::Fixed(panel_slot_height(editing)));
+        // The Find row, one island gap below the transcript card whether or not an
+        // editor is open: the editor lives inside the card now, so nothing below it
+        // changes height.
         let search_slot: Element<Message> = match has_queue {
             true => search_actions_row,
             false => horizontal_space().into(),
         };
-        let bottom_slot = container(column![panel_slot, search_slot].spacing(0))
+        let bottom_slot = container(search_slot)
             .width(Length::Fill)
             .padding(iced::Padding {
                 top: if has_queue { ISLAND_GAP } else { 0.0 },
@@ -10126,10 +10215,9 @@ impl App {
         .width(Length::Fill)
         .height(Length::Fill)
         .into();
-        // The toast clears the bottom rows: the Find row plus, while an editor is
-        // open, the island and the gap under it.
-        let toast_bottom =
-            (if has_queue { 48.0 } else { 20.0 }) + panel_slot_height(editing);
+        // The toast clears the Find row; the editor strip is inside the card, so it
+        // changes nothing down here.
+        let toast_bottom = if has_queue { 48.0 } else { 20.0 };
         let right_panel = self.with_toast(right_panel, scheme, toast_bottom);
 
         let (theme_icon, theme_tip) = match self.theme_mode {
@@ -15255,43 +15343,73 @@ mod tests {
     }
 
     #[test]
-    fn the_editor_slot_is_empty_until_a_line_is_edited() {
-        // Closed: nothing below the transcript card but the Find row, so the card
-        // runs all the way down.
-        assert_eq!(panel_slot_height(false), 0.0);
-
-        // Open: the island plus the gap under it. The column's own gap sits above
-        // it, so the island has the same margin on both sides.
-        let open = panel_slot_height(true);
-        assert_eq!(open, LINE_EDIT_PANEL_HEIGHT + ISLAND_GAP);
-        assert_eq!(open - LINE_EDIT_PANEL_HEIGHT, ISLAND_GAP);
+    fn the_editor_strip_is_empty_until_a_line_is_edited() {
+        // Closed: nothing between the header and the list, so the list runs up to
+        // the header.
+        assert_eq!(editor_strip_height(false), 0.0);
+        // Open: the strip's own box, with no gap on either side of it: it is a band
+        // inside the card now, not an island between cards.
+        assert_eq!(editor_strip_height(true), LINE_EDIT_PANEL_HEIGHT);
     }
 
     #[test]
-    fn opening_the_editor_centres_a_row_the_island_would_push_out() {
+    fn the_strip_shifts_the_content_back_under_the_pointer() {
+        // Opening: the offset grows by the strip's height so the content holds still.
+        assert_eq!(compensate_offset(200.0, LINE_EDIT_PANEL_HEIGHT, f32::MAX), 238.0);
+        // The edited row's top caps it: past that the field would sit under the strip.
+        assert_eq!(compensate_offset(200.0, LINE_EDIT_PANEL_HEIGHT, 210.0), 210.0);
+        // Closing: the offset shrinks by the strip's height, and stops at the top of
+        // the document — where the content simply starts lower instead.
+        assert_eq!(compensate_offset(200.0, -LINE_EDIT_PANEL_HEIGHT, f32::MAX), 162.0);
+        assert_eq!(compensate_offset(20.0, -LINE_EDIT_PANEL_HEIGHT, f32::MAX), 0.0);
+    }
+
+    #[test]
+    fn opening_the_editor_shifts_the_scroll_instead_of_the_row() {
         let _guard = env_lock();
-        let _config = ConfigEnv::new("reveal-config");
+        let _config = ConfigEnv::new("strip-scroll-config");
         let original = "[00:00] SPEAKER 1: one\n[00:05] SPEAKER 2: two\n[00:09] SPEAKER 1: three\n[00:12] SPEAKER 2: four\n";
-        let (mut app, _transcript, media) = line_edit_fixture("reveal", original);
+        let (mut app, _transcript, media) = line_edit_fixture("strip-scroll", original);
 
         // Four 400 px rows in a 400 px pane; the second line is centred at 400.
         app.transcript_content = 1600.0;
         app.transcript_viewport = 400.0;
         app.pane_row_height.set(Some(24.0));
-        let line = app.display_order()[1];
-
-        // Comfortably inside the pane: opening the island moves nothing.
-        app.transcript_offset = 400.0;
+        app.transcript_offset = 300.0;
         app.scroll_target = None;
-        let _ = app.reveal_edited_line(line, panel_slot_height(true));
-        assert_eq!(app.scroll_target, None, "a visible row must not move");
 
-        // Near the bottom: the island takes 50 px of pane and the row no longer
-        // fits, so it is centred with the same machinery a search jump uses.
-        app.transcript_offset = 250.0;
+        // Opening the editor inserts three strip-height px above the list, so the
+        // offset takes them back: the content does not move on screen.
+        let _ = app.update(Message::EditLine(1));
+        assert!(app.line_edit.is_some());
+        assert_eq!(
+            app.scroll_target,
+            Some(300.0 + LINE_EDIT_PANEL_HEIGHT),
+            "opening must shift the list back under the row"
+        );
+
+        // Closing gives the height back and the offset goes with it.
+        app.transcript_offset = 300.0 + LINE_EDIT_PANEL_HEIGHT;
         app.scroll_target = None;
-        let _ = app.reveal_edited_line(line, panel_slot_height(true));
-        assert_eq!(app.scroll_target, app.follow_target(line));
+        let _ = app.update(Message::CancelLineEdit);
+        assert_eq!(app.scroll_target, Some(300.0));
+
+        // A row within the strip's height of the list's top cannot hold still: it
+        // would go under the strip, so the shift stops where that row's top meets the
+        // strip's bottom edge.
+        app.transcript_offset = 560.0;
+        app.scroll_target = None;
+        let (top, _) = app.edited_row_place(1).expect("the pane is measured");
+        assert!(top < LINE_EDIT_PANEL_HEIGHT, "the row should be in the band");
+        let _ = app.update(Message::EditLine(1));
+        assert_eq!(app.scroll_target, Some(560.0 + top));
+
+        // At the top of the document there is nothing further up to shift in: closing
+        // stops at zero and the content simply starts lower.
+        app.transcript_offset = 20.0;
+        app.scroll_target = None;
+        let _ = app.update(Message::CancelLineEdit);
+        assert_eq!(app.scroll_target, Some(0.0));
 
         let _ = std::fs::remove_dir_all(&media);
     }
