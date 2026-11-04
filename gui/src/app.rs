@@ -170,10 +170,15 @@ const PANEL_ICON_DIAMETER: f32 = CONTROL_HEIGHT;
 /// is the reference the panel was asked to follow.
 const ICON_ONLY_SIZE: f32 = 15.0;
 
-/// Width of the transcript's header menus, and where their top edge sits inside
-/// the card: below the header (title, meta, divider and the slot's bottom gap).
-const VIEW_MENU_WIDTH: f32 = 212.0;
+/// Where the transcript header menus' top edge sits inside the card: below the
+/// header (title, meta, divider and the slot's bottom gap). Their width is not
+/// fixed: each menu is as wide as its own widest row, so File, Edit and View no
+/// longer share the width chosen for the longest of them.
 const VIEW_MENU_TOP: f32 = 48.0;
+
+/// Width of a header menu row's leading check slot. Fixed, so every label in a
+/// menu starts on the same left edge whether its row is checked or not.
+const HEADER_MENU_CHECK: f32 = 16.0;
 
 /// The header's horizontal padding. The menu insets are measured from the same
 /// edge, which is why this is named rather than written into each.
@@ -2786,6 +2791,7 @@ impl App {
             Key::Character(character) if modifiers.command() => match character.as_str() {
                 "," => Some(Message::OpenSettings),
                 "o" => Some(Message::AddFiles),
+                "s" => Some(Message::SaveTranscriptAs),
                 "f" => Some(Message::FocusFind),
                 "k" | "K" if modifiers.shift() => Some(Message::SplitLineAtCursor),
                 "=" | "+" => Some(Message::ZoomIn),
@@ -8928,6 +8934,13 @@ impl App {
             || self.output_dir.is_some();
         let running = matches!(self.status, Status::Running);
         let summary = !running && self.has_results();
+        // The same rows the card is built from, so its width follows the labels
+        // and the shortcut rather than a fixed 212.
+        let rows = [
+            ("Save As", Some("Ctrl+S")),
+            ("Reveal", None),
+            ("Summary", None),
+        ];
         header_menu_card(
             column![
                 header_menu_item(
@@ -8935,7 +8948,7 @@ impl App {
                     false,
                     has_text,
                     has_text.then_some(Message::SaveTranscriptAs),
-                    None,
+                    Some("Ctrl+S"),
                     scheme,
                 ),
                 header_menu_item(
@@ -8957,6 +8970,7 @@ impl App {
             ]
             .spacing(2)
             .width(Length::Fill),
+            &rows,
             scheme,
         )
     }
@@ -8978,6 +8992,7 @@ impl App {
         };
         let has_text = !self.shown_transcript().is_empty();
         let reset = self.reset_available();
+        let rows = [("Rename All", None), ("Copy", None), ("Reset", None)];
         header_menu_card(
             column![
                 header_menu_item(
@@ -9007,6 +9022,7 @@ impl App {
             ]
             .spacing(2)
             .width(Length::Fill),
+            &rows,
             scheme,
         )
     }
@@ -9065,6 +9081,16 @@ impl App {
         .spacing(2)
         .width(Length::Fill);
 
+        // One key per toggle, so the card is the width of "Timestamps" plus its
+        // trailing key.
+        let rows = [
+            ("Follow", Some(ViewShortcut::Follow.key())),
+            ("Timestamps", Some(ViewShortcut::Timestamps.key())),
+            ("SMS Mode", Some(ViewShortcut::Sms.key())),
+            ("Join", Some(ViewShortcut::Join.key())),
+            ("Confidence", Some(ViewShortcut::Confidence.key())),
+        ];
+
         let font_on = self.font_scale;
         let zoom = row![
             self.tip(
@@ -9107,6 +9133,7 @@ impl App {
             ]
             .spacing(6)
             .width(Length::Fill),
+            &rows,
             scheme,
         )
     }
@@ -13409,15 +13436,47 @@ fn action_text<'a>(label: &'a str) -> iced::widget::Button<'a, Message> {
     action(text(label).wrapping(NO_WRAP)).width(Length::Fixed(action_width(label)))
 }
 
+/// Rough advance width of a run of text: the same 10 px per character
+/// `action_width` assumes at iced's 16 px UI size, scaled for a smaller size. A
+/// menu is built before any glyph is measured and its labels never wrap, so the
+/// estimate is deliberately generous.
+fn estimated_text_width(text: &str, size: f32) -> f32 {
+    text.chars().count() as f32 * size * 0.625
+}
+
+/// Width a header menu needs: the widest of its rows, each being the check slot
+/// and its gap, the label, the minimum gap before a trailing key and the key,
+/// plus the row's and the card's padding.
+///
+/// `rows` is the same list the menu's items are built from. Rows keep their
+/// `Fill` width inside that card so every row — and its hover tint — is the
+/// menu's full width and the trailing keys line up in one column.
+fn header_menu_width(rows: &[(&str, Option<&str>)]) -> f32 {
+    let row = |label: &str, shortcut: Option<&str>| {
+        theme::SPACE_MD * 2.0                       // card padding, both sides
+            + theme::SPACE_SM * 2.0                 // row padding `[5, 6]`, both sides
+            + HEADER_MENU_CHECK
+            + theme::SPACE_SM                       // check slot to label
+            + estimated_text_width(label, 16.0)
+            + shortcut.map_or(0.0, |key| {
+                theme::SPACE_2XL + estimated_text_width(key, theme::TEXT_XS)
+            })
+    };
+    rows.iter()
+        .map(|(label, shortcut)| row(label, *shortcut))
+        .fold(0.0, f32::max)
+}
+
 /// The card every transcript-header menu is drawn in: raised, hairline-outlined
-/// and sized to the header menus. Clicks inside it, including its padding, are
-/// consumed so only a press outside dismisses the menu.
+/// and sized to `rows`. Clicks inside it, including its padding, are consumed so
+/// only a press outside dismisses the menu.
 fn header_menu_card<'a>(
     body: impl Into<Element<'a, Message>>,
+    rows: &[(&str, Option<&str>)],
     scheme: Scheme,
 ) -> Element<'a, Message> {
     let card = container(body)
-        .width(Length::Fixed(VIEW_MENU_WIDTH))
+        .width(Length::Fixed(header_menu_width(rows)))
         .padding(8)
         .style(move |_theme| container::Style {
             background: Some(scheme.dialog_bg.into()),
@@ -13450,17 +13509,20 @@ fn header_menu_item<'a>(
     scheme: Scheme,
 ) -> Element<'a, Message> {
     let check: Element<'static, Message> = if checked && enabled {
-        icon(ICON_CHECK, 12.0)
+        icon(ICON_CHECK, theme::TEXT_XS)
     } else {
         horizontal_space().into()
     };
     let mut content = row![
         container(check)
-            .width(Length::Fixed(16.0))
-            .center_x(Length::Fixed(16.0)),
-        text(label).size(theme::TEXT_SM).wrapping(NO_WRAP),
+            .width(Length::Fixed(HEADER_MENU_CHECK))
+            .center_x(Length::Fixed(HEADER_MENU_CHECK)),
+        // The label carries the same 16 px as the button that opens the menu,
+        // which is also the app's body size: a menu is a reading surface, so it
+        // does not drop to the caption size.
+        text(label).wrapping(NO_WRAP),
     ]
-    .spacing(6)
+    .spacing(theme::SPACE_SM)
     .align_y(iced::Alignment::Center)
     .width(Length::Fill);
     // The key that toggles this row, at the far right where a shortcut hint
@@ -13469,33 +13531,46 @@ fn header_menu_item<'a>(
         content = content.push(horizontal_space());
         content = content.push(
             text(key)
-                .size(11)
+                .size(theme::TEXT_XS)
                 .wrapping(NO_WRAP)
                 .color(scheme.muted),
         );
     }
+    // Every row is pressable, disabled ones included: iced only reports the
+    // `Hovered` status for a button that has a press handler, so a row without
+    // one could never tint. The disabled row's handler does nothing; its style
+    // is what keeps it from reading as actionable.
     action(content)
-    .width(Length::Fill)
-    .padding([5, 6])
-    .style(header_menu_item_style(scheme, enabled))
-    .on_press_maybe(message)
-    .into()
+        .width(Length::Fill)
+        .padding([5, 6])
+        .style(header_menu_item_style(scheme, enabled))
+        .on_press(message.unwrap_or(Message::Noop))
+        .into()
 }
 
-/// A menu row: no chrome until hovered, and no pointer feedback when the row
-/// cannot do anything.
+/// A menu row: no chrome until hovered. A disabled row still tints when the
+/// pointer is over it — the menu should read as one live surface — but with a
+/// weaker wash, because nothing about it is on offer; its label stays muted and
+/// its press does nothing.
 fn header_menu_item_style(
     scheme: Scheme,
     enabled: bool,
 ) -> impl Fn(&iced::Theme, button::Status) -> button::Style {
     move |_theme, status| {
-        let hot = enabled
-            && matches!(
-                status,
-                button::Status::Hovered | button::Status::Pressed
-            );
+        let hot = matches!(
+            status,
+            button::Status::Hovered | button::Status::Pressed
+        );
+        let tint = if enabled {
+            scheme.track
+        } else {
+            Color {
+                a: 0.45,
+                ..scheme.track
+            }
+        };
         button::Style {
-            background: hot.then(|| scheme.track.into()),
+            background: hot.then(|| tint.into()),
             text_color: if enabled { scheme.ink } else { scheme.muted },
             border: iced::border::Border {
                 color: Color::TRANSPARENT,
@@ -15191,6 +15266,17 @@ mod tests {
         assert!(matches!(
             App::key_press(Key::Character("+".into()), Modifiers::COMMAND | Modifiers::SHIFT),
             Some(Message::ZoomIn)
+        ));
+        // Ctrl+S saves, and the bare key stays the SMS toggle: the single-key
+        // arm is guarded by `!modifiers.command()`, so the two cannot shadow
+        // each other.
+        assert!(matches!(
+            App::key_press(Key::Character("s".into()), Modifiers::COMMAND),
+            Some(Message::SaveTranscriptAs)
+        ));
+        assert!(matches!(
+            App::key_press(Key::Character("s".into()), Modifiers::default()),
+            Some(Message::ViewShortcut(ViewShortcut::Sms))
         ));
     }
 
