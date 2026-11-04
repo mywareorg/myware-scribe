@@ -243,16 +243,23 @@ pub(crate) enum HelpKind {
     About,
     Shortcuts,
     Console,
+    Settings,
 }
 
 impl HelpKind {
-    pub(crate) const ALL: [HelpKind; 3] = [HelpKind::About, HelpKind::Shortcuts, HelpKind::Console];
+    pub(crate) const ALL: [HelpKind; 4] = [
+        HelpKind::About,
+        HelpKind::Shortcuts,
+        HelpKind::Console,
+        HelpKind::Settings,
+    ];
 
     pub(crate) fn label(self) -> &'static str {
         match self {
             HelpKind::About => "About",
             HelpKind::Shortcuts => "Shortcuts",
             HelpKind::Console => "Console",
+            HelpKind::Settings => "Settings",
         }
     }
 }

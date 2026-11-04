@@ -157,10 +157,9 @@ fn compensate_offset(offset: f32, delta: f32, ceiling: f32) -> f32 {
 const LINE_EDIT_GAP: f32 = 4.0;
 
 /// Outer height of a control that carries one line of text: iced's 1.3 line box
-/// at the 16 px UI size (20.8 px) plus the 5 px of vertical padding every
-/// `fit_action` uses. Icon-only controls take the same height so a row that
-/// mixes the two is one control height rather than as tall as its tallest
-/// child.
+/// at the 16 px UI size (20.8 px) plus the 5 px of vertical padding every text
+/// button uses. Icon-only controls take the same height so a row that mixes the
+/// two is one control height rather than as tall as its tallest child.
 const CONTROL_HEIGHT: f32 = 30.8;
 
 /// Diameter of the panel's circular icon buttons: a standard control height, so
@@ -178,23 +177,35 @@ const ICON_ONLY_SIZE: f32 = 15.0;
 /// whether the query is empty or not.
 const FIND_STATUS_WIDTH: f32 = 62.0;
 
-/// Width of the transcript's View menu, and where its top edge sits inside the
-/// transcript card: below the header (title, meta, divider and the slot's bottom
-/// gap). Its right edge is [`view_menu_inset`] from the card's right edge, so it
-/// stays under the button that opens it without tracking a window coordinate.
+/// Width of the transcript's header menus, and where their top edge sits inside
+/// the card: below the header (title, meta, divider and the slot's bottom gap).
 const VIEW_MENU_WIDTH: f32 = 212.0;
 const VIEW_MENU_TOP: f32 = 48.0;
 
-/// The header's horizontal padding. The View menu's inset is measured from the
-/// same edge, which is why this is named rather than written into both.
+/// The header's horizontal padding. The menu insets are measured from the same
+/// edge, which is why this is named rather than written into each.
 const HEADER_PAD_X: f32 = 8.0;
 
-/// Right inset of the View menu: the header's padding plus everything the header
-/// now puts to the right of the View button — the row gap, the divider and the
-/// Summary button — so the menu hangs from the View button's right edge even
-/// though that button is no longer last in the row.
+/// Fixed widths of the header's menu buttons. A menu is anchored by subtracting
+/// the widths of the buttons to its right from the card's right edge, so these
+/// must be the widths the buttons are actually given.
+const FILE_BUTTON_WIDTH: f32 = 78.0;
+const EDIT_BUTTON_WIDTH: f32 = 78.0;
+const VIEW_BUTTON_WIDTH: f32 = 84.0;
+
+/// Right insets of the three menus. The header ends
+/// `[Follow][View] | [File][Edit]`, so Edit is the anchor at the card's padding,
+/// File sits one button and a gap to its left, and View sits beyond the divider.
+fn edit_menu_inset() -> f32 {
+    HEADER_PAD_X
+}
+
+fn file_menu_inset() -> f32 {
+    edit_menu_inset() + EDIT_BUTTON_WIDTH + theme::SPACE_SM
+}
+
 fn view_menu_inset() -> f32 {
-    HEADER_PAD_X + theme::SPACE_SM + 1.0 + theme::SPACE_SM + action_width("Summary")
+    file_menu_inset() + FILE_BUTTON_WIDTH + theme::SPACE_SM + 1.0 + theme::SPACE_SM
 }
 
 /// Widest the panel's speaker picker may grow, and how many characters of a
@@ -546,6 +557,14 @@ enum SummaryLine {
     Table(Vec<String>, Vec<Vec<String>>),
 }
 
+/// Which menu in the transcript header is open. One at a time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HeaderMenu {
+    File,
+    Edit,
+    View,
+}
+
 #[derive(Debug, Clone)]
 pub enum Message {
     PickOutput,
@@ -619,8 +638,12 @@ pub enum Message {
     TimestampsToggled(bool),
     /// The pointer left the transcript card. An open View menu closes with it.
     TranscriptLeft,
-    ToggleViewMenu,
-    CloseViewMenu,
+    ToggleHeaderMenu(HeaderMenu),
+    CloseHeaderMenu,
+    /// Show the Reset warning; nothing is reverted until it is confirmed.
+    RequestResetTranscript,
+    ConfirmResetTranscript,
+    CloseResetConfirm,
     ToggleJoinLines,
     SpeakerCountChanged(SpeakerOpt),
     LanguageChanged(LanguageOpt),
@@ -916,8 +939,10 @@ pub struct App {
     transcript_content: f32,
     transcript_offset: f32,
     transcript_at_bottom: bool,
-    /// The transcript header's View menu is open.
-    view_menu_open: bool,
+    /// The transcript header's open menu, if any. One at a time.
+    header_menu: Option<HeaderMenu>,
+    /// The Reset warning dialog is showing.
+    reset_confirm: bool,
     transcript_dirty: bool,
     follow_offset: Option<f32>,
     /// Horizontal target of the last programmatic transcript scroll, used to
@@ -1183,7 +1208,8 @@ impl App {
             transcript_content: 0.0,
             transcript_offset: 0.0,
             transcript_at_bottom: true,
-            view_menu_open: false,
+            header_menu: None,
+            reset_confirm: false,
             transcript_dirty: false,
             follow_offset: None,
             scroll_target: None,
@@ -1690,7 +1716,13 @@ impl App {
     /// editor. `point` is where inside the words the press landed, if it did;
     /// the editor then puts its caret there.
     fn line_pressed(&mut self, index: usize, point: Option<Point>) -> Task<Message> {
-        self.view_menu_open = false;
+        // A press on the transcript dismisses an open header menu rather than
+        // acting on the row underneath it. The header buttons are above the row
+        // and still take their own presses, so one menu can switch to another.
+        if self.header_menu.is_some() {
+            self.header_menu = None;
+            return Task::none();
+        }
         let double = self.last_line_click.is_some_and(|(last, at)| {
             last == index && at.elapsed() <= Duration::from_millis(400)
         });
@@ -1842,6 +1874,7 @@ impl App {
                 .collect();
         }
 
+        self.header_menu = None;
         self.view_error = None;
         self.join_lines = false;
         self.joined_lines.clear();
@@ -1906,6 +1939,7 @@ impl App {
     ) -> Task<Message> {
         // Changing what is on screen commits the open inline edit first: its
         // row belongs to the document being left.
+        self.header_menu = None;
         self.commit_inline_edit(false);
         let Some(item) = self.queue.get(index) else {
             return Task::none();
@@ -2016,6 +2050,7 @@ impl App {
     /// Drop a pinned completed-item view and show the live run again.
     fn return_to_live(&mut self) {
         // The edited row belongs to the view being dropped.
+        self.header_menu = None;
         self.commit_inline_edit(false);
         self.invalidate_derived();
         self.selected = None;
@@ -2865,19 +2900,38 @@ impl App {
                 // A dialog owns the pointer: an open menu is already hidden
                 // behind its scrim, so leave the state alone.
                 if !self.popup_open() {
-                    self.view_menu_open = false;
+                    self.header_menu = None;
                 }
                 Task::none()
             }
-            Message::ToggleViewMenu => {
-                if self.shown_lines().is_empty() || self.popup_open() {
+            Message::ToggleHeaderMenu(menu) => {
+                if self.popup_open() {
                     return Task::none();
                 }
-                self.view_menu_open = !self.view_menu_open;
+                self.header_menu = if self.header_menu == Some(menu) {
+                    None
+                } else {
+                    Some(menu)
+                };
                 Task::none()
             }
-            Message::CloseViewMenu => {
-                self.view_menu_open = false;
+            Message::CloseHeaderMenu => {
+                self.header_menu = None;
+                Task::none()
+            }
+            Message::RequestResetTranscript => {
+                self.header_menu = None;
+                if self.reset_available() {
+                    self.reset_confirm = true;
+                }
+                Task::none()
+            }
+            Message::ConfirmResetTranscript => {
+                self.reset_confirm = false;
+                self.reset_transcript()
+            }
+            Message::CloseResetConfirm => {
+                self.reset_confirm = false;
                 Task::none()
             }
             Message::ToggleJoinLines => {
@@ -3420,7 +3474,7 @@ impl App {
                 Task::none()
             }
             Message::ToggleFollowPlayhead => {
-                self.view_menu_open = false;
+                self.header_menu = None;
                 let turning_off = self.follow_playhead;
                 let turning_on = !turning_off;
                 self.follow_playhead = turning_on;
@@ -3487,7 +3541,7 @@ impl App {
                 Task::none()
             }
             Message::OpenSettings => {
-                self.view_menu_open = false;
+                self.header_menu = None;
                 self.settings_open = true;
                 self.help_open = None;
                 self.toast = None;
@@ -3653,6 +3707,8 @@ impl App {
             Message::HelpChoice(kind) => {
                 if matches!(kind, HelpKind::Console) {
                     self.console_open = !self.console_open;
+                } else if matches!(kind, HelpKind::Settings) {
+                    return self.update(Message::OpenSettings);
                 } else {
                     self.help_open = Some(kind);
                     self.toast = None;
@@ -3682,8 +3738,12 @@ impl App {
                     self.delete_confirm = false;
                     return Task::none();
                 }
-                if self.view_menu_open {
-                    self.view_menu_open = false;
+                if self.reset_confirm {
+                    self.reset_confirm = false;
+                    return Task::none();
+                }
+                if self.header_menu.is_some() {
+                    self.header_menu = None;
                     return Task::none();
                 }
                 if self.line_edit.is_some() {
@@ -4029,7 +4089,7 @@ impl App {
                 Task::none()
             }
             Message::OpenSummary => {
-                self.view_menu_open = false;
+                self.header_menu = None;
                 if self.has_results() {
                     self.summary_open = true;
                     self.pending_rename = false;
@@ -4050,6 +4110,7 @@ impl App {
                 Task::none()
             }
             Message::OpenRename => {
+                self.header_menu = None;
                 // A rename rewrites the line the editor may be showing.
                 self.commit_inline_edit(false);
                 self.open_rename()
@@ -4136,6 +4197,7 @@ impl App {
                 Task::none()
             }
             Message::CopyTranscript => {
+                self.header_menu = None;
                 if self.shown_transcript().is_empty() {
                     return Task::none();
                 }
@@ -4143,10 +4205,12 @@ impl App {
                 iced::clipboard::write(self.shown_transcript().to_string())
             }
             Message::RevealOutput => {
+                self.header_menu = None;
                 self.reveal_output();
                 Task::none()
             }
             Message::SaveTranscriptAs => {
+                self.header_menu = None;
                 if self.shown_transcript().trim().is_empty() {
                     self.toast = Some(("No transcript to save".to_string(), Instant::now()));
                     return Task::none();
@@ -4587,6 +4651,46 @@ impl App {
         if let Some(path) = &self.output_txt {
             let _ = write_transcript_file(path, &self.transcript);
         }
+    }
+
+    /// Whether Reset has somewhere to go: the sibling copy `write_transcript_file`
+    /// keeps before the first edit. Without an edit there is no earlier state.
+    fn reset_available(&self) -> bool {
+        if !self.can(license::Feature::Editing) {
+            return false;
+        }
+        if self.selected_view.is_none() && matches!(self.status, Status::Running) {
+            return false;
+        }
+        self.shown_output()
+            .map(unedited_path)
+            .is_some_and(|path| path.is_file())
+    }
+
+    /// Revert the edited document to `<stem>-unedited.txt`, the copy kept when
+    /// the transcript was first rewritten. The revert is one undo step, so a
+    /// Reset made by mistake can be taken back like any other edit.
+    fn reset_transcript(&mut self) -> Task<Message> {
+        self.commit_inline_edit(false);
+        let Some(output) = self.shown_output().map(Path::to_path_buf) else {
+            return Task::none();
+        };
+        let unedited = unedited_path(&output);
+        let Some(text) = backend::read_transcript(&unedited) else {
+            self.toast = Some((
+                "Could not read the initial transcript".to_string(),
+                Instant::now(),
+            ));
+            return Task::none();
+        };
+        let confidences = backend::read_confidences(&unedited);
+        self.push_line_undo();
+        self.replace_edit_lines(attach_confidences(parse_lines(&text), &confidences));
+        self.modified = false;
+        self.scroll_anim = None;
+        self.reset_pane_geometry();
+        self.toast = Some(("Reverted to the initial transcript".to_string(), Instant::now()));
+        Task::none()
     }
 
     fn reveal_output(&self) {
@@ -8598,11 +8702,9 @@ impl App {
         }
 
         // The header reads left to right: the view controls, then a hairline, then
-        // the document action at the far right. The View menu hangs from the View
-        // button's right edge rather than the card's, which is what
-        // `view_menu_inset` accounts for now that the button has a neighbour on its
-        // right.
-        let document_controls: Element<Message> = if has_lines {
+        // the document menus. Each menu hangs from its own button's right edge;
+        // the inset helpers subtract the fixed button widths to the right of it.
+        let document_menus: Element<Message> = {
             let divider = container(horizontal_space())
                 .width(Length::Fixed(1.0))
                 .height(Length::Fixed(18.0))
@@ -8610,15 +8712,14 @@ impl App {
                     background: Some(scheme.border.into()),
                     ..container::Style::default()
                 });
-            let summary = action_text("Summary")
-                .on_press_maybe((!running && self.has_results()).then_some(Message::OpenSummary))
-                .style(pill_button_secondary);
-            row![divider, summary]
-                .spacing(theme::SPACE_SM)
-                .align_y(iced::Alignment::Center)
-                .into()
-        } else {
-            horizontal_space().into()
+            row![
+                divider,
+                self.header_menu_button("File", HeaderMenu::File),
+                self.header_menu_button("Edit", HeaderMenu::Edit),
+            ]
+            .spacing(theme::SPACE_SM)
+            .align_y(iced::Alignment::Center)
+            .into()
         };
         let controls: Element<Message> = if has_lines {
             row![
@@ -8638,7 +8739,7 @@ impl App {
                     },
                     &scheme,
                 ),
-                self.view_menu_button(),
+                self.header_menu_button("View", HeaderMenu::View),
             ]
             .spacing(theme::SPACE_SM)
             .align_y(iced::Alignment::Center)
@@ -8654,7 +8755,7 @@ impl App {
                     .align_y(iced::Alignment::Center),
                 horizontal_space(),
                 controls,
-                document_controls,
+                document_menus,
             ]
             .spacing(theme::SPACE_SM)
             .align_y(iced::Alignment::Center),
@@ -8678,27 +8779,116 @@ impl App {
     /// in Follow and `action_text` puts in Summary — the default 16 px label, a
     /// 12 px glyph and the button's own default padding — so the three boxes are
     /// the same height and only the words differ.
-    fn view_menu_button(&self) -> Element<'_, Message> {
-        let caret = if self.view_menu_open {
-            ICON_CARET_UP
-        } else {
-            ICON_CARET_DOWN
+    /// One of the transcript header's menu buttons. `label` is the menu's name;
+    /// the caret says whether it is open.
+    fn header_menu_button(
+        &self,
+        label: &'static str,
+        menu: HeaderMenu,
+    ) -> Element<'_, Message> {
+        let open = self.header_menu == Some(menu);
+        let width = match menu {
+            HeaderMenu::File => FILE_BUTTON_WIDTH,
+            HeaderMenu::Edit => EDIT_BUTTON_WIDTH,
+            HeaderMenu::View => VIEW_BUTTON_WIDTH,
         };
         action(
             row![
-                text("View").wrapping(NO_WRAP),
-                icon(caret, theme::TEXT_XS),
+                text(label).wrapping(NO_WRAP),
+                icon(if open { ICON_CARET_UP } else { ICON_CARET_DOWN }, theme::TEXT_XS),
             ]
             .spacing(theme::SPACE_XS)
             .align_y(iced::Alignment::Center),
         )
-        .on_press(Message::ToggleViewMenu)
-        .style(if self.view_menu_open {
+        .width(Length::Fixed(width))
+        .on_press(Message::ToggleHeaderMenu(menu))
+        .padding([5, 0])
+        .style(if open {
             pill_button_toggled
         } else {
             pill_button_secondary
         })
         .into()
+    }
+
+    /// The File menu: the transcript as a document, not its text.
+    fn file_menu(&self, scheme: &Scheme) -> Element<'_, Message> {
+        let scheme = *scheme;
+        let has_text = !self.shown_transcript().is_empty();
+        let has_target = self.shown_output().is_some()
+            || self.shown_audio().is_some()
+            || self.output_dir.is_some();
+        let running = matches!(self.status, Status::Running);
+        let summary = !running && self.has_results();
+        header_menu_card(
+            column![
+                header_menu_item(
+                    "Save As",
+                    false,
+                    has_text,
+                    has_text.then_some(Message::SaveTranscriptAs),
+                    scheme,
+                ),
+                header_menu_item(
+                    "Reveal",
+                    false,
+                    has_target,
+                    has_target.then_some(Message::RevealOutput),
+                    scheme,
+                ),
+                header_menu_item(
+                    "Summary",
+                    false,
+                    summary,
+                    summary.then_some(Message::OpenSummary),
+                    scheme,
+                ),
+            ]
+            .spacing(2)
+            .width(Length::Fill),
+            scheme,
+        )
+    }
+
+    /// The Edit menu: transcript-wide edits. Reset is only offered when the
+    /// pre-edit copy exists to go back to.
+    fn edit_menu(&self, scheme: &Scheme) -> Element<'_, Message> {
+        let scheme = *scheme;
+        let running = matches!(self.status, Status::Running);
+        let editing = self.can(license::Feature::Editing);
+        let can_rename = editing && !running && self.shown_output().is_some() && !self.shown_lines().is_empty();
+        // Without a licence the row still explains itself rather than going dead.
+        let rename_message = if can_rename {
+            Some(Message::OpenRename)
+        } else if !editing {
+            Some(Message::LockedRename)
+        } else {
+            None
+        };
+        let has_text = !self.shown_transcript().is_empty();
+        let reset = self.reset_available();
+        header_menu_card(
+            column![
+                header_menu_item("Rename All", false, can_rename, rename_message, scheme),
+                header_menu_item(
+                    "Copy",
+                    false,
+                    has_text,
+                    has_text.then_some(Message::CopyTranscript),
+                    scheme,
+                ),
+                header_menu_item(
+                    "Reset",
+                    false,
+                    reset,
+                    reset.then_some(Message::RequestResetTranscript),
+                    scheme,
+                ),
+            ]
+            .spacing(2)
+            .width(Length::Fill),
+            scheme,
+        )
     }
 
     /// The open View menu: the display toggles, then text zoom.
@@ -8711,28 +8901,28 @@ impl App {
         let scheme = *scheme;
         let confidence = self.has_confidence();
         let items = column![
-            view_menu_item(
+            header_menu_item(
                 "Timestamps",
                 self.show_timestamps,
                 true,
                 Some(Message::TimestampsToggled(!self.show_timestamps)),
                 scheme,
             ),
-            view_menu_item(
+            header_menu_item(
                 "SMS Mode",
                 self.sms_mode,
                 true,
                 Some(Message::SmsToggled(!self.sms_mode)),
                 scheme,
             ),
-            view_menu_item(
+            header_menu_item(
                 "Join",
                 self.join_lines,
                 true,
                 Some(Message::ToggleJoinLines),
                 scheme,
             ),
-            view_menu_item(
+            header_menu_item(
                 "Confidence",
                 self.confidence_view,
                 confidence,
@@ -8775,7 +8965,7 @@ impl App {
                 ..container::Style::default()
             });
 
-        let card = container(
+        header_menu_card(
             column![
                 items,
                 container(divider).padding([4, 0]),
@@ -8785,27 +8975,8 @@ impl App {
             ]
             .spacing(6)
             .width(Length::Fill),
+            scheme,
         )
-        .width(Length::Fixed(VIEW_MENU_WIDTH))
-        .padding(8)
-        .style(move |_theme| container::Style {
-            background: Some(scheme.dialog_bg.into()),
-            border: iced::border::Border {
-                color: scheme.border,
-                width: 1.0,
-                radius: theme::RADIUS_MD.into(),
-            },
-            shadow: soft_shadow(),
-            ..container::Style::default()
-        });
-        // The card consumes every press inside it, including its own padding,
-        // so only a press outside dismisses the menu.
-        mouse_area(card)
-            .interaction(mouse::Interaction::Idle)
-            .on_press(Message::Noop)
-            .on_right_press(Message::Noop)
-            .on_middle_press(Message::Noop)
-            .into()
     }
 
     /// Index of the last line whose start time is at or before `t`.
@@ -9144,37 +9315,13 @@ impl App {
             .color(status_color)
             .width(Length::Fixed(FIND_STATUS_WIDTH))
             .align_x(iced::alignment::Horizontal::Right);
-        let mut controls = row![query_input, prev, next, status]
+        let controls = row![query_input, prev, next, status]
             .spacing(theme::SPACE_SM)
             .align_y(iced::Alignment::Center)
             .width(Length::Fill);
-        // The speaker filter used to sit here. It cost the field 124 px of a row
-        // it had to share, and the transcript is easier to scan by speaker from
-        // the labels themselves; the field keeps the space.
-        let running = matches!(self.status, Status::Running);
-        let rename = if self.can(license::Feature::Editing) {
-            self.tip(
-                fit_action("Rename All")
-                    .on_press_maybe(
-                        (!running
-                            && self.shown_output().is_some()
-                            && !self.shown_lines().is_empty())
-                        .then_some(Message::OpenRename),
-                    )
-                    .style(pill_button_secondary),
-                "Rename speakers everywhere in this transcript",
-                scheme,
-            )
-        } else {
-            self.tip(
-                fit_action("Rename All")
-                    .on_press(Message::LockedRename)
-                    .style(greyed_button(*scheme)),
-                "Rename speakers everywhere in this transcript",
-                scheme,
-            )
-        };
-        controls = controls.push(rename);
+        // The speaker filter and Rename All used to sit here. Both cost the
+        // field part of a row it had to share; the field keeps the space, and
+        // Rename All now lives in the Edit menu.
         controls.into()
     }
 
@@ -9188,19 +9335,20 @@ impl App {
             || self.summary_open
             || self.help_open.is_some()
             || self.rename_open
+            || self.reset_confirm
             || self.calibration.is_some()
     }
 
-    /// True while a transient menu owns the pointer: the header's View menu, or
-    /// a pick-list dropdown that reports itself open (the line editor's speaker
-    /// picker).
+    /// True while a transient menu owns the pointer: one of the transcript
+    /// header's menus, or a pick-list dropdown that reports itself open (the
+    /// line editor's speaker picker).
     ///
     /// Kept apart from [`Self::popup_open`] because a menu is not modal. It owns
     /// the pointer, so nothing under it may light up or take a press, but it
     /// leaves the keyboard and the tooltips alone: the View menu's own zoom
     /// buttons carry tooltips, and those must keep working while it is open.
     fn menu_open(&self) -> bool {
-        self.view_menu_open || self.line_edit_picker_open
+        self.header_menu.is_some() || self.line_edit_picker_open
     }
 
     /// True while nothing under the pointer may react: a dialog is up, or a menu
@@ -10161,38 +10309,6 @@ impl App {
 
         let left_panel: Element<Message> = self.queue_panel(&scheme, LEFT_PANEL_WIDTH);
 
-        let actions_row = row![
-            fit_action("Copy")
-                .on_press_maybe(
-                    (!self.shown_transcript().is_empty()).then_some(Message::CopyTranscript)
-                )
-                .style(pill_button_secondary),
-            fit_action("Save As")
-                .on_press_maybe(
-                    (!self.shown_transcript().is_empty()).then_some(Message::SaveTranscriptAs)
-                )
-                .style(pill_button_secondary),
-            fit_action("Reveal")
-                .on_press_maybe(
-                    (self.shown_output().is_some()
-                        || self.shown_audio().is_some()
-                        || self.output_dir.is_some())
-                    .then_some(Message::RevealOutput)
-                )
-                .style(pill_button_secondary),
-        ]
-        .spacing(6)
-        .align_y(iced::Alignment::Center);
-
-        let search_actions_row: Element<Message> = row![
-            self.search_element(&scheme),
-            actions_row
-        ]
-        .spacing(4)
-        .align_y(iced::Alignment::Center)
-        .width(Length::Fill)
-        .into();
-
         // The transcript card keeps a fixed child index. Anything that appears or
         // disappears above it (model notice, progress chrome) or below it (search
         // row) would shift that index, which remounts the scrollable and resets its
@@ -10222,42 +10338,34 @@ impl App {
         // Keep the stack structure stable across hover changes. Swapping
         // between a bare column and a stack remounts the scrollable and resets
         // its scroll position to the top.
-        // The View menu hangs under its header button but inside the card, so
-        // its anchor is the card's right inset rather than a window coordinate.
+        // A header menu hangs under its button but inside the card, so its
+        // anchor is the card's right inset rather than a window coordinate.
         // Closed, the slot is a same-size space: the stack keeps its shape, so
         // the scrollable's tree index and offset never change.
-        let view_layer: Element<Message> =
-            if self.view_menu_open && !self.popup_open() && !self.shown_lines().is_empty() {
-            let menu = container(self.view_menu(&scheme))
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .align_x(iced::Alignment::End)
-                .align_y(iced::Alignment::Start)
-                .padding(iced::Padding {
-                    top: VIEW_MENU_TOP,
-                    right: view_menu_inset(),
-                    bottom: 0.0,
-                    left: 0.0,
-                });
-            // The layer under the menu swallows the press and nothing else: a
-            // press anywhere on the card while the menu is up only dismisses it,
-            // and the arrow, not a hand, says the card is inert. It sits below
-            // the menu in the stack, so the menu's own items still get the
-            // pointer.
-            let catcher: Element<Message> = mouse_area(
-                container(horizontal_space())
+        let view_layer: Element<Message> = match self.header_menu {
+            Some(menu) if !self.popup_open() => {
+                let (body, inset) = match menu {
+                    HeaderMenu::File => (self.file_menu(&scheme), file_menu_inset()),
+                    HeaderMenu::Edit => (self.edit_menu(&scheme), edit_menu_inset()),
+                    HeaderMenu::View => (self.view_menu(&scheme), view_menu_inset()),
+                };
+                let menu = container(body)
                     .width(Length::Fill)
-                    .height(Length::Fill),
-            )
-            .interaction(mouse::Interaction::Idle)
-            .on_press(Message::CloseViewMenu)
-            .into();
-            stack![catcher, menu].into()
-        } else {
-            container(horizontal_space())
+                    .height(Length::Fill)
+                    .align_x(iced::Alignment::End)
+                    .align_y(iced::Alignment::Start)
+                    .padding(iced::Padding {
+                        top: VIEW_MENU_TOP,
+                        right: inset,
+                        bottom: 0.0,
+                        left: 0.0,
+                    });
+                menu.into()
+            }
+            _ => container(horizontal_space())
                 .width(Length::Fill)
                 .height(Length::Fill)
-                .into()
+                .into(),
         };
         let transcript_content: Element<Message> = stack![transcript_box, view_layer].into();
         let transcript_card = container(transcript_content)
@@ -10273,7 +10381,7 @@ impl App {
         // editor is open: the editor lives inside the card now, so nothing below it
         // changes height.
         let search_slot: Element<Message> = match has_queue {
-            true => search_actions_row,
+            true => self.search_element(&scheme),
             false => horizontal_space().into(),
         };
         let bottom_slot = container(search_slot)
@@ -10287,7 +10395,7 @@ impl App {
         let right_panel: Element<Message> = column![
             top_slot,
             mouse_area(transcript_card)
-                .on_press(Message::CloseViewMenu)
+                .on_press(Message::CloseHeaderMenu)
                 .on_exit(Message::TranscriptLeft),
             bottom_slot,
         ]
@@ -10340,15 +10448,6 @@ impl App {
                 ),
             )
             .push(
-                self.tip(
-                    action(icon(ICON_GEAR, 16.0))
-                        .on_press(Message::OpenSettings)
-                        .style(pill_button_secondary),
-                    "Settings (Ctrl+,)",
-                    &scheme,
-                ),
-            )
-            .push(
                 pick_list(HelpKind::ALL, None::<HelpKind>, Message::HelpChoice)
                     .placeholder("Help")
                     .style(pill_pick(scheme))
@@ -10373,6 +10472,28 @@ impl App {
         let mut base: Element<Message> = base.into();
         // Always wrapped: see `drop_overlay` for why its shape must not change.
         base = drop_overlay(base, scheme, self.drag_hover);
+
+        if self.reset_confirm {
+            let body = column![
+                text("Warning").size(20),
+                text("Resetting reverts to the initial transcript.")
+                    .size(theme::TEXT_SM)
+                    .color(scheme.muted),
+                row![
+                    horizontal_space(),
+                    action_text("Cancel")
+                        .on_press(Message::CloseResetConfirm)
+                        .style(pill_button_secondary),
+                    action_text("Reset")
+                        .on_press(Message::ConfirmResetTranscript)
+                        .style(color_button(scheme.danger, scheme.on_accent)),
+                ]
+                .spacing(8),
+            ]
+            .spacing(10);
+            let dialog = modal_card(body, 420.0, scheme);
+            return modal_overlay(base, dialog, scheme);
+        }
 
         if self.summary_open {
             let lines = self.stats_lines();
@@ -10639,7 +10760,7 @@ impl App {
                         .spacing(4),
                     );
                 }
-                HelpKind::Console => {}
+                HelpKind::Console | HelpKind::Settings => {}
             }
             col = col.push(
                 container(
@@ -11812,7 +11933,6 @@ const ICON_ZOOM_OUT: char = '\u{f62d}';
 const ICON_CLOCK: char = '\u{f293}';
 const ICON_MOON: char = '\u{f494}';
 const ICON_SUN: char = '\u{f5a1}';
-const ICON_GEAR: char = '\u{f3e2}';
 const ICON_MIC: char = '\u{f490}';
 const ICON_FILE_TEXT: char = '\u{f38b}';
 const ICON_DOWNLOAD: char = '\u{f30a}';
@@ -13130,18 +13250,38 @@ fn action_text<'a>(label: &'a str) -> iced::widget::Button<'a, Message> {
     action(text(label).wrapping(NO_WRAP)).width(Length::Fixed(action_width(label)))
 }
 
-/// Text action that sizes to its label, so a tight row can never squeeze the
-/// label into a wrap.
-fn fit_action<'a>(label: &'a str) -> iced::widget::Button<'a, Message> {
-    action(text(label).wrapping(NO_WRAP))
-        .width(Length::Shrink)
-        .padding([5, 10])
+/// The card every transcript-header menu is drawn in: raised, hairline-outlined
+/// and sized to the header menus. Clicks inside it, including its padding, are
+/// consumed so only a press outside dismisses the menu.
+fn header_menu_card<'a>(
+    body: impl Into<Element<'a, Message>>,
+    scheme: Scheme,
+) -> Element<'a, Message> {
+    let card = container(body)
+        .width(Length::Fixed(VIEW_MENU_WIDTH))
+        .padding(8)
+        .style(move |_theme| container::Style {
+            background: Some(scheme.dialog_bg.into()),
+            border: iced::border::Border {
+                color: scheme.border,
+                width: 1.0,
+                radius: theme::RADIUS_MD.into(),
+            },
+            shadow: soft_shadow(),
+            ..container::Style::default()
+        });
+    mouse_area(card)
+        .interaction(mouse::Interaction::Idle)
+        .on_press(Message::Noop)
+        .on_right_press(Message::Noop)
+        .on_middle_press(Message::Noop)
+        .into()
 }
 
-/// One row of the transcript's View menu: a leading check slot that keeps every
-/// label on the same left edge, then the label. Disabled rows stay in place so
-/// the menu's height does not change with the transcript's data.
-fn view_menu_item<'a>(
+/// One row of a header menu: a leading check slot that keeps every label on the
+/// same left edge, then the label. Disabled rows stay in place so the menu's
+/// height does not change with the transcript's data.
+fn header_menu_item<'a>(
     label: &'a str,
     checked: bool,
     enabled: bool,
@@ -13165,14 +13305,14 @@ fn view_menu_item<'a>(
     )
     .width(Length::Fill)
     .padding([5, 6])
-    .style(view_menu_item_style(scheme, enabled))
+    .style(header_menu_item_style(scheme, enabled))
     .on_press_maybe(message)
     .into()
 }
 
 /// A menu row: no chrome until hovered, and no pointer feedback when the row
 /// cannot do anything.
-fn view_menu_item_style(
+fn header_menu_item_style(
     scheme: Scheme,
     enabled: bool,
 ) -> impl Fn(&iced::Theme, button::Status) -> button::Style {
@@ -14814,8 +14954,8 @@ mod tests {
         // Opening the View menu takes the pointer off the rows: the row the
         // pointer happened to be over is cleared, and none can light up again
         // while the menu is up.
-        let _ = app.update(Message::ToggleViewMenu);
-        assert!(app.view_menu_open);
+        let _ = app.update(Message::ToggleHeaderMenu(HeaderMenu::View));
+        assert_eq!(app.header_menu, Some(HeaderMenu::View));
         assert!(!app.popup_open(), "a menu is not a dialog");
         // The catcher and the menu layer build and lay out without the card
         // losing its shape.
@@ -14828,7 +14968,7 @@ mod tests {
         );
 
         // Closing it gives the hover back.
-        let _ = app.update(Message::CloseViewMenu);
+        let _ = app.update(Message::CloseHeaderMenu);
         let _ = app.update(Message::LineHover(Some(1)));
         assert_eq!(app.transcript_line_hover, Some(1));
 
@@ -15704,6 +15844,45 @@ mod tests {
         let _ = app.update(Message::EditLine(0));
         assert!(app.line_edit.is_some());
         assert!(!app.follow_playhead);
+
+        let _ = std::fs::remove_dir_all(&media);
+    }
+
+    #[test]
+    fn reset_warns_before_reverting_to_the_initial_transcript() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("reset-config");
+        let original = "[00:00] SPEAKER 1: one\n[00:05] SPEAKER 2: two\n";
+        let (mut app, transcript, media) = line_edit_fixture("reset", original);
+
+        open_line_edit(&mut app, 0);
+        current_row_mut(&mut app).content = text_editor::Content::with_text("changed");
+        let _ = app.update(Message::DoneLineEdit);
+        assert!(app.modified, "the edit should mark the transcript modified");
+        assert!(app.reset_available(), "the pre-edit copy should exist");
+
+        // The request only warns; nothing is reverted until it is confirmed.
+        let _ = app.update(Message::RequestResetTranscript);
+        assert!(app.reset_confirm);
+        assert!(app.popup_open(), "the warning is a modal");
+        assert!(app.shown_transcript().contains("changed"));
+
+        // Cancelling leaves the edit alone.
+        let _ = app.update(Message::CloseResetConfirm);
+        assert!(!app.reset_confirm);
+        assert!(app.shown_transcript().contains("changed"));
+
+        // Confirming reverts the document and the file.
+        let _ = app.update(Message::RequestResetTranscript);
+        let _ = app.update(Message::ConfirmResetTranscript);
+        assert!(!app.reset_confirm);
+        assert!(!app.modified);
+        assert_eq!(app.shown_transcript(), original);
+        assert_eq!(std::fs::read_to_string(&transcript).unwrap(), original);
+
+        // It is one undo step, like any other edit.
+        let _ = app.update(Message::UndoLineEdit);
+        assert!(app.shown_transcript().contains("changed"));
 
         let _ = std::fs::remove_dir_all(&media);
     }
@@ -17420,8 +17599,8 @@ mod tests {
 
         let cases: Vec<(&str, Box<dyn Fn(&mut App)>)> = vec![
             (
-                "view_menu_open",
-                Box::new(|app| app.view_menu_open = true),
+                "header_menu",
+                Box::new(|app| app.header_menu = Some(HeaderMenu::View)),
             ),
             (
                 "line_hover",
