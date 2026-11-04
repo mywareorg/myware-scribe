@@ -219,6 +219,8 @@ pub struct Scheme {
     pub bar_track: Color,
     /// Filled portion of progress bars.
     pub progress: Color,
+    /// Recessed surface drawn inside a panel: the waveform strip, and the groove
+    /// of a progress bar that sits on a raised surface.
     pub timeline_bg: Color,
     /// Editable field well: a surface that reads as an input against the panel
     /// in both palettes, not as plain white.

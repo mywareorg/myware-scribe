@@ -9241,10 +9241,15 @@ impl App {
         // The bar is drawn rather than composed from a `progress_bar`, so the
         // fill's corner radius can follow its own width: a two-pixel fill has to
         // stay a pill instead of inheriting a 15 px radius it cannot fit.
+        //
+        // The track is the well colour rather than a darkened `bar_track`: the
+        // bar now sits on the raised status surface, and in the dark theme
+        // `bar_track` is that same grey, so a darkened copy of it would vanish
+        // into the box it is drawn on.
         let bar = canvas(ProgressTrack {
             fraction: global_progress.clamp(0.0, 1.0),
-            track: theme::darken(scheme.bar_track, 0.06),
-            edge: theme::darken(scheme.bar_track, 0.20),
+            track: scheme.timeline_bg,
+            edge: theme::darken(scheme.timeline_bg, 0.12),
             fill: theme::lighten(scheme.progress, 0.16),
         })
         .width(Length::Fill)
@@ -9275,13 +9280,25 @@ impl App {
         // Progress, elapsed time and the stage label describe the run, not the
         // recording, so they get their own surface and disappear when the run
         // does. The waveform and player belong together and stay.
+        //
+        // The surface is the app's raised one (`dialog_bg`: white paper in the
+        // light theme, the elevated grey in the dark theme) rather than the grey
+        // well it used to share with the bars themselves. The hairline matters in
+        // the light theme, where white on the near-white middle card differs by
+        // only three levels; the shadow is the card's own `soft_shadow`, so this
+        // is not a new elevation level.
         let status_box = container(status_row)
             .width(Length::Fill)
             .padding([8, 10])
             .style(move |_theme| container::Style {
-                background: Some(scheme.track.into()),
-                border: iced::border::rounded(12.0),
-                ..container::Style::default()
+                background: Some(scheme.dialog_bg.into()),
+                text_color: Some(scheme.text),
+                border: iced::border::Border {
+                    color: scheme.border,
+                    width: 1.0,
+                    radius: 12.0.into(),
+                },
+                shadow: soft_shadow(),
             });
 
         let mut middle = column![].spacing(8).width(Length::Fill);
