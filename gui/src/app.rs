@@ -2903,14 +2903,10 @@ impl App {
                 });
                 if double {
                     self.last_line_click = None;
-                    // Double-click opens the inline editor, but only when the
-                    // transcript is not following the playhead: in Follow the
-                    // pane moves under the pointer and a field there would be
-                    // unusable. Dispatch directly so the field is mounted
-                    // before the task loop resumes.
-                    if self.follow_playhead {
-                        return Task::none();
-                    }
+                    // Double-click always opens the inline editor; opening it
+                    // turns Follow off, so the pane stops moving under the
+                    // pointer before the first keystroke. Dispatch directly so
+                    // the field is mounted before the task loop resumes.
                     return self.update(Message::EditLine(index));
                 }
                 self.last_line_click = Some((index, Instant::now()));
@@ -13997,11 +13993,15 @@ mod tests {
         let _ = app.update(Message::RedoLineEdit);
         assert_eq!(app.shown_lines()[1].speaker, "SPEAKER 1");
 
-        // Double-click opens the inline editor, but not while Follow is on.
+        // Double-click opens the inline editor even while Follow is on: the
+        // editor turns Follow off itself, which is what the earlier gate got
+        // wrong -- with Follow on by default, double-click did nothing at all.
         app.follow_playhead = true;
         let _ = app.update(Message::LineClicked(0));
         let _ = app.update(Message::LineClicked(0));
-        assert!(app.line_edit.is_none());
+        assert_eq!(app.line_edit.as_ref().map(|edit| edit.index), Some(0));
+        assert!(!app.follow_playhead);
+        let _ = app.update(Message::CancelLineEdit);
 
         app.follow_playhead = false;
         let _ = app.update(Message::LineClicked(2));
