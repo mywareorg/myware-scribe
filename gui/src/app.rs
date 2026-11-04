@@ -55,6 +55,32 @@ const FOLLOW_STUCK_STEP: f32 = 12.0;
 /// anything actually happening.
 const FOLLOW_INPUT_STEP: f32 = 12.0;
 
+/// Time constant of the follow glide. Each step covers `1 - e^(-dt/tau)` of the
+/// remaining distance: about 17 % per 60 Hz frame, 63 % after 90 ms and 95 %
+/// after 270 ms, so a one-row move settles in roughly a fifth of a second.
+const FOLLOW_GLIDE_TAU: Duration = Duration::from_millis(90);
+
+/// Longest frame gap the glide will ease over. `window::frames()` stops while
+/// the window is occluded, so coming back can present a gap of seconds; that
+/// must land the move in one step rather than sweep the pane across.
+const FOLLOW_GLIDE_MAX_GAP: Duration = Duration::from_millis(250);
+
+/// Shortest gap between two glide steps, about 30-40 Hz. Every step is a
+/// `scroll_to`, and the scrollbar reports each one back as a
+/// `TranscriptScrolled`: one step is two updates and two full view builds.
+const FOLLOW_GLIDE_FRAME: Duration = Duration::from_millis(25);
+
+/// Movement smaller than this is not worth that pair of updates.
+const FOLLOW_GLIDE_MIN_STEP: f32 = 0.5;
+
+/// Remaining distance at which the glide lands exactly and ends.
+const FOLLOW_GLIDE_SNAP: f32 = 0.5;
+
+/// Follow glides only moves this many rows or fewer. A longer move is a jump —
+/// a seek, a search hit, a view change — and has to land immediately; easing it
+/// would delay the arrival and is the kind of motion that makes people queasy.
+const FOLLOW_GLIDE_ROWS: f32 = 2.0;
+
 /// Logical 4:3 sizing for the window (default) and floors.
 // The transcript header and bottom action row need this much horizontal room
 // for the fixed-width Time, Reveal and Rename buttons to keep their size.
@@ -465,6 +491,10 @@ pub enum Message {
     Start,
     Cancel,
     Tick,
+    /// One display frame while a follow glide is running. `window::frames()` is
+    /// subscribed only then: the glide is the only thing that needs a frame
+    /// clock.
+    Frame(Instant),
     RenameName(usize, String),
     RenameSave,
     RenameCancel,
@@ -612,6 +642,31 @@ struct FollowIssue {
     retried: bool,
 }
 
+/// A follow scroll that is easing towards its target instead of snapping to
+/// it. Only the playhead-tracking path ever glides: the bottom pin follows a
+/// target that grows as text streams in, and smoothing that would leave the
+/// pane permanently behind the words.
+#[derive(Debug, Clone, Copy)]
+struct ScrollAnim {
+    /// Where the pane is heading.
+    target: f32,
+    /// Offset the last step asked the scrollable to take.
+    expected: f32,
+    /// When that step was issued.
+    last: Instant,
+    /// Size of that step, so a report that arrives one issue late still counts
+    /// as our own scroll rather than a drag.
+    step: f32,
+}
+
+/// A scroll the follow logic wants, and whether it comes from tracking the
+/// playhead line (the only path allowed to glide).
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct FollowTarget {
+    y: f32,
+    centred: bool,
+}
+
 impl FollowIssue {
     /// True when nothing that decides the target has changed since `self`.
     fn same_situation(
@@ -626,6 +681,44 @@ impl FollowIssue {
             && (self.content - content).abs() <= FOLLOW_INPUT_STEP
             && (self.viewport - viewport).abs() <= FOLLOW_INPUT_STEP
     }
+}
+
+/// Fraction of the remaining distance one glide step covers.
+///
+/// Exponential rather than a fixed-duration curve: a tween restarts its clock
+/// on every retarget, which stutters as soon as lines arrive faster than it
+/// finishes, and it needs a duration that is wrong at every speed but one.
+fn glide_fraction(dt: Duration) -> f32 {
+    if dt >= FOLLOW_GLIDE_MAX_GAP {
+        // The window was occluded (frames stop) or the app was stalled: land
+        // the move in this step instead of sweeping across the gap.
+        return 1.0;
+    }
+    1.0 - (-dt.as_secs_f32() / FOLLOW_GLIDE_TAU.as_secs_f32()).exp()
+}
+
+/// One step of the glide: the offset to ask for, and whether that offset is
+/// the target itself (the glide is over).
+fn glide_advance(expected: f32, target: f32, dt: Duration) -> (f32, bool) {
+    let next = expected + (target - expected) * glide_fraction(dt);
+    if (target - next).abs() <= FOLLOW_GLIDE_SNAP {
+        (target, true)
+    } else {
+        (next, false)
+    }
+}
+
+/// Whether a follow move should glide rather than land.
+///
+/// The centred-playhead path only, past the deadband (below it nothing moves at
+/// all) and within [`FOLLOW_GLIDE_ROWS`] rows; the first move after Follow is
+/// switched on always lands, because it can be a screenful.
+fn glide_move(centred: bool, distance: f32, row_height: f32, snap_next: bool) -> bool {
+    let distance = distance.abs();
+    centred
+        && !snap_next
+        && distance > FOLLOW_DEADBAND
+        && distance <= row_height * FOLLOW_GLIDE_ROWS
 }
 
 pub struct App {
@@ -710,6 +803,13 @@ pub struct App {
     /// content height that arrived a frame late) was re-issued every tick and
     /// the pane shimmered.
     follow_issue: Option<FollowIssue>,
+    /// The follow scroll currently easing towards its target. It owns the
+    /// in-flight marker (`scroll_target`) while it runs, and it is the only
+    /// thing that issues `scroll_to` between its start and its end.
+    scroll_anim: Option<ScrollAnim>,
+    /// The next follow move must land: switching Follow on can put the pane a
+    /// screen away from the playhead, which must not be eased across.
+    snap_next_follow: bool,
     /// Row height used to centre the followed line. Re-derived only when the
     /// row count changes or the content height jumps materially, so streamed
     /// growth does not nudge the estimate on every frame.
@@ -954,6 +1054,8 @@ impl App {
             follow_offset: None,
             scroll_target: None,
             follow_issue: None,
+            scroll_anim: None,
+            snap_next_follow: false,
             follow_row_height: RefCell::new(None),
             pane_window: Cell::new((0, 0, 0.0, 0.0)),
             pane_row_height: Cell::new(None),
@@ -1458,6 +1560,7 @@ impl App {
                 self.playhead = start.clamp(0.0, max);
                 self.follow_offset = None;
                 self.follow_issue = None;
+                self.scroll_anim = None;
                 self.scroll_seek = true;
                 if let Some(player) = &self.player {
                     player.seek(self.playhead);
@@ -1687,6 +1790,7 @@ impl App {
         self.search_query.clear();
         self.search_index = 0;
         self.follow_offset = None;
+        self.scroll_anim = None;
         self.follow_issue = None;
         *self.follow_row_height.borrow_mut() = None;
         self.reset_pane_geometry();
@@ -1757,6 +1861,7 @@ impl App {
         self.last_tick = None;
         self.follow_offset = None;
         self.scroll_target = None;
+        self.scroll_anim = None;
         self.follow_issue = None;
         *self.follow_row_height.borrow_mut() = None;
         self.reset_pane_geometry();
@@ -2371,8 +2476,18 @@ impl App {
         } else {
             Subscription::none()
         };
+        // The glide is the only frame-driven animation in the app. Subscribing
+        // unconditionally would keep a 60 Hz redraw loop (and, through each
+        // step's scroll echo, two view builds per frame) running while nothing
+        // moves.
+        let frames = if self.scroll_anim.is_some() {
+            iced::window::frames().map(Message::Frame)
+        } else {
+            Subscription::none()
+        };
         Subscription::batch([
             tick,
+            frames,
             keyboard::on_key_press(Self::key_press),
             iced::window::events().map(|(_id, event)| Message::WindowEvent(event)),
         ])
@@ -2564,6 +2679,9 @@ impl App {
                 self.commit_inline_edit(false);
                 self.join_lines = !self.join_lines;
                 self.modified = true;
+                // Joined rows are different rows: the target a glide was aiming
+                // at no longer exists.
+                self.scroll_anim = None;
                 self.reset_pane_geometry();
                 if self.join_lines {
                     self.rebuild_joined_preview();
@@ -2594,21 +2712,48 @@ impl App {
                 self.transcript_content = viewport.content_bounds().height;
                 let offset = viewport.absolute_offset().y;
                 self.transcript_offset = offset;
-                // Rows move under a stationary pointer while scrolling, and a
-                // virtualized row that mounts under the cursor never fires
-                // enter. Drop the remembered row rather than lighting up
-                // whatever now sits where it used to be.
-                self.transcript_line_hover = None;
                 let viewport_h = viewport.bounds().height;
                 let content_h = viewport.content_bounds().height;
-                self.transcript_at_bottom = offset + viewport_h >= content_h - 8.0;
+
+                // A glide owns the in-flight marker while it runs, so a report
+                // that lands between its start and its target must not consume
+                // it; the marker is compared below and released when the glide
+                // lands.
+                let ours = if self.scroll_anim.is_some() {
+                    self.glide_covers(offset)
+                } else {
+                    self.scroll_target
+                        .take()
+                        .is_some_and(|target| (offset - target).abs() <= 6.0)
+                };
+
+                // "At the bottom" is where a running glide is heading, not
+                // where it happens to be: on the way down it passes through the
+                // middle, which would read as having been scrolled away.
+                self.transcript_at_bottom = match self.scroll_anim {
+                    Some(anim) => anim.target + viewport_h >= content_h - 8.0,
+                    None => offset + viewport_h >= content_h - 8.0,
+                };
+
+                if !ours {
+                    // Rows move under a stationary pointer while scrolling, and
+                    // a virtualized row that mounts under the cursor never fires
+                    // enter. Drop the remembered row rather than lighting up
+                    // whatever now sits where it used to. A glide moves rows
+                    // every frame, so it must not clear the hover: the row's
+                    // affordances would strobe for the length of the move.
+                    self.transcript_line_hover = None;
+                    if let Some(anim) = self.scroll_anim.take() {
+                        // The user took the pane. Keep the expectation so the
+                        // ordinary 12 px test below can see it was them, which
+                        // turns Follow off rather than snapping back.
+                        self.follow_offset = Some(anim.expected);
+                        self.scroll_target = None;
+                    }
+                }
 
                 // Our own scroll landing (or close to it) needs no follow-up.
-                if self
-                    .scroll_target
-                    .take()
-                    .is_some_and(|target| (offset - target).abs() <= 6.0)
-                {
+                if ours {
                     return Task::none();
                 }
                 match self.correct_follow_offset(previous_content, offset, viewport_h, content_h) {
@@ -2622,6 +2767,9 @@ impl App {
             Message::WindowEvent(event) => {
                 match event {
                     iced::window::Event::Resized(size) => {
+                        // A resize re-wraps the transcript, so the target the
+                        // glide was aiming at no longer exists.
+                        self.scroll_anim = None;
                         // Iced 0.13 reports the OS-driven size; we cannot push
                         // a corrected resize back to the OS during a manual
                         // drag. Snap the size we *record* (and persist) to the
@@ -2862,10 +3010,7 @@ impl App {
                     None => Task::none(),
                 }
             }
-            Message::PlayerToggle => {
-                self.toggle_playback();
-                Task::none()
-            }
+            Message::PlayerToggle => self.toggle_playback(),
             Message::FocusFind => text_input::focus(find_id()),
             Message::SearchChanged(query) => {
                 self.search_query = query;
@@ -2881,6 +3026,9 @@ impl App {
                 if next != self.speaker_filter {
                     self.speaker_filter = next;
                     self.search_index = 0;
+                    // Filtering changes which rows are rendered, so a glide
+                    // towards the old geometry is stale.
+                    self.scroll_anim = None;
                     self.invalidate_derived();
                     // Keep the reader where they are; filtering should not
                     // jump the transcript back to the top (or to that
@@ -3064,18 +3212,21 @@ impl App {
             }
             Message::ZoomIn => {
                 self.font_scale = (self.font_scale + 0.1).min(2.5);
+                self.scroll_anim = None;
                 self.reset_pane_geometry();
                 self.save_settings();
                 Task::none()
             }
             Message::ZoomOut => {
                 self.font_scale = (self.font_scale - 0.1).max(0.6);
+                self.scroll_anim = None;
                 self.reset_pane_geometry();
                 self.save_settings();
                 Task::none()
             }
             Message::ZoomReset => {
                 self.font_scale = DEFAULT_FONT_SCALE;
+                self.scroll_anim = None;
                 self.reset_pane_geometry();
                 self.save_settings();
                 Task::none()
@@ -3103,6 +3254,13 @@ impl App {
                         }
                     }
                 }
+                // A glide belongs to the mode it started in. Switching Follow
+                // off finishes its move so the line does not freeze off centre;
+                // switching it on must not inherit one.
+                let stop = self.stop_glide(turning_off);
+                if turning_off {
+                    self.snap_next_follow = false;
+                }
                 self.follow_offset = None;
                 self.scroll_target = None;
                 self.follow_issue = None;
@@ -3112,16 +3270,26 @@ impl App {
                     // Same rules as the tick path: follow the playhead line,
                     // never the first-row fallback, and never to the top.
                     let active = self.follow_line_index();
-                    if let Some(y) = self.next_follow_target(active) {
-                        self.scroll_target = Some(y);
-                        self.note_follow_issue(y, active);
-                        return scrollable::scroll_to(
-                            transcript_id(),
-                            scrollable::AbsoluteOffset { x: 0.0, y },
-                        );
+                    match self.next_follow_target(active) {
+                        Some(target) => {
+                            // Enabling Follow is a jump, not a glide: the pane
+                            // can be a screen away.
+                            self.scroll_anim = None;
+                            self.scroll_target = Some(target.y);
+                            self.note_follow_issue(target.y, active);
+                            return scrollable::scroll_to(
+                                transcript_id(),
+                                scrollable::AbsoluteOffset { x: 0.0, y: target.y },
+                            );
+                        }
+                        None => {
+                            // Nothing to scroll to yet, so the next move that
+                            // does happen is the engage move and must land.
+                            self.snap_next_follow = true;
+                        }
                     }
                 }
-                Task::none()
+                stop
             }
             Message::ToggleTheme => {
                 self.theme_mode = self.theme_mode.toggled();
@@ -3367,9 +3535,10 @@ impl App {
                     && !self.settings_open
                     && self.calibration.is_none()
                 {
-                    self.toggle_playback();
+                    self.toggle_playback()
+                } else {
+                    Task::none()
                 }
-                Task::none()
             }
             Message::SeekBy(delta) => {
                 if self.rename_open
@@ -3391,6 +3560,9 @@ impl App {
                     return Task::none();
                 }
                 if self.shown_duration().is_some() {
+                    // A seek moves the target; a glide towards the old one is
+                    // no longer where the pane should be.
+                    self.scroll_anim = None;
                     let max = self.shown_duration().unwrap_or(0.0).max(0.0);
                     self.playhead = (self.playhead + delta).clamp(0.0, max);
                     let playhead = self.playhead;
@@ -3621,6 +3793,7 @@ impl App {
                     self.timeline_duration = None;
                     self.player = None;
                     self.scroll_target = None;
+                    self.scroll_anim = None;
                     self.follow_issue = None;
                     *self.follow_row_height.borrow_mut() = None;
                     self.reset_pane_geometry();
@@ -3634,6 +3807,7 @@ impl App {
                     self.search_query.clear();
                     self.search_index = 0;
                     self.follow_offset = None;
+                    self.scroll_anim = None;
                     self.transcript_at_bottom = true;
                     self.console_lines.clear();
                     self.toast = None;
@@ -3931,6 +4105,20 @@ impl App {
                 self.cancel();
                 Task::none()
             }
+            Message::Frame(now) => {
+                // A dialog owns the screen: land the move instead of easing
+                // behind it.
+                if self.popup_open() || self.delete_confirm {
+                    return self.stop_glide(true);
+                }
+                match self.advance_glide(now) {
+                    Some(y) => scrollable::scroll_to(
+                        transcript_id(),
+                        scrollable::AbsoluteOffset { x: 0.0, y },
+                    ),
+                    None => Task::none(),
+                }
+            }
             Message::Tick => {
                 if self.feature_deck_auto_advance() {
                     if self.feature_slide_at.elapsed() >= Duration::from_secs(7) {
@@ -4093,6 +4281,7 @@ impl App {
                     }
                 } else {
                     self.follow_offset = None;
+                    self.scroll_anim = None;
                     // Keep the live view pinned to the bottom as text is added,
                     // as long as the user hasn't scrolled away from the bottom.
                     if let Some(y) = self.follow_scroll(None) {
@@ -4332,18 +4521,18 @@ impl App {
     }
 
     /// Start or pause playback for the transcript currently on screen.
-    fn toggle_playback(&mut self) {
+    fn toggle_playback(&mut self) -> Task<Message> {
         if !self.player_ready() {
-            return;
+            return Task::none();
         }
         if self.player.is_none() {
             let Some(path) = self.shown_audio().map(Path::to_path_buf) else {
-                return;
+                return Task::none();
             };
             self.player = Player::new(&path, self.playback_speed);
             if self.player.is_none() {
                 self.toast = Some(("Could not open the audio file".to_string(), Instant::now()));
-                return;
+                return Task::none();
             }
             if let Some(player) = &self.player {
                 player.seek(self.playhead);
@@ -4357,6 +4546,9 @@ impl App {
             player.toggle();
         }
         self.last_tick = Some(Instant::now());
+        // Starting or stopping playback is a user decision: finish the move in
+        // flight instead of leaving the followed line half a row off centre.
+        self.stop_glide(true)
     }
 
     fn start(&mut self) {
@@ -4512,6 +4704,7 @@ impl App {
         self.transcript_dirty = false;
         self.follow_offset = None;
         self.scroll_target = None;
+        self.scroll_anim = None;
         self.follow_issue = None;
         *self.follow_row_height.borrow_mut() = None;
         self.reset_pane_geometry();
@@ -4592,6 +4785,7 @@ impl App {
         }
         self.cancelled.store(true, Ordering::SeqCst);
         Self::clear_gpu_guard();
+        self.scroll_anim = None;
         self.status = Status::Cancelled;
         self.stage = "cancelled".to_string();
         self.progress = 0.0;
@@ -4725,6 +4919,7 @@ impl App {
             self.follow_playhead = false;
             self.follow_offset = None;
             self.scroll_target = None;
+            self.scroll_anim = None;
             self.follow_issue = None;
             self.scroll_seek = false;
         }
@@ -4802,8 +4997,9 @@ impl App {
         self.reflow_pane_geometry();
         if resume {
             // Same path as the play button, so a finished track restarts from
-            // the top instead of being left stopped.
-            self.toggle_playback();
+            // the top instead of being left stopped. Opening the editor already
+            // cancelled any glide, so there is nothing for it to land.
+            let _ = self.toggle_playback();
         }
     }
 
@@ -5297,6 +5493,7 @@ impl App {
                     self.transcript_dirty = false;
                     self.follow_offset = None;
                     self.scroll_target = None;
+                    self.scroll_anim = None;
                     self.follow_issue = None;
                     *self.follow_row_height.borrow_mut() = None;
                     self.reset_pane_geometry();
@@ -5986,6 +6183,14 @@ impl App {
             0.0
         };
         let mut latched = self.pane_row_height.get();
+        // A glide reports a new offset every frame, so the window it measures
+        // against is moving; keep the latch it started with rather than
+        // re-measuring (and possibly re-latching) against every frame of it.
+        if self.scroll_anim.is_some() {
+            if let Some(height) = latched {
+                return height.max(12.0);
+            }
+        }
         if measured > 1.0 {
             match latched {
                 // A real size change (zoom, bubble mode, re-wrap) recalibrates;
@@ -6033,9 +6238,10 @@ impl App {
         }
     }
 
-    /// Pixel offset the follow logic wants, or `None` when the transcript is
+    /// The scroll the follow logic wants next, or `None` when the transcript is
     /// already close enough that another programmatic `scroll_to` would only
-    /// make the pane shimmer.
+    /// make the pane shimmer. `centred` marks the playhead-tracking path, the
+    /// only one that may ease instead of landing.
     ///
     /// `scroll_to` is a one-shot jump, so every call that is not strictly
     /// needed shows up as a visible step. Three things kept it firing:
@@ -6060,7 +6266,7 @@ impl App {
     /// streamed transcript pins to the bottom instead, because centring the
     /// newest line with the average-height estimate makes it jump as rows are
     /// added.
-    fn next_follow_target(&self, active: Option<usize>) -> Option<f32> {
+    fn next_follow_target(&self, active: Option<usize>) -> Option<FollowTarget> {
         let content = self.transcript_content;
         let viewport = self.transcript_viewport;
         // Nothing can scroll while the content fits the pane. Checked before
@@ -6071,15 +6277,15 @@ impl App {
             return None;
         }
         let bottom = content - viewport;
-        let desired = if self.follow_playhead {
+        let (desired, centred) = if self.follow_playhead {
             if self.live_streaming() && !self.scroll_seek {
-                bottom
+                (bottom, false)
             } else {
-                self.centred_follow_target(active?)?
+                (self.centred_follow_target(active?)?, true)
             }
         } else if self.selected_view.is_none() && self.transcript_at_bottom {
             // The live view has not been scrolled away: stay at the bottom.
-            bottom
+            (bottom, false)
         } else {
             return None;
         };
@@ -6098,7 +6304,7 @@ impl App {
             return None;
         }
         let Some(issue) = self.follow_issue else {
-            return Some(desired);
+            return Some(FollowTarget { y: desired, centred });
         };
         // Edge-triggered. If the target is the one we last asked for there is
         // nothing to do: either the scroll landed (the reported offset is only
@@ -6115,7 +6321,7 @@ impl App {
         if same && (issue.retried || issue.at.elapsed() < FOLLOW_MIN_INTERVAL) {
             return None;
         }
-        Some(desired)
+        Some(FollowTarget { y: desired, centred })
     }
 
     /// Centred target for a playback line, using a row height that only moves
@@ -6178,16 +6384,134 @@ impl App {
         });
     }
 
-    /// Ask the follow logic for the next scroll and record it. Returns the
-    /// offset to send to the scrollable, or `None` when the view must not move.
+    /// Row height the glide decision measures a move against.
+    fn follow_row_estimate(&self) -> f32 {
+        self.pane_line_height((16.0 * self.font_scale * 1.8).max(24.0))
+    }
+
+    /// Ask the follow logic for the next scroll and record it. A move that
+    /// should ease starts or retargets the glide and returns `None` (the
+    /// animator issues its own scrolls); anything else is returned for the
+    /// caller to send at once.
     fn follow_scroll(&mut self, active: Option<usize>) -> Option<f32> {
         let target = self.next_follow_target(active)?;
+        self.note_follow_issue(target.y, active);
+        let from = self
+            .scroll_anim
+            .map_or(self.transcript_offset, |anim| anim.expected);
+        let glide = !self.popup_open()
+            && !self.delete_confirm
+            && glide_move(
+                target.centred,
+                target.y - from,
+                self.follow_row_estimate(),
+                self.snap_next_follow,
+            );
+        self.snap_next_follow = false;
+        if glide {
+            self.start_glide(target.y);
+            None
+        } else {
+            // A snap supersedes any glide, which must not keep writing offsets
+            // towards a target the pane is no longer heading for.
+            self.scroll_anim = None;
+            self.scroll_target = Some(target.y);
+            Some(target.y)
+        }
+    }
+
+    /// Start easing towards `target`, or retarget a glide already running so
+    /// its position and velocity carry over instead of restarting.
+    fn start_glide(&mut self, target: f32) {
+        match self.scroll_anim.as_mut() {
+            Some(anim) => anim.target = target,
+            None => {
+                let expected = self.transcript_offset;
+                self.follow_offset = Some(expected);
+                // The first step is a quarter of the remaining distance, so the
+                // "was that us?" tolerance starts at the size of that step.
+                let step = (target - expected).abs() * glide_fraction(FOLLOW_GLIDE_FRAME);
+                self.scroll_anim = Some(ScrollAnim {
+                    target,
+                    expected,
+                    last: Instant::now(),
+                    step,
+                });
+            }
+        }
         self.scroll_target = Some(target);
-        self.note_follow_issue(target, active);
-        Some(target)
+    }
+
+    /// True when a reported offset is one the running glide asked for. Tolerates
+    /// one step of lag: the scrollbar reports the previous step while the next
+    /// one is being issued.
+    fn glide_covers(&self, offset: f32) -> bool {
+        self.scroll_anim.is_some_and(|anim| {
+            (offset - anim.expected).abs() <= FOLLOW_STUCK_STEP + anim.step
+        })
+    }
+
+    /// One step of the running glide, or `None` when it is not due yet (the
+    /// step rate is capped) or there is nothing to send.
+    fn advance_glide(&mut self, now: Instant) -> Option<f32> {
+        let anim = self.scroll_anim?;
+        let dt = now.saturating_duration_since(anim.last);
+        if dt < FOLLOW_GLIDE_FRAME {
+            return None;
+        }
+        let (next, landed) = glide_advance(anim.expected, anim.target, dt);
+        let step = next - anim.expected;
+        if !landed && step.abs() < FOLLOW_GLIDE_MIN_STEP {
+            // Not worth a scroll (and its echo) for movement nobody can see;
+            // keep the state so the next frame steps further.
+            return None;
+        }
+        self.follow_offset = Some(next);
+        if landed {
+            // The in-flight marker is left in place on purpose: the landing
+            // report still has to be recognised as ours, or it would clear the
+            // hovered row once per advance.
+            self.scroll_anim = None;
+        } else {
+            self.scroll_anim = Some(ScrollAnim {
+                expected: next,
+                last: now,
+                step,
+                ..anim
+            });
+        }
+        Some(next)
+    }
+
+    /// Stop any glide. `land` sends the pane to where the glide was heading, so
+    /// an interrupted pan leaves the followed line centred; a manual scroll
+    /// passes `false` and keeps the position the user chose.
+    fn stop_glide(&mut self, land: bool) -> Task<Message> {
+        let Some(anim) = self.scroll_anim.take() else {
+            return Task::none();
+        };
+        self.scroll_target = None;
+        if land {
+            self.follow_offset = Some(anim.target);
+            self.scroll_target = Some(anim.target);
+            scrollable::scroll_to(
+                transcript_id(),
+                scrollable::AbsoluteOffset {
+                    x: 0.0,
+                    y: anim.target,
+                },
+            )
+        } else {
+            self.follow_offset = None;
+            Task::none()
+        }
     }
 
     fn scroll_to_line(&mut self, line: usize) -> Task<Message> {
+        // A named destination (a seek, a search hit, a keyboard line move) must
+        // land at once: a glide towards the previous target would keep writing
+        // offsets over it.
+        self.scroll_anim = None;
         match self.follow_target(line) {
             Some(y) => {
                 let active = self.follow_line_index();
@@ -6260,6 +6584,7 @@ impl App {
         self.follow_playhead = false;
         self.follow_offset = None;
         self.scroll_target = None;
+        self.scroll_anim = None;
         self.follow_issue = None;
         self.scroll_seek = false;
         self.save_settings();
@@ -7009,13 +7334,14 @@ impl App {
                 .on_press_maybe(can_start.then_some(Message::Start))
                 // Dark mode fills read better with a white label; light mode
                 // keeps the dark ink it has always used.
-                .style(color_button(
+                .style(color_button_outlined(
                     scheme.green,
                     if theme::is_dark_scheme(&scheme) {
                         Color::WHITE
                     } else {
                         scheme.on_accent
                     },
+                    scheme,
                 )),
                 button(
                     container(text("Cancel"))
@@ -7025,13 +7351,14 @@ impl App {
                 .width(Length::Fill)
                 .height(Length::Fixed(30.0))
                 .on_press_maybe(running.then_some(Message::Cancel))
-                .style(color_button(
+                .style(color_button_outlined(
                     scheme.danger,
                     if theme::is_dark_scheme(&scheme) {
                         Color::WHITE
                     } else {
                         scheme.on_accent
                     },
+                    scheme,
                 )),
             ]
             .spacing(8)
@@ -12511,6 +12838,25 @@ fn panel_icon_button(
     }
 }
 
+/// The accent fill with the card hairline around it.
+///
+/// `color_button` outlines a filled button with a lighter tint of its own hue,
+/// which on a dark window leaves the two queue actions looking flush with the
+/// panel. In dark mode this wraps them in the same border every card uses.
+fn color_button_outlined(
+    bg: Color,
+    ink: Color,
+    scheme: Scheme,
+) -> impl Fn(&iced::Theme, button::Status) -> button::Style {
+    move |theme, status| {
+        let mut style = color_button(bg, ink)(theme, status);
+        if theme::is_dark_scheme(&scheme) {
+            style.border.color = scheme.border;
+        }
+        style
+    }
+}
+
 fn color_button(bg: Color, ink: Color) -> impl Fn(&iced::Theme, button::Status) -> button::Style {
     move |theme, status| {
         let (top, bottom, text, border, border_width, shadow) = match status {
@@ -15621,8 +15967,12 @@ mod tests {
         // offset therefore never matches the desired target.
         app.transcript_offset = 810.0;
 
-        // 2.5 rows * 400 px - 200 px viewport = 800.
-        assert_eq!(app.follow_scroll(Some(order[2])), Some(800.0));
+        // 2.5 rows * 400 px - 200 px viewport = 800. A one-row move eases, so
+        // the offset is not returned for a jump; the glide is the scroll.
+        assert_eq!(app.follow_scroll(Some(order[2])), None);
+        assert_eq!(app.scroll_anim.map(|anim| anim.target), Some(800.0));
+        // Treat the glide as landed before checking that the tick stays quiet.
+        app.scroll_anim = None;
         // Every following tick used to re-issue, each time with a target that
         // had drifted a little: that is the jitter.
         for _ in 0..5 {
@@ -15656,7 +16006,10 @@ mod tests {
         let order = app.display_order();
 
         app.transcript_offset = 780.0;
-        assert_eq!(app.follow_scroll(Some(order[2])), Some(800.0));
+        // One row out: eased rather than jumped, and the glide is the scroll.
+        assert_eq!(app.follow_scroll(Some(order[2])), None);
+        assert_eq!(app.scroll_anim.map(|anim| anim.target), Some(800.0));
+        app.scroll_anim = None;
 
         // The scroll landed, so the pending offset is stale by the time the
         // next tick runs; a few pixels of drift must not queue another jump.
@@ -15764,6 +16117,135 @@ mod tests {
         tag_paths(&tree, tag, &mut Vec::new(), &mut out);
         assert!(!out.is_empty(), "expected scrollables in the view");
         out
+    }
+
+    #[test]
+    fn the_glide_fraction_eases_and_lands_a_long_frame_in_one_step() {
+        // About a sixth of the remaining distance per 60 Hz frame.
+        let frame = glide_fraction(Duration::from_micros(16_667));
+        assert!((frame - 0.169).abs() < 0.01, "{frame}");
+        // One time constant covers 63 %.
+        let tau = glide_fraction(FOLLOW_GLIDE_TAU);
+        assert!((tau - 0.632).abs() < 0.01, "{tau}");
+        // Nothing moves in no time, and the curve is monotone.
+        assert_eq!(glide_fraction(Duration::ZERO), 0.0);
+        assert!(glide_fraction(Duration::from_millis(8)) < glide_fraction(Duration::from_millis(20)));
+        assert!(
+            glide_fraction(Duration::from_millis(20)) < glide_fraction(Duration::from_millis(60))
+        );
+        // A gap the window could not have shown (occluded, stalled) lands in
+        // one step instead of sweeping the pane across it.
+        assert_eq!(glide_fraction(FOLLOW_GLIDE_MAX_GAP), 1.0);
+        assert_eq!(glide_fraction(Duration::from_secs(30)), 1.0);
+    }
+
+    #[test]
+    fn the_glide_advance_lands_inside_the_snap_threshold() {
+        // Well short of the target: a step, not a landing.
+        let (next, landed) = glide_advance(100.0, 124.0, Duration::from_millis(25));
+        assert!(!landed);
+        assert!(next > 100.0 && next < 124.0, "{next}");
+        // Inside half a pixel it lands exactly.
+        let (next, landed) = glide_advance(123.8, 124.0, Duration::from_millis(16));
+        assert!(landed);
+        assert_eq!(next, 124.0);
+        // A long gap lands in one step.
+        let (next, landed) = glide_advance(0.0, 24.0, Duration::from_secs(5));
+        assert!(landed);
+        assert_eq!(next, 24.0);
+    }
+
+    #[test]
+    fn only_small_centred_moves_glide() {
+        let row = 24.0;
+        // The playhead path, one row, and exactly the ceiling: glide.
+        assert!(glide_move(true, row, row, false));
+        assert!(glide_move(true, 2.0 * row, row, false));
+        // Only the centred path. The bottom pin follows a target that grows as
+        // text streams in, so it must stay instant.
+        assert!(!glide_move(false, row, row, false));
+        // Below the deadband nothing moves at all.
+        assert!(!glide_move(true, FOLLOW_DEADBAND - 0.5, row, false));
+        // Past two rows it is a jump: a seek, a search hit, a view change.
+        assert!(!glide_move(true, 2.0 * row + 1.0, row, false));
+        // The first move after Follow is switched on always lands.
+        assert!(!glide_move(true, row, row, true));
+        // Direction does not matter.
+        assert!(glide_move(true, -row, row, false));
+    }
+
+    #[test]
+    fn a_one_row_advance_glides_and_lands() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("glide-config");
+        let (mut app, media) = follow_app("glide-media");
+
+        // Four 400 px rows in a 400 px pane: centring the second line is 400 px.
+        // Start one 24 px row short of it.
+        app.pane_row_height.set(Some(24.0));
+        app.transcript_offset = 376.0;
+        let active = app.display_order()[1];
+
+        assert_eq!(
+            app.follow_scroll(Some(active)),
+            None,
+            "a one-row advance should glide, not snap"
+        );
+        let anim = app.scroll_anim.expect("a glide started");
+        assert_eq!(anim.target, 400.0);
+
+        // Step it at the frame cap until it lands.
+        let mut now = anim.last;
+        let mut steps = 0;
+        while app.scroll_anim.is_some() && steps < 60 {
+            now += FOLLOW_GLIDE_FRAME;
+            if app.advance_glide(now).is_some() {
+                steps += 1;
+            }
+        }
+        assert!(app.scroll_anim.is_none(), "the glide did not land");
+        assert_eq!(app.follow_offset, Some(400.0));
+        assert!(steps > 4, "the glide should take several frames, took {steps}");
+
+        let _ = std::fs::remove_dir_all(&media);
+    }
+
+    #[test]
+    fn long_moves_the_bottom_pin_and_the_first_move_after_enabling_snap() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("snap-config");
+        let (mut app, media) = follow_app("snap-media");
+
+        app.pane_row_height.set(Some(24.0));
+
+        // Four rows short of the target: a jump, not a nudge.
+        app.transcript_offset = 304.0;
+        let active = app.display_order()[1];
+        assert_eq!(app.follow_scroll(Some(active)), Some(400.0));
+        assert!(app.scroll_anim.is_none(), "a four-row move must not glide");
+
+        // The first move after Follow is switched on lands even at one row.
+        app.scroll_target = None;
+        app.follow_issue = None;
+        app.transcript_offset = 376.0;
+        app.snap_next_follow = true;
+        let active = app.display_order()[1];
+        assert_eq!(app.follow_scroll(Some(active)), Some(400.0));
+        assert!(app.scroll_anim.is_none());
+        assert!(!app.snap_next_follow, "the flag should be spent");
+
+        // The bottom pin tracks a target that grows as text arrives, so even a
+        // one-row move of it must land rather than ease.
+        app.selected_view = None;
+        app.follow_playhead = false;
+        app.transcript_at_bottom = true;
+        app.scroll_target = None;
+        app.follow_issue = None;
+        app.transcript_offset = 1176.0;
+        assert_eq!(app.follow_scroll(None), Some(1200.0));
+        assert!(app.scroll_anim.is_none());
+
+        let _ = std::fs::remove_dir_all(&media);
     }
 
     #[test]
@@ -15957,7 +16439,11 @@ mod tests {
 
         let active = app.follow_line_index();
         assert_eq!(active, Some(order[2]));
-        assert_eq!(app.follow_scroll(active), Some(800.0));
+        // One row out eases rather than jumps; land it before checking that a
+        // paused pane stays put.
+        assert_eq!(app.follow_scroll(active), None);
+        assert_eq!(app.scroll_anim.map(|anim| anim.target), Some(800.0));
+        app.scroll_anim = None;
 
         // With the playhead, line, content and viewport unchanged, the tick
         // must emit nothing at all.
