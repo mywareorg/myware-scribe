@@ -147,15 +147,6 @@ impl AppTheme {
         }
     }
 
-    /// Cycle Light -> Dark -> System -> Light.
-    pub fn toggled(self) -> Self {
-        match self {
-            AppTheme::Light => AppTheme::Dark,
-            AppTheme::Dark => AppTheme::System,
-            AppTheme::System => AppTheme::Light,
-        }
-    }
-
     fn system_is_dark() -> bool {
         matches!(Theme::default(), Theme::Dark)
     }
@@ -356,15 +347,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn system_theme_is_selectable_and_cycles() {
+    fn system_theme_is_selectable() {
         assert_eq!(AppTheme::ALL.len(), 3);
         assert_eq!(AppTheme::from_arg("system"), Some(AppTheme::System));
         assert_eq!(AppTheme::System.label(), "System");
         assert_eq!(AppTheme::System.arg(), "system");
-
-        assert_eq!(AppTheme::Light.toggled(), AppTheme::Dark);
-        assert_eq!(AppTheme::Dark.toggled(), AppTheme::System);
-        assert_eq!(AppTheme::System.toggled(), AppTheme::Light);
     }
 
     #[test]

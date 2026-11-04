@@ -663,7 +663,6 @@ pub enum Message {
     ZoomReset,
     ToggleFollowPlayhead,
     ToggleConfidenceView,
-    ToggleTheme,
     SetTheme(AppTheme),
     OpenSettings,
     CloseSettings,
@@ -3673,11 +3672,6 @@ impl App {
                     }
                 }
                 stop
-            }
-            Message::ToggleTheme => {
-                self.theme_mode = self.theme_mode.toggled();
-                self.save_settings();
-                Task::none()
             }
             Message::SetTheme(mode) => {
                 self.theme_mode = mode;
@@ -10727,12 +10721,6 @@ impl App {
         };
         let right_panel = self.with_toast(right_panel, scheme, toast_bottom);
 
-        let (theme_icon, theme_tip) = match self.theme_mode {
-            AppTheme::Light => (ICON_MOON, "Switch to dark theme"),
-            AppTheme::Dark => (ICON_DISPLAY, "Switch to system theme"),
-            AppTheme::System => (ICON_SUN, "Switch to light theme"),
-        };
-
         let mut header = row![
             iced::widget::image(header_logo_handle())
                 .width(Length::Fixed(67.0))
@@ -10756,16 +10744,6 @@ impl App {
         if cfg!(debug_assertions) {
             header = header.push(self.tier_toggle_button(&scheme));
         }
-        header = header
-            .push(
-                self.tip(
-                    action(icon(theme_icon, 16.0))
-                        .on_press(Message::ToggleTheme)
-                        .style(pill_button_secondary),
-                    theme_tip,
-                    &scheme,
-                ),
-            );
 
         let mut base = column![
             header,
@@ -12227,8 +12205,6 @@ const ICON_CARET_UP: char = '\u{f235}';
 const ICON_ZOOM_IN: char = '\u{f62c}';
 const ICON_ZOOM_OUT: char = '\u{f62d}';
 const ICON_CLOCK: char = '\u{f293}';
-const ICON_MOON: char = '\u{f494}';
-const ICON_SUN: char = '\u{f5a1}';
 const ICON_MIC: char = '\u{f490}';
 const ICON_FILE_TEXT: char = '\u{f38b}';
 const ICON_DOWNLOAD: char = '\u{f30a}';
@@ -12239,7 +12215,6 @@ const ICON_TRASH: char = '\u{f5de}';
 /// A repeat arrow for retrying a failed item. Distinct from the editor's redo
 /// glyph, which used to share this codepoint.
 const ICON_RETRY: char = '\u{f130}';
-const ICON_DISPLAY: char = '\u{f302}';
 
 /// Full-window drop target, kept in the widget tree at all times.
 ///
@@ -16650,7 +16625,7 @@ mod tests {
     }
 
     #[test]
-    fn theme_toggle_round_trips_through_settings() {
+    fn theme_choice_round_trips_through_settings() {
         let _guard = env_lock();
         let _dir = ConfigEnv::new("theme");
 
@@ -16658,12 +16633,11 @@ mod tests {
         // A fresh profile follows the desktop rather than forcing light.
         assert_eq!(app.theme_mode, AppTheme::System);
 
-        // The cycle goes System -> Light -> Dark -> System.
-        let _ = app.update(Message::ToggleTheme);
-        assert_eq!(app.theme_mode, AppTheme::Light);
+        let _ = app.update(Message::SetTheme(AppTheme::Dark));
+        assert_eq!(app.theme_mode, AppTheme::Dark);
 
         let reloaded = pro_app();
-        assert_eq!(reloaded.theme_mode, AppTheme::Light);
+        assert_eq!(reloaded.theme_mode, AppTheme::Dark);
     }
 
     #[test]
