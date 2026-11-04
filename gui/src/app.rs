@@ -5338,7 +5338,13 @@ impl App {
                     text,
                     confidence,
                 } => {
-                    let raw = format!("[{}] {speaker}: {text}", format_secs(start as f64));
+                    let stamp = format_secs(start as f64);
+                    // A cleared label must not leave a leading colon behind.
+                    let raw = if speaker.is_empty() {
+                        format!("[{stamp}] {text}")
+                    } else {
+                        format!("[{stamp}] {speaker}: {text}")
+                    };
                     // Queue it; the textbox reveals lines at a speech-like pace.
                     self.pending_lines.push_back(DocLine {
                         raw,
@@ -9301,22 +9307,31 @@ impl App {
                 shadow: soft_shadow(),
             });
 
+        // The player keeps its own card. The run progress used to sit inside it,
+        // which stacked one white surface on another; it is a sibling card above
+        // the player instead.
+        let player_box = container(
+            column![
+                self.timeline_element(&scheme),
+                self.player_element(&scheme)
+            ]
+            .spacing(8)
+            .width(Length::Fill),
+        )
+        .width(Length::Fill)
+        .padding(12)
+        .style(move |_theme| container::Style {
+            background: Some(scheme.panel_bg.into()),
+            border: iced::border::rounded(16.0),
+            shadow: soft_shadow(),
+            ..container::Style::default()
+        });
+
         let mut middle = column![].spacing(8).width(Length::Fill);
         if running || self.completion_pending {
             middle = middle.push(status_box);
         }
-        middle = middle.push(self.timeline_element(&scheme));
-        middle = middle.push(self.player_element(&scheme));
-
-        let middle = container(middle)
-            .width(Length::Fill)
-            .padding(12)
-            .style(move |_theme| container::Style {
-                background: Some(scheme.panel_bg.into()),
-                border: iced::border::rounded(16.0),
-                shadow: soft_shadow(),
-                ..container::Style::default()
-            });
+        middle = middle.push(player_box);
 
         // Fixed slots, fixed indices: the header appears and disappears with
         // the run, and anything that changes the scrollable's child index
@@ -12897,6 +12912,15 @@ mod tests {
         let lines = parse_lines("[00:00] SPEAKER 1: hello there\n[00:05] plain text\n");
         assert_eq!(line_text(&lines[0]), "hello there");
         assert_eq!(line_text(&lines[1]), "plain text");
+    }
+
+    #[test]
+    fn a_cleared_speaker_label_leaves_no_colon() {
+        // Single-speaker transcripts lose their labels; older files still carry
+        // the colon that belonged to the label.
+        let lines = parse_lines("[00:00] : hello there\n[00:05] hello again\n");
+        assert_eq!(line_text(&lines[0]), "hello there");
+        assert_eq!(line_text(&lines[1]), "hello again");
     }
 
     #[test]

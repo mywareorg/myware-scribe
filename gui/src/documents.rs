@@ -116,7 +116,12 @@ fn strip_speaker_label(text: &str) -> &str {
         return text;
     };
     let label = head.trim();
-    if label.is_empty() || label.chars().count() > MAX_LABEL_CHARS || label.contains('[') {
+    if label.is_empty() {
+        // Text written before empty labels were handled still reads ": hello";
+        // the colon belongs to the missing label, not to the spoken words.
+        return tail.trim_start();
+    }
+    if label.chars().count() > MAX_LABEL_CHARS || label.contains('[') {
         return text;
     }
     tail.trim_start()
