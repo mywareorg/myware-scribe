@@ -7375,10 +7375,11 @@ impl App {
                 .on_press(Message::LineClicked(idx))
                 .into();
                 // The exchange button belongs to the bubble, not to the pane
-                // edge: it sits against the bubble's inner side and appears on
-                // hover as well as on the playhead row.
-                let swap = (!single_speaker && (active || hovered))
-                    .then(|| sms_swap_button(idx, &scheme));
+                // edge: it sits against the bubble's inner side and appears
+                // only while the row is hovered, so the playhead row does not
+                // carry a button the pointer is not on.
+                let swap =
+                    (!single_speaker && hovered).then(|| sms_swap_button(idx, &scheme));
                 let mut content_row = row![]
                     .spacing(theme::SPACE_SM)
                     .align_y(iced::Alignment::Center)
@@ -11472,7 +11473,8 @@ fn row_spacer(height: f32) -> Element<'static, Message> {
 /// same height as the control rows above it.
 fn sms_swap_button(index: usize, scheme: &Scheme) -> Element<'static, Message> {
     let scheme = *scheme;
-    icon_pill(ICON_SWAP, scheme.ink)
+    action(icon_colored(ICON_SWAP, SWAP_ICON_SIZE, scheme.ink))
+        .padding(theme::CONTROL_PADDING)
         .on_press(Message::FlipLineSpeaker(index))
         .style(pill_button_secondary)
         .into()
@@ -11904,7 +11906,7 @@ fn line_element(
     // Swap the speaker of this line. It replaces the old pencil in the same
     // reserved slot, so revealing it never rewraps the line.
     let swap: Element<'static, Message> = if hovered {
-        button(icon_colored(ICON_SWAP, size * 0.82, scheme.muted))
+        button(icon_colored(ICON_SWAP, size * 1.05, scheme.muted))
             .padding([0, 2])
             .style(|_theme, _status| button::Style {
                 background: None,
@@ -11954,6 +11956,10 @@ const PILL: f32 = 1000.0;
 
 /// Glyph size of every compact control-row icon.
 const ICON_SIZE: f32 = 14.0;
+
+/// The exchange glyph is the only one that has to read at a glance while the
+/// pointer is already on the row, so it is drawn larger than the control icons.
+const SWAP_ICON_SIZE: f32 = 20.0;
 
 /// A button (content-sized / minimum width).
 fn action<'a>(content: impl Into<Element<'a, Message>>) -> iced::widget::Button<'a, Message> {
