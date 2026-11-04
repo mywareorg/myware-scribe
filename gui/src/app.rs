@@ -9341,6 +9341,34 @@ impl App {
         }
     }
 
+    /// The collapsed player's scrubber: one thin seek bar in place of the
+    /// waveform, so a collapsed card can still show and set the position.
+    fn scrubber_element(&self, scheme: &Scheme) -> Element<'_, Message> {
+        let duration = self.shown_duration().unwrap_or(0.0).max(0.0);
+        // The same gates the transport row uses: a locked player and a file with
+        // no duration both leave the bar inert.
+        let enabled = self.can(license::Feature::Playback) && duration > 0.0;
+        let progress = if duration > 0.0 {
+            (self.playhead / duration).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        canvas(Scrubber {
+            progress,
+            duration,
+            // `track`, not `timeline_bg`: this sits directly on the card, and in
+            // the dark palette `timeline_bg` is the same grey as `panel_bg`, so
+            // the bar would vanish.
+            track: scheme.track,
+            played: scheme.progress,
+            playhead: scheme.ink,
+            enabled,
+        })
+        .width(Length::Fill)
+        .height(Length::Fixed(SCRUBBER_HEIGHT))
+        .into()
+    }
+
     /// Waveform/speaker timeline strip (greyed out until audio is probed).
     fn timeline_element(&self, scheme: &Scheme) -> Element<'_, Message> {
         let duration = self.shown_duration().unwrap_or(0.0);
@@ -10614,46 +10642,32 @@ impl App {
         // The player keeps its own card. The run progress used to sit inside it,
         // which stacked one white surface on another; it is a sibling card above
         // the player instead.
-        // `Player` matches the queue card's title exactly: the card pads 12 and
-        // the title sits 12 above the controls, so the two islands start on the
-        // same line and share a rhythm. No summary beside it: the player already
-        // shows its times, and a second line here would only repeat them.
-        // The caret collapses the scrubber, the speaker ribbon and the legend;
-        // the transport row stays, because a player that cannot play is not a
-        // smaller player. Down while the strip is showing, up once it is gone.
+        //
+        // Expanded, the card is a `Player` title matching the queue card's title
+        // (12 px padding, 12 px down to the controls), then the waveform, then
+        // the transport row. Collapsed, the title goes, the waveform becomes the
+        // thin scrubber above the same transport row, and the caret moves into
+        // that row so the card is two lines rather than three.
         let collapse = if self.player_collapsed {
             ICON_CARET_UP
         } else {
             ICON_CARET_DOWN
         };
-        let title_row = row![
-            text("Player")
-                .size(theme::TEXT_MD)
-                .font(Font {
-                    weight: font::Weight::Bold,
-                    ..Font::DEFAULT
-                })
-                .wrapping(NO_WRAP),
-            horizontal_space(),
-            self.tip(
-                // The triangle alone: no fill, no border, no shadow, and the
-                // app's `subtle_icon_button` only washes it when the pointer is
-                // on it, so the title row reads as a heading with a caret
-                // rather than as a heading beside a button.
-                action(icon(collapse, 16.0))
-                    .on_press(Message::TogglePlayerCollapsed)
-                    .padding([4, 4])
-                    .style(subtle_icon_button),
-                if self.player_collapsed {
-                    "Show the waveform"
-                } else {
-                    "Hide the waveform"
-                },
-                &scheme,
-            ),
-        ]
-        .spacing(theme::SPACE_SM)
-        .align_y(iced::Alignment::Center);
+        // The same caret in both states. The triangle alone: no fill, no border,
+        // no shadow, and `subtle_icon_button` only washes it when the pointer is
+        // on it, so it reads as a disclosure control rather than as a button.
+        let caret = self.tip(
+            action(icon(collapse, 16.0))
+                .on_press(Message::TogglePlayerCollapsed)
+                .padding([4, 4])
+                .style(subtle_icon_button),
+            if self.player_collapsed {
+                "Show the waveform"
+            } else {
+                "Hide the waveform"
+            },
+            &scheme,
+        );
 
         let mut player_body = column![].spacing(8).width(Length::Fill);
         if !self.player_collapsed {
@@ -10661,19 +10675,50 @@ impl App {
         }
         player_body = player_body.push(self.player_element(&scheme));
 
-        let player_box = container(
-            column![title_row, player_body]
-                .spacing(theme::SPACE_LG)
+        let player_box = if self.player_collapsed {
+            // Collapsed: no title. The scrubber takes the waveform's place above
+            // the transport row, keeping the expanded order, and the caret ends
+            // that row so the card is two lines rather than three.
+            container(
+                column![
+                    self.scrubber_element(&scheme),
+                    row![self.player_element(&scheme), horizontal_space(), caret]
+                        .spacing(theme::SPACE_SM)
+                        .align_y(iced::Alignment::Center),
+                ]
+                .spacing(theme::SPACE_MD)
                 .width(Length::Fill),
-        )
-        .width(Length::Fill)
-        .padding(12)
-        .style(move |_theme| container::Style {
-            background: Some(scheme.panel_bg.into()),
-            border: island_border(&scheme),
-            shadow: soft_shadow(),
-            ..container::Style::default()
-        });
+            )
+        } else {
+            let title_row = row![
+                text("Player")
+                    .size(theme::TEXT_MD)
+                    .font(Font {
+                        weight: font::Weight::Bold,
+                        ..Font::DEFAULT
+                    })
+                    .wrapping(NO_WRAP),
+                horizontal_space(),
+                caret,
+            ]
+            .spacing(theme::SPACE_SM)
+            .align_y(iced::Alignment::Center);
+            container(
+                column![title_row, player_body]
+                    .spacing(theme::SPACE_LG)
+                    .width(Length::Fill),
+            )
+        };
+
+        let player_box = player_box
+            .width(Length::Fill)
+            .padding(12)
+            .style(move |_theme| container::Style {
+                background: Some(scheme.panel_bg.into()),
+                border: island_border(&scheme),
+                shadow: soft_shadow(),
+                ..container::Style::default()
+            });
 
         let mut middle = column![].spacing(8).width(Length::Fill);
         if running || self.completion_pending {
@@ -11239,6 +11284,13 @@ struct TimelineTurn {
     color: Color,
 }
 
+/// Height of the collapsed player's scrubber canvas and of the line drawn inside
+/// it. The line is the visible control; the canvas is four times as tall so the
+/// pointer has something to land on, and only 12 px so the collapsed card stays
+/// short.
+const SCRUBBER_HEIGHT: f32 = 12.0;
+const SCRUBBER_LINE: f32 = 3.0;
+
 #[derive(Default)]
 struct TimelineState {
     scrubbing: bool,
@@ -11429,6 +11481,151 @@ impl canvas::Program<Message> for Timeline {
         }
 
         vec![frame.into_geometry()]
+    }
+}
+
+/// The collapsed player's single-line scrubber.
+///
+/// A canvas of its own rather than the [`Timeline`] in a shorter box: that one
+/// draws mirrored bars, a speaker band and a zoom-aware window, none of which
+/// mean anything three pixels tall. This keeps the timeline's vocabulary — a
+/// recessed track, a filled played portion and an ink playhead — and its seek
+/// mapping, minus the zoom.
+struct Scrubber {
+    /// Playhead as a fraction of the duration, 0..1.
+    progress: f32,
+    duration: f32,
+    track: Color,
+    played: Color,
+    playhead: Color,
+    /// False when playback is locked or nothing is loaded: the bar still shows
+    /// where the playhead is, but takes no presses and draws no head.
+    enabled: bool,
+}
+
+#[derive(Default)]
+struct ScrubberState {
+    scrubbing: bool,
+}
+
+/// Time under `x` in a full-width scrubber: the mapping `Timeline::time_at`
+/// applies at zoom 1, without the visible window.
+fn scrub_time_at(x: f32, width: f32, duration: f32) -> f32 {
+    if width <= 0.0 || duration <= 0.0 {
+        return 0.0;
+    }
+    (x / width).clamp(0.0, 1.0) * duration
+}
+
+impl canvas::Program<Message> for Scrubber {
+    type State = ScrubberState;
+
+    fn update(
+        &self,
+        state: &mut ScrubberState,
+        event: canvas::Event,
+        bounds: Rectangle,
+        cursor: mouse::Cursor,
+    ) -> (canvas::event::Status, Option<Message>) {
+        use canvas::event::Status;
+        if !self.enabled {
+            return (Status::Ignored, None);
+        }
+        match event {
+            canvas::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
+                if let Some(position) = cursor.position_in(bounds) {
+                    state.scrubbing = true;
+                    return (
+                        Status::Captured,
+                        Some(Message::Seek(scrub_time_at(
+                            position.x,
+                            bounds.width,
+                            self.duration,
+                        ))),
+                    );
+                }
+            }
+            canvas::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
+                state.scrubbing = false;
+            }
+            // Only while a press started on the bar is held. Like the timeline,
+            // a cursor outside the canvas publishes nothing, so the seek follows
+            // the pointer only while it is over the bar.
+            canvas::Event::Mouse(mouse::Event::CursorMoved { .. }) if state.scrubbing => {
+                if let Some(position) = cursor.position_in(bounds) {
+                    return (
+                        Status::Captured,
+                        Some(Message::Seek(scrub_time_at(
+                            position.x,
+                            bounds.width,
+                            self.duration,
+                        ))),
+                    );
+                }
+            }
+            _ => {}
+        }
+        (Status::Ignored, None)
+    }
+
+    fn draw(
+        &self,
+        _state: &ScrubberState,
+        renderer: &Renderer,
+        _theme: &Theme,
+        bounds: Rectangle,
+        _cursor: mouse::Cursor,
+    ) -> Vec<canvas::Geometry> {
+        let mut frame = canvas::Frame::new(renderer, bounds.size());
+        let width = bounds.width;
+        let height = bounds.height;
+        let line_y = (height - SCRUBBER_LINE) / 2.0;
+        let radius = (SCRUBBER_LINE / 2.0).into();
+
+        frame.fill(
+            &canvas::Path::rounded_rectangle(
+                Point::new(0.0, line_y),
+                Size::new(width, SCRUBBER_LINE),
+                radius,
+            ),
+            self.track,
+        );
+
+        if self.enabled {
+            let x = (width * self.progress.clamp(0.0, 1.0)).clamp(0.0, width);
+            if x > 0.0 {
+                frame.fill(
+                    &canvas::Path::rounded_rectangle(
+                        Point::new(0.0, line_y),
+                        Size::new(x, SCRUBBER_LINE),
+                        radius,
+                    ),
+                    self.played,
+                );
+            }
+            // Full canvas height, so the head crosses the card's own surface
+            // where the ink contrasts, not just the played band.
+            frame.fill_rectangle(
+                Point::new((x - 1.0).max(0.0), 0.0),
+                Size::new(2.0, height),
+                self.playhead,
+            );
+        }
+
+        vec![frame.into_geometry()]
+    }
+
+    fn mouse_interaction(
+        &self,
+        _state: &ScrubberState,
+        bounds: Rectangle,
+        cursor: mouse::Cursor,
+    ) -> mouse::Interaction {
+        if self.enabled && cursor.is_over(bounds) {
+            mouse::Interaction::Pointer
+        } else {
+            mouse::Interaction::None
+        }
     }
 }
 
@@ -16811,6 +17008,20 @@ mod tests {
         assert_eq!(AppTheme::default(), AppTheme::System);
         let app = pro_app();
         assert_eq!(app.theme_mode, AppTheme::System);
+    }
+
+    #[test]
+    fn the_scrubber_maps_x_to_time() {
+        // The whole width is the whole duration, and halfway is half of it.
+        assert_eq!(scrub_time_at(0.0, 200.0, 60.0), 0.0);
+        assert_eq!(scrub_time_at(100.0, 200.0, 60.0), 30.0);
+        assert_eq!(scrub_time_at(200.0, 200.0, 60.0), 60.0);
+        // Past either edge clamps rather than seeking out of range.
+        assert_eq!(scrub_time_at(-10.0, 200.0, 60.0), 0.0);
+        assert_eq!(scrub_time_at(400.0, 200.0, 60.0), 60.0);
+        // No duration, or no width yet, means no time.
+        assert_eq!(scrub_time_at(100.0, 200.0, 0.0), 0.0);
+        assert_eq!(scrub_time_at(100.0, 0.0, 60.0), 0.0);
     }
 
     #[test]
