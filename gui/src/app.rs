@@ -904,7 +904,7 @@ impl App {
             work_total: 0.0,
             eta_samples: VecDeque::new(),
             eta_throughput: None,
-            eta_prior: settings.eta_throughput,
+            eta_prior: settings.eta_throughput.and_then(App::usable_throughput),
             diarize_fraction: 0.0,
             diarize_prior: settings.eta_diarize,
             prepare_prior: settings.eta_prepare,
@@ -5237,7 +5237,7 @@ impl App {
                             .collect();
                         if !rates.is_empty() {
                             rates.sort_by(f32::total_cmp);
-                            self.eta_throughput = Some(median(&rates));
+                            self.eta_throughput = App::usable_throughput(median(&rates));
                         }
                     }
                 }
@@ -5353,11 +5353,13 @@ impl App {
                     let mut learned = false;
                     if stats.asr_seconds > 0.0 && stats.audio_seconds > 0.0 {
                         let sample = (stats.audio_seconds / stats.asr_seconds) as f32;
-                        self.eta_prior = Some(match self.eta_prior {
-                            Some(prior) => prior * 0.5 + sample * 0.5,
-                            None => sample,
-                        });
-                        learned = true;
+                        if let Some(sample) = Self::usable_throughput(sample) {
+                            self.eta_prior = Some(match self.eta_prior {
+                                Some(prior) => prior * 0.5 + sample * 0.5,
+                                None => sample,
+                            });
+                            learned = true;
+                        }
                     }
                     // Diarization cost is measured the same way, so an
                     // ASR-first run still has a rate to wait against.
@@ -5742,7 +5744,10 @@ impl App {
     /// Estimated wall-clock seconds left, derived from measured throughput
     /// (audio seconds transcribed per wall second).
     fn estimate_remaining(&self) -> Option<f32> {
-        let throughput = self.eta_throughput.or(self.eta_prior)?;
+        let throughput = self
+            .eta_throughput
+            .or(self.eta_prior)
+            .and_then(Self::usable_throughput)?;
         if !throughput.is_finite() || throughput <= 0.0 {
             return None;
         }
@@ -5803,6 +5808,16 @@ impl App {
 
         let estimate = current_remaining + queued;
         estimate.is_finite().then_some(estimate.max(0.0))
+    }
+
+    /// Audio seconds per wall second above which a sample cannot be real.
+    ///
+    /// A run served entirely from the segment cache reports a large
+    /// `audio_seconds` against almost no ASR time, and a run whose Work deltas
+    /// arrive back to back looks the same. Learning either would drive every
+    /// later estimate to zero, which is how "finishing..." became permanent.
+    fn usable_throughput(rate: f32) -> Option<f32> {
+        (rate.is_finite() && rate > 0.02 && rate <= MAX_THROUGHPUT).then_some(rate)
     }
 
     fn timer_text(&self) -> String {
@@ -11981,6 +11996,10 @@ const PILL: f32 = 1000.0;
 /// Glyph size of every compact control-row icon.
 const ICON_SIZE: f32 = 14.0;
 
+/// Ceiling for a believable audio-seconds-per-wall-second sample. See
+/// `App::usable_throughput`.
+const MAX_THROUGHPUT: f32 = 200.0;
+
 /// The exchange glyph is the only one that has to read at a glance while the
 /// pointer is already on the row, so it is drawn larger than the control icons.
 const SWAP_ICON_SIZE: f32 = 20.0;
@@ -13859,6 +13878,24 @@ mod tests {
         assert_eq!(app.scroll_target, Some(expected));
 
         let _ = std::fs::remove_dir_all(&media);
+    }
+
+    #[test]
+    fn an_impossible_throughput_never_becomes_an_eta() {
+        // A cached run reports a huge audio/asr ratio; learning it would leave
+        // every later estimate at zero, which shows as a permanent "finishing".
+        assert_eq!(App::usable_throughput(3004.33), None);
+        assert_eq!(App::usable_throughput(f32::INFINITY), None);
+        assert_eq!(App::usable_throughput(0.0), None);
+        assert_eq!(App::usable_throughput(12.5), Some(12.5));
+
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("eta-implausible");
+        let mut app = pro_app();
+        app.status = Status::Running;
+        // A value already saved by an older build is ignored rather than used.
+        app.eta_prior = Some(3004.33);
+        assert!(app.estimate_remaining().is_none());
     }
 
     #[test]
