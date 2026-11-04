@@ -194,6 +194,17 @@ const VIEW_MENU_TOP: f32 =
 /// menu starts on the same left edge whether its row is checked or not.
 const HEADER_MENU_CHECK: f32 = 16.0;
 
+/// The app header's logo, which is the tallest thing in that row and therefore
+/// sets its height. The Help menu hangs from the row's bottom edge, so its top
+/// is measured from this.
+const HEADER_LOGO_SIZE: f32 = 67.0;
+
+/// Top edge of the Help menu: the window's outer padding, the header row, and
+/// the same small gap the menus inside the transcript card hang by. Its right
+/// edge is `OUTER_PADDING` from the window edge, which is the Help button's own
+/// right edge because the button ends the row.
+const HELP_MENU_TOP: f32 = OUTER_PADDING + HEADER_LOGO_SIZE + theme::SPACE_SM;
+
 /// The header's horizontal padding. The menus hang from the same left edge, so
 /// this is named rather than written into both.
 const HEADER_PAD_X: f32 = 8.0;
@@ -229,10 +240,6 @@ fn edit_menu_offset() -> f32 {
 
 fn view_menu_offset() -> f32 {
     edit_menu_offset() + EDIT_BUTTON_WIDTH + theme::SPACE_SM
-}
-
-fn help_menu_offset() -> f32 {
-    view_menu_offset() + VIEW_BUTTON_WIDTH + theme::SPACE_SM
 }
 
 /// Widest the panel's speaker picker may grow, and how many characters of a
@@ -3019,9 +3026,16 @@ impl App {
                 Task::none()
             }
             Message::TranscriptLeft => {
-                // A dialog owns the pointer: an open menu is already hidden
-                // behind its scrim, so leave the state alone.
-                if !self.popup_open() {
+                // Only the card's own menus close when the pointer leaves the
+                // card; Help's menu hangs from the app header and has nothing to
+                // do with where the pointer is. A dialog owns the pointer: an
+                // open menu is already hidden behind its scrim, so leave it.
+                if !self.popup_open()
+                    && matches!(
+                        self.header_menu,
+                        Some(HeaderMenu::File | HeaderMenu::Edit | HeaderMenu::View)
+                    )
+                {
                     self.header_menu = None;
                 }
                 Task::none()
@@ -8903,21 +8917,21 @@ impl App {
             );
         }
 
-        // The header starts with the menus, left to right File, Edit, View and
-        // Help, immediately followed by the file's own identity. Each menu hangs
-        // from its own button's left edge; the offset helpers add the fixed
-        // button widths to its left.
+        // The header starts with the card's own menus, left to right File, Edit
+        // and View, immediately followed by the file's own identity. Each menu
+        // hangs from its own button's left edge; the offset helpers add the
+        // fixed button widths to its left. Help belongs to the app header, not
+        // to this card, so it is not here.
         let menus: Element<Message> = row![
             self.header_menu_button("File", HeaderMenu::File),
             self.header_menu_button("Edit", HeaderMenu::Edit),
             self.header_menu_button("View", HeaderMenu::View),
-            self.header_menu_button("Help", HeaderMenu::Help),
         ]
         .spacing(HEADER_GAP)
         .align_y(iced::Alignment::Center)
         .into();
 
-        // The identity sits one row gap after Help, and the elastic space takes
+        // The identity sits one row gap after View, and the elastic space takes
         // whatever is left: the menus and the label block keep their own widths,
         // so only the space changes with the window.
         let header = container(
@@ -10419,6 +10433,44 @@ impl App {
         stack![base, overlay].into()
     }
 
+    /// The Help menu's own layer over the window.
+    ///
+    /// Help lives in the app header now, outside the transcript card, so its
+    /// menu cannot ride the card's stack. This is a stack level of its own,
+    /// shaped like the toast's: right-aligned, hanging from the header row. A
+    /// full-surface catcher sits under the card and only closes the menu, so a
+    /// press anywhere else dismisses and does nothing else; hover needs no
+    /// catcher, because `pointer_blocked` already makes the page inert while a
+    /// menu is open.
+    fn help_menu_layer<'a>(&'a self, scheme: &Scheme) -> Element<'a, Message> {
+        let open = self.header_menu == Some(HeaderMenu::Help) && !self.popup_open();
+        let layer: Element<'a, Message> = if open {
+            let catcher = mouse_area(
+                container(horizontal_space())
+                    .width(Length::Fill)
+                    .height(Length::Fill),
+            )
+            .interaction(mouse::Interaction::Idle)
+            .on_press(Message::CloseHeaderMenu);
+            let card = container(self.help_menu(scheme))
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .align_x(iced::Alignment::End)
+                .align_y(iced::Alignment::Start)
+                .padding(iced::Padding {
+                    top: HELP_MENU_TOP,
+                    right: OUTER_PADDING,
+                    bottom: 0.0,
+                    left: 0.0,
+                });
+            stack![catcher, card].into()
+        } else {
+            // Closed: an empty filler so the stack keeps its shape.
+            horizontal_space().into()
+        };
+        layer
+    }
+
     pub fn view(&self) -> Element<'_, Message> {
         let scheme = self.scheme();
         let running = matches!(self.status, Status::Running);
@@ -10658,33 +10710,21 @@ impl App {
         // Keep the stack structure stable across hover changes. Swapping
         // between a bare column and a stack remounts the scrollable and resets
         // its scroll position to the top.
-        // A header menu hangs under its button but inside the card, so its
-        // anchor is the card's right inset rather than a window coordinate.
-        // Closed, the slot is a same-size space: the stack keeps its shape, so
-        // the scrollable's tree index and offset never change.
+        // A card menu hangs under its button but inside the card, so its anchor
+        // is a left offset rather than a window coordinate. Closed — and for
+        // Help, which lives in the app header — the slot is a same-size space:
+        // the stack keeps its shape, so the scrollable's tree index and offset
+        // never change.
+        let card_menu_open = !self.popup_open();
         let view_layer: Element<Message> = match self.header_menu {
-            Some(menu) if !self.popup_open() => {
-                let (body, offset) = match menu {
-                    HeaderMenu::File => (self.file_menu(&scheme), file_menu_offset()),
-                    HeaderMenu::Edit => (self.edit_menu(&scheme), edit_menu_offset()),
-                    HeaderMenu::View => (self.view_menu(&scheme), view_menu_offset()),
-                    HeaderMenu::Help => (self.help_menu(&scheme), help_menu_offset()),
-                };
-                // Start-aligned with a left offset: the container lays its child
-                // out inside the padding, so the menu's left edge sits exactly
-                // `offset` from the card's left edge, under its button.
-                let menu = container(body)
-                    .width(Length::Fill)
-                    .height(Length::Fill)
-                    .align_x(iced::Alignment::Start)
-                    .align_y(iced::Alignment::Start)
-                    .padding(iced::Padding {
-                        top: VIEW_MENU_TOP,
-                        right: 0.0,
-                        bottom: 0.0,
-                        left: offset,
-                    });
-                menu.into()
+            Some(HeaderMenu::File) if card_menu_open => {
+                card_menu_layer(self.file_menu(&scheme), file_menu_offset())
+            }
+            Some(HeaderMenu::Edit) if card_menu_open => {
+                card_menu_layer(self.edit_menu(&scheme), edit_menu_offset())
+            }
+            Some(HeaderMenu::View) if card_menu_open => {
+                card_menu_layer(self.view_menu(&scheme), view_menu_offset())
             }
             _ => container(horizontal_space())
                 .width(Length::Fill)
@@ -10752,8 +10792,8 @@ impl App {
 
         let mut header = row![
             iced::widget::image(header_logo_handle())
-                .width(Length::Fixed(67.0))
-                .height(Length::Fixed(67.0)),
+                .width(Length::Fixed(HEADER_LOGO_SIZE))
+                .height(Length::Fixed(HEADER_LOGO_SIZE)),
             column![
                 text("Hippo Transcribe").size(theme::TEXT_XL).font(Font {
                     weight: font::Weight::Bold,
@@ -10773,6 +10813,10 @@ impl App {
         if cfg!(debug_assertions) {
             header = header.push(self.tier_toggle_button(&scheme));
         }
+        // Help ends the row in every build, so its right edge is the row's right
+        // edge — and the menu's, since that is what the layer aligns to. The
+        // debug-only toggle is pushed above precisely so it cannot move it.
+        header = header.push(self.header_menu_button("Help", HeaderMenu::Help));
 
         let mut base = column![
             header,
@@ -10790,6 +10834,9 @@ impl App {
         let mut base: Element<Message> = base.into();
         // Always wrapped: see `drop_overlay` for why its shape must not change.
         base = drop_overlay(base, scheme, self.drag_hover);
+        // The Help menu's layer, over the panels rather than inside the card.
+        // Always present for the same reason as the wrap above.
+        base = stack![base, self.help_menu_layer(&scheme)].into();
 
         if self.reset_confirm {
             let body = column![
@@ -13619,6 +13666,23 @@ fn header_menu_width(rows: &[(&str, Option<&str>)]) -> f32 {
 /// The card every transcript-header menu is drawn in: raised, hairline-outlined
 /// and sized to `rows`. Clicks inside it, including its padding, are consumed so
 /// only a press outside dismisses the menu.
+/// The transcript card's menu layer: `body` hangs `offset` from the card's left
+/// edge and `VIEW_MENU_TOP` from its top.
+fn card_menu_layer<'a>(body: Element<'a, Message>, offset: f32) -> Element<'a, Message> {
+    container(body)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .align_x(iced::Alignment::Start)
+        .align_y(iced::Alignment::Start)
+        .padding(iced::Padding {
+            top: VIEW_MENU_TOP,
+            right: 0.0,
+            bottom: 0.0,
+            left: offset,
+        })
+        .into()
+}
+
 fn header_menu_card<'a>(
     body: impl Into<Element<'a, Message>>,
     rows: &[(&str, Option<&str>)],
@@ -15443,10 +15507,16 @@ mod tests {
             view_menu_offset() - edit_menu_offset(),
             EDIT_BUTTON_WIDTH + theme::SPACE_SM
         );
-        assert_eq!(
-            help_menu_offset() - view_menu_offset(),
-            VIEW_BUTTON_WIDTH + theme::SPACE_SM
-        );
+    }
+
+    #[test]
+    fn the_help_menu_hangs_from_the_header_row() {
+        // The app header row's height is its logo's, and it sits inside the
+        // outer padding; the menu drops one small gap below it. Its right edge
+        // is `OUTER_PADDING` in, which is the row's own right edge — the Help
+        // button ends that row.
+        assert_eq!(HELP_MENU_TOP, OUTER_PADDING + HEADER_LOGO_SIZE + theme::SPACE_SM);
+        assert_eq!(HELP_MENU_TOP, 85.0);
     }
 
     #[test]
