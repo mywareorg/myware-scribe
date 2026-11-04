@@ -1164,22 +1164,10 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
                             }
                         }
                     };
-                    let global_speakers = opts.num_speakers;
                     let handle = std::thread::spawn(move || {
                         let started = Instant::now();
-                        let raw = if diarize::blocks_enabled() {
-                            diarize::run_blockwise(
-                                &session,
-                                audio.as_slice(),
-                                global_speakers,
-                                Some(progress_for_thread),
-                            )
-                        } else {
-                            session.run_with_progress(
-                                audio.as_slice(),
-                                Some(progress_for_thread),
-                            )
-                        };
+                        let raw = session
+                            .run_with_progress(audio.as_slice(), Some(progress_for_thread));
                         // A collapsed turn is the failure that survives the
                         // clustering: one speaker is credited with a stretch
                         // that holds both. Splitting it by embedding drift is

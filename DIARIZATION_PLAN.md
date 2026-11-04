@@ -119,100 +119,34 @@ acceptance is measured against the per-file table in
 `tests/diarization/README.md`, including a re-measure of the shipped 300/45
 geometry against the finished references.
 
-## Phase 3 - Blockwise diarization, cluster-level assignment
+## Phase 3 - Blockwise diarization (measured, removed)
 
-One phase, replacing the earlier blockwise / centroid / Viterbi trio.
+Built, measured, and deleted. Five-minute blocks with a 20-45 s overlap and a
+chained label assignment through the overlap score worse than the single pass on
+every file long enough to have more than one block:
 
-Blocks:
+```text
+file      single @0.25/@1.0     blocks 300/25     blocks 300/45
+long         10.62 / 2.76        12.29 / 4.32      21.45 / 15.71
+full         14.36 / 6.15            -             30.24 / 23.87
+```
 
-- 5 minutes with 45 s overlap (`HIPPO_TRANSCRIBE_DIARIZE_BLOCKS=1`). Shorter
-  overlaps and shorter blocks were measured and were not more stable; see the
-  progress note below.
-- **Seam ownership by midpoint**: a segment belongs to the block whose centre it
-  falls in; drop the duplicate copy before assignment. No seam churn, no nested
-  turns at block boundaries.
-- Local clusters may be 1..N, but a cluster under 2 s or 10% of the block's
-  speech is merged into the nearest local cluster before assignment.
+`full` also loses 250.6 s of one speaker to the other under 300/45, against
+43.9 s in the single pass. The chained assignment is the defect: one wrong link
+inside an overlap propagates through every later block. Files of 300 s or less
+were unaffected either way, which is why the change looked plausible.
 
-Assignment:
+Files, `HIPPO_TRANSCRIBE_DIARIZE_BLOCKS`, the block geometry constants and the
+progress composition were removed rather than left behind a switch. The
+measurements stay in `tests/diarization/README.md`.
 
-- One mean embedding per **local cluster**, never per segment. This preserves
-  the local clustering that was just paid for and removes per-segment flapping
-  at the source.
-- Two global centroids initialised from the most widely separated cluster means;
-  verify the permutation is stable across two independent initialisations.
-- Assign each local cluster **wholesale** to a global centroid, with an absolute
-  similarity floor and a margin veto against the runner-up.
-- Cap influence per **block**, not per segment: a 4.5-minute monologue block
-  otherwise dominates the centroid.
-- Never recompute a centroid from a cluster whose internal dispersion exceeds
-  the inter-centroid distance — that is the re-split check that stops a merged
-  cluster from absorbing the other speaker.
-- Anchor speaker identity explicitly; do not rely on first-appearance ordering,
-  which inverts the whole transcript when one early block is mis-mapped.
-
-Progress:
-
-- Landed behind `HIPPO_TRANSCRIBE_DIARIZE_BLOCKS=1` (default off):
-  block splitting with midpoint seam ownership, per-block local diarization,
-  small-cluster folding, and a chained label assignment that matches each block
-  to the previous one inside their overlap. `HIPPO_TRANSCRIBE_DIARIZE_BLOCK_S`
-  and `..._BLOCK_OVERLAP_S` set the geometry; the geometry is part of the
-  diarization cache salt.
-- Re-measured on `audio/sample-long.mp3` against the finished reference
-  (`tests/diarization/sample-long.rttm`, 242 turns), `--num-speakers 2`, debug
-  build. The earlier figures in this section were taken against a less-edited
-  reference and are superseded:
-
-  ```text
-  single pass            10.62% @0.25s   2.76% @1.0s   confusion 18.13s
-  blocks 300 / 25        12.29% @0.25s   4.32% @1.0s   confusion 25.93s
-  blocks 300 / 45        21.45% @0.25s  15.71% @1.0s   confusion 65.66s
-  ```
-
-  Both blockwise geometries lose to the single pass, and the configured 300/45
-  loses by a factor of two. The long file confirms it at scale: `sample-full`
-  scores 30.24% / 23.87% under 300/45 against 14.36% / 6.15% single pass, and
-  loses 250.6 s of one speaker to the other versus 43.9 s. Files of 300 s or
-  less are unaffected either way: one block is one pass.
-
-  **The shipped geometry is currently 300/45, and that is indefensible on these
-  numbers**: it doubles confusion against the single pass. The 25 s overlap only
-  loses less, because its boundaries happen to link cleanly; the overlap length
-  is not a quality dial. Until the chain is replaced, blocks should stay
-  opt-in and the default must remain the single pass.
-
-  The default single-pass turn map is byte-identical to the recorded baseline.
-
-- **The chained assignment is not good enough to ship.** It is fragile in a way
-  the numbers show directly: a block where the overlap contains only one voice
-  has no evidence for the other label, and one wrong link inverts every block
-  after it. That is why 300/25 loses less and 300/45 loses twice as much on the
-  same file — the block boundaries moved and one link broke. The plan's cluster-mean embedding
-  assignment exists precisely to replace this step; it needs the speaker
-  embedding extractor bound (`sherpa_dynamic.rs` currently binds the diarizer
-  and segmentation configs only), so the remaining work is FFI plus the
-  centroid assignment, not more tuning of the chain.
-
-- `run_with_progress` reports 0..1 per block and `overlap_progress` clamps with
-  `.min()`, so the bar would go backwards. The blockwise path composes progress
-  as `base + span * fraction` instead; the single-pass path is unchanged.
-
-Acceptance:
-
-- Beats, on every file in the table, the current absorption figure; `sample-long`
-  (10.48 s) and `sample-full` (43.94 s) must not regress.
-- Does not regress the full-file pass on the 300-600 s window (13.15% / 5.55%).
-- No block where both global speakers collapse into one.
-- No phantom speaker on the single-speaker check once a file exists.
-- Diarize wall time stays below ASR wall time for the same file.
-
-Explicit non-goals: frame-level Viterbi smoothing, forced alignment,
-overlap-aware segmentation, incremental attribution inside the ASR path.
-
-Overlap justification: Sherpa already emits both speakers on powerset overlap
-frames, reference overlap is ~1% of speech, and the transcript UI renders one
-speaker per line. The ceiling does not pay for the work.
+What the phase established, and what replaces it: the failure it was meant to
+fix is real (one speaker absorbed for tens of seconds on `mid-1` and `short-1`),
+but blocks are the wrong axis. Three further approaches were measured and
+rejected - turn-level re-clustering, a dense window track, and three identity
+rules for split turns - each documented with numbers. The common cause is model
+quality per recording, not the geometry of the pass: the same embedding model
+wins on one file and loses by 25 points on another.
 
 ## Phase 4 - UI, cache, progress
 
@@ -224,9 +158,11 @@ speaker per line. The ceiling does not pay for the work.
   bytes) while the pipeline writes with `samples_hash` (decoded samples), so GUI
   cache reads always missed. `e8c1c6f` writes the turns under both keys, since a
   restored queue has the file and no samples.
-- Include block geometry and embedding model in per-block cache keys.
-- `Diarizing block 3/12`, with a correct base/span.
-- `Only one speaker detected` when the global result is one centroid.
+- (done) `Only one speaker detected` in the transcript header when diarization
+  returns a single voice; the lines are unlabelled, which otherwise reads as a
+  failure.
+- (done) The blockwise path and its geometry are gone, so the cache salt is a
+  constant `single` plus the model pair.
 
 ## Phase 5 - Performance and Windows validation
 
@@ -241,20 +177,19 @@ speaker per line. The ceiling does not pay for the work.
 
 ## Recommended order
 
-1. Finish Phase 3: replace the chained block labels with cluster-mean embedding
-   assignment. This needs the speaker embedding extractor bound in
-   `core/src/sherpa_dynamic.rs`, which is not there yet.
-2. Re-measure both geometries (300/45 and 300/25) against the eight-file table.
-   If 300/45 still loses on every file, do not ship it; the chain is the defect,
-   not the overlap length.
-3. (done, opt-in) Split collapsed turns by embedding drift:
+1. (done, opt-in) Split collapsed turns by embedding drift:
    `HIPPO_TRANSCRIBE_DIARIZE_SPLIT=1` takes `hour-conversation-short-1` from
    53.89% to 27.18% and `mid-2` from 33.45% to 28.22%, at the cost of +0.7 and
    +0.2 points on `sample-long`/`sample-full`. Two identity rules were measured
    and rejected; see `tests/diarization/README.md`. Promoting it to default
    needs the two small regressions removed.
-4. Cache/progress corrections (Phase 4 remainder).
-5. Windows and performance validation (Phase 5).
+2. Windows and performance validation (Phase 5): the Windows matrix, peak
+   memory, and a release-build timing run.
+
+The clustering work is closed unless a better speaker model appears. Four
+post-processing designs were measured against the eight-file table and each one
+traded files rather than improving them; the remaining error is model quality
+per recording.
 
 Viterbi smoothing, overlap research, forced alignment, and incremental
 attribution are deferred, each with a documented reason above.
