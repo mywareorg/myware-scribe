@@ -130,6 +130,39 @@ The remaining regression is small and confined to the two files where the
 diarizer is already close to the reference; splitting is worth enabling on
 files like `short-1` where one speaker is collapsed for tens of seconds.
 
+## Dense window track (measured, removed)
+
+A 1.5 s window track (0.75 s hop, Viterbi with a switch penalty 0.02) that
+replaces the diarizer's turn geometry, with centroids taken either from the
+diarizer's own turns or from clustering the windows themselves. The idea was to
+fix under-segmentation, which no post-pass over turns can.
+
+```
+file          baseline @0.25/@1.0   diarizer seed      k-means seed
+short-1          53.89 / 48.13      45.64 / 42.26      13.24 /  5.59
+mid-1            34.97 / 26.76      34.30 / 27.44      38.50 / 33.42
+mid-2            33.45 / 25.47      25.30 / 20.72      28.19 / 19.83
+short-2          13.57 /  1.82      16.66 /  9.78      43.24 / 40.86
+end              10.60 /  3.58      11.44 /  1.32      19.54 / 15.12
+full             14.36 /  6.15      14.81 /  6.64      21.09 / 13.07
+long             10.62 /  2.76      11.67 /  4.73      20.35 / 15.91
+short            10.36 /  1.60      19.01 /  8.79      44.39 / 41.89
+```
+
+The diarizer seed is a wash: it wins `mid-2` and half of `short-1`, and loses
+the files that were already at 10-13%. The k-means seed is spectacular on
+`short-1` (better than the 21% oracle-span ceiling) and ruins six files,
+including two at 10-13%.
+
+Seeding the k-means with restarts and picking the lowest-inertia assignment
+made it worse, not better: `short-1` 13.24% -> 14.39%, `short-2` 43.24% ->
+54.60%, `sample-short` 44.39% -> 48.94%, `sample-long` unchanged at 20.35%.
+Inertia rewards a balanced split by whatever feature varies (level, music),
+not by speaker identity.
+
+Deleted rather than kept behind a flag: it costs roughly a doubling of the
+diarize stage and is neutral at best.
+
 ## Ceiling test: reference spans through our own clustering
 
 A diagnostic, not a result: take the reference's own spans (perfect
