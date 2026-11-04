@@ -31,13 +31,21 @@ impl LineEdit {
     /// row can become a field where it stands. `None` when `index` is out of
     /// range.
     pub(crate) fn inline(index: usize, lines: &[DocLine]) -> Option<Self> {
+        Self::inline_at(index, lines, usize::MAX)
+    }
+
+    /// Open the editor on `index` with the caret `caret` bytes into the line's
+    /// text. `usize::MAX` puts the caret at the end, which is where a fresh edit
+    /// starts; a merge or a split passes the join point so the caret lands
+    /// where the two halves met rather than at the far end of the line.
+    pub(crate) fn inline_at(index: usize, lines: &[DocLine], caret: usize) -> Option<Self> {
         let line = lines.get(index)?;
         Some(Self {
             index,
             rows: vec![LineEditRow {
                 index,
                 speaker: line.speaker.clone(),
-                content: content_at_end(&line_text(line)),
+                content: content_at(&line_text(line), caret),
             }],
         })
     }
@@ -57,10 +65,27 @@ impl LineEdit {
     }
 }
 
-/// An editor holding `text` with the caret at the end, ready to be typed into.
-fn content_at_end(text: &str) -> text_editor::Content {
+/// An editor holding `text` with the caret `caret` bytes in; past the end puts
+/// it at the end.
+fn content_at(text: &str, caret: usize) -> text_editor::Content {
     let mut content = text_editor::Content::with_text(text);
-    content.perform(text_editor::Action::Move(text_editor::Motion::End));
+    if caret >= text.len() {
+        content.perform(text_editor::Action::Move(text_editor::Motion::End));
+        return content;
+    }
+    content.perform(text_editor::Action::Move(text_editor::Motion::Home));
+    let mut bytes = 0;
+    let mut offset = 0;
+    for character in text.chars() {
+        if bytes >= caret {
+            break;
+        }
+        bytes += character.len_utf8();
+        offset += 1;
+    }
+    for _ in 0..offset {
+        content.perform(text_editor::Action::Move(text_editor::Motion::Right));
+    }
     content
 }
 
