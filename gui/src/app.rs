@@ -7278,7 +7278,7 @@ impl App {
                 .placeholder("Import")
                 .style(ink_pick(scheme))
                 .menu_style(pick_menu_style(scheme))
-                .handle(caret_handle(false))
+                .handle(caret_handle())
                 .width(Length::Fixed(126.0))
                 .into()
         } else {
@@ -7288,7 +7288,7 @@ impl App {
                         .placeholder("Import")
                         .style(greyed_pick(scheme))
                         .menu_style(pick_menu_style(scheme))
-                        .handle(caret_handle(false))
+                        .handle(caret_handle())
                         .width(Length::Fixed(122.0)),
                     mouse_area(
                         container(horizontal_space())
@@ -8086,6 +8086,7 @@ impl App {
                 )
                 .style(speaker_pick(accent, scheme))
                 .menu_style(pick_menu_style(scheme))
+                .handle(caret_handle())
                 .text_size(theme::TEXT_SM)
                 .font(Font {
                     weight: font::Weight::Bold,
@@ -8832,7 +8833,7 @@ impl App {
                     pick_list(Speed::ALL, Some(Speed::One), Message::SpeedChanged)
                         .style(greyed_pick(*scheme))
                         .menu_style(pick_menu_style(*scheme))
-                        .handle(caret_handle(false)),
+                        .handle(caret_handle()),
                     mouse_area(
                         container(horizontal_space())
                             .width(Length::Fill)
@@ -8852,14 +8853,14 @@ impl App {
             )
             .style(speed_pick(*scheme))
             .menu_style(pick_menu_style(*scheme))
-            .handle(caret_handle(false))
+            .handle(caret_handle())
             .into()
         } else {
             stack![
                 pick_list(Speed::ALL, Some(Speed::One), Message::SpeedChanged)
                     .style(greyed_pick(*scheme))
                     .menu_style(pick_menu_style(*scheme))
-                    .handle(caret_handle(false)),
+                    .handle(caret_handle()),
                 mouse_area(
                     container(horizontal_space())
                         .width(Length::Fill)
@@ -9300,7 +9301,7 @@ impl App {
             pick_list(AppTheme::ALL, Some(self.theme_mode), Message::SetTheme)
                 .style(ink_pick(scheme))
                 .menu_style(pick_menu_style(scheme))
-                .handle(caret_handle(false))
+                .handle(caret_handle())
                 .width(Length::Fixed(180.0)),
         );
 
@@ -9336,7 +9337,7 @@ impl App {
                     pick_list(Preset::ALL, Some(Preset::Balanced), Message::PresetChanged,)
                         .style(greyed_pick(scheme))
                         .menu_style(pick_menu_style(scheme))
-                        .handle(caret_handle(false))
+                        .handle(caret_handle())
                         .width(Length::Fixed(180.0)),
                     mouse_area(
                         container(horizontal_space())
@@ -9353,7 +9354,7 @@ impl App {
             pick_list(Preset::ALL, Some(self.preset), Message::PresetChanged)
                 .style(pill_pick(scheme))
                 .menu_style(pick_menu_style(scheme))
-                .handle(caret_handle(false))
+                .handle(caret_handle())
                 .width(Length::Fixed(180.0))
                 .into()
         };
@@ -9373,7 +9374,7 @@ impl App {
                     )
                     .style(greyed_pick(scheme))
                     .menu_style(pick_menu_style(scheme))
-                    .handle(caret_handle(false))
+                    .handle(caret_handle())
                     .width(Length::Fixed(180.0)),
                     mouse_area(
                         container(horizontal_space())
@@ -9394,7 +9395,7 @@ impl App {
             )
             .style(pill_pick(scheme))
             .menu_style(pick_menu_style(scheme))
-            .handle(caret_handle(false))
+            .handle(caret_handle())
             .width(Length::Fixed(180.0))
             .into()
         };
@@ -9413,7 +9414,7 @@ impl App {
             )
             .style(pill_pick(scheme))
             .menu_style(pick_menu_style(scheme))
-            .handle(caret_handle(false))
+            .handle(caret_handle())
             .width(Length::Fixed(180.0))
             .into()
         };
@@ -9426,7 +9427,7 @@ impl App {
             )
             .style(speed_pick(scheme))
             .menu_style(pick_menu_style(scheme))
-            .handle(caret_handle(false))
+            .handle(caret_handle())
             .width(Length::Fixed(180.0)),
         );
 
@@ -10076,7 +10077,7 @@ impl App {
                     .placeholder("Help")
                     .style(pill_pick(scheme))
                     .menu_style(pick_menu_style(scheme))
-                    .handle(caret_handle(true))
+                    .handle(caret_handle())
                     .width(Length::Fixed(92.0)),
             );
 
@@ -11463,9 +11464,17 @@ impl canvas::Program<Message> for DeckWaveform {
     }
 }
 
-/// A dynamic pick-list handle: caret points down when closed (or up when
-/// `invert` is set), flipping when the menu opens.
-fn caret_handle(invert: bool) -> pick_list::Handle<Font> {
+/// The caret every pick list draws in its handle: a downward caret when the
+/// list is closed, an upward one when it is open.
+///
+/// The flip is a state cue, not a direction: Material and Fluent/WinUI both
+/// rotate the chevron 180 degrees on expand, and neither points it at the side
+/// the list appears on — Fluent's own combo boxes open above the control when it
+/// sits near the bottom of the screen and still flip the chevron up. iced makes
+/// the same point unavoidable here: it chooses whether the menu opens above or
+/// below (`overlay/menu.rs:246-255`) and never reports it, and `Status::Opened`
+/// is the same in both cases, so a caret that flips can only express state.
+fn caret_handle() -> pick_list::Handle<Font> {
     let icon = |code: char| pick_list::Icon {
         font: Font::with_name("bootstrap-icons"),
         code_point: code,
@@ -11473,12 +11482,10 @@ fn caret_handle(invert: bool) -> pick_list::Handle<Font> {
         line_height: iced::advanced::text::LineHeight::default(),
         shaping: iced::advanced::text::Shaping::Basic,
     };
-    let (closed, open) = if invert {
-        (icon(ICON_CARET_UP), icon(ICON_CARET_DOWN))
-    } else {
-        (icon(ICON_CARET_DOWN), icon(ICON_CARET_UP))
-    };
-    pick_list::Handle::Dynamic { closed, open }
+    pick_list::Handle::Dynamic {
+        closed: icon(ICON_CARET_DOWN),
+        open: icon(ICON_CARET_UP),
+    }
 }
 
 /// Pick-list style whose text/placeholder/handle use `ink` (button text colour).
