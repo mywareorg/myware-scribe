@@ -704,6 +704,7 @@ pub enum Message {
     Noop,
     OpenSummary,
     SmsToggled(bool),
+    TogglePlayerCollapsed,
     NotificationsToggled(bool),
     SetAcceleration(bool),
     TestGpu,
@@ -1009,6 +1010,9 @@ pub struct App {
     rename_fields: Vec<(String, String)>,
     rename_focus: usize,
     sms_mode: bool,
+    /// The player's waveform, speaker ribbon and legend are hidden. The
+    /// transport row stays: the card can lose its scrubber, not its playback.
+    player_collapsed: bool,
     notifications: bool,
     /// Calibration results and selected backend, keyed by preset arg.
     gpu_profiles: HashMap<String, GpuProfile>,
@@ -1289,6 +1293,7 @@ impl App {
             rename_fields: Vec::new(),
             rename_focus: 0,
             sms_mode: settings.sms_mode.unwrap_or(false),
+            player_collapsed: false,
             notifications: settings.notifications,
             gpu_profiles: settings.gpu_profiles.clone(),
             gpu_actual: None,
@@ -2903,6 +2908,10 @@ impl App {
     /// strip's appearance or disappearance needs.
     fn dispatch(&mut self, message: Message) -> Task<Message> {
         match message {
+            Message::TogglePlayerCollapsed => {
+                self.player_collapsed = !self.player_collapsed;
+                Task::none()
+            }
             Message::SmsToggled(value) => {
                 // Bubbles and lines are laid out differently: keep the edited
                 // row as a line and commit it before the view changes shape.
@@ -10609,24 +10618,47 @@ impl App {
         // the title sits 12 above the controls, so the two islands start on the
         // same line and share a rhythm. No summary beside it: the player already
         // shows its times, and a second line here would only repeat them.
+        // The caret collapses the scrubber, the speaker ribbon and the legend;
+        // the transport row stays, because a player that cannot play is not a
+        // smaller player. Down while the strip is showing, up once it is gone.
+        let collapse = if self.player_collapsed {
+            ICON_CARET_UP
+        } else {
+            ICON_CARET_DOWN
+        };
+        let title_row = row![
+            text("Player")
+                .size(theme::TEXT_MD)
+                .font(Font {
+                    weight: font::Weight::Bold,
+                    ..Font::DEFAULT
+                })
+                .wrapping(NO_WRAP),
+            horizontal_space(),
+            self.tip(
+                icon_pill(collapse, scheme.ink)
+                    .on_press(Message::TogglePlayerCollapsed),
+                if self.player_collapsed {
+                    "Show the waveform"
+                } else {
+                    "Hide the waveform"
+                },
+                &scheme,
+            ),
+        ]
+        .spacing(theme::SPACE_SM)
+        .align_y(iced::Alignment::Center);
+
+        let mut player_body = column![].spacing(8).width(Length::Fill);
+        if !self.player_collapsed {
+            player_body = player_body.push(self.timeline_element(&scheme));
+        }
+        player_body = player_body.push(self.player_element(&scheme));
+
         let player_box = container(
-            column![
-                text("Player")
-                    .size(theme::TEXT_MD)
-                    .font(Font {
-                        weight: font::Weight::Bold,
-                        ..Font::DEFAULT
-                    })
-                    .wrapping(NO_WRAP),
-                column![
-                    self.timeline_element(&scheme),
-                    self.player_element(&scheme)
-                ]
-                .spacing(8)
+            column![title_row, player_body]
+                .spacing(theme::SPACE_LG)
                 .width(Length::Fill),
-            ]
-            .spacing(theme::SPACE_LG)
-            .width(Length::Fill),
         )
         .width(Length::Fill)
         .padding(12)
@@ -16773,6 +16805,22 @@ mod tests {
         assert_eq!(AppTheme::default(), AppTheme::System);
         let app = pro_app();
         assert_eq!(app.theme_mode, AppTheme::System);
+    }
+
+    #[test]
+    fn the_player_caret_collapses_the_waveform() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("player-collapse");
+        let mut app = pro_app();
+
+        assert!(!app.player_collapsed, "the waveform starts visible");
+        let _ = app.update(Message::TogglePlayerCollapsed);
+        assert!(app.player_collapsed);
+        // The card still builds with the timeline gone: the transport row is
+        // what the collapsed state keeps.
+        let _ = app.view();
+        let _ = app.update(Message::TogglePlayerCollapsed);
+        assert!(!app.player_collapsed);
     }
 
     #[test]
