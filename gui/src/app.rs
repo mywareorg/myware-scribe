@@ -963,7 +963,7 @@ impl App {
             follow_playhead: settings.follow_playhead.unwrap_or(true),
             // Low-confidence lines are marked from the moment a transcript with
             // confidence data is opened; the toggle is there to quiet them.
-            confidence_view: true,
+            confidence_view: false,
             console_open: false,
             console_lines: Vec::new(),
             toast: None,
@@ -12951,13 +12951,13 @@ mod tests {
     }
 
     #[test]
-    fn low_confidence_marking_is_on_by_default() {
+    fn low_confidence_marking_is_off_by_default() {
         let _guard = env_lock();
         let _config = ConfigEnv::new("confidence-default");
         let app = pro_app();
-        // The marker is a view-only affordance: it must be visible as soon as a
-        // transcript with confidence data is opened, not hidden behind a toggle.
-        assert!(app.confidence_view);
+        // Opt-in: the dulled rows are useful for checking a transcript, but
+        // they make every other read noisier, so they stay off until asked for.
+        assert!(!app.confidence_view);
     }
 
     #[test]
