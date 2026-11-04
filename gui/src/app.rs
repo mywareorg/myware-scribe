@@ -31,7 +31,7 @@ const AUDIO_EXTS: &[&str] = &[
 ];
 
 /// Height of the waveform/speaker timeline strip.
-const TIMELINE_HEIGHT: f32 = 72.0;
+const TIMELINE_HEIGHT: f32 = 36.0;
 
 /// Movement smaller than this is invisible, so the follow logic does not
 /// issue a programmatic transcript scroll for it. Kept under the 6 px
@@ -9200,25 +9200,17 @@ impl App {
             text(label).into()
         };
 
-        let bar_style = move |_theme: &Theme| progress_bar::Style {
-            background: linear_gradient(
-                theme::darken(scheme.bar_track, 0.12),
-                theme::lighten(scheme.bar_track, 0.05),
-            ),
-            bar: linear_gradient(
-                theme::lighten(scheme.progress, 0.28),
-                theme::darken(scheme.progress, 0.06),
-            ),
-            border: iced::border::Border {
-                color: theme::darken(scheme.bar_track, 0.20),
-                width: 1.0,
-                radius: 15.0.into(),
-            },
-        };
-        let bar = progress_bar(0.0..=1.0, global_progress)
-            .width(Length::Fill)
-            .height(Length::Fixed(30.0))
-            .style(bar_style);
+        // The bar is drawn rather than composed from a `progress_bar`, so the
+        // fill's corner radius can follow its own width: a two-pixel fill has to
+        // stay a pill instead of inheriting a 15 px radius it cannot fit.
+        let bar = canvas(ProgressTrack {
+            fraction: global_progress.clamp(0.0, 1.0),
+            track: theme::darken(scheme.bar_track, 0.06),
+            edge: theme::darken(scheme.bar_track, 0.20),
+            fill: theme::lighten(scheme.progress, 0.16),
+        })
+        .width(Length::Fill)
+        .height(Length::Fixed(30.0));
         let label = container(label_el)
             .center_x(Length::Fill)
             .center_y(Length::Fill);
@@ -9242,8 +9234,22 @@ impl App {
         let status_row = row![clock, progress_shell]
             .spacing(4)
             .align_y(iced::Alignment::Center);
+        // Progress, elapsed time and the stage label describe the run, not the
+        // recording, so they get their own surface and disappear when the run
+        // does. The waveform and player belong together and stay.
+        let status_box = container(status_row)
+            .width(Length::Fill)
+            .padding([8, 10])
+            .style(move |_theme| container::Style {
+                background: Some(scheme.track.into()),
+                border: iced::border::rounded(12.0),
+                ..container::Style::default()
+            });
 
-        let mut middle = column![status_row].spacing(8).width(Length::Fill);
+        let mut middle = column![].spacing(8).width(Length::Fill);
+        if running || self.completion_pending {
+            middle = middle.push(status_box);
+        }
         middle = middle.push(self.timeline_element(&scheme));
         middle = middle.push(self.player_element(&scheme));
 
@@ -10708,6 +10714,71 @@ fn feature_vignette_local(scheme: Scheme) -> Element<'static, Message> {
     .center_x(Length::Fill)
     .center_y(Length::Fill)
     .into()
+}
+
+/// The run progress bar: a rounded track with a rounded fill whose corner
+/// radius follows its own width, so a barely-started bar is still a pill.
+struct ProgressTrack {
+    fraction: f32,
+    track: Color,
+    edge: Color,
+    fill: Color,
+}
+
+impl canvas::Program<Message> for ProgressTrack {
+    type State = ();
+
+    fn update(
+        &self,
+        _state: &mut Self::State,
+        _event: canvas::Event,
+        _bounds: Rectangle,
+        _cursor: mouse::Cursor,
+    ) -> (canvas::event::Status, Option<Message>) {
+        (canvas::event::Status::Ignored, None)
+    }
+
+    fn draw(
+        &self,
+        _state: &(),
+        renderer: &iced::Renderer,
+        _theme: &Theme,
+        bounds: Rectangle,
+        _cursor: mouse::Cursor,
+    ) -> Vec<canvas::Geometry> {
+        let mut frame = canvas::Frame::new(renderer, bounds.size());
+        let width = bounds.width;
+        let height = bounds.height;
+        let radius = height / 2.0;
+        let track = canvas::Path::rounded_rectangle(
+            Point::ORIGIN,
+            Size::new(width, height),
+            radius.into(),
+        );
+        frame.fill(&track, self.track);
+        frame.stroke(
+            &track,
+            canvas::Stroke::default()
+                .with_color(self.edge)
+                .with_width(1.0),
+        );
+
+        // Inset by the border, then clamp the radius to half of whichever
+        // dimension is smaller: that is what keeps a short fill round.
+        let inset = 1.0f32;
+        let fill_width = (width * self.fraction - inset).clamp(0.0, width - inset * 2.0);
+        let fill_height = (height - inset * 2.0).max(0.0);
+        if fill_width >= 0.5 && fill_height > 0.5 {
+            let corner = fill_width.min(fill_height) / 2.0;
+            let path = canvas::Path::rounded_rectangle(
+                Point::new(inset, inset),
+                Size::new(fill_width, fill_height),
+                corner.into(),
+            );
+            frame.fill(&path, self.fill);
+        }
+        vec![frame.into_geometry()]
+    }
 }
 
 /// Abstract waveform used by the review slide: deterministic, no audio needed.
