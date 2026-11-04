@@ -130,6 +130,28 @@ The remaining regression is small and confined to the two files where the
 diarizer is already close to the reference; splitting is worth enabling on
 files like `short-1` where one speaker is collapsed for tens of seconds.
 
+## Re-clustering the turns (measured, not shipped)
+
+An experiment, recorded so it is not repeated without new evidence: embed every
+turn with the speaker model, run 2-means over those vectors, and replace the
+diarizer's labels.
+
+```
+file            diarizer labels   re-clustered     coherence gate
+mid-1            34.97%            29.95%           rejected (34.97%)
+short-1          53.89%            54.07%           rejected
+sample-long      10.62%            22.76%           rejected
+```
+
+It helps exactly the file whose global clustering is wrong and destroys one
+where it is right. The intended discriminator — mean within-label cosine for
+each labelling — chose the diarizer's labels on all three files, including
+`mid-1`, so it cannot tell the good case from the bad.
+
+What the experiment does show: `mid-1`'s 35% is a clustering error, not a
+segmentation error. Any future fix has to replace the clustering on files like
+it, with a signal better than within-label coherence.
+
 ## Independent blocks are not an improvement
 
 An ablation, not a test of the shipped blockwise path: the same 300-600 s window
