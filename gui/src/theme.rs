@@ -302,17 +302,13 @@ impl Scheme {
     }
 
     pub fn dark() -> Scheme {
-        // IBM Carbon Gray 90 base. One neutral ramp, one blue accent, and
-        // semantic support colours; controls and speaker chips are the only
-        // things allowed to sit above the surface.
+        // IBM Carbon Gray 100. One neutral ramp, one blue accent, and
+        // semantic support colours; this keeps panels, fields, and speaker
+        // chips from competing with each other.
         Scheme {
-            // One surface for every background an element sits on: window,
-            // panels, cards and dialogs. Elevation is carried by the hairline
-            // border and the card shadow, not by a lighter fill, so a card can
-            // no longer look like a different material from the window.
-            bg: Color::from_rgb(0.149, 0.149, 0.149), // Gray 90  #262626
+            bg: Color::from_rgb(0.086, 0.086, 0.086), // Gray 100 #161616
             panel_bg: Color::from_rgb(0.149, 0.149, 0.149), // Gray 90  #262626
-            dialog_bg: Color::from_rgb(0.149, 0.149, 0.149), // Gray 90  #262626
+            dialog_bg: Color::from_rgb(0.224, 0.224, 0.224), // Gray 80  #393939
             track: Color::from_rgb(0.224, 0.224, 0.224), // Gray 80
             bar_track: Color::from_rgb(0.224, 0.224, 0.224), // Gray 80
             progress: Color::from_rgb(0.471, 0.663, 1.0), // Blue 40  #78a9ff
