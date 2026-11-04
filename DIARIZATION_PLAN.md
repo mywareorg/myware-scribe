@@ -136,8 +136,38 @@ Assignment:
 
 Progress:
 
+- Landed behind `HIPPO_TRANSCRIBE_DIARIZE_BLOCKS=1` (default off):
+  block splitting with midpoint seam ownership, per-block local diarization,
+  small-cluster folding, and a chained label assignment that matches each block
+  to the previous one inside their overlap. `HIPPO_TRANSCRIBE_DIARIZE_BLOCK_S`
+  and `..._BLOCK_OVERLAP_S` set the geometry; the geometry is part of the
+  diarization cache salt.
+- Measured on `audio/sample-long.mp3` against `tests/diarization/sample-long.rttm`,
+  `--num-speakers 2`, debug build:
+
+  ```text
+  single pass            13.04% @0.25s   7.08% @1.0s   confusion 31.73s
+  blocks 300 / 25        11.45% @0.25s   4.63% @1.0s   confusion 25.07s
+  blocks 240 / 60        13.55% @0.25s   6.80% @1.0s   confusion 34.20s
+  blocks 180 / 60        29.01% @0.25s  20.77% @1.0s   confusion 101.62s
+  blocks 300 / 45        23.43% @0.25s  19.15% @1.0s   confusion  77.36s
+  ```
+
+  The default single-pass turn map is byte-identical to the recorded baseline.
+
+- **The chained assignment is not good enough to ship.** It is fragile in a way
+  the numbers show directly: a block where the overlap contains only one voice
+  has no evidence for the other label, and one wrong link inverts every block
+  after it. That is why 300/25 wins and 300/45 loses on the same file — the
+  block boundaries moved and one link broke. The plan's cluster-mean embedding
+  assignment exists precisely to replace this step; it needs the speaker
+  embedding extractor bound (`sherpa_dynamic.rs` currently binds the diarizer
+  and segmentation configs only), so the remaining work is FFI plus the
+  centroid assignment, not more tuning of the chain.
+
 - `run_with_progress` reports 0..1 per block and `overlap_progress` clamps with
-  `.min()`, so the bar would go backwards. Add a base/span parameter.
+  `.min()`, so the bar would go backwards. The blockwise path composes progress
+  as `base + span * fraction` instead; the single-pass path is unchanged.
 
 Acceptance:
 

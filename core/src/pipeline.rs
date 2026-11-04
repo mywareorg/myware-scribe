@@ -873,7 +873,9 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
     let segmentation = models::segmentation_model();
     let embedding = models::embedding_model();
     let whisper = models::whisper_model(&opts.preset);
-    let diarizer = models::diarizer_id();
+    // The salt carries the turn geometry as well as the model pair: a cached
+    // single pass must not be served to a blockwise run.
+    let diarizer = format!("{}-{}", models::diarizer_id(), diarize::geometry_id());
     let diarized = opts.mode.diarizes();
 
     emit(Event::Stage {
@@ -1162,10 +1164,22 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
                             }
                         }
                     };
+                    let global_speakers = opts.num_speakers;
                     let handle = std::thread::spawn(move || {
                         let started = Instant::now();
-                        let result =
-                            session.run_with_progress(audio.as_slice(), Some(progress_for_thread));
+                        let result = if diarize::blocks_enabled() {
+                            diarize::run_blockwise(
+                                &session,
+                                audio.as_slice(),
+                                global_speakers,
+                                Some(progress_for_thread),
+                            )
+                        } else {
+                            session.run_with_progress(
+                                audio.as_slice(),
+                                Some(progress_for_thread),
+                            )
+                        };
                         (result, started.elapsed().as_secs_f64())
                     });
                     DiarizeJob::Running(handle, progress)
