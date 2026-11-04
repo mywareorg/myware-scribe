@@ -574,8 +574,8 @@ pub enum Message {
     Cancel,
     Tick,
     /// One display frame. `window::frames()` is subscribed only while a follow
-    /// glide runs or a click point is waiting for the editor's first layout:
-    /// those are the only things that need a frame clock.
+    /// glide runs or a caret or focus is waiting for a first layout: those are
+    /// the only things that need a frame clock.
     Frame(Instant),
     RenameName(usize, String),
     RenameSave,
@@ -659,6 +659,9 @@ pub enum Message {
     Escape,
     ShortcutPlay,
     ShortcutPlayChecked(bool),
+    /// Plain `f` outside a text field.
+    ShortcutFollow,
+    ShortcutFollowChecked(bool),
     SeekBy(f32),
     SeekByChecked(f32, bool),
     ImportPicked(Option<PathBuf>),
@@ -997,6 +1000,12 @@ pub struct App {
     /// When the current slide was shown; drives auto-advance.
     feature_slide_at: Instant,
     search_query: String,
+    /// The Find row is showing. It is hidden until Ctrl+F, so the transcript
+    /// card can reach the bottom of the pane.
+    find_open: bool,
+    /// Ctrl+F asked for the Find field before it was mounted; focus it on the
+    /// next frame, once it has a widget and a layout.
+    find_focus_pending: bool,
     speaker_filter: Option<String>,
     search_index: usize,
     playback_speed: f32,
@@ -1237,6 +1246,8 @@ impl App {
             feature_slide_at: Instant::now(),
             waveform_zoom: settings.waveform_zoom.unwrap_or(1.0),
             search_query: String::new(),
+            find_open: false,
+            find_focus_pending: false,
             speaker_filter: None,
             search_index: 0,
             playback_speed: settings.playback_speed.unwrap_or(1.0),
@@ -1875,6 +1886,8 @@ impl App {
         }
 
         self.header_menu = None;
+        self.find_open = false;
+        self.find_focus_pending = false;
         self.view_error = None;
         self.join_lines = false;
         self.joined_lines.clear();
@@ -1940,6 +1953,8 @@ impl App {
         // Changing what is on screen commits the open inline edit first: its
         // row belongs to the document being left.
         self.header_menu = None;
+        self.find_open = false;
+        self.find_focus_pending = false;
         self.commit_inline_edit(false);
         let Some(item) = self.queue.get(index) else {
             return Task::none();
@@ -2051,6 +2066,8 @@ impl App {
     fn return_to_live(&mut self) {
         // The edited row belongs to the view being dropped.
         self.header_menu = None;
+        self.find_open = false;
+        self.find_focus_pending = false;
         self.commit_inline_edit(false);
         self.invalidate_derived();
         self.selected = None;
@@ -2072,6 +2089,7 @@ impl App {
         self.reset_pane_geometry();
         self.scroll_seek = false;
         self.transcript_offset = 0.0;
+        self.search_query.clear();
         self.search_index = 0;
     }
 
@@ -2682,11 +2700,14 @@ impl App {
             Subscription::none()
         };
         // The glide is the only frame-driven animation in the app, and placing
-        // a caret needs exactly one frame of layout. Subscribing
-        // unconditionally would keep a 60 Hz redraw loop (and, through each
-        // step's scroll echo, two view builds per frame) running while nothing
-        // moves.
-        let frames = if self.scroll_anim.is_some() || self.line_edit_caret.is_some() {
+        // a caret or focusing the Find field needs exactly one frame of layout.
+        // Subscribing unconditionally would keep a 60 Hz redraw loop (and,
+        // through each step's scroll echo, two view builds per frame) running
+        // while nothing moves.
+        let frames = if self.scroll_anim.is_some()
+            || self.line_edit_caret.is_some()
+            || self.find_focus_pending
+        {
             iced::window::frames().map(Message::Frame)
         } else {
             Subscription::none()
@@ -2717,6 +2738,16 @@ impl App {
             Key::Named(Named::ArrowDown) => Some(Message::SelectRelative(1)),
             Key::Named(Named::ArrowRight) => Some(Message::SeekBy(5.0)),
             Key::Named(Named::ArrowLeft) => Some(Message::SeekBy(-5.0)),
+            // Follow on `f`, but never while something is being typed into: the
+            // focus probe in the handler decides that.
+            Key::Character(character)
+                if character.eq_ignore_ascii_case("f")
+                    && !modifiers.command()
+                    && !modifiers.alt()
+                    && !modifiers.shift() =>
+            {
+                Some(Message::ShortcutFollow)
+            }
             Key::Character(character) if modifiers.command() => match character.as_str() {
                 "," => Some(Message::OpenSettings),
                 "o" => Some(Message::AddFiles),
@@ -3277,7 +3308,15 @@ impl App {
                 }
             }
             Message::PlayerToggle => self.toggle_playback(),
-            Message::FocusFind => text_input::focus(find_id()),
+            Message::FocusFind => {
+                if self.popup_open() {
+                    return Task::none();
+                }
+                self.header_menu = None;
+                self.find_open = true;
+                self.find_focus_pending = true;
+                Task::none()
+            }
             Message::SearchChanged(query) => {
                 self.search_query = query;
                 self.search_index = 0;
@@ -3474,7 +3513,6 @@ impl App {
                 Task::none()
             }
             Message::ToggleFollowPlayhead => {
-                self.header_menu = None;
                 let turning_off = self.follow_playhead;
                 let turning_on = !turning_off;
                 self.follow_playhead = turning_on;
@@ -3758,6 +3796,10 @@ impl App {
                         self.pending_rename = false;
                         return self.open_rename();
                     }
+                } else if self.find_open {
+                    self.find_open = false;
+                    self.search_query.clear();
+                    self.search_index = 0;
                 } else if !self.search_query.is_empty() {
                     self.search_query.clear();
                     self.search_index = 0;
@@ -3789,6 +3831,29 @@ impl App {
                 } else {
                     Task::none()
                 }
+            }
+            Message::ShortcutFollow => {
+                if self.line_edit_shortcut_blocked()
+                    || self.rename_open
+                    || self.line_edit.is_some()
+                    || self.settings_open
+                    || self.calibration.is_some()
+                {
+                    return Task::none();
+                }
+                Self::focus_probe().map(Message::ShortcutFollowChecked)
+            }
+            Message::ShortcutFollowChecked(focused) => {
+                if focused
+                    || self.line_edit_shortcut_blocked()
+                    || self.rename_open
+                    || self.line_edit.is_some()
+                    || self.settings_open
+                    || self.calibration.is_some()
+                {
+                    return Task::none();
+                }
+                self.update(Message::ToggleFollowPlayhead)
             }
             Message::SeekBy(delta) => {
                 if self.rename_open
@@ -4375,7 +4440,8 @@ impl App {
                 // A click point can only be mapped once the editor has been
                 // laid out, which is what a frame proves. Focus it and place
                 // the caret before the glide, so a double-click lands ready to
-                // type.
+                // type. The Find field is the same: Ctrl+F mounts it, and this
+                // frame is the first one where focusing it can work.
                 let caret = self
                     .line_edit_caret
                     .take()
@@ -4389,13 +4455,22 @@ impl App {
                             )),
                         ])
                     });
+                let find_focus = if std::mem::take(&mut self.find_focus_pending) && self.find_open {
+                    Some(text_input::focus(find_id()))
+                } else {
+                    None
+                };
                 // A dialog owns the screen: land the move instead of easing
                 // behind it.
                 if self.popup_open() || self.delete_confirm {
-                    return Task::batch([
-                        self.stop_glide(true),
-                        caret.unwrap_or_else(Task::none),
-                    ]);
+                    let mut tasks = vec![self.stop_glide(true)];
+                    if let Some(caret) = caret {
+                        tasks.push(caret);
+                    }
+                    if let Some(focus) = find_focus {
+                        tasks.push(focus);
+                    }
+                    return Task::batch(tasks);
                 }
                 let glide = match self.advance_glide(now) {
                     Some(y) => scrollable::scroll_to(
@@ -4404,10 +4479,14 @@ impl App {
                     ),
                     None => Task::none(),
                 };
-                match caret {
-                    Some(caret) => Task::batch([glide, caret]),
-                    None => glide,
+                let mut tasks = vec![glide];
+                if let Some(caret) = caret {
+                    tasks.push(caret);
                 }
+                if let Some(focus) = find_focus {
+                    tasks.push(focus);
+                }
+                Task::batch(tasks)
             }
             Message::Tick => {
                 if self.feature_deck_auto_advance() {
@@ -8701,9 +8780,14 @@ impl App {
             );
         }
 
-        // The header reads left to right: the view controls, then a hairline, then
+        // The header reads left to right: the view control, then a hairline, then
         // the document menus. Each menu hangs from its own button's right edge;
         // the inset helpers subtract the fixed button widths to the right of it.
+        let controls: Element<Message> = if has_lines {
+            self.header_menu_button("View", HeaderMenu::View)
+        } else {
+            horizontal_space().into()
+        };
         let document_menus: Element<Message> = {
             let divider = container(horizontal_space())
                 .width(Length::Fixed(1.0))
@@ -8720,32 +8804,6 @@ impl App {
             .spacing(theme::SPACE_SM)
             .align_y(iced::Alignment::Center)
             .into()
-        };
-        let controls: Element<Message> = if has_lines {
-            row![
-                self.tip(
-                    action(toggle_label("Follow", self.follow_playhead))
-                        .on_press(Message::ToggleFollowPlayhead)
-                        .style(if self.follow_playhead {
-                            pill_button_toggled
-                        } else {
-                            pill_button_secondary
-                        })
-                        .width(Length::Fixed(96.0)),
-                    if self.follow_playhead {
-                        "Stop keeping the active line in view"
-                    } else {
-                        "Keep the active line in view"
-                    },
-                    &scheme,
-                ),
-                self.header_menu_button("View", HeaderMenu::View),
-            ]
-            .spacing(theme::SPACE_SM)
-            .align_y(iced::Alignment::Center)
-            .into()
-        } else {
-            horizontal_space().into()
         };
 
         let header = container(
@@ -8772,13 +8830,6 @@ impl App {
         Some(column![header, divider].spacing(4).into())
     }
 
-    /// The transcript header's "View" control. One menu replaces the two
-    /// header toggles and the hover strip that used to carry the rest.
-    ///
-    /// Same label size, glyph size, inner gap and padding as `toggle_label` puts
-    /// in Follow and `action_text` puts in Summary — the default 16 px label, a
-    /// 12 px glyph and the button's own default padding — so the three boxes are
-    /// the same height and only the words differ.
     /// One of the transcript header's menu buttons. `label` is the menu's name;
     /// the caret says whether it is open.
     fn header_menu_button(
@@ -8901,6 +8952,13 @@ impl App {
         let scheme = *scheme;
         let confidence = self.has_confidence();
         let items = column![
+            header_menu_item(
+                "Follow",
+                self.follow_playhead,
+                true,
+                Some(Message::ToggleFollowPlayhead),
+                scheme,
+            ),
             header_menu_item(
                 "Timestamps",
                 self.show_timestamps,
@@ -9345,8 +9403,8 @@ impl App {
     ///
     /// Kept apart from [`Self::popup_open`] because a menu is not modal. It owns
     /// the pointer, so nothing under it may light up or take a press, but it
-    /// leaves the keyboard and the tooltips alone: the View menu's own zoom
-    /// buttons carry tooltips, and those must keep working while it is open.
+    /// leaves the keyboard and the tooltips alone: a menu's own buttons carry
+    /// tooltips, and those must keep working while it is open.
     fn menu_open(&self) -> bool {
         self.header_menu.is_some() || self.line_edit_picker_open
     }
@@ -10377,17 +10435,27 @@ impl App {
                 shadow: soft_shadow(),
                 ..container::Style::default()
             });
-        // The Find row, one island gap below the transcript card whether or not an
-        // editor is open: the editor lives inside the card now, so nothing below it
-        // changes height.
-        let search_slot: Element<Message> = match has_queue {
-            true => self.search_element(&scheme),
-            false => horizontal_space().into(),
+        // The Find row is hidden until Ctrl+F: closed, it takes no height and the
+        // transcript card reaches the bottom of the pane. Opening it takes the
+        // row plus an island gap from the card, shifting the card's bottom up.
+        let find_width = (self.window_size.width / 3.0)
+            .max(220.0)
+            .min(self.pane_width());
+        let search_slot: Element<Message> = if has_queue && self.find_open {
+            container(self.search_element(&scheme))
+                .width(Length::Fixed(find_width))
+                .into()
+        } else {
+            horizontal_space().into()
         };
         let bottom_slot = container(search_slot)
             .width(Length::Fill)
             .padding(iced::Padding {
-                top: if has_queue { ISLAND_GAP } else { 0.0 },
+                top: if has_queue && self.find_open {
+                    ISLAND_GAP
+                } else {
+                    0.0
+                },
                 right: 0.0,
                 bottom: 0.0,
                 left: 0.0,
@@ -10405,7 +10473,11 @@ impl App {
         .into();
         // The toast clears the Find row; the editor strip is inside the card, so it
         // changes nothing down here.
-        let toast_bottom = if has_queue { 48.0 } else { 20.0 };
+        let toast_bottom = if has_queue && self.find_open {
+            48.0
+        } else {
+            20.0
+        };
         let right_panel = self.with_toast(right_panel, scheme, toast_bottom);
 
         let (theme_icon, theme_tip) = match self.theme_mode {
@@ -13335,18 +13407,6 @@ fn header_menu_item_style(
     }
 }
 
-/// A toggle label with its check mark trailing at the right edge.
-fn toggle_label<'a>(label: &'a str, enabled: bool) -> Element<'a, Message> {
-    if enabled {
-        row![text(label).wrapping(NO_WRAP), icon(ICON_CHECK, 12.0)]
-            .spacing(4)
-            .align_y(iced::Alignment::Center)
-            .into()
-    } else {
-        text(label).wrapping(NO_WRAP).into()
-    }
-}
-
 /// A subtle drop shadow that gives surfaces a soft, raised look.
 fn soft_shadow() -> Shadow {
     Shadow {
@@ -15888,6 +15948,46 @@ mod tests {
     }
 
     #[test]
+    fn ctrl_f_reveals_the_find_row_and_escape_hides_it() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("find-row-config");
+        let original = "[00:00] SPEAKER 1: one\n[00:05] SPEAKER 2: two\n";
+        let (mut app, _transcript, media) = line_edit_fixture("find-row", original);
+
+        assert!(!app.find_open, "the row starts hidden");
+        let _ = app.update(Message::FocusFind);
+        assert!(app.find_open, "Ctrl+F must reveal the row");
+        assert!(app.find_focus_pending, "focus waits for the first layout");
+
+        app.search_query = "one".to_string();
+        let _ = app.update(Message::Escape);
+        assert!(!app.find_open);
+        assert!(
+            app.search_query.is_empty(),
+            "closing the row clears what it was searching"
+        );
+
+        let _ = std::fs::remove_dir_all(&media);
+    }
+
+    #[test]
+    fn the_f_key_toggles_follow_only_outside_a_text_field() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("follow-key-config");
+        let original = "[00:00] SPEAKER 1: one\n[00:05] SPEAKER 2: two\n";
+        let (mut app, _transcript, media) = line_edit_fixture("follow-key", original);
+
+        let before = app.follow_playhead;
+        // A focused field owns the key: the checked form does nothing.
+        let _ = app.update(Message::ShortcutFollowChecked(true));
+        assert_eq!(app.follow_playhead, before);
+        let _ = app.update(Message::ShortcutFollowChecked(false));
+        assert_ne!(app.follow_playhead, before);
+
+        let _ = std::fs::remove_dir_all(&media);
+    }
+
+    #[test]
     fn joining_adjacent_lines_and_save_as() {
         let _guard = env_lock();
         let _config = ConfigEnv::new("join-config");
@@ -17602,6 +17702,7 @@ mod tests {
                 "header_menu",
                 Box::new(|app| app.header_menu = Some(HeaderMenu::View)),
             ),
+            ("find_open", Box::new(|app| app.find_open = true)),
             (
                 "line_hover",
                 Box::new(|app| app.transcript_line_hover = Some(1)),
