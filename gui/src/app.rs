@@ -118,12 +118,27 @@ const NO_WRAP: iced::widget::text::Wrapping = iced::widget::text::Wrapping::None
 /// Transcript text scale when nothing has been stored yet: 70 % of the base size.
 const DEFAULT_FONT_SCALE: f32 = 0.7;
 
-/// Height reserved below the transcript for the line-editor panel, at all times
-/// so opening and closing the editor never resizes the pane (which would move
-/// the row under the pointer while the caret is being placed). The panel's own
-/// box is a little shorter: it sizes to its controls, and the difference is the
-/// gap to the Find row.
-const LINE_EDIT_PANEL_SLOT: f32 = 40.0;
+/// Gap the right-hand column puts between its islands. The column is built with
+/// `spacing(0)` and every gap is carried by a padding instead, so this one
+/// number is the distance from the transcript card to the run card, from the run
+/// card to the editor island and from the editor island to the Find row.
+const ISLAND_GAP: f32 = theme::SPACE_LG;
+
+/// Height of the line-editor island's own box. Its padding and border are inside
+/// it; the tallest control in it is the Done button at 30.8 px, so this leaves a
+/// little slack rather than clipping.
+const LINE_EDIT_PANEL_HEIGHT: f32 = 38.0;
+
+/// Height the editor island adds to the column while a line is being edited: the
+/// island plus the gap under it, on top of the column's own gap above it. Zero
+/// when no editor is open, so the transcript card runs down to the Find row.
+fn panel_slot_height(editing: bool) -> f32 {
+    if editing {
+        LINE_EDIT_PANEL_HEIGHT + ISLAND_GAP
+    } else {
+        0.0
+    }
+}
 
 /// Gap between the panel's controls, and between the two groups inside it
 /// (which line and speaker, then the edits and the commit pair).
@@ -521,8 +536,6 @@ pub enum Message {
     ShiftEnterSubmit,
     SelectLine(usize),
     LineClicked(usize),
-    /// A click on a bubble's words, which seeks but never edits.
-    LineTextClicked(usize),
     /// A press on a line's words, at a point in the text's own coordinates.
     /// Carries the caret position a double-click should open at.
     LineTextPressed(usize, Point),
@@ -3199,19 +3212,6 @@ impl App {
                 }
                 Task::none()
             }
-            Message::LineTextClicked(index) => {
-                // Bubble text is a seek target only. Clicking away from an open
-                // editor still commits it, but this cannot open another.
-                self.last_line_click = None;
-                if self.line_edit.as_ref().is_some_and(|edit| edit.index != index) {
-                    self.commit_inline_edit(false);
-                }
-                if self.playhead_locked {
-                    Task::none()
-                } else {
-                    self.select_line_with(index, false)
-                }
-            }
             Message::LineHover(index) => {
                 // As with the transcript chrome: no per-line affordances while
                 // a dialog covers the transcript.
@@ -5067,7 +5067,8 @@ impl App {
             return Task::none();
         }
         // Moving the editor from one line to another commits the first.
-        if self.line_edit.is_some() {
+        let island_was_open = self.line_edit.is_some();
+        if island_was_open {
             self.commit_inline_edit(false);
         }
         // Rows come from the document the editor writes to, not from the joined
@@ -5106,7 +5107,41 @@ impl App {
         self.last_line_click = None;
         self.line_edit_picker_open = false;
         self.toast = None;
-        Task::none()
+        // The island takes its height out of the pane, so a row clicked near the
+        // bottom would be scrolled out from under itself. Moving an editor that is
+        // already open changes nothing about the pane's height.
+        let shrink = if island_was_open {
+            0.0
+        } else {
+            panel_slot_height(true)
+        };
+        self.reveal_edited_line(index, shrink)
+    }
+
+    /// Keep the row being edited inside the pane after the editor island appears.
+    ///
+    /// The island is `pane_shrink` px of pane (zero when it was already open), so
+    /// a row clicked in the last row and a half of the viewport no longer fits. Its
+    /// place is the same average-row-height estimate the follow logic uses; when it
+    /// does not fit, `scroll_to_line` centres it, which is how every other "bring
+    /// this line into view" path works.
+    fn reveal_edited_line(&mut self, index: usize, pane_shrink: f32) -> Task<Message> {
+        let Some(target) = self.follow_target(index) else {
+            return Task::none();
+        };
+        let viewport = self.transcript_viewport;
+        if viewport <= 0.0 {
+            return Task::none();
+        }
+        let row = self.follow_row_estimate().max(1.0);
+        // Where the row's centre sits in the pane, given where the pane is.
+        let centre = target + viewport / 2.0 - self.transcript_offset;
+        let fits = centre - row / 2.0 >= 0.0 && centre + row / 2.0 <= viewport - pane_shrink;
+        if fits {
+            Task::none()
+        } else {
+            self.scroll_to_line(index)
+        }
     }
 
     /// Commit the inline editor into the transcript and close it. One changed
@@ -8009,10 +8044,9 @@ impl App {
                 col = col.push(
                     mouse_area(content_row)
                         .interaction(mouse::Interaction::Pointer)
-                        // A click on the words only seeks. Double-clicking
-                        // them does not open the editor either: in this view
-                        // the speaker label and the timestamp own that.
-                        .on_press(Message::LineTextClicked(idx))
+                        // The row takes the same press a line row does, so the
+                        // first click seeks and the second opens the editor.
+                        .on_press(Message::LineClicked(idx))
                         .on_right_press(Message::FlipLineSpeaker(idx))
                         .on_enter(Message::LineHover(Some(idx)))
                         .on_exit(Message::LineHover(None)),
@@ -8142,7 +8176,6 @@ impl App {
         let allowed = writable && self.can(license::Feature::Editing);
         let order = self.speaker_order();
         let accent = line_accent(&order, &row.speaker, &scheme);
-        let blank = row.content.text().trim().is_empty();
 
         // The picker's options are the names themselves, so the handle sizes to
         // the longest label and the menu — which inherits the handle's width —
@@ -8195,25 +8228,16 @@ impl App {
             .into()
         };
 
-        // Which line this is, not just "a line": join and split move the indices
-        // around, and a tall field can push the row itself out of sight. The
-        // time of the line is already in the field's own gutter, so the label
-        // stays as short as the compact row needs it.
-        let mut label = format!("Line {} of {}", index + 1, total.max(1));
-        if blank {
-            label.push_str(" \u{00b7} no text");
-        }
-        let label = if allowed {
-            text(label)
-                .size(theme::TEXT_XS)
-                .wrapping(NO_WRAP)
-                .color(if blank { scheme.danger } else { scheme.muted })
-        } else {
+        // No line-number label: the field's own gutter says when the line is and
+        // the panel is only ever about the line that is already open under it.
+        // The one case that still needs words is a transcript that cannot be
+        // written to, where the greyed controls would otherwise go unexplained.
+        let read_only = (!allowed).then(|| {
             text("Read-only transcript")
                 .size(theme::TEXT_XS)
                 .wrapping(NO_WRAP)
                 .color(scheme.muted)
-        };
+        });
 
         let can_join_prev = allowed && index > 0;
         let can_join_next = allowed && index + 1 < total;
@@ -8275,9 +8299,11 @@ impl App {
         // One left-aligned cluster, two small groups inside it: what is being
         // edited, then the edits and the way out. No elastic spacer, so the
         // controls do not drift apart in a wide window.
-        let identity = row![label, picker]
-            .spacing(LINE_EDIT_GAP)
-            .align_y(iced::Alignment::Center);
+        let mut identity = row![].spacing(LINE_EDIT_GAP).align_y(iced::Alignment::Center);
+        if let Some(read_only) = read_only {
+            identity = identity.push(read_only);
+        }
+        identity = identity.push(picker);
         let editing = row![
             text("Join")
                 .size(theme::TEXT_XS)
@@ -8328,6 +8354,7 @@ impl App {
         Some(
             container(controls)
                 .width(Length::Fill)
+                .height(Length::Fixed(LINE_EDIT_PANEL_HEIGHT))
                 .padding([theme::CONTROL_PADDING[0], theme::SPACE_SM as u16])
                 .align_y(iced::Alignment::Center)
                 .style(move |_theme| container::Style {
@@ -10012,14 +10039,14 @@ impl App {
         .width(Length::Fill)
         .into();
 
-        // The transcript card keeps a fixed child index. Anything that appears
-        // or disappears above it (model notice, progress chrome) or below it
-        // (search row) would shift that index, which remounts the scrollable
-        // and resets its offset to the top. The conditional content lives in
-        // slots instead, and the 12 px gaps are slot padding, so the layout is
-        // unchanged.
+        // The transcript card keeps a fixed child index. Anything that appears or
+        // disappears above it (model notice, progress chrome) or below it (editor
+        // island, search row) would shift that index, which remounts the
+        // scrollable and resets its offset to the top. The conditional content
+        // lives in slots instead, and the island gaps are slot padding, so the
+        // child indices never change even though the heights now do.
         let show_middle = has_queue || self.selected_view.is_some() || running;
-        let mut top_slot_col = column![].spacing(12).width(Length::Fill);
+        let mut top_slot_col = column![].spacing(ISLAND_GAP).width(Length::Fill);
         let mut has_top = false;
         if let Some(notice) = self.model_notice(&scheme) {
             top_slot_col = top_slot_col.push(notice);
@@ -10036,7 +10063,7 @@ impl App {
             .padding(iced::Padding {
                 top: 0.0,
                 right: 0.0,
-                bottom: if has_top { 12.0 } else { 0.0 },
+                bottom: if has_top { ISLAND_GAP } else { 0.0 },
                 left: 0.0,
             });
         // Keep the stack structure stable across hover changes. Swapping
@@ -10061,19 +10088,21 @@ impl App {
                 shadow: soft_shadow(),
                 ..container::Style::default()
             });
-        // Two fixed slots stacked below the transcript card. The line editor
-        // panel lives in the first, whose height is reserved whether or not the
-        // editor is open: a slot that grew would shrink the transcript card and
-        // move the row under the pointer while the caret is being placed. The
-        // panel stays a single child index, so the scrollable is never remounted
-        // and the transcript's scroll offset is never reset.
+        // Two slots stacked below the transcript card. The line editor panel
+        // lives in the first, at a fixed child index, and only its *height*
+        // changes: nothing when no editor is open, so the card runs down to the
+        // Find row, and the island plus the gap under it while one is. Resizing a
+        // container in place does not touch the widget tree (a `Container`
+        // delegates its tag, state, children and diff to its content, so the
+        // scrollable's node and its absolute pixel offset survive), which is why
+        // the transcript's scroll position is not reset.
         let editing = self.line_edit.is_some();
         let panel_slot = container(match self.line_edit_panel(scheme) {
             Some(panel) => panel,
             None => horizontal_space().into(),
         })
         .width(Length::Fill)
-        .height(Length::Fixed(LINE_EDIT_PANEL_SLOT));
+        .height(Length::Fixed(panel_slot_height(editing)));
         let search_slot: Element<Message> = match has_queue {
             true => search_actions_row,
             false => horizontal_space().into(),
@@ -10081,7 +10110,7 @@ impl App {
         let bottom_slot = container(column![panel_slot, search_slot].spacing(0))
             .width(Length::Fill)
             .padding(iced::Padding {
-                top: if has_queue { 12.0 } else { 0.0 },
+                top: if has_queue { ISLAND_GAP } else { 0.0 },
                 right: 0.0,
                 bottom: 0.0,
                 left: 0.0,
@@ -10097,10 +10126,10 @@ impl App {
         .width(Length::Fill)
         .height(Length::Fill)
         .into();
-        // The toast clears the panel when it is open; the slot beneath it is
-        // reserved, so only the open panel changes this offset.
-        let toast_bottom = (if has_queue { 48.0 } else { 20.0 })
-            + if editing { LINE_EDIT_PANEL_SLOT } else { 0.0 };
+        // The toast clears the bottom rows: the Find row plus, while an editor is
+        // open, the island and the gap under it.
+        let toast_bottom =
+            (if has_queue { 48.0 } else { 20.0 }) + panel_slot_height(editing);
         let right_panel = self.with_toast(right_panel, scheme, toast_bottom);
 
         let (theme_icon, theme_tip) = match self.theme_mode {
@@ -15223,6 +15252,83 @@ mod tests {
         open_test_item(&mut app, 0);
         assert!(app.view_error.is_some());
         assert!(app.shown_lines().is_empty());
+    }
+
+    #[test]
+    fn the_editor_slot_is_empty_until_a_line_is_edited() {
+        // Closed: nothing below the transcript card but the Find row, so the card
+        // runs all the way down.
+        assert_eq!(panel_slot_height(false), 0.0);
+
+        // Open: the island plus the gap under it. The column's own gap sits above
+        // it, so the island has the same margin on both sides.
+        let open = panel_slot_height(true);
+        assert_eq!(open, LINE_EDIT_PANEL_HEIGHT + ISLAND_GAP);
+        assert_eq!(open - LINE_EDIT_PANEL_HEIGHT, ISLAND_GAP);
+    }
+
+    #[test]
+    fn opening_the_editor_centres_a_row_the_island_would_push_out() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("reveal-config");
+        let original = "[00:00] SPEAKER 1: one\n[00:05] SPEAKER 2: two\n[00:09] SPEAKER 1: three\n[00:12] SPEAKER 2: four\n";
+        let (mut app, _transcript, media) = line_edit_fixture("reveal", original);
+
+        // Four 400 px rows in a 400 px pane; the second line is centred at 400.
+        app.transcript_content = 1600.0;
+        app.transcript_viewport = 400.0;
+        app.pane_row_height.set(Some(24.0));
+        let line = app.display_order()[1];
+
+        // Comfortably inside the pane: opening the island moves nothing.
+        app.transcript_offset = 400.0;
+        app.scroll_target = None;
+        let _ = app.reveal_edited_line(line, panel_slot_height(true));
+        assert_eq!(app.scroll_target, None, "a visible row must not move");
+
+        // Near the bottom: the island takes 50 px of pane and the row no longer
+        // fits, so it is centred with the same machinery a search jump uses.
+        app.transcript_offset = 250.0;
+        app.scroll_target = None;
+        let _ = app.reveal_edited_line(line, panel_slot_height(true));
+        assert_eq!(app.scroll_target, app.follow_target(line));
+
+        let _ = std::fs::remove_dir_all(&media);
+    }
+
+    #[test]
+    fn a_double_click_on_a_bubble_opens_the_editor() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("bubble-edit-config");
+        let original = "[00:00] SPEAKER 1: one\n[00:05] SPEAKER 2: two\n";
+        let (mut app, _transcript, media) = line_edit_fixture("bubble-edit", original);
+
+        // This is the message a bubble row sends. In SMS mode the bubble is the
+        // thing to point at, so its press has to behave like a line row's: seek on
+        // the first click, edit on the second.
+        app.sms_mode = true;
+        app.playhead = 0.0;
+        let _ = app.update(Message::LineClicked(1));
+        assert!(app.line_edit.is_none(), "one click must not open the field");
+        assert_eq!(app.playhead, 5.0, "the first click still seeks");
+
+        let _ = app.update(Message::LineClicked(1));
+        assert_eq!(app.line_edit.as_ref().map(|edit| edit.index), Some(1));
+
+        // Escape still cancels and leaves the line alone.
+        let _ = app.update(Message::Escape);
+        assert!(app.line_edit.is_none());
+        assert_eq!(line_text(&app.edit_lines()[1]), "two");
+
+        // A press on another bubble while editing commits the open one and moves
+        // the editor there, exactly as a line row does.
+        let _ = app.update(Message::LineClicked(0));
+        let _ = app.update(Message::LineClicked(0));
+        assert_eq!(app.line_edit.as_ref().map(|edit| edit.index), Some(0));
+        let _ = app.update(Message::LineClicked(1));
+        assert_eq!(app.line_edit.as_ref().map(|edit| edit.index), Some(1));
+
+        let _ = std::fs::remove_dir_all(&media);
     }
 
     #[test]
