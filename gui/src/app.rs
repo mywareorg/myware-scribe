@@ -13562,11 +13562,11 @@ fn header_menu_item_style(
             button::Status::Hovered | button::Status::Pressed
         );
         let tint = if enabled {
-            scheme.track
+            hover_band(&scheme)
         } else {
             Color {
                 a: 0.45,
-                ..scheme.track
+                ..hover_band(&scheme)
             }
         };
         button::Style {
@@ -13886,6 +13886,23 @@ fn pill_input(theme: &iced::Theme, status: text_input::Status) -> text_input::St
     style
 }
 
+/// The wash under the row the pointer is on, for every menu in the app.
+///
+/// Both the header menus and the pick lists are drawn on `dialog_bg`, so one
+/// rule serves both. The band is the surface mixed away from itself rather than
+/// a fixed token: `track` equals `dialog_bg` in the dark palette (both Gray 80),
+/// which is why the header menus' hover was invisible there, and `timeline_bg`
+/// was only about 1.3:1 against the same surface. These mixes give roughly
+/// 1.6:1 in light and 1.75:1 in dark — a clear row under the pointer that is
+/// still a wash and not a filled button.
+fn hover_band(scheme: &Scheme) -> Color {
+    if theme::is_dark_scheme(scheme) {
+        theme::lighten(scheme.dialog_bg, 0.18)
+    } else {
+        theme::darken(scheme.dialog_bg, 0.20)
+    }
+}
+
 /// The surface every pick-list menu is drawn on.
 ///
 /// iced's default menu is a square popup filled with the window colour and edged
@@ -13894,12 +13911,11 @@ fn pill_input(theme: &iced::Theme, status: text_input::Status) -> text_input::St
 /// fill and the hairline *are* the elevation: this puts it on the raised dialog
 /// surface with the card radius, and replaces the row highlight.
 ///
-/// iced draws the row under the pointer with the same fill it uses for the row
-/// that is the current value. The default `primary.strong` is the accent at full
-/// strength with a `readable()`-picked label — on a raised card a harsh band, and
-/// in the dark palette `readable()` picks black, which inverts the menu's text.
-/// The recessed surface is a quiet band in both palettes (about 1.3:1 against the
-/// menu) that keeps the menu's own text as the label.
+/// iced has one index for the row under the pointer and for the row that is the
+/// current value (`hovered_option`, seeded from the selection when the menu
+/// opens), so a single `selected_background` paints both and they cannot be told
+/// apart by colour. The band is therefore the same wash the header menus use,
+/// and the chosen value stays legible in the closed control above the menu.
 fn pick_menu_style(scheme: Scheme) -> impl Fn(&iced::Theme) -> menu::Style {
     move |_theme| menu::Style {
         background: scheme.dialog_bg.into(),
@@ -13910,7 +13926,7 @@ fn pick_menu_style(scheme: Scheme) -> impl Fn(&iced::Theme) -> menu::Style {
         },
         text_color: scheme.text,
         selected_text_color: scheme.text,
-        selected_background: scheme.timeline_bg.into(),
+        selected_background: hover_band(&scheme).into(),
     }
 }
 
@@ -15222,6 +15238,45 @@ mod tests {
         assert_eq!(app.transcript_line_hover, Some(0));
 
         let _ = std::fs::remove_dir_all(&media);
+    }
+
+    #[test]
+    fn a_menu_row_hover_is_visible_in_both_palettes() {
+        fn channel(value: f32) -> f32 {
+            if value <= 0.039_28 {
+                value / 12.92
+            } else {
+                ((value + 0.055) / 1.055).powf(2.4)
+            }
+        }
+
+        fn luminance(color: Color) -> f32 {
+            0.2126 * channel(color.r) + 0.7152 * channel(color.g) + 0.0722 * channel(color.b)
+        }
+
+        fn contrast(a: Color, b: Color) -> f32 {
+            let (hi, lo) = if luminance(a) >= luminance(b) {
+                (luminance(a), luminance(b))
+            } else {
+                (luminance(b), luminance(a))
+            };
+            (hi + 0.05) / (lo + 0.05)
+        }
+
+        // Every menu — the header's own and every pick list — is drawn on
+        // `dialog_bg`. The old fixed band was 1.30:1 in light and 1.31:1 in dark,
+        // and the header's `track` tint was 1.27:1 and 1.00:1 (invisible in dark).
+        for scheme in [Scheme::light(), Scheme::dark()] {
+            let ratio = contrast(hover_band(&scheme), scheme.dialog_bg);
+            assert!(
+                ratio >= 1.5,
+                "{ratio:.2}:1 is too quiet to read as a row under the pointer"
+            );
+            assert!(
+                ratio <= 2.2,
+                "{ratio:.2}:1 is a filled button, not a wash"
+            );
+        }
     }
 
     #[test]
