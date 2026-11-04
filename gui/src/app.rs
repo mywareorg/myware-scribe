@@ -85,21 +85,24 @@ const LINE_EDIT_MIN_LINES: usize = 1;
 const LINE_EDIT_PAD_Y: f32 = 6.0;
 const LINE_EDIT_PAD_X: f32 = 8.0;
 
-/// Height of the line-editor panel, reserved below the transcript at all times
+/// Height reserved below the transcript for the line-editor panel, at all times
 /// so opening and closing the editor never resizes the pane (which would move
 /// the row under the pointer while the caret is being placed). The panel's own
-/// box is shorter; the difference is the gap to the Find row.
+/// box is a little shorter: it sizes to its controls, and the difference is the
+/// gap to the Find row.
 const LINE_EDIT_PANEL_SLOT: f32 = 36.0;
-
-/// Height of the panel's box: one control row (24 px) plus 3 px of padding and
-/// a 1 px border either side. Kept within a few pixels of a one-line field, so
-/// the field and the controls under it read as one block.
-const LINE_EDIT_PANEL_HEIGHT: f32 = 32.0;
 
 /// Gap between the panel's controls, and between the two groups inside it
 /// (which line and speaker, then the edits and the commit pair).
 const LINE_EDIT_GAP: f32 = 4.0;
 const LINE_EDIT_GROUP_GAP: f32 = 8.0;
+
+/// Width reserved for the Find row's match counter. Measured at 11 px: "no
+/// matches" is the widest it gets at 60.3 px, and "999 / 9999" reaches 53.9.
+/// It changes with every keystroke, and as a free-standing child it re-flowed
+/// the arrows beside it each time; the slot keeps the row's geometry fixed
+/// whether the query is empty or not.
+const FIND_STATUS_WIDTH: f32 = 62.0;
 
 /// Widest the panel's speaker picker may grow, and how many characters of a
 /// speaker name it shows. The picker sits in a row with nine other controls: it
@@ -7549,9 +7552,9 @@ impl App {
         let undo = allowed && self.line_undo_available();
         let redo = allowed && self.line_redo_available();
 
-        // 14 px glyph in a 24 px pill. The deletion is tinted like the danger
-        // it is: with the row compacted it sits mid-cluster, so its colour is
-        // what keeps it from reading as one more neutral edit.
+        // Sized by `icon_pill`'s padding alone. The deletion is tinted like the
+        // danger it is: with the row compact it sits mid-cluster, so its colour
+        // is what keeps it from reading as one more neutral edit.
         let button = |code: char, enabled: bool, danger: bool, message: Message| {
             let ink = if !enabled {
                 scheme.muted
@@ -7560,9 +7563,7 @@ impl App {
             } else {
                 scheme.ink
             };
-            action(icon_colored(code, 14.0, ink))
-                .padding([3, 5])
-                .height(Length::Fixed(theme::CONTROL_HEIGHT))
+            icon_pill(code, ink)
                 .style(panel_icon_button(scheme, enabled))
                 .on_press_maybe(enabled.then_some(message))
         };
@@ -7583,11 +7584,10 @@ impl App {
 
         // Cancel stays live whatever the state: it is the way out of a row the
         // panel can no longer write to.
-        let cancel = action(icon_colored(ICON_X, 14.0, scheme.ink))
+        let cancel = icon_pill(ICON_X, scheme.ink)
             .on_press(Message::CancelLineEdit)
-            .padding([3, 5])
-            .height(Length::Fixed(theme::CONTROL_HEIGHT))
             .style(pill_button_secondary);
+        // Padding, not a height, so the label's line box decides the size.
         let done = action(
             row![
                 icon(ICON_CHECK, 12.0),
@@ -7597,8 +7597,7 @@ impl App {
             .align_y(iced::Alignment::Center),
         )
         .on_press_maybe(allowed.then_some(Message::DoneLineEdit))
-        .padding([3, 8])
-        .height(Length::Fixed(theme::CONTROL_HEIGHT))
+        .padding([theme::CONTROL_PADDING[0], 8])
         .style(color_button(scheme.blue, scheme.on_accent));
 
         // One left-aligned cluster, two small groups inside it: what is being
@@ -7657,8 +7656,7 @@ impl App {
         Some(
             container(controls)
                 .width(Length::Fill)
-                .height(Length::Fixed(LINE_EDIT_PANEL_HEIGHT))
-                .padding([3, theme::SPACE_SM as u16])
+                .padding([theme::CONTROL_PADDING[0], theme::SPACE_SM as u16])
                 .align_y(iced::Alignment::Center)
                 .style(move |_theme| container::Style {
                     background: Some(scheme.panel_bg.into()),
@@ -8298,26 +8296,29 @@ impl App {
             .on_input(Message::SearchChanged)
             .width(Length::Fixed(80.0))
             .style(pill_input);
-        // Same height as the line-edit panel's controls: these two rows stack,
-        // and a 22 px icon beside a 28 px one reads as a different widget.
-        let prev = action(icon(ICON_ARROW_UP, 14.0))
+        // Same constructor as the line-edit panel's pills, so both rows are the
+        // same height by construction rather than by two numbers agreeing.
+        let prev = icon_pill(ICON_ARROW_UP, scheme.ink)
             .on_press(Message::FindPrev)
-            .padding([4, 6])
-            .height(Length::Fixed(theme::CONTROL_HEIGHT))
             .style(pill_button_secondary);
-        let next = action(icon(ICON_ARROW_DOWN, 14.0))
+        let next = icon_pill(ICON_ARROW_DOWN, scheme.ink)
             .on_press(Message::FindNext)
-            .padding([4, 6])
-            .height(Length::Fixed(theme::CONTROL_HEIGHT))
             .style(pill_button_secondary);
-        let mut controls = row![
-            query_input,
-            text(status).size(11).wrapping(NO_WRAP).color(status_color),
-            prev,
-            next,
-        ]
-        .spacing(6)
-        .align_y(iced::Alignment::Center);
+        // The match count gets its own slot. As a free-standing child it was 0
+        // px wide with an empty query and up to ~61 px with "999 / 9999", so
+        // every keystroke — and clearing the field — re-flowed the arrows and
+        // everything after them, which also flipped whatever button the pointer
+        // happened to be resting on. A fixed slot keeps the row's geometry
+        // still, and the count right-aligned against the arrows.
+        let status = text(status)
+            .size(11)
+            .wrapping(NO_WRAP)
+            .color(status_color)
+            .width(Length::Fixed(FIND_STATUS_WIDTH))
+            .align_x(iced::alignment::Horizontal::Right);
+        let mut controls = row![query_input, status, prev, next]
+            .spacing(theme::SPACE_SM)
+            .align_y(iced::Alignment::Center);
         let speaker_order = self.speaker_order();
         let has_confidence = self.has_confidence();
         if speaker_order.len() > 1 || has_confidence {
@@ -11367,10 +11368,8 @@ fn row_spacer(height: f32) -> Element<'static, Message> {
 /// same height as the control rows above it.
 fn sms_swap_button(index: usize, scheme: &Scheme) -> Element<'static, Message> {
     let scheme = *scheme;
-    action(icon_colored(ICON_SWAP, 14.0, scheme.ink))
+    icon_pill(ICON_SWAP, scheme.ink)
         .on_press(Message::FlipLineSpeaker(index))
-        .padding([4, 6])
-        .height(Length::Fixed(theme::CONTROL_HEIGHT))
         .style(pill_button_secondary)
         .into()
 }
@@ -11849,9 +11848,21 @@ fn line_element(
 
 const PILL: f32 = 1000.0;
 
+/// Glyph size of every compact control-row icon.
+const ICON_SIZE: f32 = 14.0;
+
 /// A button (content-sized / minimum width).
 fn action<'a>(content: impl Into<Element<'a, Message>>) -> iced::widget::Button<'a, Message> {
     button(content)
+}
+
+/// A compact icon button, sized by `theme::CONTROL_PADDING` alone.
+///
+/// Every icon control row builds its buttons through this, so the Find row and
+/// the line editor panel cannot drift apart: no `Length::Fixed` height, which
+/// would set the box *inside* the padding and squeeze the glyph's line box.
+fn icon_pill(code: char, colour: Color) -> iced::widget::Button<'static, Message> {
+    action(icon_colored(code, ICON_SIZE, colour)).padding(theme::CONTROL_PADDING)
 }
 
 /// Fixed width for a text button so its label can never wrap. The iced default
@@ -13415,6 +13426,71 @@ mod tests {
             App::key_press(Key::Character("+".into()), Modifiers::COMMAND | Modifiers::SHIFT),
             Some(Message::ZoomIn)
         ));
+    }
+
+    #[test]
+    fn clearing_the_find_query_leaves_the_app_idle() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("find-clear-config");
+        let original = "[00:00] SPEAKER 1: one\n[00:05] SPEAKER 2: two\n";
+        let (mut app, _transcript, media) = line_edit_fixture("find-clear", original);
+
+        // Type through the real message path, then clear it the same way.
+        let _ = app.update(Message::SearchChanged("one".to_string()));
+        assert_eq!(app.matching_lines().len(), 1);
+        let _ = app.update(Message::SearchChanged(String::new()));
+
+        // A cleared query must not leave anything that rebuilds the row: no
+        // tick subscription (10 Hz rebuilds of the field), no pending window
+        // change, no stale match index.
+        assert!(app.search_query.is_empty());
+        assert_eq!(app.search_index, 0);
+        assert!(
+            !app.needs_ticks(),
+            "a cleared query left the tick loop running"
+        );
+        assert!(
+            !app.window_dirty,
+            "a cleared query left a window change pending"
+        );
+
+        // Ticking in that state changes nothing, so the field cannot be rebuilt
+        // frame after frame from the app side.
+        let _ = app.update(Message::Tick);
+        assert!(app.search_query.is_empty());
+        assert!(!app.needs_ticks());
+
+        // And the row still renders with the empty query.
+        let _ = app.view();
+
+        let _ = std::fs::remove_dir_all(&media);
+    }
+
+    #[test]
+    fn the_find_row_keeps_its_shape_when_the_query_is_cleared() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("find-shape-config");
+        let original = "[00:00] SPEAKER 1: one\n[00:05] SPEAKER 2: two\n";
+        let (mut app, _transcript, media) = line_edit_fixture("find-shape", original);
+        let scheme = app.scheme();
+
+        // The match counter sits in a fixed slot: its text grows and shrinks on
+        // every keystroke, but the row's children — and therefore the arrows
+        // beside it — must not be re-flowed when the query changes.
+        app.search_query = "one".to_string();
+        let typed = {
+            let row = app.search_element(&scheme);
+            iced::advanced::widget::Tree::new(row.as_widget()).children.len()
+        };
+        app.search_query.clear();
+        let cleared = {
+            let row = app.search_element(&scheme);
+            iced::advanced::widget::Tree::new(row.as_widget()).children.len()
+        };
+
+        assert_eq!(typed, cleared, "the Find row changed shape with the query");
+
+        let _ = std::fs::remove_dir_all(&media);
     }
 
     #[test]

@@ -24,11 +24,12 @@ pub const RADIUS_SM: f32 = 6.0;
 pub const RADIUS_MD: f32 = 10.0;
 pub const RADIUS_LG: f32 = 16.0;
 
-/// Height of a compact control-row button. The Find row, the line editor panel
-/// and the bubble row's exchange button share it, so stacked rows do not read as
-/// different widget families. Small enough for the editor panel, still a
-/// comfortable click target.
-pub const CONTROL_HEIGHT: f32 = 24.0;
+/// Padding of a compact icon button, in logical pixels. Icon buttons are sized
+/// by this padding rather than by a fixed height: `Button::height(Fixed(h))`
+/// fixes the box *inside* the padding, so 24 px of height with 4 px of vertical
+/// padding leaves 16 px for a glyph whose line box is 18.2 px (a 14 px icon at
+/// iced's 1.3 line height) and the glyph gets cut.
+pub const CONTROL_PADDING: [u16; 2] = [3, 5];
 
 /// Type scale.
 pub const TEXT_XS: f32 = 12.0;
