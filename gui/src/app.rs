@@ -5881,6 +5881,19 @@ impl App {
         order
     }
 
+    /// True when diarization ran and found a single voice, so every line lost
+    /// its label. Worth saying out loud: an unlabelled transcript otherwise
+    /// looks like a failure.
+    fn only_one_speaker(&self) -> bool {
+        self.pipelines_diarize()
+            && !self.shown_turns().is_empty()
+            && self.speaker_order().is_empty()
+            && self
+                .shown_lines()
+                .iter()
+                .any(|line| !line.raw.trim().is_empty())
+    }
+
     /// True when the visible transcript carries ASR confidence values.
     fn has_confidence(&self) -> bool {
         self.shown_lines()
@@ -7724,7 +7737,11 @@ impl App {
                 ICON_FILE_TEXT,
                 scheme.blue,
                 "Transcript".to_string(),
-                String::new(),
+                if self.only_one_speaker() {
+                    "Only one speaker detected".to_string()
+                } else {
+                    String::new()
+                },
             )
         };
 
@@ -12727,6 +12744,33 @@ mod tests {
         let lines = parse_lines("[00:00] SPEAKER 1: hello there\n[00:05] plain text\n");
         assert_eq!(line_text(&lines[0]), "hello there");
         assert_eq!(line_text(&lines[1]), "plain text");
+    }
+
+    #[test]
+    fn a_single_speaker_run_says_so() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("one-speaker");
+        let mut app = pro_app();
+        app.num_speakers = Some(2);
+        // Diarization emitted turns but cleared every label: one voice.
+        app.turns = vec![backend::Turn {
+            start: 0.0,
+            end: 5.0,
+            speaker: String::new(),
+        }];
+        app.lines = vec![DocLine {
+            raw: "[00:00] hello".to_string(),
+            speaker: String::new(),
+            start: Some(0.0),
+            confidence: None,
+        }];
+        app.invalidate_derived();
+        assert!(app.only_one_speaker());
+
+        // An ASR-only run has no turns and must not claim a single speaker.
+        app.turns.clear();
+        app.invalidate_derived();
+        assert!(!app.only_one_speaker());
     }
 
     #[test]
