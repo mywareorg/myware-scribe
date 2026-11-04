@@ -590,7 +590,6 @@ pub enum Message {
     PlayerToggle,
     FocusFind,
     SearchChanged(String),
-    SpeakerFilterChanged(String),
     FindPrev,
     FindNext,
     SpeedChanged(Speed),
@@ -1640,6 +1639,13 @@ impl App {
     }
 
     fn select_line(&mut self, index: usize) -> Task<Message> {
+        self.select_line_with(index, true)
+    }
+
+    /// Seek to `index`. `scroll` is false for a click on the line itself: it is
+    /// already on screen, and scrolling it would move the row out from under a
+    /// second click that is trying to open the editor.
+    fn select_line_with(&mut self, index: usize, scroll: bool) -> Task<Message> {
         if !self.can(license::Feature::Playback) {
             return Task::none();
         }
@@ -1650,7 +1656,7 @@ impl App {
                 self.follow_offset = None;
                 self.follow_issue = None;
                 self.scroll_anim = None;
-                self.scroll_seek = true;
+                self.scroll_seek = scroll;
                 if let Some(player) = &self.player {
                     player.seek(self.playhead);
                 }
@@ -3108,25 +3114,6 @@ impl App {
                 self.search_index = 0;
                 Task::none()
             }
-            Message::SpeakerFilterChanged(choice) => {
-                let next = if choice == "All speakers" {
-                    None
-                } else {
-                    Some(choice)
-                };
-                if next != self.speaker_filter {
-                    self.speaker_filter = next;
-                    self.search_index = 0;
-                    // Filtering changes which rows are rendered, so a glide
-                    // towards the old geometry is stale.
-                    self.scroll_anim = None;
-                    self.invalidate_derived();
-                    // Keep the reader where they are; filtering should not
-                    // jump the transcript back to the top (or to that
-                    // speaker's first line).
-                }
-                Task::none()
-            }
             Message::FindNext => {
                 let matches = self.matching_lines();
                 if !matches.is_empty() {
@@ -3174,7 +3161,7 @@ impl App {
                 if self.playhead_locked {
                     Task::none()
                 } else {
-                    self.select_line(index)
+                    self.select_line_with(index, false)
                 }
             }
             Message::LineHover(index) => {
@@ -8895,24 +8882,9 @@ impl App {
             .spacing(theme::SPACE_SM)
             .align_y(iced::Alignment::Center)
             .width(Length::Fill);
-        let speaker_order = self.speaker_order();
-        let has_confidence = self.has_confidence();
-        if speaker_order.len() > 1 || has_confidence {
-            let mut speakers = vec!["All speakers".to_string()];
-            speakers.extend(speaker_order);
-            if has_confidence {
-                speakers.push(LOW_CONFIDENCE_FILTER.to_string());
-            }
-            let selected = self
-                .speaker_filter
-                .clone()
-                .unwrap_or_else(|| "All speakers".to_string());
-            controls = controls.push(
-                pick_list(speakers, Some(selected), Message::SpeakerFilterChanged)
-                    .style(pill_pick)
-                    .width(Length::Fixed(124.0)),
-            );
-        }
+        // The speaker filter used to sit here. It cost the field 124 px of a row
+        // it had to share, and the transcript is easier to scan by speaker from
+        // the labels themselves; the field keeps the space.
         let running = matches!(self.status, Status::Running);
         let rename = if self.can(license::Feature::Editing) {
             self.tip(
@@ -12219,17 +12191,10 @@ fn inline_line_edit_row<'a>(
     text_width: f32,
 ) -> Element<'a, Message> {
     let height = line_edit_height(&content.text(), size, text_width);
-    let stripe = container(horizontal_space())
-        .width(Length::Fixed(3.0))
-        .height(Length::Fixed(height))
-        .style(move |_theme| container::Style {
-            background: Some(accent.into()),
-            border: iced::border::rounded(2.0),
-            ..container::Style::default()
-        });
-    // The field is visibly a field: the theme's input well, a border in the
-    // speaker's colour and rounded corners around transparent editor chrome, so
-    // the text still reads as the transcript's ink rather than as form text.
+    // The editor is one box: a bordered well in the theme's input colour, the
+    // way any other text field reads. There is no accent stripe down the side -
+    // it pushed the text off the row's own margin and made the line jump when
+    // editing began.
     let field = container(
         text_editor(content)
             .on_action(|action| Message::LineEditAction(0, action))
@@ -12245,24 +12210,30 @@ fn inline_line_edit_row<'a>(
     .padding([LINE_EDIT_PAD_Y, LINE_EDIT_PAD_X])
     // The field is as tall as its text; this only guards against an estimate
     // that came out a pixel short.
-    .clip(true)
-    .style(move |_theme| container::Style {
-        background: Some(scheme.field_bg.into()),
-        border: iced::border::Border {
-            color: accent,
-            width: 1.0,
-            radius: 8.0.into(),
-        },
-        ..container::Style::default()
-    });
+    .clip(true);
     let mut line = row![]
         .spacing(theme::SPACE_SM)
         .align_y(iced::Alignment::Start)
         .width(Length::Fill);
     if !stamp.is_empty() {
-        line = line.push(text(stamp.to_string()).size(size * 0.78).color(scheme.muted));
+        // The timestamp keeps the speaker's colour: the row still reads as the
+        // utterance it is, not as a form.
+        line = line.push(text(stamp.to_string()).size(size * 0.78).color(accent));
     }
-    line.push(stripe).push(field).into()
+    let line = line.push(field);
+    container(line)
+        .width(Length::Fill)
+        .padding([2, 2])
+        .style(move |_theme| container::Style {
+            background: Some(scheme.field_bg.into()),
+            border: iced::border::Border {
+                color: scheme.border,
+                width: 1.0,
+                radius: 8.0.into(),
+            },
+            ..container::Style::default()
+        })
+        .into()
 }
 
 /// Height of the editor's field for `text` at `size`, wrapped to `text_width`.
@@ -14651,11 +14622,11 @@ mod tests {
             .iter()
             .all(|index| app.shown_lines()[*index].speaker == "SPEAKER 1"));
 
-        // Switching speakers keeps the current scroll position.
+        // Clearing the filter keeps the current scroll position.
         app.scroll_target = Some(321.0);
-        let _ = app.update(Message::SpeakerFilterChanged("All speakers".to_string()));
+        app.speaker_filter = None;
+        app.invalidate_derived();
         assert_eq!(app.scroll_target, Some(321.0));
-        assert!(app.speaker_filter.is_none());
 
         app.search_query = "hello".to_string();
         assert_eq!(app.matching_lines().len(), 2);
