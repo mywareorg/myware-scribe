@@ -11325,15 +11325,13 @@ impl canvas::Program<Message> for Timeline {
                     turn.color,
                 );
             }
+            // The playhead is the line alone. The 10 x 3 px stub that used to
+            // cap it read as a horizontal rule across the bar tops, not as part
+            // of the indicator.
             let x = self.x_of((self.playhead / self.duration).clamp(0.0, 1.0), width);
             frame.fill_rectangle(
                 Point::new((x - 1.0).max(0.0), 0.0),
                 Size::new(2.0, height),
-                self.playhead_color,
-            );
-            frame.fill_rectangle(
-                Point::new((x - 5.0).max(0.0), 1.0),
-                Size::new(10.0, 3.0),
                 self.playhead_color,
             );
         }
@@ -12167,13 +12165,10 @@ impl canvas::Program<Message> for DeckWaveform {
             );
         }
 
+        // No cap: the preview is static, so a stub at the top only read as a
+        // stray horizontal line over the first bar.
         let x = (width * 0.42).clamp(0.0, (width - 2.0).max(0.0));
         frame.fill_rectangle(Point::new(x, 0.0), Size::new(2.0, height), self.playhead);
-        frame.fill_rectangle(
-            Point::new((x - 3.0).max(0.0), 0.0),
-            Size::new(8.0, 3.0),
-            self.playhead,
-        );
 
         vec![frame.into_geometry()]
     }
