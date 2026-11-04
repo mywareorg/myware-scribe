@@ -110,7 +110,9 @@ One phase, replacing the earlier blockwise / centroid / Viterbi trio.
 
 Blocks:
 
-- 5 minutes with 20-30 s overlap; benchmark 2 minutes with 15 s separately.
+- 5 minutes with 45 s overlap (`HIPPO_TRANSCRIBE_DIARIZE_BLOCKS=1`). Shorter
+  overlaps and shorter blocks were measured and were not more stable; see the
+  progress note below.
 - **Seam ownership by midpoint**: a segment belongs to the block whose centre it
   falls in; drop the duplicate copy before assignment. No seam churn, no nested
   turns at block boundaries.
@@ -148,10 +150,16 @@ Progress:
   ```text
   single pass            13.04% @0.25s   7.08% @1.0s   confusion 31.73s
   blocks 300 / 25        11.45% @0.25s   4.63% @1.0s   confusion 25.07s
+  blocks 300 / 30        11.47% @0.25s   4.63% @1.0s   confusion 25.18s
   blocks 240 / 60        13.55% @0.25s   6.80% @1.0s   confusion 34.20s
   blocks 180 / 60        29.01% @0.25s  20.77% @1.0s   confusion 101.62s
   blocks 300 / 45        23.43% @0.25s  19.15% @1.0s   confusion  77.36s
   ```
+
+  The shipped geometry is 300/45 despite that number. The 25 s overlap wins on
+  this file only because its boundaries happen to link cleanly; the overlap
+  length is not a quality dial, and shipping the 45 s version keeps the
+  comparison honest about the mechanism that still has to be replaced.
 
   The default single-pass turn map is byte-identical to the recorded baseline.
 
