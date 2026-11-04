@@ -130,29 +130,32 @@ The remaining regression is small and confined to the two files where the
 diarizer is already close to the reference; splitting is worth enabling on
 files like `short-1` where one speaker is collapsed for tens of seconds.
 
-## Embedding model is a domain lever
+## Embedding model is not a per-family lever
 
-`HIPPO_TRANSCRIBE_EMBEDDING_MODEL` already swaps the speaker model; no code
-change. Comparing the default CAM++ against resnet34, same pipeline, same
-`--num-speakers 2`:
+`HIPPO_TRANSCRIBE_EMBEDDING_MODEL` swaps the speaker model with no code change.
+Comparing the default CAM++ against resnet34 across all eight files, same
+pipeline, same `--num-speakers 2`:
 
 ```
 file          CAM++ @0.25/@1.0     resnet34 @0.25/@1.0
 short-1          53.89 / 48.13       17.36 / 11.03
 mid-1            34.97 / 26.76       35.25 / 27.49
-sample-long      10.62 /  2.76       34.45 / 26.33
-sample-short     10.36 /  1.60       10.36 /  1.60
+mid-2            33.45 / 25.47       49.16 / 37.91
+short-2          13.57 /  1.82       13.73 /  3.61
+end              10.60 /  3.58       37.38 / 31.04
+full             14.36 /  6.15       14.71 /  6.96
+long             10.62 /  2.76       34.45 / 26.33
+short            10.36 /  1.60       10.36 /  1.60
 ```
 
-The two families of recordings want different models: resnet34 fixes the
-`hour-conversation` short file and destroys `sample-long`, and the reverse is
-true for CAM++. `sample-short` produces byte-identical turns under both, which
-means the model barely matters there.
+The hypothesis was that the two recording families want different models. They
+do not: resnet34 wins on **one** file (`short-1`, the collapsed one) and is
+worse or equal on the other seven, including `mid-2` and `end` from both
+families. `sample-short` produces byte-identical turns under both, so the model
+barely matters there.
 
-This is a recording-condition mismatch, not a tuning problem, and it explains
-why every post-pass so far helped one family and hurt the other. A per-file
-choice of embedding model would need a signal that identifies the family
-without a reference; nothing tried so far provides one.
+CAM++ stays the default. `short-1` is an outlier where a different embedding
+happens to suit the audio, and nothing in the file identifies it as such.
 
 ## Dense window track (measured, removed)
 
