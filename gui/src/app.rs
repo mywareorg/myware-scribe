@@ -183,22 +183,12 @@ const HEADER_LABEL_HEIGHT: f32 = 13.0 * 1.3 + 1.0 + 11.0 * 1.3;
 /// Gap the header's slot leaves under the header's rule.
 const HEADER_SLOT_GAP: f32 = theme::SPACE_SM;
 
-/// Top inset of the transcript card's title row, one step larger than
-/// `HEADER_GAP`: the title belongs to the card, the menu strip below it belongs
-/// to the header.
-const TITLE_TOP: f32 = theme::SPACE_MD;
-
-/// Height of the card's title row: its top inset plus a 14 px bold line at
-/// iced's 1.3 line height. It has no bottom padding — the header's own top gap
-/// is the space beneath it.
-const TITLE_HEIGHT: f32 = TITLE_TOP + 14.0 * 1.3;
-
-/// Where the transcript header menus' top edge sits inside the card: the title
-/// row, the header's gap above and below its controls, the identity block, the
-/// gap to the rule, the rule itself and the slot's gap. Their width is not
-/// fixed: each menu is as wide as its own widest row.
+/// Where the transcript header menus' top edge sits inside the card: the
+/// header's gap above and below its controls, the identity block, the gap to the
+/// rule, the rule itself and the slot's gap. Their width is not fixed: each menu
+/// is as wide as its own widest row.
 const VIEW_MENU_TOP: f32 =
-    TITLE_HEIGHT + HEADER_GAP * 3.0 + HEADER_LABEL_HEIGHT + 1.0 + HEADER_SLOT_GAP;
+    HEADER_GAP * 3.0 + HEADER_LABEL_HEIGHT + 1.0 + HEADER_SLOT_GAP;
 
 /// Width of a header menu row's leading check slot. Fixed, so every label in a
 /// menu starts on the same left edge whether its row is checked or not.
@@ -207,6 +197,15 @@ const HEADER_MENU_CHECK: f32 = 16.0;
 /// The header's horizontal padding. The menus hang from the same left edge, so
 /// this is named rather than written into both.
 const HEADER_PAD_X: f32 = 8.0;
+
+/// The header's identity badge and the gap between it and the label. The
+/// filename's budget is measured past both.
+const HEADER_BADGE_WIDTH: f32 = 26.0;
+const HEADER_BADGE_GAP: f32 = 8.0;
+
+/// Fewest characters the filename is cut down to. Below this a middle ellipsis
+/// leaves two characters either side of it, which no longer names the file.
+const MIN_NAME_CHARS: usize = 8;
 
 /// Fixed widths of the header's menu buttons. A menu is anchored by adding the
 /// widths of the buttons to its left, so these must be the widths the buttons
@@ -8810,6 +8809,10 @@ impl App {
             return None;
         }
 
+        // How wide the identity block may grow before the filename has to be
+        // cut: everything the menus leave, less the badge.
+        let (name_budget, meta_budget) = header_identity_budgets(self.window_size.width);
+
         let (glyph, tint, title, meta) = if let Some(view) = &self.selected_view {
             let name = view
                 .audio
@@ -8831,12 +8834,7 @@ impl App {
             {
                 meta.push("read-only".to_string());
             }
-            (
-                ICON_FILE_TEXT,
-                scheme.blue,
-                ellipsize_middle(name, 20),
-                meta.join(" \u{00b7} "),
-            )
+            (ICON_FILE_TEXT, scheme.blue, name.to_string(), meta.join(" \u{00b7} "))
         } else if running {
             (
                 ICON_MIC,
@@ -8859,10 +8857,10 @@ impl App {
         };
 
         let badge = container(icon_colored(glyph, 13.0, tint))
-            .width(Length::Fixed(26.0))
-            .height(Length::Fixed(26.0))
-            .center_x(Length::Fixed(26.0))
-            .center_y(Length::Fixed(26.0))
+            .width(Length::Fixed(HEADER_BADGE_WIDTH))
+            .height(Length::Fixed(HEADER_BADGE_WIDTH))
+            .center_x(Length::Fixed(HEADER_BADGE_WIDTH))
+            .center_y(Length::Fixed(HEADER_BADGE_WIDTH))
             .style(move |_theme| container::Style {
                 background: Some(Color { a: 0.16, ..tint }.into()),
                 border: iced::border::rounded(13.0),
@@ -8885,6 +8883,12 @@ impl App {
         } else {
             meta
         };
+        // Both lines are capped to the same pixel width, so neither can reach
+        // past the card's padding: the filename gets the whole budget, the meta
+        // gets the same width in its smaller size. `ellipsize_middle` keeps the
+        // tail, which is what preserves "Save As to keep" when the meta is cut.
+        let title = ellipsize_middle(&title, name_budget);
+        let meta = ellipsize_middle(&meta, meta_budget);
         let mut label = column![text(title).size(13).wrapping(NO_WRAP)].spacing(1);
         if !meta.is_empty() {
             label = label.push(
@@ -8920,7 +8924,7 @@ impl App {
             row![
                 menus,
                 row![badge, label]
-                    .spacing(8)
+                    .spacing(HEADER_BADGE_GAP)
                     .align_y(iced::Alignment::Center),
                 horizontal_space(),
             ]
@@ -10604,30 +10608,10 @@ impl App {
             bottom: if has_header { HEADER_SLOT_GAP } else { 0.0 },
             left: 0.0,
         });
-        // The card's own name, inset from the rounded top edge and aligned with
-        // the header's horizontal padding. It carries no bottom padding: the
-        // header's top gap is the space under it, so the title and the menu
-        // strip read as one block with the title leading it.
-        let title = container(
-            text("Transcription")
-                .size(theme::TEXT_MD)
-                .font(Font {
-                    weight: font::Weight::Bold,
-                    ..Font::DEFAULT
-                })
-                .wrapping(NO_WRAP),
-        )
-        .width(Length::Fill)
-        .padding(iced::Padding {
-            top: TITLE_TOP,
-            right: HEADER_PAD_X,
-            bottom: 0.0,
-            left: HEADER_PAD_X,
-        });
         // The editor strip sits between the header and the list, inside the card,
         // and only its *height* changes: nothing when no editor is open, so the
         // list runs up to the header. It is always the child before the list, so
-        // the scrollable stays child 3 in both states and `Tree::diff` matches it
+        // the scrollable stays child 2 in both states and `Tree::diff` matches it
         // by index — the strip's node swaps between a `Space` and a `Row` (a
         // `Container` has no node of its own), but the scrollable's node and its
         // absolute pixel offset are untouched, which is why its offset is not
@@ -10638,13 +10622,8 @@ impl App {
         })
         .width(Length::Fill)
         .height(Length::Fixed(editor_strip_height(self.line_edit.is_some())));
-        let transcript_box = column![
-            title,
-            header_slot,
-            strip_slot,
-            self.transcript_element()
-        ]
-        .spacing(0)
+        let transcript_box = column![header_slot, strip_slot, self.transcript_element()]
+            .spacing(0)
         .width(Length::Fill)
         .height(Length::Fill);
 
@@ -13579,6 +13558,41 @@ fn estimated_text_width(text: &str, size: f32) -> f32 {
     text.chars().count() as f32 * size * 0.625
 }
 
+/// Character budgets for the header's two identity lines, from the window width.
+///
+/// The filename must not be cut until it comes `HEADER_PAD_X` from the card's
+/// right edge, so the block's width is the card minus both paddings, the four
+/// menu buttons and their gaps, the row gap, the badge and the gap after it. The
+/// row's elastic space is not subtracted: it is what gives way first.
+///
+/// The result is in characters, not pixels. The view is built without a
+/// renderer, so the width can only be divided by the same per-character estimate
+/// the rest of the app relies on ([`estimated_text_width`]). That estimate is
+/// generous — about a tenth wide on a wide system sans, more on a narrow one —
+/// so the cut lands a few characters early instead of overflowing. A
+/// pixel-exact cut would need a measured layout, which this does not have.
+fn header_identity_budgets(window_width: f32) -> (usize, usize) {
+    let menus = FILE_BUTTON_WIDTH
+        + EDIT_BUTTON_WIDTH
+        + VIEW_BUTTON_WIDTH
+        + HELP_BUTTON_WIDTH
+        + theme::SPACE_SM * 3.0;
+    let card = window_width - OUTER_PADDING * 2.0 - LEFT_PANEL_WIDTH - PANEL_GAP;
+    let available = card
+        - HEADER_PAD_X * 2.0
+        - menus
+        - HEADER_GAP
+        - HEADER_BADGE_WIDTH
+        - HEADER_BADGE_GAP;
+    let budget = |size: f32| {
+        (available / estimated_text_width("x", size))
+            .floor()
+            .max(MIN_NAME_CHARS as f32) as usize
+    };
+    // 13 px filename, 11 px meta: the same width in two type sizes.
+    (budget(13.0), budget(11.0))
+}
+
 /// Width a header menu needs: the widest of its rows, each being the check slot
 /// and its gap, the label, the minimum gap before a trailing key and the key,
 /// plus the row's and the card's padding.
@@ -15395,6 +15409,23 @@ mod tests {
                 "{ratio:.2}:1 is a filled button, not a wash"
             );
         }
+    }
+
+    #[test]
+    fn the_filename_budget_follows_the_window_width() {
+        // 1024 is the app's minimum: a 648 px card leaves the identity block
+        // 256 px, which is 31 characters at 13 px and 37 at 11 px.
+        let (name, meta) = header_identity_budgets(1024.0);
+        assert_eq!(name, 31);
+        assert_eq!(meta, 37);
+
+        // A wide window gives the whole name back; the fixed 20 characters this
+        // replaced would have cut it anyway.
+        assert_eq!(header_identity_budgets(1600.0).0, 102);
+
+        // Never negative or unreadable, even below the app's minimum width.
+        assert_eq!(header_identity_budgets(300.0).0, MIN_NAME_CHARS);
+        assert_eq!(header_identity_budgets(0.0).1, MIN_NAME_CHARS);
     }
 
     #[test]
