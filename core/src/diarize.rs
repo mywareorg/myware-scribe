@@ -1167,6 +1167,104 @@ mod tests {
         }
     }
 
+    /// Diagnostic, not a gate: measure whether the speaker model separates the
+    /// reference speakers at all, and what clustering over reference spans
+    /// would score. Ignored by default because it needs an audio file and an
+    /// RTTM on disk.
+    ///
+    /// `DIARIZE_AUDIO`, `DIARIZE_RTTM`, optional `DIARIZE_OUT` (TSV of the
+    /// oracle clustering).
+    #[test]
+    #[ignore = "diagnostic: needs DIARIZE_AUDIO and DIARIZE_RTTM"]
+    fn measure_reference_separability() {
+        let Ok(audio_path) = std::env::var("DIARIZE_AUDIO") else {
+            return;
+        };
+        let Ok(rttm_path) = std::env::var("DIARIZE_RTTM") else {
+            return;
+        };
+        let (samples, _rate) = crate::audio::decode(std::path::Path::new(&audio_path))
+            .expect("decode audio");
+        let embedder = Embedder::new(&crate::models::embedding_model(), Some(4))
+            .expect("embedding model");
+
+        let mut spans: Vec<(f32, f32, String)> = Vec::new();
+        for line in std::fs::read_to_string(&rttm_path)
+            .expect("read rttm")
+            .lines()
+        {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() < 8 || parts[0] != "SPEAKER" {
+                continue;
+            }
+            let start: f32 = parts[3].parse().unwrap_or(0.0);
+            let duration: f32 = parts[4].parse().unwrap_or(0.0);
+            if duration <= 0.0 {
+                continue;
+            }
+            spans.push((start, start + duration, parts[7].to_string()));
+        }
+
+        let mut vectors: Vec<Vec<f32>> = Vec::new();
+        let mut labels: Vec<String> = Vec::new();
+        for (start, end, speaker) in &spans {
+            let width = SPLIT_WINDOW_S.min(end - start);
+            let middle = (start + end) / 2.0;
+            let Some(vector) = embed_span(
+                &samples,
+                &embedder,
+                (middle - width / 2.0).max(*start),
+                (middle + width / 2.0).min(*end),
+            ) else {
+                continue;
+            };
+            vectors.push(vector);
+            labels.push(speaker.clone());
+        }
+        assert!(!vectors.is_empty(), "no spans embedded");
+
+        let mut same = (0.0f32, 0usize);
+        let mut different = (0.0f32, 0usize);
+        for i in 0..vectors.len() {
+            for j in (i + 1)..vectors.len() {
+                let similarity = cosine(&vectors[i], &vectors[j]);
+                if labels[i] == labels[j] {
+                    same.0 += similarity;
+                    same.1 += 1;
+                } else {
+                    different.0 += similarity;
+                    different.1 += 1;
+                }
+            }
+        }
+        println!(
+            "intra-speaker cosine {:.3} ({} pairs), inter-speaker {:.3} ({} pairs)",
+            same.0 / same.1.max(1) as f32,
+            same.1,
+            different.0 / different.1.max(1) as f32,
+            different.1
+        );
+
+        let Some((_, assignment)) = two_means(&vectors) else {
+            panic!("clustering failed");
+        };
+        let mut body = String::new();
+        let mut index = 0usize;
+        for (start, end, _) in &spans {
+            // Spans that could not be embedded have no assignment.
+            if index < assignment.len() {
+                body.push_str(&format!(
+                    "{start:.3}\t{end:.3}\tspk{}\n",
+                    assignment[index]
+                ));
+                index += 1;
+            }
+        }
+        if let Ok(out) = std::env::var("DIARIZE_OUT") {
+            std::fs::write(out, body).expect("write assignments");
+        }
+    }
+
     #[test]
     fn normalize_scales_to_unit_length() {
         let mut vector = vec![3.0f32, 4.0];

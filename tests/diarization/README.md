@@ -130,6 +130,45 @@ The remaining regression is small and confined to the two files where the
 diarizer is already close to the reference; splitting is worth enabling on
 files like `short-1` where one speaker is collapsed for tens of seconds.
 
+## Ceiling test: reference spans through our own clustering
+
+A diagnostic, not a result: take the reference's own spans (perfect
+segmentation), embed each with the speaker model, and cluster with two-means.
+That isolates clustering quality from segmentation quality.
+
+```
+file        intra-speaker cosine   inter-speaker   oracle-span DER@0.25/@1.0
+short-1          0.431 (1186)        0.372 (1160)         21.28% / 19.69%
+sample-long      0.467 (15196)       0.388 (13965)        (not scored)
+```
+
+Two conclusions:
+
+- **The embedding margin is small on both files** (0.06-0.08 cosine), so the
+  model is not the thing separating these speakers cleanly. It is still enough
+  to cluster with, because sample-long scores 10.62% with the same margin.
+- **Most of short-1's error is under-segmentation, not label error.** With the
+  reference's own spans it scores 21.28%, against 53.89% today and 27.18% with
+  drift-splitting. The file is 120 s long with 69 reference turns while the
+  diarizer emits 21 raw units - roughly half the granularity the audio needs.
+
+So the next change should be a dense window track (1.5 s windows, 0.75 s hop,
+Viterbi with a switch penalty, centroids bootstrapped from the diarizer's
+turns), not another post-pass over `Vec<Turn>`. Its ceiling on short-1 is
+~21%; it must not move sample-long.
+
+Reproduce with the ignored diagnostic:
+
+```
+DIARIZE_AUDIO=audio/hour-conversation-short-1.mp3 \
+DIARIZE_RTTM=tests/diarization/hour-conversation-short-1.rttm \
+DIARIZE_OUT=/tmp/oracle.tsv \
+cargo test -p hippo-transcribe-core --lib measure_reference_separability \
+    -- --ignored --nocapture
+scripts/diarize-score.py score --ref tests/diarization/hour-conversation-short-1.rttm \
+    --hyp /tmp/oracle.tsv
+```
+
 ## Re-clustering the turns (measured, not shipped)
 
 An experiment, recorded so it is not repeated without new evidence: embed every
