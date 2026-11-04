@@ -10636,8 +10636,12 @@ impl App {
                 .wrapping(NO_WRAP),
             horizontal_space(),
             self.tip(
-                icon_pill(collapse, scheme.ink)
-                    .on_press(Message::TogglePlayerCollapsed),
+                // The same icon-only secondary button the queue's Clear uses:
+                // a 16 px glyph in the button's own padding, so the two cards'
+                // controls are one height and one shape.
+                action(icon(collapse, 16.0))
+                    .on_press(Message::TogglePlayerCollapsed)
+                    .style(pill_button_secondary),
                 if self.player_collapsed {
                     "Show the waveform"
                 } else {
