@@ -372,6 +372,8 @@ const SPLIT_MIN_PART_S: f32 = 2.0;
 const SPLIT_MAX_CENTROID_SIM: f32 = 0.80;
 /// Runs of windows shorter than this are smoothed into their neighbours.
 const SPLIT_MIN_RUN_S: f32 = 1.5;
+/// Required cosine margin when the split is decided by centroids alone.
+const SPLIT_MIN_MARGIN: f32 = 0.05;
 /// How many turns per label are sampled to build the label centroids.
 const CENTROID_SAMPLES: usize = 6;
 
@@ -431,10 +433,22 @@ where
         // The centroids must not be built from the turn under test: a collapsed
         // turn would pull its own label towards one of the halves and make the
         // mapping agree with itself.
-        let centroids = local_centroids(&turns, index, &labels, &embed);
-        match centroids.and_then(|centroids| {
-            split_one(turn, &embed, &labels, &centroids)
-        }) {
+        // Centroids are only the fallback, so a label with no other turns must
+        // not block a split that continuity can decide on its own.
+        let centroids = local_centroids(&turns, index, &labels, &embed).unwrap_or_default();
+        // Continuity beats a centroid comparison: the turns either side share
+        // channel, level and room with the one being split, and a collapse
+        // almost always starts and ends with the two speakers in some order.
+        let before = turns[..index]
+            .iter()
+            .rev()
+            .find(|other| other.end <= turn.start + 0.5)
+            .map(|other| other.speaker.as_str());
+        let after = turns[index + 1..]
+            .iter()
+            .find(|other| other.start >= turn.end - 0.5)
+            .map(|other| other.speaker.as_str());
+        match split_one(turn, &embed, &labels, &centroids, before, after) {
             Some(parts) => out.extend(parts),
             None => out.push(turn.clone()),
         }
@@ -574,6 +588,8 @@ fn split_one<F>(
     embed: &F,
     labels: &[String],
     centroids: &[Vec<f32>],
+    before: Option<&str>,
+    after: Option<&str>,
 ) -> Option<Vec<Turn>>
 where
     F: Fn(f32, f32) -> Option<Vec<f32>>,
@@ -643,36 +659,57 @@ where
         index = end + 1;
     }
 
-    // Which global speaker is which half.
-    let mut side_label = [0usize; 2];
-    for side in 0..2 {
-        let mut best = (usize::MAX, f32::NEG_INFINITY);
-        for (label_index, centroid) in centroids.iter().enumerate() {
-            let similarity = cosine(&means[side], centroid);
-            if similarity > best.1 {
-                best = (label_index, similarity);
-            }
-        }
-        side_label[side] = best.0;
+    // Which global speaker is which half: continuity first, centroids only as
+    // a fallback with a margin, because the label centres are built from short
+    // interjections and are the weaker evidence.
+    let label_index = |name: &str| labels.iter().position(|label| label == name);
+    let first_side = assignment[0];
+    let last_side = assignment[assignment.len() - 1];
+    let mut side_label: [Option<usize>; 2] = [None, None];
+    if let Some(label) = before.and_then(label_index) {
+        side_label[first_side] = Some(label);
     }
-    if trace() {
-        let sims: Vec<[f32; 2]> = (0..2)
-            .map(|side| {
-                let mut row = [0.0f32; 2];
-                for label in 0..centroids.len().min(2) {
-                    row[label] = cosine(&means[side], &centroids[label]);
-                }
-                row
-            })
-            .collect();
-        eprintln!(
-            "split: sides map to {:?} (labels {:?}) similarities {:?}",
-            side_label, labels, sims
-        );
+    if let Some(label) = after.and_then(label_index) {
+        side_label[last_side] = Some(label);
     }
-    if side_label[0] == side_label[1] {
+    if side_label[0].is_some() && side_label[0] == side_label[1] {
+        // The turn starts and ends with the same voice yet claims two speakers.
         return None;
     }
+    if side_label[0].is_none() && side_label[1].is_none() {
+        if centroids.len() < 2 {
+            return None;
+        }
+        let mut scores = [[0.0f32; 2]; 2];
+        for side in 0..2 {
+            for (label, centroid) in centroids.iter().enumerate().take(2) {
+                scores[side][label] = cosine(&means[side], centroid);
+            }
+        }
+        for side in 0..2 {
+            let best = if scores[side][0] >= scores[side][1] { 0 } else { 1 };
+            let margin = (scores[side][0] - scores[side][1]).abs();
+            if margin < SPLIT_MIN_MARGIN {
+                return None;
+            }
+            side_label[side] = Some(best);
+        }
+        if side_label[0] == side_label[1] {
+            return None;
+        }
+    }
+    for side in 0..2 {
+        if side_label[side].is_none() {
+            side_label[side] = side_label[1 - side].map(|taken| 1 - taken);
+        }
+    }
+    if trace() {
+        eprintln!(
+            "split: turn {:.1}-{:.1}s sides {:?} before {:?} after {:?}",
+            turn.start, turn.end, side_label, before, after
+        );
+    }
+    let side_label = [side_label[0].unwrap_or(0), side_label[1].unwrap_or(1)];
 
     let mut parts: Vec<Turn> = Vec::new();
     let mut run_start = 0usize;
@@ -1196,6 +1233,29 @@ mod tests {
         assert_eq!(split[1].speaker, "B");
         assert!((split[0].end - 20.0).abs() <= 1.5, "{:?}", split[0]);
         assert!((split[1].end - 40.0).abs() <= 0.1, "{:?}", split[1]);
+    }
+
+    #[test]
+    fn continuity_decides_which_half_is_which_speaker() {
+        // A speaks, the middle collapses onto A, B closes the clip. The
+        // embedding step has no usable centroids here, so only continuity can
+        // label the halves.
+        let turns = vec![
+            turn(0.0, 5.0, "A"),
+            turn(5.0, 45.0, "A"),
+            turn(45.0, 50.0, "B"),
+        ];
+        let split = split_with(turns, |start, _end| {
+            Some(if start < 25.0 {
+                vec![1.0, 0.0]
+            } else {
+                vec![0.0, 1.0]
+            })
+        });
+        assert_eq!(split.len(), 4, "{split:?}");
+        assert_eq!(split[1].speaker, "A");
+        assert_eq!(split[2].speaker, "B");
+        assert!((split[2].end - 45.0).abs() <= 0.1);
     }
 
     #[test]
