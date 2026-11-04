@@ -550,6 +550,29 @@ enum SummaryLine {
     Table(Vec<String>, Vec<Vec<String>>),
 }
 
+/// A View-menu toggle reachable by a single key. The letters are shown in the
+/// menu, so the shortcut and the hint cannot drift apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ViewShortcut {
+    Follow,
+    Timestamps,
+    Sms,
+    Join,
+    Confidence,
+}
+
+impl ViewShortcut {
+    fn key(self) -> &'static str {
+        match self {
+            Self::Follow => "f",
+            Self::Timestamps => "t",
+            Self::Sms => "s",
+            Self::Join => "j",
+            Self::Confidence => "c",
+        }
+    }
+}
+
 /// Which menu in the transcript header is open. One at a time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HeaderMenu {
@@ -652,9 +675,9 @@ pub enum Message {
     Escape,
     ShortcutPlay,
     ShortcutPlayChecked(bool),
-    /// Plain `f` outside a text field.
-    ShortcutFollow,
-    ShortcutFollowChecked(bool),
+    /// A plain View-menu key, outside a text field.
+    ViewShortcut(ViewShortcut),
+    ViewShortcutChecked(ViewShortcut, bool),
     FindHover(bool),
     /// The Find row is open: is its field still focused?
     PollFindFocus,
@@ -2746,15 +2769,19 @@ impl App {
             Key::Named(Named::ArrowDown) => Some(Message::SelectRelative(1)),
             Key::Named(Named::ArrowRight) => Some(Message::SeekBy(5.0)),
             Key::Named(Named::ArrowLeft) => Some(Message::SeekBy(-5.0)),
-            // Follow on `f`, but never while something is being typed into: the
-            // focus probe in the handler decides that.
+            // Single-key View toggles. Never fires while something is being
+            // typed into: the focus probe in the handler decides that.
             Key::Character(character)
-                if character.eq_ignore_ascii_case("f")
-                    && !modifiers.command()
-                    && !modifiers.alt()
-                    && !modifiers.shift() =>
+                if !modifiers.command() && !modifiers.alt() && !modifiers.shift() =>
             {
-                Some(Message::ShortcutFollow)
+                match character.to_ascii_lowercase().as_str() {
+                    "f" => Some(Message::ViewShortcut(ViewShortcut::Follow)),
+                    "t" => Some(Message::ViewShortcut(ViewShortcut::Timestamps)),
+                    "s" => Some(Message::ViewShortcut(ViewShortcut::Sms)),
+                    "j" => Some(Message::ViewShortcut(ViewShortcut::Join)),
+                    "c" => Some(Message::ViewShortcut(ViewShortcut::Confidence)),
+                    _ => None,
+                }
             }
             Key::Character(character) if modifiers.command() => match character.as_str() {
                 "," => Some(Message::OpenSettings),
@@ -2774,6 +2801,13 @@ impl App {
     /// that arrives from the global key subscription must not fire behind it.
     fn line_edit_shortcut_blocked(&self) -> bool {
         self.delete_confirm || self.line_edit_picker_open || self.popup_open()
+    }
+
+    /// A single-key View toggle is off while a dialog owns the keyboard or the
+    /// line editor is open: those fields would otherwise swallow the letter's
+    /// meaning.
+    fn view_shortcut_blocked(&self) -> bool {
+        self.line_edit_shortcut_blocked() || self.line_edit.is_some()
     }
 
     /// Ask the widget tree whether a focusable input currently owns focus.
@@ -3864,28 +3898,28 @@ impl App {
                 }
                 Task::none()
             }
-            Message::ShortcutFollow => {
-                if self.line_edit_shortcut_blocked()
-                    || self.rename_open
-                    || self.line_edit.is_some()
-                    || self.settings_open
-                    || self.calibration.is_some()
-                {
+            Message::ViewShortcut(shortcut) => {
+                if self.view_shortcut_blocked() {
                     return Task::none();
                 }
-                Self::focus_probe().map(Message::ShortcutFollowChecked)
+                Self::focus_probe().map(move |focused| Message::ViewShortcutChecked(shortcut, focused))
             }
-            Message::ShortcutFollowChecked(focused) => {
-                if focused
-                    || self.line_edit_shortcut_blocked()
-                    || self.rename_open
-                    || self.line_edit.is_some()
-                    || self.settings_open
-                    || self.calibration.is_some()
-                {
+            Message::ViewShortcutChecked(shortcut, focused) => {
+                if focused || self.view_shortcut_blocked() {
                     return Task::none();
                 }
-                self.update(Message::ToggleFollowPlayhead)
+                match shortcut {
+                    ViewShortcut::Follow => self.update(Message::ToggleFollowPlayhead),
+                    ViewShortcut::Timestamps => {
+                        self.update(Message::TimestampsToggled(!self.show_timestamps))
+                    }
+                    ViewShortcut::Sms => self.update(Message::SmsToggled(!self.sms_mode)),
+                    ViewShortcut::Join => self.update(Message::ToggleJoinLines),
+                    ViewShortcut::Confidence if self.has_confidence() => {
+                        self.update(Message::ToggleConfidenceView)
+                    }
+                    ViewShortcut::Confidence => Task::none(),
+                }
             }
             Message::SeekBy(delta) => {
                 if self.rename_open
@@ -8901,6 +8935,7 @@ impl App {
                     false,
                     has_text,
                     has_text.then_some(Message::SaveTranscriptAs),
+                    None,
                     scheme,
                 ),
                 header_menu_item(
@@ -8908,6 +8943,7 @@ impl App {
                     false,
                     has_target,
                     has_target.then_some(Message::RevealOutput),
+                    None,
                     scheme,
                 ),
                 header_menu_item(
@@ -8915,6 +8951,7 @@ impl App {
                     false,
                     summary,
                     summary.then_some(Message::OpenSummary),
+                    None,
                     scheme,
                 ),
             ]
@@ -8943,12 +8980,20 @@ impl App {
         let reset = self.reset_available();
         header_menu_card(
             column![
-                header_menu_item("Rename All", false, can_rename, rename_message, scheme),
+                header_menu_item(
+                    "Rename All",
+                    false,
+                    can_rename,
+                    rename_message,
+                    None,
+                    scheme,
+                ),
                 header_menu_item(
                     "Copy",
                     false,
                     has_text,
                     has_text.then_some(Message::CopyTranscript),
+                    None,
                     scheme,
                 ),
                 header_menu_item(
@@ -8956,6 +9001,7 @@ impl App {
                     false,
                     reset,
                     reset.then_some(Message::RequestResetTranscript),
+                    None,
                     scheme,
                 ),
             ]
@@ -8980,6 +9026,7 @@ impl App {
                 self.follow_playhead,
                 true,
                 Some(Message::ToggleFollowPlayhead),
+                Some(ViewShortcut::Follow.key()),
                 scheme,
             ),
             header_menu_item(
@@ -8987,6 +9034,7 @@ impl App {
                 self.show_timestamps,
                 true,
                 Some(Message::TimestampsToggled(!self.show_timestamps)),
+                Some(ViewShortcut::Timestamps.key()),
                 scheme,
             ),
             header_menu_item(
@@ -8994,6 +9042,7 @@ impl App {
                 self.sms_mode,
                 true,
                 Some(Message::SmsToggled(!self.sms_mode)),
+                Some(ViewShortcut::Sms.key()),
                 scheme,
             ),
             header_menu_item(
@@ -9001,6 +9050,7 @@ impl App {
                 self.join_lines,
                 true,
                 Some(Message::ToggleJoinLines),
+                Some(ViewShortcut::Join.key()),
                 scheme,
             ),
             header_menu_item(
@@ -9008,6 +9058,7 @@ impl App {
                 self.confidence_view,
                 confidence,
                 confidence.then_some(Message::ToggleConfidenceView),
+                Some(ViewShortcut::Confidence.key()),
                 scheme,
             ),
         ]
@@ -10782,6 +10833,8 @@ impl App {
                         ("Ctrl+Enter", "Transcribe"),
                         ("Ctrl + / - / 0", "Transcript font zoom"),
                         ("Space", "Play / pause"),
+                        ("F", "Follow the active line"),
+                        ("T / S / J / C", "Timestamps / SMS / Join / Confidence"),
                         ("Left / Right", "Seek \u{00b1}5s"),
                         ("Up / Down", "Move through transcript"),
                         ("Alt+Enter", "Edit active line"),
@@ -13385,13 +13438,15 @@ fn header_menu_card<'a>(
 }
 
 /// One row of a header menu: a leading check slot that keeps every label on the
-/// same left edge, then the label. Disabled rows stay in place so the menu's
-/// height does not change with the transcript's data.
+/// same left edge, the label, then the key that toggles it at the trailing
+/// edge. Disabled rows stay in place so the menu's height does not change with
+/// the transcript's data.
 fn header_menu_item<'a>(
     label: &'a str,
     checked: bool,
     enabled: bool,
     message: Option<Message>,
+    shortcut: Option<&'a str>,
     scheme: Scheme,
 ) -> Element<'a, Message> {
     let check: Element<'static, Message> = if checked && enabled {
@@ -13399,16 +13454,27 @@ fn header_menu_item<'a>(
     } else {
         horizontal_space().into()
     };
-    action(
-        row![
-            container(check)
-                .width(Length::Fixed(16.0))
-                .center_x(Length::Fixed(16.0)),
-            text(label).size(theme::TEXT_SM).wrapping(NO_WRAP),
-        ]
-        .spacing(6)
-        .align_y(iced::Alignment::Center),
-    )
+    let mut content = row![
+        container(check)
+            .width(Length::Fixed(16.0))
+            .center_x(Length::Fixed(16.0)),
+        text(label).size(theme::TEXT_SM).wrapping(NO_WRAP),
+    ]
+    .spacing(6)
+    .align_y(iced::Alignment::Center)
+    .width(Length::Fill);
+    // The key that toggles this row, at the far right where a shortcut hint
+    // belongs. A row without one keeps the same label edge and no trailing text.
+    if let Some(key) = shortcut {
+        content = content.push(horizontal_space());
+        content = content.push(
+            text(key)
+                .size(11)
+                .wrapping(NO_WRAP)
+                .color(scheme.muted),
+        );
+    }
+    action(content)
     .width(Length::Fill)
     .padding([5, 6])
     .style(header_menu_item_style(scheme, enabled))
@@ -16035,6 +16101,37 @@ mod tests {
     }
 
     #[test]
+    fn the_view_menu_keys_toggle_their_toggles_outside_text_fields() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("view-keys-config");
+        let original = "[00:00] SPEAKER 1: one\n[00:05] SPEAKER 2: two\n";
+        let (mut app, _transcript, media) = line_edit_fixture("view-keys", original);
+
+        // A focused field owns every one of them.
+        let timestamps = app.show_timestamps;
+        let _ = app.update(Message::ViewShortcutChecked(ViewShortcut::Timestamps, true));
+        assert_eq!(app.show_timestamps, timestamps);
+
+        let _ = app.update(Message::ViewShortcutChecked(ViewShortcut::Timestamps, false));
+        assert_ne!(app.show_timestamps, timestamps);
+
+        let sms = app.sms_mode;
+        let _ = app.update(Message::ViewShortcutChecked(ViewShortcut::Sms, false));
+        assert_ne!(app.sms_mode, sms);
+
+        let join = app.join_lines;
+        let _ = app.update(Message::ViewShortcutChecked(ViewShortcut::Join, false));
+        assert_ne!(app.join_lines, join);
+
+        // No confidence sidecar here, so the key and the menu row both stay inert.
+        let confidence = app.confidence_view;
+        let _ = app.update(Message::ViewShortcutChecked(ViewShortcut::Confidence, false));
+        assert_eq!(app.confidence_view, confidence);
+
+        let _ = std::fs::remove_dir_all(&media);
+    }
+
+    #[test]
     fn the_f_key_toggles_follow_only_outside_a_text_field() {
         let _guard = env_lock();
         let _config = ConfigEnv::new("follow-key-config");
@@ -16043,9 +16140,9 @@ mod tests {
 
         let before = app.follow_playhead;
         // A focused field owns the key: the checked form does nothing.
-        let _ = app.update(Message::ShortcutFollowChecked(true));
+        let _ = app.update(Message::ViewShortcutChecked(ViewShortcut::Follow, true));
         assert_eq!(app.follow_playhead, before);
-        let _ = app.update(Message::ShortcutFollowChecked(false));
+        let _ = app.update(Message::ViewShortcutChecked(ViewShortcut::Follow, false));
         assert_ne!(app.follow_playhead, before);
 
         let _ = std::fs::remove_dir_all(&media);
