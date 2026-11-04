@@ -358,6 +358,232 @@ fn normalize(vector: &mut [f32]) {
     }
 }
 
+// ------------------------------------------------------------ window track
+
+/// Cost, in cosine similarity, of switching speaker between two windows.
+/// Without it a single noisy window flips the label; the value is small enough
+/// that a real turn change (much larger in similarity) still wins.
+const TRACK_SWITCH_PENALTY: f32 = 0.06;
+
+/// Switch penalty for this run, overridable for sweeps.
+fn track_penalty() -> f32 {
+    crate::env_compat(
+        "HIPPO_TRANSCRIBE_DIARIZE_TRACK_PENALTY",
+        "TRANSIEL_DIARIZE_TRACK_PENALTY",
+    )
+    .and_then(|value| value.parse::<f32>().ok())
+    .unwrap_or(TRACK_SWITCH_PENALTY)
+}
+/// Windows shorter than this are dropped when the track is turned into turns.
+const TRACK_MIN_TURN_S: f32 = 0.30;
+
+/// Off by default until it is measured against the eight-file table.
+pub fn track_enabled() -> bool {
+    crate::env_compat(
+        "HIPPO_TRANSCRIBE_DIARIZE_TRACK",
+        "TRANSIEL_DIARIZE_TRACK",
+    )
+    .map(|value| {
+        let value = value.trim().to_ascii_lowercase();
+        value == "1" || value == "true" || value == "yes"
+    })
+    .unwrap_or(false)
+}
+
+/// Replace the diarizer's turn geometry with a dense window track.
+///
+/// The built-in pass decides segmentation and clustering together; when it
+/// under-segments, an entire exchange becomes one turn and no post-pass can put
+/// the boundary back. The track keeps its clustering as a bootstrap and asks the
+/// speaker model about every 1.5 s of audio instead, with a switch penalty so a
+/// single noisy window cannot flip a speaker.
+pub fn run_track(base: Vec<Turn>, samples: &[f32], embedder: &Embedder) -> Vec<Turn> {
+    let labels: Vec<String> = {
+        let mut seen: Vec<String> = Vec::new();
+        for turn in &base {
+            if !seen.contains(&turn.speaker) {
+                seen.push(turn.speaker.clone());
+            }
+        }
+        seen
+    };
+    if labels.len() != 2 {
+        return base;
+    }
+    let bootstrap = track_centroids(&base, samples, embedder, &labels);
+
+    let window = (SPLIT_WINDOW_S * SAMPLE_RATE as f32) as usize;
+    let hop = (SPLIT_HOP_S * SAMPLE_RATE as f32) as usize;
+    if samples.len() < window {
+        return base;
+    }
+    let starts: Vec<usize> = (0..=(samples.len() - window)).step_by(hop).collect();
+    let mut vectors: Vec<Vec<f32>> = Vec::with_capacity(starts.len());
+    for start in &starts {
+        let Some(vector) = embedder.embed(&samples[*start..start + window]).ok() else {
+            return base;
+        };
+        vectors.push(vector);
+    }
+    if vectors.len() < 3 {
+        return base;
+    }
+    let seed = crate::env_compat(
+        "HIPPO_TRANSCRIBE_DIARIZE_TRACK_SEED",
+        "TRANSIEL_DIARIZE_TRACK_SEED",
+    )
+    .unwrap_or_default();
+    let centroids = if seed.eq_ignore_ascii_case("kmeans") {
+        // Cluster the windows themselves: sherpa's labels are least reliable
+        // exactly where the track is needed.
+        let Some((_, assignment)) = two_means(&vectors) else {
+            return base;
+        };
+        let mut sums = [vec![0.0f32; vectors[0].len()], vec![0.0f32; vectors[0].len()]];
+        let mut counts = [0usize; 2];
+        for (vector, side) in vectors.iter().zip(&assignment) {
+            for (slot, value) in sums[*side].iter_mut().zip(vector) {
+                *slot += value;
+            }
+            counts[*side] += 1;
+        }
+        if counts[0] == 0 || counts[1] == 0 {
+            return base;
+        }
+        for sum in sums.iter_mut() {
+            normalize(sum);
+        }
+        sums
+    } else {
+        let Some(centroids) = bootstrap.clone() else {
+            return base;
+        };
+        [centroids[0].clone(), centroids[1].clone()]
+    };
+    if trace() {
+        eprintln!(
+            "track: windows {}, bootstrap centroid cosine {:.3}",
+            vectors.len(),
+            bootstrap
+                .as_ref()
+                .map(|centroids| cosine(&centroids[0], &centroids[1]))
+                .unwrap_or(f32::NAN)
+        );
+    }
+    let scores: Vec<[f32; 2]> = vectors
+        .iter()
+        .map(|vector| [cosine(vector, &centroids[0]), cosine(vector, &centroids[1])])
+        .collect();
+
+    // Viterbi over the two speakers.
+    let penalty = track_penalty();
+    let mut best = vec![[0.0f32; 2]; scores.len()];
+    let mut back = vec![[0u8; 2]; scores.len()];
+    best[0] = scores[0];
+    for index in 1..scores.len() {
+        for side in 0..2 {
+            let stay = best[index - 1][side];
+            let switch = best[index - 1][1 - side] - penalty;
+            let (previous, value) = if stay >= switch {
+                (side, stay)
+            } else {
+                (1 - side, switch)
+            };
+            best[index][side] = scores[index][side] + value;
+            back[index][side] = previous as u8;
+        }
+    }
+    let last = if best[scores.len() - 1][0] >= best[scores.len() - 1][1] {
+        0usize
+    } else {
+        1
+    };
+    let mut track = vec![0usize; scores.len()];
+    track[scores.len() - 1] = last;
+    for index in (1..scores.len()).rev() {
+        track[index - 1] = back[index][track[index]] as usize;
+    }
+
+    let mut out: Vec<Turn> = Vec::new();
+    let mut run_start = 0usize;
+    for index in 1..=track.len() {
+        let boundary = index == track.len() || track[index] != track[run_start];
+        if !boundary {
+            continue;
+        }
+        let start = starts[run_start] as f32 / SAMPLE_RATE as f32;
+        let end = if index < starts.len() {
+            starts[index] as f32 / SAMPLE_RATE as f32
+        } else {
+            samples.len() as f32 / SAMPLE_RATE as f32
+        };
+        if end - start >= TRACK_MIN_TURN_S {
+            let speaker = labels[track[run_start]].clone();
+            match out.last_mut() {
+                Some(previous) if previous.speaker == speaker => previous.end = end,
+                _ => out.push(Turn {
+                    start,
+                    end,
+                    speaker,
+                }),
+            }
+        }
+        run_start = index;
+    }
+    if out.is_empty() {
+        base
+    } else {
+        out
+    }
+}
+
+/// Centroid per label from the diarizer's own turns, one vote per turn so a
+/// single collapsed turn cannot dominate.
+fn track_centroids(
+    base: &[Turn],
+    samples: &[f32],
+    embedder: &Embedder,
+    labels: &[String],
+) -> Option<Vec<Vec<f32>>> {
+    let mut centroids = Vec::with_capacity(labels.len());
+    for label in labels {
+        let mut sum: Vec<f32> = Vec::new();
+        let mut count = 0usize;
+        for turn in base.iter().filter(|turn| &turn.speaker == label) {
+            let width = SPLIT_WINDOW_S.min(turn.end - turn.start);
+            if width < 0.5 {
+                continue;
+            }
+            let middle = (turn.start + turn.end) / 2.0;
+            let Some(vector) = embed_span(
+                samples,
+                embedder,
+                middle - width / 2.0,
+                middle + width / 2.0,
+            ) else {
+                continue;
+            };
+            if sum.is_empty() {
+                sum = vec![0.0f32; vector.len()];
+            }
+            for (slot, value) in sum.iter_mut().zip(vector) {
+                *slot += value;
+            }
+            count += 1;
+        }
+        if count == 0 {
+            return None;
+        }
+        normalize(&mut sum);
+        centroids.push(sum);
+    }
+    // Two identical centroids would make the track arbitrary.
+    if cosine(&centroids[0], &centroids[1]) > 0.95 {
+        return None;
+    }
+    Some(centroids)
+}
+
 // ------------------------------------------------------- drift-based splitting
 
 /// A turn longer than this may really hold two speakers: the clustering put
@@ -730,11 +956,15 @@ pub fn diarize(
     // A block that really holds one voice is handled afterwards by
     // `merge_small_clusters`, which folds the phantom cluster away.
     let session = Diarizer::new(segmentation, embedding, num_speakers, threshold)?;
-    let turns = if blocks_enabled() {
+    let mut turns = if blocks_enabled() {
         run_blockwise(&session, samples, num_speakers, None)?
     } else {
         session.run_with_progress(samples, None)?
     };
+    if track_enabled() {
+        let embedder = Embedder::new(embedding, None)?;
+        turns = run_track(turns, samples, &embedder);
+    }
     if split_enabled() {
         let embedder = Embedder::new(embedding, None)?;
         return Ok(split_long_turns(turns, samples, &embedder));

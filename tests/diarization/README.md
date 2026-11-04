@@ -130,6 +130,38 @@ The remaining regression is small and confined to the two files where the
 diarizer is already close to the reference; splitting is worth enabling on
 files like `short-1` where one speaker is collapsed for tens of seconds.
 
+## Dense window track (measured, not shipped)
+
+`HIPPO_TRANSCRIBE_DIARIZE_TRACK=1` replaces the turn geometry with a 1.5 s
+window track (0.75 s hop, Viterbi with a switch penalty), so under-segmentation
+cannot hide a speaker change. The centroids come either from the diarizer's own
+turns (`TRACK_SEED=diarizer`, default) or from clustering the windows
+themselves (`TRACK_SEED=kmeans`). Penalty 0.02 for both runs below.
+
+```
+file          baseline @0.25/@1.0   diarizer seed      k-means seed
+short-1          53.89 / 48.13      45.64 / 42.26      13.24 /  5.59
+mid-1            34.97 / 26.76      34.30 / 27.44      38.50 / 33.42
+mid-2            33.45 / 25.47      25.30 / 20.72      28.19 / 19.83
+short-2          13.57 /  1.82      16.66 /  9.78      43.24 / 40.86
+end              10.60 /  3.58      11.44 /  1.32      19.54 / 15.12
+full             14.36 /  6.15      14.81 /  6.64      21.09 / 13.07
+long             10.62 /  2.76      11.67 /  4.73      20.35 / 15.91
+short            10.36 /  1.60      19.01 /  8.79      44.39 / 41.89
+```
+
+Neither seed is shippable. The diarizer seed is roughly neutral and loses on the
+files that were already good; the k-means seed fixes `short-1` completely
+(53.89% -> 13.24%, better than the 21% oracle-span ceiling) and then ruins six
+other files, including two that score 10-13% today.
+
+Suspicion, not yet tested: `two_means` seeds with the globally most distant
+pair, which on a file with music, silence or a level change picks outliers
+rather than two voices. `short-1` is the file where that happened to be right.
+A k-means++ initialisation with restarts is the next experiment; if it does not
+make the k-means seed safe on `short`/`short-2`, the track should be deleted
+rather than kept as a flag.
+
 ## Ceiling test: reference spans through our own clustering
 
 A diagnostic, not a result: take the reference's own spans (perfect
