@@ -213,30 +213,6 @@ impl fmt::Display for Speed {
     }
 }
 
-/// Options in the "Import…" dropdown.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ImportKind {
-    Transcription,
-    Audio,
-}
-
-impl ImportKind {
-    pub(crate) const ALL: [ImportKind; 2] = [ImportKind::Transcription, ImportKind::Audio];
-
-    pub(crate) fn label(self) -> &'static str {
-        match self {
-            ImportKind::Transcription => "Transcript",
-            ImportKind::Audio => "Audio",
-        }
-    }
-}
-
-impl fmt::Display for ImportKind {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.label())
-    }
-}
-
 /// Options in the "Help…" dropdown.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum HelpKind {

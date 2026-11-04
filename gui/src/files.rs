@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::SystemTime;
 
 /// Backup kept next to a transcript before it is rewritten in place.
 pub(crate) fn transcript_backup_path(path: &Path) -> PathBuf {
@@ -49,8 +50,9 @@ pub(crate) fn unedited_path(path: &Path) -> PathBuf {
 ///
 /// The first rewrite also preserves the untouched original as
 /// `<stem>-unedited.txt`; later writes leave that file alone, so it always
-/// holds the transcript as it was before any edit. It can be re-imported from
-/// the Import menu.
+/// holds the transcript as it was before any edit. It is never taken for the
+/// transcript itself: adding the audio again reads `<stem>.txt` or the
+/// pipeline's own output names, not this copy.
 pub(crate) fn write_transcript_file(path: &Path, text: &str) -> std::io::Result<()> {
     if path.is_file() {
         let _ = std::fs::copy(path, transcript_backup_path(path));
@@ -101,6 +103,228 @@ mod tests {
         assert!(!unedited_path(&path).exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    /// Make `path` older or newer than the files around it without sleeping.
+    fn set_modified(path: &Path, offset_secs: i64) {
+        let time = if offset_secs >= 0 {
+            SystemTime::now() + std::time::Duration::from_secs(offset_secs as u64)
+        } else {
+            SystemTime::now() - std::time::Duration::from_secs((-offset_secs) as u64)
+        };
+        std::fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(time)
+            .unwrap();
+    }
+
+    #[test]
+    fn the_transcript_candidate_prefers_the_exact_name() {
+        let dir = scratch("candidate");
+        let audio = dir.join("talk.mp3");
+        std::fs::write(&audio, b"audio").unwrap();
+        let exact = dir.join("talk.txt");
+        std::fs::write(&exact, "[00:00] A: one\n").unwrap();
+        let pipeline = dir.join("talk-balanced-transcription-2speakers.txt");
+        std::fs::write(&pipeline, "[00:00] A: two\n").unwrap();
+        // The pipeline file is newer and still loses to the plain name.
+        set_modified(&exact, -60);
+        set_modified(&pipeline, 60);
+
+        assert_eq!(
+            find_transcripts(&[(0, audio.clone())], None),
+            vec![(0, audio.clone(), exact.clone())]
+        );
+
+        // Without the plain copy, the newest pipeline-named file wins.
+        std::fs::remove_file(&exact).unwrap();
+        set_modified(&pipeline, -60);
+        let newer = dir.join("talk-fast-transcription-1speaker.txt");
+        std::fs::write(&newer, "[00:00] A: three\n").unwrap();
+        set_modified(&newer, 60);
+        assert_eq!(
+            find_transcripts(&[(0, audio.clone())], None),
+            vec![(0, audio.clone(), newer.clone())]
+        );
+
+        // The save location is the fallback when the audio's own directory has
+        // nothing.
+        let elsewhere = scratch("candidate-out");
+        let moved = elsewhere.join("talk.txt");
+        std::fs::write(&moved, "[00:00] A: four\n").unwrap();
+        std::fs::remove_file(&pipeline).unwrap();
+        std::fs::remove_file(&newer).unwrap();
+        assert_eq!(
+            find_transcripts(&[(7, audio.clone())], Some(&elsewhere)),
+            vec![(7, audio.clone(), moved)]
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&elsewhere);
+    }
+
+    #[test]
+    fn empty_files_and_edit_sidecars_are_not_transcripts() {
+        let dir = scratch("candidate-empty");
+        let audio = dir.join("empty.mp3");
+        std::fs::write(&audio, b"audio").unwrap();
+        std::fs::write(dir.join("empty.txt"), "").unwrap();
+        std::fs::write(dir.join("empty-unedited.txt"), "old\n").unwrap();
+        std::fs::write(dir.join("empty.txt.hippo-transcribe.bak"), "backup\n").unwrap();
+
+        // Only an empty plain copy and the app's own sidecars: no transcript.
+        assert!(find_transcripts(&[(0, audio.clone())], None).is_empty());
+
+        // A pipeline file with content is taken once the plain copy is empty.
+        let pipeline = dir.join("empty-balanced-transcription-2speakers.txt");
+        std::fs::write(&pipeline, "[00:00] A: kept\n").unwrap();
+        assert_eq!(
+            find_transcripts(&[(0, audio.clone())], None),
+            vec![(0, audio.clone(), pipeline)]
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_file_without_a_transcript_has_no_candidate() {
+        let dir = scratch("candidate-none");
+        let audio = dir.join("silent.mp3");
+        std::fs::write(&audio, b"audio").unwrap();
+        std::fs::write(dir.join("silent-slow-transcription-2speakers.json"), "{}").unwrap();
+
+        assert!(find_transcripts(&[(3, audio)], None).is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+/// A file in a directory that has already been read once.
+struct ScannedFile {
+    /// File name, lowercased so the comparisons are case-insensitive the way
+    /// the filesystems this ships on usually are.
+    name: String,
+    path: PathBuf,
+    size: u64,
+    modified: Option<SystemTime>,
+}
+
+/// One directory's files, read once per add.
+struct DirScan {
+    files: Vec<ScannedFile>,
+}
+
+impl DirScan {
+    fn read(dir: &Path) -> Option<DirScan> {
+        let mut files = Vec::new();
+        for entry in std::fs::read_dir(dir).ok()?.flatten() {
+            let Ok(metadata) = entry.metadata() else {
+                continue;
+            };
+            if !metadata.is_file() {
+                continue;
+            }
+            let Some(name) = entry.file_name().to_str().map(str::to_lowercase) else {
+                continue;
+            };
+            files.push(ScannedFile {
+                name,
+                path: entry.path(),
+                size: metadata.len(),
+                modified: metadata.modified().ok(),
+            });
+        }
+        Some(DirScan { files })
+    }
+
+    fn usable(&self) -> impl Iterator<Item = &ScannedFile> {
+        self.files
+            .iter()
+            .filter(|file| file.size > 0 && !is_edit_sidecar(&file.name))
+    }
+
+    /// The transcript for `stem` in this directory: the exact `<stem>.txt`
+    /// first, then the newest pipeline-named sibling.
+    fn candidate(&self, stem: &str) -> Option<PathBuf> {
+        let stem = stem.to_lowercase();
+        let exact = format!("{stem}.txt");
+        if let Some(file) = self.usable().find(|file| file.name == exact) {
+            return Some(file.path.clone());
+        }
+        self.usable()
+            .filter(|file| is_transcription_of(&file.name, &stem))
+            .max_by(|a, b| a.modified.cmp(&b.modified).then_with(|| a.name.cmp(&b.name)))
+            .map(|file| file.path.clone())
+    }
+}
+
+/// Files the app writes beside a transcript that must never be taken for it.
+fn is_edit_sidecar(name: &str) -> bool {
+    name.ends_with(".hippo-transcribe.bak") || name.ends_with("-unedited.txt")
+}
+
+/// Whether `name` is the pipeline's own output for `stem`:
+/// `<stem>-<preset>-transcription-<N>speakers.txt`.
+///
+/// Only the prefix and the marker are checked, so an audio file whose stem is a
+/// prefix of another's (`talk` and `talk-interview`) would match the longer
+/// one's output. Tightening that would mean guessing the preset list, which is
+/// the worse trade.
+fn is_transcription_of(name: &str, stem: &str) -> bool {
+    name.strip_prefix(stem)
+        .and_then(|rest| rest.strip_prefix('-'))
+        .is_some_and(|rest| rest.ends_with(".txt") && rest.contains("transcription"))
+}
+
+/// The transcript for each added audio file that already has one, as
+/// `(queue index, audio, transcript)`.
+///
+/// The rule, applied to the audio's own directory first and then to the
+/// configured save location:
+///
+/// 1. `<stem>.txt`, the name Save As defaults to.
+/// 2. The most recently modified `<stem>-*transcription*.txt`, the pipeline's
+///    own naming.
+///
+/// An exact `<stem>.txt` that is not one of the app's files is accepted as a
+/// transcript anyway: a sidecar with that name is indistinguishable from one
+/// the app wrote, and the alternative — parsing every candidate to guess — is
+/// worse than the risk.
+///
+/// Directories are read once per call, so a folder add of `n` files costs one
+/// `read_dir` per directory rather than `n`.
+pub(crate) fn find_transcripts(
+    added: &[(usize, PathBuf)],
+    output_dir: Option<&Path>,
+) -> Vec<(usize, PathBuf, PathBuf)> {
+    let mut scans: Vec<(PathBuf, Option<DirScan>)> = Vec::new();
+    let mut found = Vec::new();
+
+    for (index, audio) in added {
+        let Some(stem) = audio.file_stem().and_then(|stem| stem.to_str()) else {
+            continue;
+        };
+        let mut transcript = None;
+        for dir in [audio.parent(), output_dir].into_iter().flatten() {
+            let scan = match scans.iter().position(|(cached, _)| cached == dir) {
+                Some(position) => scans[position].1.as_ref(),
+                None => {
+                    scans.push((dir.to_path_buf(), DirScan::read(dir)));
+                    scans.last().and_then(|(_, scan)| scan.as_ref())
+                }
+            };
+            if let Some(path) = scan.and_then(|scan| scan.candidate(stem)) {
+                transcript = Some(path);
+                break;
+            }
+        }
+        if let Some(transcript) = transcript {
+            found.push((*index, audio.clone(), transcript));
+        }
+    }
+
+    found
 }
 
 /// Open a file or folder with the platform's default handler.

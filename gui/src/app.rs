@@ -278,7 +278,7 @@ struct QueueItem {
     /// Identity used to match backend events and to de-duplicate additions:
     /// the audio path when one is known, otherwise the transcript path.
     path: PathBuf,
-    /// Audio file backing this item (None for transcript-only imports).
+    /// Audio file backing this item.
     audio: Option<PathBuf>,
     status: ItemStatus,
     duration: Option<f64>,
@@ -289,6 +289,28 @@ struct QueueItem {
     /// Diarization turns, persisted with the queue for timeline colours.
     turns: Vec<backend::Turn>,
     peaks: Arc<Vec<f32>>,
+}
+
+/// A transcript found beside one of the audio files just added.
+#[derive(Debug, Clone)]
+pub(crate) struct TranscriptHit {
+    /// The queue row the audio was added as, and the audio itself. Adoption is
+    /// dropped if the row has moved or started running by the time it lands.
+    index: usize,
+    audio: PathBuf,
+    transcript: PathBuf,
+}
+
+/// A found transcript, read and measured off the UI thread.
+#[derive(Debug, Clone)]
+pub(crate) struct AdoptedTranscript {
+    index: usize,
+    audio: PathBuf,
+    transcript: PathBuf,
+    text: String,
+    duration: Option<f64>,
+    peaks: Vec<f32>,
+    turns: Vec<backend::Turn>,
 }
 
 /// Persisted queue entry. Speaker turns are stored so the timeline keeps its
@@ -629,7 +651,6 @@ pub enum Message {
     LockedPreset,
     LockedSpeakers,
     LockedGpu,
-    LockedImport,
     LockedPlayer,
     LockedRename,
     FeatureAdvance,
@@ -694,14 +715,10 @@ pub enum Message {
     FindFocusPolled(bool),
     SeekBy(f32),
     SeekByChecked(f32, bool),
-    ImportPicked(Option<PathBuf>),
-    ImportLoaded(Option<(PathBuf, String)>),
-    ImportChoice(ImportKind),
     CopyTranscript,
     SaveTranscriptAs,
     SaveTranscriptAsPicked(Option<PathBuf>),
     RevealOutput,
-    AudioPicked(Option<PathBuf>),
     OpenRename,
     EditLine(usize),
     FlipLineSpeaker(usize),
@@ -728,6 +745,11 @@ pub enum Message {
     FilesPicked(Option<Vec<PathBuf>>),
     AddFolder,
     FolderPicked(Option<PathBuf>),
+    /// Transcripts found for the files in one add. The flag says the add
+    /// produced a single file, which is the case that opens itself.
+    TranscriptsFound(bool, Vec<TranscriptHit>),
+    /// One found transcript, read and measured off the UI thread.
+    TranscriptAdopted(bool, AdoptedTranscript),
     RemoveItem(usize),
     ClearQueue,
     ItemDurationProbed(PathBuf, Option<f64>),
@@ -2128,27 +2150,6 @@ impl App {
         self.search_index = 0;
     }
 
-    /// Find an audio file beside the transcript with the same stem.
-    fn matching_audio(transcript: &Path) -> Option<PathBuf> {
-        let parent = transcript.parent()?;
-        let stem = transcript.file_stem()?.to_str()?;
-        let mut candidates: Vec<PathBuf> = std::fs::read_dir(parent)
-            .ok()?
-            .flatten()
-            .map(|entry| entry.path())
-            .filter(|path| {
-                path.is_file()
-                    && is_audio(path)
-                    && path
-                        .file_stem()
-                        .and_then(|name| name.to_str())
-                        .is_some_and(|name| name.eq_ignore_ascii_case(stem))
-            })
-            .collect();
-        candidates.sort();
-        candidates.into_iter().next()
-    }
-
     /// Window settings seeded from the persisted size/position.
     pub fn window_settings() -> iced::window::Settings {
         let settings = Self::load_settings();
@@ -3192,7 +3193,7 @@ impl App {
                             ),
                             Instant::now(),
                         ));
-                        return Self::probe_items(added);
+                        return self.added_tasks(added);
                     }
                     _ => {}
                 }
@@ -3698,13 +3699,6 @@ impl App {
                 ));
                 Task::none()
             }
-            Message::LockedImport => {
-                self.toast = Some((
-                    "Import and editing is a Pro feature".to_string(),
-                    Instant::now(),
-                ));
-                Task::none()
-            }
             Message::LockedSpeakers => {
                 self.toast = Some((
                     "Speaker labels are a Pro feature.".to_string(),
@@ -3999,78 +3993,6 @@ impl App {
                 }
                 Task::none()
             }
-            Message::ImportPicked(path) => match path {
-                Some(path) => Task::perform(
-                    async move { backend::read_transcript(&path).map(|text| (path, text)) },
-                    Message::ImportLoaded,
-                ),
-                None => Task::none(),
-            },
-            Message::ImportLoaded(loaded) => {
-                let Some((transcript, text)) = loaded else {
-                    self.toast =
-                        Some(("Could not read that transcript".to_string(), Instant::now()));
-                    return Task::none();
-                };
-                let imported_name = transcript
-                    .file_name()
-                    .map(|name| name.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| transcript.display().to_string());
-                self.toast = Some((format!("Imported {imported_name}"), Instant::now()));
-                let audio = Self::matching_audio(&transcript);
-                // Reuse the entry for the same transcript; attach the audio to a
-                // still-pending entry for the same audio instead of duplicating.
-                let existing = self.queue.iter().position(|item| {
-                    item.transcript.as_deref() == Some(transcript.as_path())
-                        || (audio.is_some()
-                            && item.audio == audio
-                            && matches!(item.status, ItemStatus::Pending))
-                });
-                let index = match existing {
-                    Some(index) => {
-                        let item = &mut self.queue[index];
-                        item.transcript = Some(transcript.clone());
-                        if !matches!(item.status, ItemStatus::Done) {
-                            item.status = ItemStatus::Done;
-                            item.stats = None;
-                            item.turns.clear();
-                            item.peaks = Arc::new(Vec::new());
-                        }
-                        if item.audio.is_none() {
-                            item.audio = audio.clone();
-                        }
-                        index
-                    }
-                    None => {
-                        let path = audio.clone().unwrap_or_else(|| transcript.clone());
-                        self.queue.push(QueueItem {
-                            path,
-                            audio: audio.clone(),
-                            status: ItemStatus::Done,
-                            duration: None,
-                            transcript: Some(transcript.clone()),
-                            stats: None,
-                            turns: Vec::new(),
-                            peaks: Arc::new(Vec::new()),
-                        });
-                        self.queue.len() - 1
-                    }
-                };
-                self.save_queue();
-                // Plain .txt files are editable in place; anything else (legacy
-                // JSON) is shown read-only.
-                let editable = transcript
-                    .extension()
-                    .and_then(|ext| ext.to_str())
-                    .map(|ext| ext.eq_ignore_ascii_case("txt"))
-                    .unwrap_or(false);
-                let output = editable.then(|| transcript.clone());
-                let mut tasks = vec![self.open_item_view(index, Some((text, output)))];
-                if let Some(audio) = audio {
-                    tasks.push(Self::probe_items(vec![audio]));
-                }
-                Task::batch(tasks)
-            }
             Message::AddFiles => Task::perform(
                 async {
                     rfd::FileDialog::new()
@@ -4094,7 +4016,7 @@ impl App {
                         ),
                         Instant::now(),
                     ));
-                    return Self::probe_items(added);
+                    return self.added_tasks(added);
                 }
                 Task::none()
             }
@@ -4130,9 +4052,86 @@ impl App {
                         ),
                         Instant::now(),
                     ));
-                    return Self::probe_items(added);
+                    return self.added_tasks(added);
                 }
                 Task::none()
+            }
+            Message::TranscriptsFound(single, hits) => {
+                // Reading the transcript and re-deriving the turns/waveform is
+                // per file, so one slow probe cannot hold up the others.
+                Task::batch(hits.into_iter().map(move |hit| {
+                    Task::perform(
+                        async move {
+                            let text = backend::read_transcript(&hit.transcript)?;
+                            if text.trim().is_empty() {
+                                return None;
+                            }
+                            let (turns, probe) =
+                                backend::load_completed(hit.audio.clone(), None, TIMELINE_BUCKETS);
+                            let (duration, peaks) = match probe {
+                                Some((duration, peaks)) => (Some(duration), peaks),
+                                None => (None, Vec::new()),
+                            };
+                            Some(AdoptedTranscript {
+                                index: hit.index,
+                                audio: hit.audio,
+                                transcript: hit.transcript,
+                                text,
+                                duration,
+                                peaks,
+                                turns: turns.unwrap_or_default(),
+                            })
+                        },
+                        move |adopted| match adopted {
+                            Some(adopted) => Message::TranscriptAdopted(single, adopted),
+                            None => Message::Noop,
+                        },
+                    )
+                }))
+            }
+            Message::TranscriptAdopted(single, adopted) => {
+                // Only adopt onto the row this audio was added as, and only
+                // while it is still waiting: a run may have started on it while
+                // the lookup and probe were running.
+                let still_waiting = self.queue.get(adopted.index).is_some_and(|item| {
+                    matches!(item.status, ItemStatus::Pending)
+                        && item.audio.as_deref() == Some(adopted.audio.as_path())
+                });
+                if !still_waiting {
+                    return Task::none();
+                }
+                let editable = adopted
+                    .transcript
+                    .extension()
+                    .and_then(|ext| ext.to_str())
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("txt"));
+                let output = editable.then(|| adopted.transcript.clone());
+                {
+                    let item = &mut self.queue[adopted.index];
+                    item.status = ItemStatus::Done;
+                    item.transcript = Some(adopted.transcript.clone());
+                    item.duration = adopted.duration;
+                    item.peaks = Arc::new(adopted.peaks);
+                    item.turns = adopted.turns;
+                }
+                self.invalidate_derived();
+                self.save_queue();
+                // A single file is the case where the user is waiting to see
+                // the text, so it opens; a folder add leaves the queue on
+                // screen and the adopted rows simply read as Done.
+                if !single {
+                    return Task::none();
+                }
+                let name = adopted
+                    .audio
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| adopted.audio.display().to_string());
+                self.toast = Some((
+                    format!("Added {name} with its transcript"),
+                    Instant::now(),
+                ));
+                self.open_item_view(adopted.index, Some((adopted.text, output)))
             }
             Message::ItemDurationProbed(path, seconds) => {
                 if let Some(item) = self
@@ -4424,55 +4423,6 @@ impl App {
                     } else {
                         self.toast =
                             Some((format!("Could not save {}", path.display()), Instant::now()));
-                    }
-                }
-                Task::none()
-            }
-            Message::ImportChoice(kind) if !self.can(license::Feature::Editing) => {
-                let _ = kind;
-                self.toast = Some((
-                    "Import and editing is a Pro feature".to_string(),
-                    Instant::now(),
-                ));
-                Task::none()
-            }
-            Message::ImportChoice(kind) => match kind {
-                ImportKind::Transcription => Task::perform(
-                    async {
-                        rfd::FileDialog::new()
-                            .add_filter("Transcript", &["txt", "json"])
-                            .pick_file()
-                    },
-                    Message::ImportPicked,
-                ),
-                ImportKind::Audio => Task::perform(
-                    async {
-                        rfd::FileDialog::new()
-                            .add_filter("Audio/Video", AUDIO_EXTS)
-                            .pick_file()
-                    },
-                    Message::AudioPicked,
-                ),
-            },
-            Message::AudioPicked(path) => {
-                if let Some(path) = path {
-                    if self
-                        .queue
-                        .iter()
-                        .any(|item| item.audio.as_deref() == Some(path.as_path()))
-                    {
-                        self.toast = Some(("Already in the queue".to_string(), Instant::now()));
-                        return Task::none();
-                    }
-                    let added = self.add_paths(vec![path]);
-                    if let Some(path) = added.first() {
-                        let name = path
-                            .file_name()
-                            .and_then(|name| name.to_str())
-                            .unwrap_or("file")
-                            .to_string();
-                        self.toast = Some((format!("Added {name} to the queue"), Instant::now()));
-                        return Self::probe_items(added);
                     }
                 }
                 Task::none()
@@ -4949,6 +4899,50 @@ impl App {
             self.save_queue();
         }
         added
+    }
+
+    /// What an add starts: the duration probe for every file, plus the lookup
+    /// for a transcript each one may already have.
+    ///
+    /// A file with a transcript is adopted as a completed item instead of being
+    /// queued for a run; see `Message::TranscriptAdopted`. The scan runs off the
+    /// UI thread with the probe, and reads each directory once for the whole
+    /// add.
+    fn added_tasks(&self, added: Vec<PathBuf>) -> Task<Message> {
+        let rows: Vec<(usize, PathBuf)> = added
+            .iter()
+            .filter_map(|path| {
+                self.queue
+                    .iter()
+                    .position(|item| item.audio.as_deref() == Some(path.as_path()))
+                    .map(|index| (index, path.clone()))
+            })
+            .collect();
+        // A single file is opened when its transcript is found; a batch is not,
+        // because the view would jump away from the queue the user just filled.
+        let single = added.len() == 1;
+        let output_dir = self.output_dir.clone();
+        Task::batch([
+            Self::probe_items(added),
+            Task::perform(
+                async move { crate::files::find_transcripts(&rows, output_dir.as_deref()) },
+                move |hits| {
+                    if hits.is_empty() {
+                        return Message::Noop;
+                    }
+                    Message::TranscriptsFound(
+                        single,
+                        hits.into_iter()
+                            .map(|(index, audio, transcript)| TranscriptHit {
+                                index,
+                                audio,
+                                transcript,
+                            })
+                            .collect(),
+                    )
+                },
+            ),
+        ])
     }
 
     fn probe_items(paths: Vec<PathBuf>) -> Task<Message> {
@@ -7538,7 +7532,7 @@ impl App {
         }
     }
 
-    /// The queue card in the left panel: header, add/import toolbar, list and
+    /// The queue card in the left panel: header, add toolbar, list and
     /// run controls.
     fn acceleration_row(&self, scheme: &Scheme) -> Element<'_, Message> {
         let scheme = *scheme;
@@ -7933,36 +7927,6 @@ impl App {
             )
         };
 
-        let import_picker: Element<Message> = if self.can(license::Feature::Editing) {
-            pick_list(ImportKind::ALL, None::<ImportKind>, Message::ImportChoice)
-                .placeholder("Import")
-                .style(ink_pick(scheme))
-                .menu_style(pick_menu_style(scheme))
-                .handle(caret_handle())
-                .width(Length::Fixed(126.0))
-                .into()
-        } else {
-            self.tip(
-                stack![
-                    pick_list(ImportKind::ALL, None::<ImportKind>, Message::ImportChoice)
-                        .placeholder("Import")
-                        .style(greyed_pick(scheme))
-                        .menu_style(pick_menu_style(scheme))
-                        .handle(caret_handle())
-                        .width(Length::Fixed(122.0)),
-                    mouse_area(
-                        container(horizontal_space())
-                            .width(Length::Fill)
-                            .height(Length::Fill),
-                    )
-                    .interaction(mouse::Interaction::Pointer)
-                    .on_press(Message::LockedImport),
-                ],
-                "Import and editing is a Pro feature",
-                &scheme,
-            )
-        };
-
         let clear_button = self.tip(
             action(icon(ICON_TRASH, 15.0))
                 .on_press_maybe((!running && has_queue).then_some(Message::ClearQueue))
@@ -7974,7 +7938,6 @@ impl App {
         let toolbar = row![
             add_button,
             folder_button,
-            import_picker,
             horizontal_space(),
             clear_button,
         ]
@@ -9300,8 +9263,8 @@ impl App {
         let turns = self.shown_turns();
         // Diarization turns carry exact ranges, but they are absent after a
         // reload (the clip cache is keyed on the diarizer) and never existed
-        // for imported transcripts. Only trust them when every label they
-        // mention is one the transcript actually shows.
+        // for transcripts the app did not produce. Only trust them when every
+        // label they mention is one the transcript actually shows.
         let turns_are_complete = !turns.is_empty()
             && turns
                 .iter()
@@ -14535,23 +14498,6 @@ mod tests {
     }
 
     #[test]
-    fn matching_audio_finds_same_stem() {
-        let dir = temp_dir("matching");
-        let transcript = dir.join("interview.txt");
-        std::fs::write(&transcript, "").unwrap();
-        std::fs::write(dir.join("interview.mp3"), b"audio").unwrap();
-        std::fs::write(dir.join("other.wav"), b"audio").unwrap();
-
-        let matched = App::matching_audio(&transcript).unwrap();
-        assert_eq!(
-            matched.file_name().and_then(|name| name.to_str()),
-            Some("interview.mp3")
-        );
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
     fn line_text_drops_the_prefix_once() {
         let lines = parse_lines("[00:00] SPEAKER 1: hello there\n[00:05] plain text\n");
         assert_eq!(line_text(&lines[0]), "hello there");
@@ -16455,34 +16401,6 @@ mod tests {
     }
 
     #[test]
-    fn importing_a_transcript_adds_a_completed_item() {
-        let _guard = env_lock();
-        let _config = ConfigEnv::new("import-config");
-        let media = temp_dir("import-media");
-
-        let audio = media.join("talk.mp3");
-        std::fs::write(&audio, b"audio").unwrap();
-        let transcript = media.join("talk.txt");
-        let text = "[00:00] SPEAKER 1: imported line\n";
-        std::fs::write(&transcript, text).unwrap();
-
-        let mut app = pro_app();
-        assert!(app.queue.is_empty());
-        let _ = app.update(Message::ImportLoaded(Some((
-            transcript.clone(),
-            text.to_string(),
-        ))));
-
-        assert_eq!(app.queue.len(), 1);
-        assert_eq!(app.queue[0].audio.as_deref(), Some(audio.as_path()));
-        assert!(matches!(app.queue[0].status, ItemStatus::Done));
-        assert_eq!(app.selected, Some(0));
-        assert!(app.shown_transcript().contains("imported line"));
-
-        let _ = std::fs::remove_dir_all(&media);
-    }
-
-    #[test]
     fn editing_one_line_changes_only_that_line() {
         let _guard = env_lock();
         let _config = ConfigEnv::new("edit-config");
@@ -16546,7 +16464,7 @@ mod tests {
         );
 
         // Done and Enter commits share one undo history: two steps back to the
-        // transcript as it was imported.
+        // transcript as it was when it opened.
         let _ = app.update(Message::UndoLineEdit);
         assert!(std::fs::read_to_string(&transcript)
             .unwrap()
@@ -17154,7 +17072,7 @@ mod tests {
     }
 
     #[test]
-    fn queue_summary_and_import_failure_feedback() {
+    fn queue_summary_text_counts_known_durations() {
         let _guard = env_lock();
         let config = ConfigEnv::new("queue-summary");
         let dir = config.dir.clone();
@@ -17178,12 +17096,87 @@ mod tests {
         assert_eq!(app.queue_summary_text(), "2 files \u{00b7} 1:30");
         app.queue[1].duration = None;
         assert_eq!(app.queue_summary_text(), "2 files \u{00b7} 1:00 known");
+    }
 
-        let _ = app.update(Message::ImportLoaded(None));
-        assert_eq!(
-            app.toast.as_ref().map(|(message, _)| message.as_str()),
-            Some("Could not read that transcript")
-        );
+    #[test]
+    fn adding_audio_with_a_transcript_makes_it_done() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("adopt-config");
+        let media = temp_dir("adopt-media");
+        let audio = media.join("talk.mp3");
+        std::fs::write(&audio, b"audio").unwrap();
+        let transcript = media.join("talk.txt");
+        std::fs::write(&transcript, "[00:00] SPEAKER 1: adopted line\n").unwrap();
+
+        let mut app = pro_app();
+        let added = app.add_paths(vec![audio.clone()]);
+        assert_eq!(added.len(), 1);
+        assert!(matches!(app.queue[0].status, ItemStatus::Pending));
+
+        // What the add starts: the lookup finds the transcript, and the read
+        // and probe come back with it.
+        let hits = find_transcripts(&[(0, audio.clone())], None);
+        assert_eq!(hits.len(), 1);
+        let text = backend::read_transcript(&hits[0].2).unwrap();
+        let _ = app.update(Message::TranscriptAdopted(
+            true,
+            AdoptedTranscript {
+                index: 0,
+                audio: audio.clone(),
+                transcript: transcript.clone(),
+                text,
+                duration: Some(12.0),
+                peaks: vec![0.3; 8],
+                turns: Vec::new(),
+            },
+        ));
+
+        assert!(matches!(app.queue[0].status, ItemStatus::Done));
+        assert_eq!(app.queue[0].transcript.as_deref(), Some(transcript.as_path()));
+        assert_eq!(app.queue[0].duration, Some(12.0));
+        assert_eq!(app.queue[0].peaks.len(), 8);
+        // A single adopted add opens, so the text is on screen immediately.
+        assert_eq!(app.selected, Some(0));
+        assert!(app.shown_transcript().contains("adopted line"));
+
+        // A run that started while the lookup was in flight keeps the row: the
+        // adoption is dropped rather than overwriting it.
+        app.queue[0].status = ItemStatus::Running;
+        let _ = app.update(Message::TranscriptAdopted(
+            true,
+            AdoptedTranscript {
+                index: 0,
+                audio: audio.clone(),
+                transcript: media.join("other.txt"),
+                text: "other\n".to_string(),
+                duration: None,
+                peaks: Vec::new(),
+                turns: Vec::new(),
+            },
+        ));
+        assert_eq!(app.queue[0].transcript.as_deref(), Some(transcript.as_path()));
+
+        let _ = std::fs::remove_dir_all(&media);
+    }
+
+    #[test]
+    fn adding_audio_without_a_transcript_leaves_it_pending() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("adopt-none-config");
+        let media = temp_dir("adopt-none-media");
+        let audio = media.join("silent.mp3");
+        std::fs::write(&audio, b"audio").unwrap();
+
+        let mut app = pro_app();
+        let added = app.add_paths(vec![audio.clone()]);
+        assert_eq!(added.len(), 1);
+        // Nothing to adopt, so the add looks exactly as it did before.
+        assert!(find_transcripts(&[(0, audio)], None).is_empty());
+        assert!(matches!(app.queue[0].status, ItemStatus::Pending));
+        assert_eq!(app.queue[0].transcript, None);
+        assert_eq!(app.selected, None);
+
+        let _ = std::fs::remove_dir_all(&media);
     }
 
     #[test]

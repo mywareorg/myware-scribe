@@ -273,8 +273,8 @@ the Store does not resolve an add-on for an app that is not yet published.
 Run `hippo-transcribe` with no arguments. Add files/folders to the queue, or drag audio
 files and folders anywhere into the window, then choose a preset and speaker
 count and press Transcribe. The header theme button cycles light, dark and
-system themes. Files added (or imported) while a run is active join the queue
-and are processed in a follow-up pass automatically. The gear button (or
+system themes. Files added while a run is active join the queue and are
+processed in a follow-up pass automatically. The gear button (or
 `Ctrl+,`) opens Settings for theme, transcript text size, preset, speaker count,
 language, playback speed, follow mode, notifications, save location, and model
 storage.
@@ -293,9 +293,10 @@ confirmation. Saves are written atomically and keep a
 
 Completed rows stay in the queue: click one to revisit that file's transcript,
 speaker timeline, waveform and playback. Renaming speakers or saving writes back
-to that file's `.txt`. `Import → Transcript` adds an existing transcript as a
-completed item (a same-stem audio file beside it is attached automatically);
-`Import → Audio` queues a file for transcription.
+to that file's `.txt`. Adding an audio file that already has a transcript loads
+it straight away instead of queueing a run: `<name>.txt` beside the audio, or
+the newest `<name>-<preset>-transcription-<N>speakers.txt` when there is no
+plain copy, looked up beside the audio first and then in the save location.
 
 The queue (statuses, output paths and per-file statistics) is restored on
 restart; timeline and waveform data is re-derived on demand from the
