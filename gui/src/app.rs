@@ -665,6 +665,11 @@ pub enum Message {
     RequestResetTranscript,
     ConfirmResetTranscript,
     CloseResetConfirm,
+    /// Show the run options (save location, preset, speakers, acceleration)
+    /// before starting.
+    OpenRunSetup,
+    ConfirmRunSetup,
+    CloseRunSetup,
     ToggleJoinLines,
     SpeakerCountChanged(SpeakerOpt),
     LanguageChanged(LanguageOpt),
@@ -971,6 +976,8 @@ pub struct App {
     header_menu: Option<HeaderMenu>,
     /// The Reset warning dialog is showing.
     reset_confirm: bool,
+    /// The Transcribe/Retranscribe setup dialog is showing.
+    run_setup_open: bool,
     transcript_dirty: bool,
     follow_offset: Option<f32>,
     /// Horizontal target of the last programmatic transcript scroll, used to
@@ -1247,6 +1254,7 @@ impl App {
             transcript_at_bottom: true,
             header_menu: None,
             reset_confirm: false,
+            run_setup_open: false,
             transcript_dirty: false,
             follow_offset: None,
             scroll_target: None,
@@ -3003,6 +3011,22 @@ impl App {
                 self.header_menu = None;
                 Task::none()
             }
+            Message::OpenRunSetup => {
+                if !matches!(self.status, Status::Running) && !self.queue.is_empty() {
+                    self.header_menu = None;
+                    self.run_setup_open = true;
+                }
+                Task::none()
+            }
+            Message::CloseRunSetup => {
+                self.run_setup_open = false;
+                Task::none()
+            }
+            Message::ConfirmRunSetup => {
+                self.run_setup_open = false;
+                self.start();
+                Task::none()
+            }
             Message::RequestResetTranscript => {
                 self.header_menu = None;
                 if self.reset_available() {
@@ -3840,6 +3864,10 @@ impl App {
                     self.reset_confirm = false;
                     return Task::none();
                 }
+                if self.run_setup_open {
+                    self.run_setup_open = false;
+                    return Task::none();
+                }
                 if self.header_menu.is_some() {
                     self.header_menu = None;
                     return Task::none();
@@ -4500,6 +4528,7 @@ impl App {
             }
             Message::Start => {
                 if !self.settings_open && self.calibration.is_none() {
+                    self.run_setup_open = false;
                     self.start();
                 }
                 Task::none()
@@ -5035,6 +5064,26 @@ impl App {
         // Starting or stopping playback is a user decision: finish the move in
         // flight instead of leaving the followed line half a row off centre.
         self.stop_glide(true)
+    }
+
+    /// "Retranscribe" when nothing is waiting and the selected queue row is a
+    /// finished transcript, because that is the row Start will run. Any pending
+    /// item keeps the button "Transcribe": Start works through the queue. The
+    /// same rule drives the setup dialog's primary button.
+    fn transcribe_label(&self) -> &'static str {
+        let pending = self
+            .queue
+            .iter()
+            .any(|item| matches!(item.status, ItemStatus::Pending));
+        let finished = self
+            .selected
+            .and_then(|index| self.queue.get(index))
+            .is_some_and(|item| matches!(item.status, ItemStatus::Done));
+        if !pending && finished {
+            "Retranscribe"
+        } else {
+            "Transcribe"
+        }
     }
 
     fn start(&mut self) {
@@ -7706,6 +7755,129 @@ impl App {
         )
     }
 
+    /// The Transcribe/Retranscribe dialog: the run's options, shown when the
+    /// button is pressed instead of occupying the queue panel.
+    fn run_setup_dialog(&self, scheme: &Scheme) -> Element<'_, Message> {
+        let scheme = *scheme;
+
+        let output = self
+            .output_dir
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "Audio source directory".to_string());
+        let output_short = ellipsize_middle(&output, 38);
+        let output_row = row![
+            action_text("Save Location")
+                .on_press(Message::PickOutput)
+                .style(pill_button_secondary),
+            text(output_short)
+                .size(theme::TEXT_XS)
+                .wrapping(NO_WRAP)
+                .color(scheme.muted)
+                .width(Length::Fill),
+        ]
+        .spacing(8)
+        .align_y(iced::Alignment::Center);
+
+        let preset: Element<Message> = if !self.shows(license::Audience::ProOnly) {
+            // Free tier: Balanced only, and the picker cannot be opened.
+            self.tip(
+                stack![
+                    pick_list(Preset::ALL, Some(Preset::Balanced), Message::PresetChanged,)
+                        .style(greyed_pick(scheme))
+                        .menu_style(pick_menu_style(scheme))
+                        .width(Length::Fill),
+                    mouse_area(
+                        container(horizontal_space())
+                            .width(Length::Fill)
+                            .height(Length::Fill),
+                    )
+                    .interaction(mouse::Interaction::Pointer)
+                    .on_press(Message::LockedPreset),
+                ],
+                "Speed and Accuracy presets are Pro features",
+                &scheme,
+            )
+        } else {
+            pick_list(Preset::ALL, Some(self.preset), Message::PresetChanged)
+                .style(pill_pick(scheme))
+                .menu_style(pick_menu_style(scheme))
+                .width(Length::Fill)
+                .into()
+        };
+
+        let speaker_pick = pick_list(
+            SpeakerOpt::ALL,
+            Some(SpeakerOpt::from_value(self.num_speakers)),
+            Message::SpeakerCountChanged,
+        )
+        .menu_style(pick_menu_style(scheme));
+        let speakers: Element<Message> = if !self.shows(license::Audience::ProOnly) {
+            // Free runs ASR only, so the speaker count has no effect.
+            self.tip(
+                stack![
+                    speaker_pick.style(greyed_pick(scheme)).width(Length::Fill),
+                    mouse_area(
+                        container(horizontal_space())
+                            .width(Length::Fill)
+                            .height(Length::Fill),
+                    )
+                    .interaction(mouse::Interaction::Pointer)
+                    .on_press(Message::LockedSpeakers),
+                ],
+                "Speaker labels are a Pro feature",
+                &scheme,
+            )
+        } else {
+            speaker_pick
+                .style(pill_pick(scheme))
+                .width(Length::Fill)
+                .into()
+        };
+
+        let option_label =
+            |label: &'static str| text(label).size(11).wrapping(NO_WRAP).color(scheme.muted);
+        let options = row![
+            column![option_label("Preset"), preset]
+                .spacing(2)
+                .width(Length::Fill),
+            column![option_label("Speakers"), speakers]
+                .spacing(2)
+                .width(Length::Fill),
+        ]
+        .spacing(8);
+
+        let primary = action_text(self.transcribe_label())
+            .on_press(Message::ConfirmRunSetup)
+            .style(color_button_outlined(
+                scheme.green,
+                if theme::is_dark_scheme(&scheme) {
+                    Color::WHITE
+                } else {
+                    scheme.on_accent
+                },
+                scheme,
+            ));
+        let body = column![
+            text("Transcription settings").size(20),
+            output_row,
+            options,
+            self.acceleration_row(&scheme),
+            row![
+                horizontal_space(),
+                // The options save as they are changed, so this closes rather
+                // than reverting them.
+                action_text("Close")
+                    .on_press(Message::CloseRunSetup)
+                    .style(pill_button_secondary),
+                primary,
+            ]
+            .spacing(8),
+        ]
+        .spacing(10);
+        modal_card(body, 460.0, scheme)
+    }
+
     fn queue_panel(&self, scheme: &Scheme, width: f32) -> Element<'_, Message> {
         let scheme = *scheme;
         let running = matches!(self.status, Status::Running);
@@ -7859,169 +8031,48 @@ impl App {
             .into()
         };
 
-        let output = self
-            .output_dir
-            .as_ref()
-            .map(|p| p.display().to_string())
-            .unwrap_or_else(|| "Audio source directory".to_string());
-        // Keep the default label intact; only longer paths are shortened.
-        let output_short = ellipsize_middle(&output, 22);
-        let output_row = row![
-            action_text("Save Location")
-                .on_press_maybe((!running && has_queue).then_some(Message::PickOutput))
-                .style(pill_button_secondary),
-            text(output_short)
-                .size(theme::TEXT_XS)
-                .wrapping(NO_WRAP)
-                .color(scheme.muted)
-                .width(Length::Fill),
+        let controls = row![
+            button(
+                container(text(self.transcribe_label()))
+                    .center_x(Length::Fill)
+                    .center_y(Length::Fill),
+            )
+            .width(Length::Fill)
+            .height(Length::Fixed(30.0))
+            // The options live in the dialog this opens; starting is the
+            // dialog's job, so nothing is launched by the first press.
+            .on_press_maybe(can_start.then_some(Message::OpenRunSetup))
+            // Dark mode fills read better with a white label; light mode
+            // keeps the dark ink it has always used.
+            .style(color_button_outlined(
+                scheme.green,
+                if theme::is_dark_scheme(&scheme) {
+                    Color::WHITE
+                } else {
+                    scheme.on_accent
+                },
+                scheme,
+            )),
+            button(
+                container(text("Cancel"))
+                    .center_x(Length::Fill)
+                    .center_y(Length::Fill),
+            )
+            .width(Length::Fill)
+            .height(Length::Fixed(30.0))
+            .on_press_maybe(running.then_some(Message::Cancel))
+            .style(color_button_outlined(
+                scheme.danger,
+                if theme::is_dark_scheme(&scheme) {
+                    Color::WHITE
+                } else {
+                    scheme.on_accent
+                },
+                scheme,
+            )),
         ]
         .spacing(8)
         .align_y(iced::Alignment::Center);
-
-        let preset: Element<Message> = if !self.shows(license::Audience::ProOnly) {
-            // Free tier: Balanced only, and the picker cannot be opened.
-            self.tip(
-                stack![
-                    pick_list(Preset::ALL, Some(Preset::Balanced), Message::PresetChanged,)
-                        .style(greyed_pick(scheme))
-                        .menu_style(pick_menu_style(scheme))
-                        .width(Length::Fill),
-                    mouse_area(
-                        container(horizontal_space())
-                            .width(Length::Fill)
-                            .height(Length::Fill),
-                    )
-                    .interaction(mouse::Interaction::Pointer)
-                    .on_press(Message::LockedPreset),
-                ],
-                "Speed and Accuracy presets are Pro features",
-                &scheme,
-            )
-        } else if !running && has_queue {
-            pick_list(Preset::ALL, Some(self.preset), Message::PresetChanged)
-                .style(pill_pick(scheme))
-                .menu_style(pick_menu_style(scheme))
-                .width(Length::Fill)
-                .into()
-        } else {
-            // Keep the real pick_list (so iced draws its arrow) but put a
-            // click-capturing layer on top so it cannot be opened.
-            stack![
-                pick_list(Preset::ALL, Some(self.preset), Message::PresetChanged)
-                    .style(greyed_pick(scheme))
-                    .menu_style(pick_menu_style(scheme))
-                    .width(Length::Fill),
-                mouse_area(
-                    container(horizontal_space())
-                        .width(Length::Fill)
-                        .height(Length::Fill),
-                )
-                .interaction(mouse::Interaction::Idle)
-                .on_press(Message::Tick),
-            ]
-            .into()
-        };
-
-        let speaker_pick = pick_list(
-            SpeakerOpt::ALL,
-            Some(SpeakerOpt::from_value(self.num_speakers)),
-            Message::SpeakerCountChanged,
-        )
-        .menu_style(pick_menu_style(scheme));
-        let speakers: Element<Message> = if running {
-            stack![
-                speaker_pick.style(greyed_pick(scheme)).width(Length::Fill),
-                mouse_area(
-                    container(horizontal_space())
-                        .width(Length::Fill)
-                        .height(Length::Fill),
-                )
-                .interaction(mouse::Interaction::Idle)
-                .on_press(Message::Tick),
-            ]
-            .into()
-        } else if !self.shows(license::Audience::ProOnly) {
-            // Free runs ASR only, so the speaker count has no effect.
-            self.tip(
-                stack![
-                    speaker_pick.style(greyed_pick(scheme)).width(Length::Fill),
-                    mouse_area(
-                        container(horizontal_space())
-                            .width(Length::Fill)
-                            .height(Length::Fill),
-                    )
-                    .interaction(mouse::Interaction::Pointer)
-                    .on_press(Message::LockedSpeakers),
-                ],
-                "Speaker labels are a Pro feature",
-                &scheme,
-            )
-        } else {
-            speaker_pick
-                .style(pill_pick(scheme))
-                .width(Length::Fill)
-                .into()
-        };
-
-        let option_label =
-            |label: &'static str| text(label).size(11).wrapping(NO_WRAP).color(scheme.muted);
-        let options = row![
-            column![option_label("Preset"), preset]
-                .spacing(2)
-                .width(Length::Fill),
-            column![option_label("Speakers"), speakers]
-                .spacing(2)
-                .width(Length::Fill),
-        ]
-        .spacing(8);
-
-        let controls = column![
-            output_row,
-            options,
-            self.acceleration_row(&scheme),
-            row![
-                button(
-                    container(text("Transcribe"))
-                        .center_x(Length::Fill)
-                        .center_y(Length::Fill),
-                )
-                .width(Length::Fill)
-                .height(Length::Fixed(30.0))
-                .on_press_maybe(can_start.then_some(Message::Start))
-                // Dark mode fills read better with a white label; light mode
-                // keeps the dark ink it has always used.
-                .style(color_button_outlined(
-                    scheme.green,
-                    if theme::is_dark_scheme(&scheme) {
-                        Color::WHITE
-                    } else {
-                        scheme.on_accent
-                    },
-                    scheme,
-                )),
-                button(
-                    container(text("Cancel"))
-                        .center_x(Length::Fill)
-                        .center_y(Length::Fill),
-                )
-                .width(Length::Fill)
-                .height(Length::Fixed(30.0))
-                .on_press_maybe(running.then_some(Message::Cancel))
-                .style(color_button_outlined(
-                    scheme.danger,
-                    if theme::is_dark_scheme(&scheme) {
-                        Color::WHITE
-                    } else {
-                        scheme.on_accent
-                    },
-                    scheme,
-                )),
-            ]
-            .spacing(8)
-            .align_y(iced::Alignment::Center),
-        ]
-        .spacing(12);
 
         let content = column![header, toolbar, body, horizontal_rule(1), controls,]
             .spacing(12)
@@ -9502,6 +9553,7 @@ impl App {
             || self.help_open.is_some()
             || self.rename_open
             || self.reset_confirm
+            || self.run_setup_open
             || self.calibration.is_some()
     }
 
@@ -10959,6 +11011,11 @@ impl App {
                 .align_x(iced::Alignment::End),
             );
             let dialog = modal_card(col, 460.0, scheme);
+            return modal_overlay(base, dialog, scheme);
+        }
+
+        if self.run_setup_open {
+            let dialog = self.run_setup_dialog(&scheme);
             return modal_overlay(base, dialog, scheme);
         }
 
@@ -16184,6 +16241,62 @@ mod tests {
         // It is one undo step, like any other edit.
         let _ = app.update(Message::UndoLineEdit);
         assert!(app.shown_transcript().contains("changed"));
+
+        let _ = std::fs::remove_dir_all(&media);
+    }
+
+    #[test]
+    fn the_transcribe_button_says_retranscribe_for_a_finished_item() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("retranscribe-label");
+        let original = "[00:00] SPEAKER 1: one\n";
+        let (mut app, _transcript, media) = line_edit_fixture("retranscribe", original);
+
+        // The fixture opens its only item, which is Done and selected.
+        assert_eq!(app.transcribe_label(), "Retranscribe");
+
+        app.queue.push(QueueItem {
+            path: media.join("queued.mp3"),
+            audio: None,
+            status: ItemStatus::Pending,
+            duration: Some(1.0),
+            transcript: None,
+            stats: None,
+            turns: Vec::new(),
+            peaks: Arc::new(vec![0.1; 8]),
+        });
+        assert_eq!(
+            app.transcribe_label(),
+            "Transcribe",
+            "a pending item means Start will run the queue"
+        );
+
+        let _ = std::fs::remove_dir_all(&media);
+    }
+
+    #[test]
+    fn the_transcribe_button_opens_a_setup_dialog() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("run-setup-dialog");
+        let original = "[00:00] SPEAKER 1: one\n";
+        let (mut app, _transcript, media) = line_edit_fixture("run-setup", original);
+
+        let _ = app.update(Message::OpenRunSetup);
+        assert!(app.run_setup_open);
+        assert!(app.popup_open(), "the setup is modal");
+        let _ = app.view();
+
+        let _ = app.update(Message::Escape);
+        assert!(!app.run_setup_open);
+
+        let _ = app.update(Message::OpenRunSetup);
+        let _ = app.update(Message::CloseRunSetup);
+        assert!(!app.run_setup_open);
+
+        // Starting closes the dialog; the run itself is gated on models.
+        let _ = app.update(Message::OpenRunSetup);
+        let _ = app.update(Message::ConfirmRunSetup);
+        assert!(!app.run_setup_open);
 
         let _ = std::fs::remove_dir_all(&media);
     }
