@@ -138,6 +138,10 @@ const LINE_EDIT_PANEL_SLOT: f32 = 36.0;
 const LINE_EDIT_GAP: f32 = 4.0;
 const LINE_EDIT_GROUP_GAP: f32 = 8.0;
 
+/// Diameter of the panel's circular icon buttons. Equal to the row height the
+/// pills had (24 px), so the panel box and its reserved slot are unchanged.
+const PANEL_ICON_DIAMETER: f32 = 24.0;
+
 /// Width reserved for the Find row's match counter. Measured at 11 px: "no
 /// matches" is the widest it gets at 60.3 px, and "999 / 9999" reaches 53.9.
 /// It changes with every keystroke, and as a free-standing child it re-flowed
@@ -8104,7 +8108,7 @@ impl App {
         let undo = allowed && self.line_undo_available();
         let redo = allowed && self.line_redo_available();
 
-        // Sized by `icon_pill`'s padding alone. The deletion is tinted like the
+        // Circles at `PANEL_ICON_DIAMETER`. The deletion is tinted like the
         // danger it is: with the row compact it sits mid-cluster, so its colour
         // is what keeps it from reading as one more neutral edit.
         let button = |code: char, enabled: bool, danger: bool, message: Message| {
@@ -8115,7 +8119,7 @@ impl App {
             } else {
                 scheme.ink
             };
-            icon_pill(code, ink)
+            icon_circle(code, ink)
                 .style(panel_icon_button(scheme, enabled))
                 .on_press_maybe(enabled.then_some(message))
         };
@@ -8136,9 +8140,9 @@ impl App {
 
         // Cancel stays live whatever the state: it is the way out of a row the
         // panel can no longer write to.
-        let cancel = icon_pill(ICON_X, scheme.ink)
+        let cancel = icon_circle(ICON_X, scheme.ink)
             .on_press(Message::CancelLineEdit)
-            .style(pill_button_secondary);
+            .style(panel_icon_button(scheme, true));
         // Padding, not a height, so the label's line box decides the size.
         let done = action(
             row![
@@ -12581,6 +12585,40 @@ fn icon_pill(code: char, colour: Color) -> iced::widget::Button<'static, Message
     action(icon_colored(code, ICON_SIZE, colour)).padding(theme::CONTROL_PADDING)
 }
 
+/// The line box of an icon glyph, tightened to its own em size.
+///
+/// This icon font is 300/300 em: ascent exactly one em, descent zero, and its
+/// glyph inks are symmetric about the em box's centre (measured: the join
+/// arrows and the cancel cross land on 7.00 px of a 14 px box, the trash and
+/// the undo arrows within 0.75 px). A line box the size of the glyph therefore
+/// centres the ink, which is what lets a circle centre it by layout.
+fn icon_line_height() -> iced::advanced::text::LineHeight {
+    iced::advanced::text::LineHeight::Absolute(Pixels(ICON_SIZE))
+}
+
+/// A circular icon button: a square box whose radius is half its side, with the
+/// glyph centred by layout rather than by padding.
+///
+/// The line box comes from [`icon_line_height`], so the node the container
+/// centres is the glyph itself rather than a taller box with the ink at its top.
+fn icon_circle(code: char, colour: Color) -> iced::widget::Button<'static, Message> {
+    let glyph = text(code.to_string())
+        .font(Font::with_name("bootstrap-icons"))
+        .size(ICON_SIZE)
+        .line_height(icon_line_height())
+        .style(move |_theme| text::Style { color: Some(colour) });
+    action(
+        container(glyph)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .center_x(Length::Fill)
+            .center_y(Length::Fill),
+    )
+    .width(Length::Fixed(PANEL_ICON_DIAMETER))
+    .height(Length::Fixed(PANEL_ICON_DIAMETER))
+    .padding(0)
+}
+
 /// Fixed width for a text button so its label can never wrap. The iced default
 /// 16 px UI font averages close to 10 px per character for mixed-case Latin
 /// text, and the button adds 10 px of padding on each side.
@@ -12979,17 +13017,21 @@ fn greyed_button(scheme: Scheme) -> impl Fn(&iced::Theme, button::Status) -> but
 
 /// A control in the line editor panel: the live pill, or the greyed one when
 /// the panel already knows the action would refuse. One style function for both
-/// states keeps the row's buttons a single type.
+/// states keeps the row's buttons a single type, and the radius is pinned to
+/// half the diameter so hover, pressed and disabled all draw a circle rather
+/// than a pill whose ends depend on the box's height.
 fn panel_icon_button(
     scheme: Scheme,
     enabled: bool,
 ) -> impl Fn(&iced::Theme, button::Status) -> button::Style {
     move |theme, status| {
-        if enabled {
+        let mut style = if enabled {
             pill_button_secondary(theme, status)
         } else {
             greyed_button(scheme)(theme, status)
-        }
+        };
+        style.border.radius = (PANEL_ICON_DIAMETER / 2.0).into();
+        style
     }
 }
 
@@ -16272,6 +16314,40 @@ mod tests {
         tag_paths(&tree, tag, &mut Vec::new(), &mut out);
         assert!(!out.is_empty(), "expected scrollables in the view");
         out
+    }
+
+    #[test]
+    fn the_icon_line_box_matches_the_glyph_so_a_circle_can_centre_it() {
+        use iced::advanced::graphics::text as gtext;
+        use iced::advanced::text::{self, Paragraph as _};
+
+        let paragraph = |line_height| {
+            gtext::Paragraph::with_text(text::Text {
+                content: "\u{f145}",
+                bounds: Size::new(f32::INFINITY, 64.0),
+                size: Pixels(ICON_SIZE),
+                line_height,
+                font: Font::with_name("bootstrap-icons"),
+                horizontal_alignment: iced::alignment::Horizontal::Left,
+                vertical_alignment: iced::alignment::Vertical::Top,
+                shaping: text::Shaping::Advanced,
+                wrapping: text::Wrapping::None,
+            })
+        };
+
+        // Tightened to the em box: the glyph's node is exactly the glyph, so a
+        // circle that centres the node centres the ink.
+        let tight = paragraph(icon_line_height());
+        assert_eq!(tight.min_bounds().height, ICON_SIZE);
+
+        // iced's default is 1.3 em, and the spare space goes below the baseline,
+        // which is what would sit the icon about 2 px high in the circle.
+        let loose = paragraph(text::LineHeight::default());
+        assert!(
+            loose.min_bounds().height > ICON_SIZE + 2.0,
+            "default line box {} should be materially taller than the glyph",
+            loose.min_bounds().height
+        );
     }
 
     #[test]
