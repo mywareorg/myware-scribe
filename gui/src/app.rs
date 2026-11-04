@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime};
 
 use iced::keyboard::{self, Key, Modifiers};
+use iced::overlay::menu;
 use iced::widget::{
     button, canvas, column, container, horizontal_rule, horizontal_space, mouse_area, pick_list,
     progress_bar, rich_text, row, scrollable, stack, text, text_editor, text_input, tooltip,
@@ -7275,7 +7276,8 @@ impl App {
         let import_picker: Element<Message> = if self.can(license::Feature::Editing) {
             pick_list(ImportKind::ALL, None::<ImportKind>, Message::ImportChoice)
                 .placeholder("Import")
-                .style(ink_pick(scheme.ink))
+                .style(ink_pick(scheme))
+                .menu_style(pick_menu_style(scheme))
                 .handle(caret_handle(false))
                 .width(Length::Fixed(126.0))
                 .into()
@@ -7285,6 +7287,7 @@ impl App {
                     pick_list(ImportKind::ALL, None::<ImportKind>, Message::ImportChoice)
                         .placeholder("Import")
                         .style(greyed_pick(scheme))
+                        .menu_style(pick_menu_style(scheme))
                         .handle(caret_handle(false))
                         .width(Length::Fixed(122.0)),
                     mouse_area(
@@ -7394,6 +7397,7 @@ impl App {
                 stack![
                     pick_list(Preset::ALL, Some(Preset::Balanced), Message::PresetChanged,)
                         .style(greyed_pick(scheme))
+                        .menu_style(pick_menu_style(scheme))
                         .width(Length::Fill),
                     mouse_area(
                         container(horizontal_space())
@@ -7408,7 +7412,8 @@ impl App {
             )
         } else if !running && has_queue {
             pick_list(Preset::ALL, Some(self.preset), Message::PresetChanged)
-                .style(pill_pick)
+                .style(pill_pick(scheme))
+                .menu_style(pick_menu_style(scheme))
                 .width(Length::Fill)
                 .into()
         } else {
@@ -7417,6 +7422,7 @@ impl App {
             stack![
                 pick_list(Preset::ALL, Some(self.preset), Message::PresetChanged)
                     .style(greyed_pick(scheme))
+                    .menu_style(pick_menu_style(scheme))
                     .width(Length::Fill),
                 mouse_area(
                     container(horizontal_space())
@@ -7433,7 +7439,8 @@ impl App {
             SpeakerOpt::ALL,
             Some(SpeakerOpt::from_value(self.num_speakers)),
             Message::SpeakerCountChanged,
-        );
+        )
+        .menu_style(pick_menu_style(scheme));
         let speakers: Element<Message> = if running {
             stack![
                 speaker_pick.style(greyed_pick(scheme)).width(Length::Fill),
@@ -7463,7 +7470,10 @@ impl App {
                 &scheme,
             )
         } else {
-            speaker_pick.style(pill_pick).width(Length::Fill).into()
+            speaker_pick
+                .style(pill_pick(scheme))
+                .width(Length::Fill)
+                .into()
         };
 
         let option_label =
@@ -8075,6 +8085,7 @@ impl App {
                     |choice| Message::LineEditSpeaker(0, choice.name),
                 )
                 .style(speaker_pick(accent, scheme))
+                .menu_style(pick_menu_style(scheme))
                 .text_size(theme::TEXT_SM)
                 .font(Font {
                     weight: font::Weight::Bold,
@@ -8820,6 +8831,7 @@ impl App {
                 stack![
                     pick_list(Speed::ALL, Some(Speed::One), Message::SpeedChanged)
                         .style(greyed_pick(*scheme))
+                        .menu_style(pick_menu_style(*scheme))
                         .handle(caret_handle(false)),
                     mouse_area(
                         container(horizontal_space())
@@ -8838,13 +8850,15 @@ impl App {
                 Some(Speed::from_factor(self.playback_speed)),
                 Message::SpeedChanged,
             )
-            .style(speed_pick)
+            .style(speed_pick(*scheme))
+            .menu_style(pick_menu_style(*scheme))
             .handle(caret_handle(false))
             .into()
         } else {
             stack![
                 pick_list(Speed::ALL, Some(Speed::One), Message::SpeedChanged)
                     .style(greyed_pick(*scheme))
+                    .menu_style(pick_menu_style(*scheme))
                     .handle(caret_handle(false)),
                 mouse_area(
                     container(horizontal_space())
@@ -9284,7 +9298,8 @@ impl App {
 
         let theme = settings_control(
             pick_list(AppTheme::ALL, Some(self.theme_mode), Message::SetTheme)
-                .style(ink_pick(scheme.ink))
+                .style(ink_pick(scheme))
+                .menu_style(pick_menu_style(scheme))
                 .handle(caret_handle(false))
                 .width(Length::Fixed(180.0)),
         );
@@ -9320,6 +9335,7 @@ impl App {
                 stack![
                     pick_list(Preset::ALL, Some(Preset::Balanced), Message::PresetChanged,)
                         .style(greyed_pick(scheme))
+                        .menu_style(pick_menu_style(scheme))
                         .handle(caret_handle(false))
                         .width(Length::Fixed(180.0)),
                     mouse_area(
@@ -9335,7 +9351,8 @@ impl App {
             )
         } else {
             pick_list(Preset::ALL, Some(self.preset), Message::PresetChanged)
-                .style(pill_pick)
+                .style(pill_pick(scheme))
+                .menu_style(pick_menu_style(scheme))
                 .handle(caret_handle(false))
                 .width(Length::Fixed(180.0))
                 .into()
@@ -9355,6 +9372,7 @@ impl App {
                         Message::SpeakerCountChanged,
                     )
                     .style(greyed_pick(scheme))
+                    .menu_style(pick_menu_style(scheme))
                     .handle(caret_handle(false))
                     .width(Length::Fixed(180.0)),
                     mouse_area(
@@ -9374,7 +9392,8 @@ impl App {
                 Some(SpeakerOpt::from_value(self.num_speakers)),
                 Message::SpeakerCountChanged,
             )
-            .style(pill_pick)
+            .style(pill_pick(scheme))
+            .menu_style(pick_menu_style(scheme))
             .handle(caret_handle(false))
             .width(Length::Fixed(180.0))
             .into()
@@ -9392,7 +9411,8 @@ impl App {
                 Some(LanguageOpt::from_code(self.language.as_deref())),
                 Message::LanguageChanged,
             )
-            .style(pill_pick)
+            .style(pill_pick(scheme))
+            .menu_style(pick_menu_style(scheme))
             .handle(caret_handle(false))
             .width(Length::Fixed(180.0))
             .into()
@@ -9404,7 +9424,8 @@ impl App {
                 Some(Speed::from_factor(self.playback_speed)),
                 Message::SpeedChanged,
             )
-            .style(speed_pick)
+            .style(speed_pick(scheme))
+            .menu_style(pick_menu_style(scheme))
             .handle(caret_handle(false))
             .width(Length::Fixed(180.0)),
         );
@@ -10053,7 +10074,8 @@ impl App {
             .push(
                 pick_list(HelpKind::ALL, None::<HelpKind>, Message::HelpChoice)
                     .placeholder("Help")
-                    .style(pill_pick)
+                    .style(pill_pick(scheme))
+                    .menu_style(pick_menu_style(scheme))
                     .handle(caret_handle(true))
                     .width(Length::Fixed(92.0)),
             );
@@ -11460,13 +11482,18 @@ fn caret_handle(invert: bool) -> pick_list::Handle<Font> {
 }
 
 /// Pick-list style whose text/placeholder/handle use `ink` (button text colour).
-fn ink_pick(ink: Color) -> impl Fn(&iced::Theme, pick_list::Status) -> pick_list::Style {
+fn ink_pick(scheme: Scheme) -> impl Fn(&iced::Theme, pick_list::Status) -> pick_list::Style {
     move |theme, status| {
         let mut style = pick_list::default(theme, status);
-        style.text_color = ink;
-        style.placeholder_color = ink;
-        style.handle_color = ink;
+        style.text_color = scheme.ink;
+        style.placeholder_color = scheme.ink;
+        style.handle_color = scheme.ink;
         style.border.radius = PILL.into();
+        // Open: the menu's surface and hairline, as `pill_pick` does.
+        if matches!(status, pick_list::Status::Opened) {
+            style.background = scheme.dialog_bg.into();
+            style.border.color = scheme.border;
+        }
         style
     }
 }
@@ -12974,32 +13001,80 @@ fn pill_input(theme: &iced::Theme, status: text_input::Status) -> text_input::St
     style
 }
 
-fn pill_pick(theme: &iced::Theme, status: pick_list::Status) -> pick_list::Style {
-    let mut style = pick_list::default(theme, status);
-    style.border.radius = PILL.into();
-    style
+/// The surface every pick-list menu is drawn on.
+///
+/// iced's default menu is a square popup filled with the window colour and edged
+/// with a `background.strong` hairline, which floats with no elevation cue and
+/// matches none of the app's surfaces. `menu::Style` has no shadow field, so the
+/// fill and the hairline *are* the elevation: this puts it on the raised dialog
+/// surface with the card radius, and replaces the row highlight.
+///
+/// iced draws the row under the pointer with the same fill it uses for the row
+/// that is the current value. The default `primary.strong` is the accent at full
+/// strength with a `readable()`-picked label — on a raised card a harsh band, and
+/// in the dark palette `readable()` picks black, which inverts the menu's text.
+/// The recessed surface is a quiet band in both palettes (about 1.3:1 against the
+/// menu) that keeps the menu's own text as the label.
+fn pick_menu_style(scheme: Scheme) -> impl Fn(&iced::Theme) -> menu::Style {
+    move |_theme| menu::Style {
+        background: scheme.dialog_bg.into(),
+        border: iced::border::Border {
+            color: scheme.border,
+            width: 1.0,
+            radius: theme::RADIUS_MD.into(),
+        },
+        text_color: scheme.text,
+        selected_text_color: scheme.text,
+        selected_background: scheme.timeline_bg.into(),
+    }
+}
+
+fn pill_pick(scheme: Scheme) -> impl Fn(&iced::Theme, pick_list::Status) -> pick_list::Style {
+    move |theme, status| {
+        let mut style = pick_list::default(theme, status);
+        style.border.radius = PILL.into();
+        // Open: the handle takes the menu's surface, so the list reads as this
+        // control opening rather than as a popup landing under a pill. iced's own
+        // open state only tints the border with the accent, which would draw a
+        // blue edge above the menu's grey hairline.
+        if matches!(status, pick_list::Status::Opened) {
+            style.background = scheme.dialog_bg.into();
+            style.border.color = scheme.border;
+        }
+        style
+    }
 }
 
 /// Borderless pick list whose colours mirror the secondary (Advanced) button.
-fn speed_pick(theme: &iced::Theme, status: pick_list::Status) -> pick_list::Style {
-    let button_status = match status {
-        pick_list::Status::Hovered | pick_list::Status::Opened => button::Status::Hovered,
-        pick_list::Status::Active => button::Status::Active,
-    };
-    let base = button::secondary(theme, button_status);
-    // The speed label is a button-level label, so it follows the same rule:
-    // pure white on a dark theme, the theme text otherwise.
-    let text = button_label(theme);
-    pick_list::Style {
-        text_color: text,
-        placeholder_color: text,
-        handle_color: text,
-        background: base.background.unwrap_or_else(|| Color::TRANSPARENT.into()),
-        border: iced::border::Border {
-            color: Color::TRANSPARENT,
-            width: 0.0,
-            radius: PILL.into(),
-        },
+fn speed_pick(scheme: Scheme) -> impl Fn(&iced::Theme, pick_list::Status) -> pick_list::Style {
+    move |theme, status| {
+        let button_status = match status {
+            pick_list::Status::Hovered | pick_list::Status::Opened => button::Status::Hovered,
+            pick_list::Status::Active => button::Status::Active,
+        };
+        let base = button::secondary(theme, button_status);
+        // The speed label is a button-level label, so it follows the same rule:
+        // pure white on a dark theme, the theme text otherwise.
+        let text = button_label(theme);
+        pick_list::Style {
+            text_color: text,
+            placeholder_color: text,
+            handle_color: text,
+            // Open: the same surface as its list, like the pill handles. The
+            // border stays transparent — this idiom has no chrome when closed, and
+            // growing one only while open would be a new shape rather than the same
+            // control opening.
+            background: if matches!(status, pick_list::Status::Opened) {
+                scheme.dialog_bg.into()
+            } else {
+                base.background.unwrap_or_else(|| Color::TRANSPARENT.into())
+            },
+            border: iced::border::Border {
+                color: Color::TRANSPARENT,
+                width: 0.0,
+                radius: PILL.into(),
+            },
+        }
     }
 }
 
