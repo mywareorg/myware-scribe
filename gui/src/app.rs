@@ -183,12 +183,22 @@ const HEADER_LABEL_HEIGHT: f32 = 13.0 * 1.3 + 1.0 + 11.0 * 1.3;
 /// Gap the header's slot leaves under the header's rule.
 const HEADER_SLOT_GAP: f32 = theme::SPACE_SM;
 
-/// Where the transcript header menus' top edge sits inside the card: the
-/// header's gap above and below its controls, the identity block, the gap to the
-/// rule, the rule itself and the slot's gap. Their width is not fixed: each menu
-/// is as wide as its own widest row.
+/// Top inset of the transcript card's title row, one step larger than
+/// `HEADER_GAP`: the title belongs to the card, the menu strip below it belongs
+/// to the header.
+const TITLE_TOP: f32 = theme::SPACE_MD;
+
+/// Height of the card's title row: its top inset plus a 14 px bold line at
+/// iced's 1.3 line height. It has no bottom padding — the header's own top gap
+/// is the space beneath it.
+const TITLE_HEIGHT: f32 = TITLE_TOP + 14.0 * 1.3;
+
+/// Where the transcript header menus' top edge sits inside the card: the title
+/// row, the header's gap above and below its controls, the identity block, the
+/// gap to the rule, the rule itself and the slot's gap. Their width is not
+/// fixed: each menu is as wide as its own widest row.
 const VIEW_MENU_TOP: f32 =
-    HEADER_GAP * 3.0 + HEADER_LABEL_HEIGHT + 1.0 + HEADER_SLOT_GAP;
+    TITLE_HEIGHT + HEADER_GAP * 3.0 + HEADER_LABEL_HEIGHT + 1.0 + HEADER_SLOT_GAP;
 
 /// Width of a header menu row's leading check slot. Fixed, so every label in a
 /// menu starts on the same left edge whether its row is checked or not.
@@ -10539,12 +10549,27 @@ impl App {
         // The player keeps its own card. The run progress used to sit inside it,
         // which stacked one white surface on another; it is a sibling card above
         // the player instead.
+        // `Player` matches the queue card's title exactly: the card pads 12 and
+        // the title sits 12 above the controls, so the two islands start on the
+        // same line and share a rhythm. No summary beside it: the player already
+        // shows its times, and a second line here would only repeat them.
         let player_box = container(
             column![
-                self.timeline_element(&scheme),
-                self.player_element(&scheme)
+                text("Player")
+                    .size(theme::TEXT_MD)
+                    .font(Font {
+                        weight: font::Weight::Bold,
+                        ..Font::DEFAULT
+                    })
+                    .wrapping(NO_WRAP),
+                column![
+                    self.timeline_element(&scheme),
+                    self.player_element(&scheme)
+                ]
+                .spacing(8)
+                .width(Length::Fill),
             ]
-            .spacing(8)
+            .spacing(theme::SPACE_LG)
             .width(Length::Fill),
         )
         .width(Length::Fill)
@@ -10579,11 +10604,31 @@ impl App {
             bottom: if has_header { HEADER_SLOT_GAP } else { 0.0 },
             left: 0.0,
         });
+        // The card's own name, inset from the rounded top edge and aligned with
+        // the header's horizontal padding. It carries no bottom padding: the
+        // header's top gap is the space under it, so the title and the menu
+        // strip read as one block with the title leading it.
+        let title = container(
+            text("Transcription")
+                .size(theme::TEXT_MD)
+                .font(Font {
+                    weight: font::Weight::Bold,
+                    ..Font::DEFAULT
+                })
+                .wrapping(NO_WRAP),
+        )
+        .width(Length::Fill)
+        .padding(iced::Padding {
+            top: TITLE_TOP,
+            right: HEADER_PAD_X,
+            bottom: 0.0,
+            left: HEADER_PAD_X,
+        });
         // The editor strip sits between the header and the list, inside the card,
         // and only its *height* changes: nothing when no editor is open, so the
-        // list runs up to the header. It is always the middle child, so the
-        // scrollable stays child 2 in both states and `Tree::diff` matches it by
-        // index — the strip's node swaps between a `Space` and a `Row` (a
+        // list runs up to the header. It is always the child before the list, so
+        // the scrollable stays child 3 in both states and `Tree::diff` matches it
+        // by index — the strip's node swaps between a `Space` and a `Row` (a
         // `Container` has no node of its own), but the scrollable's node and its
         // absolute pixel offset are untouched, which is why its offset is not
         // reset. Shifting the offset to match is `strip_scroll`.
@@ -10593,10 +10638,15 @@ impl App {
         })
         .width(Length::Fill)
         .height(Length::Fixed(editor_strip_height(self.line_edit.is_some())));
-        let transcript_box = column![header_slot, strip_slot, self.transcript_element()]
-            .spacing(0)
-            .width(Length::Fill)
-            .height(Length::Fill);
+        let transcript_box = column![
+            title,
+            header_slot,
+            strip_slot,
+            self.transcript_element()
+        ]
+        .spacing(0)
+        .width(Length::Fill)
+        .height(Length::Fill);
 
         let left_panel: Element<Message> = self.queue_panel(&scheme, LEFT_PANEL_WIDTH);
 
