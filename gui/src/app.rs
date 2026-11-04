@@ -117,15 +117,6 @@ const NO_WRAP: iced::widget::text::Wrapping = iced::widget::text::Wrapping::None
 /// Transcript text scale when nothing has been stored yet: 70 % of the base size.
 const DEFAULT_FONT_SCALE: f32 = 0.7;
 
-/// Lines of text the inline editor shows at minimum, so the field never
-/// collapses around a single word. There is no upper limit: a long line grows
-/// the field rather than hiding its tail behind a silent clip.
-const LINE_EDIT_MIN_LINES: usize = 1;
-
-/// Inner padding of the line editor's field, in logical pixels.
-const LINE_EDIT_PAD_Y: f32 = 6.0;
-const LINE_EDIT_PAD_X: f32 = 8.0;
-
 /// Height reserved below the transcript for the line-editor panel, at all times
 /// so opening and closing the editor never resizes the pane (which would move
 /// the row under the pointer while the caret is being placed). The panel's own
@@ -169,10 +160,6 @@ const LINE_EDIT_PICKER_CHARS: usize = 18;
 
 /// iced's default text line height, as a multiple of the font size.
 const LINE_HEIGHT_FACTOR: f32 = 1.3;
-
-/// Average advance of mixed-case Latin text, as a fraction of the font size.
-/// Used only to estimate how many lines a line editor wraps to.
-const LINE_EDIT_CHAR_WIDTH: f32 = 0.52;
 
 /// Padding inside every modal card (see `modal_card`).
 const MODAL_PADDING: f32 = 16.0;
@@ -533,6 +520,8 @@ pub enum Message {
     ShiftEnterSubmit,
     SelectLine(usize),
     LineClicked(usize),
+    /// A click on a bubble's words, which seeks but never edits.
+    LineTextClicked(usize),
     LineHover(Option<usize>),
     TogglePlayheadLock,
     SelectRelative(i32),
@@ -3157,6 +3146,19 @@ impl App {
                 if self.line_edit.as_ref().is_some_and(|edit| edit.index != index) {
                     self.commit_inline_edit(false);
                     return self.update(Message::EditLine(index));
+                }
+                if self.playhead_locked {
+                    Task::none()
+                } else {
+                    self.select_line_with(index, false)
+                }
+            }
+            Message::LineTextClicked(index) => {
+                // Bubble text is a seek target only. Clicking away from an open
+                // editor still commits it, but this cannot open another.
+                self.last_line_click = None;
+                if self.line_edit.as_ref().is_some_and(|edit| edit.index != index) {
+                    self.commit_inline_edit(false);
                 }
                 if self.playhead_locked {
                     Task::none()
@@ -7875,7 +7877,7 @@ impl App {
                 } else {
                     String::new()
                 };
-                let bubble: Element<'static, Message> = button(sms_bubble(
+                let bubble: Element<'static, Message> = sms_bubble(
                     &line_text(line),
                     &line.speaker,
                     &stamp,
@@ -7887,19 +7889,8 @@ impl App {
                     &query,
                     size,
                     active,
-                ))
-                // The bubble is its own hit target: a row-level area lost the
-                // press once the bubble's text was the pointer's target, so
-                // only the speaker label inside it still sought. A transparent
-                // button on the bubble itself makes the whole shape clickable.
-                .padding(0)
-                .width(Length::Shrink)
-                .style(|_theme, _status| button::Style {
-                    background: None,
-                    border: iced::border::Border::default(),
-                    ..button::Style::default()
-                })
-                .on_press(Message::LineClicked(idx))
+                    idx,
+                )
                 .into();
                 // The exchange button belongs to the bubble, not to the pane
                 // edge: it sits against the bubble's inner side and appears
@@ -7929,7 +7920,10 @@ impl App {
                 col = col.push(
                     mouse_area(content_row)
                         .interaction(mouse::Interaction::Pointer)
-                        .on_press(Message::LineClicked(idx))
+                        // A click on the words only seeks. Double-clicking
+                        // them does not open the editor either: in this view
+                        // the speaker label and the timestamp own that.
+                        .on_press(Message::LineTextClicked(idx))
                         .on_right_press(Message::FlipLineSpeaker(idx))
                         .on_enter(Message::LineHover(Some(idx)))
                         .on_exit(Message::LineHover(None)),
@@ -7972,13 +7966,15 @@ impl App {
     }
 
     /// The inline editor for `index`, drawn where its transcript row was.
+    ///
+    /// The row keeps everything except the words themselves: the timestamp and
+    /// the speaker label stay exactly where the transcript put them, and only
+    /// the text becomes editable. Nothing moves when editing begins.
     fn inline_editor_element(&self, size: f32, scheme: Scheme) -> Element<'_, Message> {
         let Some(row) = self.line_edit.as_ref().and_then(|edit| edit.current_row()) else {
             return horizontal_space().into();
         };
         let accent = line_accent(&self.speaker_order(), &row.speaker, &scheme);
-        // The timestamp stays in the row's gutter while it is edited, so the
-        // line does not jump sideways when the field replaces it.
         let stamp = if self.show_timestamps {
             self.edit_lines()
                 .get(row.index)
@@ -7988,13 +7984,43 @@ impl App {
         } else {
             String::new()
         };
+        if self.sms_mode {
+            // A bubble keeps its meta row above the text and its own side of
+            // the pane; only the text well is replaced.
+            let order = self.speaker_order();
+            let single_speaker = order.len() <= 1;
+            let index = order
+                .iter()
+                .position(|name| name == &row.speaker)
+                .unwrap_or(if single_speaker { 1 } else { 0 });
+            let bubble = inline_bubble_edit(
+                &row.content,
+                &stamp,
+                &row.speaker,
+                accent,
+                scheme,
+                size,
+                self.inline_bubble_width(size),
+            );
+            let mut content = row![]
+                .spacing(theme::SPACE_SM)
+                .align_y(iced::Alignment::Center)
+                .width(Length::Fill);
+            if index.is_multiple_of(2) || single_speaker {
+                content = content.push(bubble);
+            } else {
+                content = content.push(horizontal_space());
+                content = content.push(bubble);
+            }
+            return content.into();
+        }
         inline_line_edit_row(
             &row.content,
             &stamp,
+            &row.speaker,
             accent,
             scheme,
             size,
-            self.inline_text_width(),
         )
     }
 
@@ -8004,19 +8030,13 @@ impl App {
         (self.window_size.width - LEFT_PANEL_WIDTH - PANEL_GAP - 2.0 * OUTER_PADDING).max(320.0)
     }
 
-    /// Width the inline editor's text area has inside the transcript pane.
+    /// Width the bubble editor's text well has to wrap to.
     ///
-    /// An estimate: the pane is whatever the window has left after the queue
-    /// panel, the card padding and the scrollbar, and the field only uses it to
-    /// decide how many lines its own text wraps to.
-    fn inline_text_width(&self) -> f32 {
-        let pane = (self.pane_width() - 2.0 * 8.0 // transcript column padding
-            - 12.0) // scrollbar
-            .max(240.0);
-        pane - 3.0 // accent stripe
-            - theme::SPACE_SM // between the stripe and the field
-            - 2.0 * LINE_EDIT_PAD_X
-            - 2.0 // field border
+    /// The pane, less the transcript's own padding and scrollbar, less the
+    /// bubble's padding and border, capped at the width a bubble may reach.
+    fn inline_bubble_width(&self, size: f32) -> f32 {
+        let pane = (self.pane_width() - 2.0 * 8.0 - 12.0).max(240.0);
+        (pane - 30.0).min((size * 28.0).clamp(240.0, 620.0) - 20.0)
     }
 
     /// Controls for the line being edited: which line it is, its speaker, the
@@ -8043,7 +8063,11 @@ impl App {
             names.push(row.speaker.clone());
         }
         let choices: Vec<SpeakerChoice> = names.into_iter().map(SpeakerChoice::new).collect();
-        let picker: Element<Message> = if allowed {
+        // With one speaker there is nothing to choose: show the label the row
+        // already carries, without the arrow and the menu that would only ever
+        // hold the one name back.
+        let can_change_speaker = allowed && choices.len() > 1;
+        let picker: Element<Message> = if can_change_speaker {
             container(
                 pick_list(
                     choices,
@@ -8064,8 +8088,8 @@ impl App {
             .max_width(Pixels(LINE_EDIT_PICKER_WIDTH))
             .into()
         } else {
-            // Read-only: show whose line this is, without a control that
-            // would only refuse the change afterwards.
+            // Read-only, or the only speaker there is: show whose line this is
+            // in its own colour, without a control that cannot change anything.
             container(
                 text(ellipsize_middle(&row.speaker, LINE_EDIT_PICKER_CHARS))
                     .size(theme::TEXT_SM)
@@ -8073,7 +8097,7 @@ impl App {
                         weight: font::Weight::Bold,
                         ..Font::DEFAULT
                     })
-                    .color(scheme.muted)
+                    .color(if allowed { accent } else { scheme.muted })
                     .wrapping(NO_WRAP),
             )
             .padding([3, 5])
@@ -12179,111 +12203,113 @@ fn line_editor_style(
 }
 
 /// The line being edited, drawn in the transcript as a field where the line
-/// stands: the timestamp gutter, the speaker's accent stripe, then the text.
-/// The speaker itself is chosen from the panel below the transcript, so the
-/// field keeps the width it needs for the words being fixed.
+/// stands. Everything the row had — the timestamp and the speaker label — stays
+/// in place at its usual size and colour; only the words become an editor, and
+/// the row's fill turns into the theme's text-field well so the change of state
+/// is visible without moving anything.
 fn inline_line_edit_row<'a>(
     content: &'a text_editor::Content,
     stamp: &str,
+    speaker: &str,
     accent: Color,
     scheme: Scheme,
     size: f32,
-    text_width: f32,
 ) -> Element<'a, Message> {
-    let height = line_edit_height(&content.text(), size, text_width);
-    // The editor is one box: a bordered well in the theme's input colour, the
-    // way any other text field reads. There is no accent stripe down the side -
-    // it pushed the text off the row's own margin and made the line jump when
-    // editing began.
-    let field = container(
-        text_editor(content)
-            .on_action(|action| Message::LineEditAction(0, action))
-            .placeholder("Empty line")
-            .size(size)
-            .wrapping(iced::widget::text::Wrapping::Word)
-            .height(Length::Fill)
-            .padding(0)
-            .style(line_editor_style(scheme)),
-    )
-    .width(Length::Fill)
-    .height(Length::Fixed(height))
-    .padding([LINE_EDIT_PAD_Y, LINE_EDIT_PAD_X])
-    // The field is as tall as its text; this only guards against an estimate
-    // that came out a pixel short.
-    .clip(true);
-    let mut line = row![]
-        .spacing(theme::SPACE_SM)
+    let field = text_editor(content)
+        .on_action(|action| Message::LineEditAction(0, action))
+        .placeholder("Empty line")
+        .size(size)
+        .line_height(iced::advanced::text::LineHeight::Relative(LINE_HEIGHT_FACTOR))
+        .wrapping(iced::widget::text::Wrapping::Word)
+        .padding(0)
+        .style(line_editor_style(scheme));
+
+    // Same order, spacing and alignment as `line_element`, so the words do not
+    // shift by a pixel when the row becomes a field.
+    let mut content_row = row![]
+        .spacing(6)
         .align_y(iced::Alignment::Start)
         .width(Length::Fill);
     if !stamp.is_empty() {
-        // The timestamp keeps the speaker's colour: the row still reads as the
-        // utterance it is, not as a form.
-        line = line.push(text(stamp.to_string()).size(size * 0.78).color(accent));
+        content_row = content_row.push(
+            text(stamp.to_string())
+                .size(size * 0.78)
+                .color(scheme.muted),
+        );
     }
-    let line = line.push(field);
-    container(line)
+    if !speaker.is_empty() {
+        content_row = content_row.push(speaker_chip(speaker, accent, scheme.ink, size));
+    }
+    content_row = content_row.push(field);
+
+    container(content_row)
         .width(Length::Fill)
-        .padding([2, 2])
+        .padding([3, 6])
         .style(move |_theme| container::Style {
             background: Some(scheme.field_bg.into()),
             border: iced::border::Border {
                 color: scheme.border,
                 width: 1.0,
-                radius: 8.0.into(),
+                radius: 6.0.into(),
             },
             ..container::Style::default()
         })
         .into()
 }
 
-/// Height of the editor's field for `text` at `size`, wrapped to `text_width`.
-///
-/// Trailing newlines are trimmed first: a row holds one transcript line, and
-/// the editor's own text can end with a newline that would otherwise buy the
-/// field an empty extra line. There is deliberately no upper bound: a long line
-/// grows the field and the pane scrolls to it, rather than the field hiding its
-/// own tail behind a clip.
-fn line_edit_height(text: &str, size: f32, text_width: f32) -> f32 {
-    let text = text.trim_end_matches(['\n', '\r']);
-    let lines = visual_line_count(text, size, text_width);
-    lines as f32 * size * LINE_HEIGHT_FACTOR + 2.0 * LINE_EDIT_PAD_Y
-}
-
-/// Visual lines `text` occupies when wrapped to `width`, never fewer than the
-/// editor's floor.
-fn visual_line_count(text: &str, size: f32, width: f32) -> usize {
-    let columns = (width / (size * LINE_EDIT_CHAR_WIDTH)).floor().max(1.0) as usize;
-    text.split('\n')
-        .map(|line| wrapped_line_count(line, columns))
-        .sum::<usize>()
-        .max(LINE_EDIT_MIN_LINES)
-}
-
-/// Lines one paragraph takes when wrapped greedily on spaces at `columns`.
-fn wrapped_line_count(line: &str, columns: usize) -> usize {
-    let columns = columns.max(1);
-    if line.is_empty() {
-        return 1;
-    }
-    let mut rows = 1;
-    let mut used = 0;
-    for word in line.split(' ') {
-        let width = word.chars().count();
-        let gap = usize::from(used > 0);
-        if used + gap + width <= columns {
-            used += gap + width;
-        } else {
-            // The word starts a new row and may still be wider than one row.
-            rows += 1;
-            let mut remaining = width;
-            while remaining > columns {
-                remaining -= columns;
-                rows += 1;
-            }
-            used = remaining;
+/// The bubble view's editor: the same bubble, with its meta row untouched and
+/// its text replaced by a well. It keeps the speaker's side of the pane and the
+/// bubble's width; only the words are editable.
+fn inline_bubble_edit<'a>(
+    content: &'a text_editor::Content,
+    stamp: &str,
+    speaker: &str,
+    accent: Color,
+    scheme: Scheme,
+    size: f32,
+    wrap: f32,
+) -> Element<'a, Message> {
+    let mut body = column![].spacing(2);
+    if !speaker.is_empty() || !stamp.is_empty() {
+        let mut meta = row![].spacing(6).align_y(iced::Alignment::Center);
+        if !speaker.is_empty() {
+            meta = meta.push(speaker_chip(speaker, accent, scheme.ink, size * 0.72));
         }
+        if !stamp.is_empty() {
+            meta = meta.push(
+                text(stamp.to_string())
+                    .size(size * 0.72)
+                    .color(Color { a: 0.70, ..scheme.ink }),
+            );
+        }
+        body = body.push(meta);
     }
-    rows
+    body = body.push(
+        text_editor(content)
+            .on_action(|action| Message::LineEditAction(0, action))
+            .placeholder("Empty line")
+            .size(size)
+            .line_height(iced::advanced::text::LineHeight::Relative(LINE_HEIGHT_FACTOR))
+            .wrapping(iced::widget::text::Wrapping::Word)
+            .width(wrap)
+            .padding(0)
+            .style(line_editor_style(scheme)),
+    );
+    container(body)
+        .width(Length::Shrink)
+        .max_width(Pixels((size * 28.0).clamp(240.0, 620.0)))
+        .align_x(iced::Alignment::Start)
+        .padding([6, 9])
+        .style(move |_theme| container::Style {
+            background: Some(scheme.field_bg.into()),
+            border: iced::border::Border {
+                color: scheme.border,
+                width: 1.0,
+                radius: 10.0.into(),
+            },
+            ..container::Style::default()
+        })
+        .into()
 }
 
 /// One chat bubble: the speaker chip, the timestamp and the text, in the
@@ -12302,6 +12328,7 @@ fn sms_bubble(
     query: &str,
     size: f32,
     active: bool,
+    index: usize,
 ) -> Element<'static, Message> {
     // A low-confidence bubble keeps its speaker hue but desaturates and takes a
     // muted outline, so it reads as tentative next to a confident neighbour.
@@ -12352,7 +12379,14 @@ fn sms_bubble(
                     .color(Color { a: 0.70, ..ink }),
             );
         }
-        body = body.push(meta);
+        // In bubble mode the label and the timestamp are the only way into the
+        // editor: the words themselves stay a plain seek target, so reading a
+        // transcript cannot put it into edit mode by accident.
+        body = body.push(
+            mouse_area(meta)
+                .interaction(mouse::Interaction::Pointer)
+                .on_press(Message::LineClicked(index)),
+        );
     }
     body = body.push(rich_text(styled_spans(
         content,
@@ -15721,42 +15755,6 @@ mod tests {
         assert_eq!(app.line_edit.as_ref().map(|edit| edit.index), Some(150));
 
         let _ = std::fs::remove_dir_all(&media);
-    }
-
-    #[test]
-    fn line_edit_height_follows_the_text_and_the_width() {
-        let size = 16.0;
-        let width = 520.0;
-        // A short line is one line tall: the field only covers its own text.
-        let short = line_edit_height("hello there", size, width);
-        assert_eq!(visual_line_count("hello there", size, width), 1);
-        assert_eq!(short, line_edit_height("", size, width));
-        assert_eq!(short, size * LINE_HEIGHT_FACTOR + 2.0 * LINE_EDIT_PAD_Y);
-        // A trailing newline from the editor is not an extra empty line.
-        assert_eq!(line_edit_height("hello there\n", size, width), short);
-
-        // Wrapping text grows the field.
-        let medium = "word ".repeat(48);
-        let medium_lines = visual_line_count(&medium, size, width);
-        assert!(medium_lines > LINE_EDIT_MIN_LINES, "{medium_lines}");
-        assert!(line_edit_height(&medium, size, width) > short);
-
-        // The same text needs more lines in a narrower field, which is what
-        // lets the inline editor sit in the transcript instead of a dialog.
-        assert!(
-            line_edit_height(&medium, size, width / 2.0) > line_edit_height(&medium, size, width)
-        );
-
-        // A very long paste keeps growing the field instead of clipping its
-        // own tail: the pane scrolls to the rest.
-        let long = "word ".repeat(4000);
-        let long_lines = visual_line_count(&long, size, width);
-        assert!(long_lines > LINE_EDIT_MIN_LINES, "{long_lines}");
-        assert!(line_edit_height(&long, size, width) > line_edit_height(&medium, size, width));
-
-        // An empty paragraph still occupies a line, and hard breaks add up.
-        assert_eq!(wrapped_line_count("", 40), 1);
-        assert_eq!(visual_line_count("a\nb\nc\nd\ne", size, 10_000.0), 5);
     }
 
     #[test]
