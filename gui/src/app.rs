@@ -7049,7 +7049,7 @@ impl App {
             .height(Length::Fill)
             .style(move |_theme| container::Style {
                 background: Some(scheme.panel_bg.into()),
-                border: iced::border::rounded(16.0),
+                border: island_border(&scheme),
                 shadow: soft_shadow(),
                 ..container::Style::default()
             })
@@ -9348,7 +9348,7 @@ impl App {
         .padding(12)
         .style(move |_theme| container::Style {
             background: Some(scheme.panel_bg.into()),
-            border: iced::border::rounded(16.0),
+            border: island_border(&scheme),
             shadow: soft_shadow(),
             ..container::Style::default()
         });
@@ -9460,7 +9460,7 @@ impl App {
             .height(Length::Fill)
             .style(move |_theme| container::Style {
                 background: Some(scheme.panel_bg.into()),
-                border: iced::border::rounded(16.0),
+                border: island_border(&scheme),
                 shadow: soft_shadow(),
                 ..container::Style::default()
             });
@@ -11095,6 +11095,21 @@ fn drop_card<'a>(scheme: Scheme) -> Element<'a, Message> {
 }
 
 /// Standard dialog surface shared by every modal.
+/// Outline shared by every card ("island") in the review pane: the same hairline
+/// the run card already draws. In the light theme the shadow separates cards;
+/// on a dark window a shadow barely registers, so the outline does the work.
+fn island_border(scheme: &Scheme) -> iced::border::Border {
+    if theme::is_dark_scheme(scheme) {
+        iced::border::Border {
+            color: scheme.border,
+            width: 1.0,
+            radius: 16.0.into(),
+        }
+    } else {
+        iced::border::rounded(16.0)
+    }
+}
+
 fn modal_card<'a>(
     content: impl Into<Element<'a, Message>>,
     width: f32,
@@ -11105,7 +11120,15 @@ fn modal_card<'a>(
         .padding(MODAL_PADDING)
         .style(move |_theme| container::Style {
             background: Some(scheme.dialog_bg.into()),
-            border: iced::border::rounded(16.0),
+            border: if theme::is_dark_scheme(&scheme) {
+                iced::border::Border {
+                    color: scheme.border,
+                    width: 1.0,
+                    radius: 16.0.into(),
+                }
+            } else {
+                iced::border::rounded(16.0)
+            },
             shadow: dialog_shadow(),
             ..container::Style::default()
         })
