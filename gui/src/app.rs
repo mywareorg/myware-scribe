@@ -1867,12 +1867,7 @@ impl App {
         }
         self.gpu_profile()
             .and_then(|profile| profile.gpu_error.as_deref())
-            .filter(|error| {
-                // A stored model-not-found error is stale once the selected
-                // preset resolves. Keep real backend failures, such as Vulkan
-                // device loss, but let the next GPU selection retest.
-                !(self.models_ready() && error.to_ascii_lowercase().contains("model not found"))
-            })
+            .filter(|error| !stale_gpu_error(error, self.models_ready()))
             .map(str::to_string)
     }
 
@@ -10951,6 +10946,19 @@ const ICON_DISPLAY: char = '\u{f302}';
 /// descendant, which remounts the transcript scrollable and resets its offset
 /// to 0. Only the overlay's contents vary, and an inert filler keeps the empty
 /// case from touching layout or input.
+/// True when a stored GPU error no longer describes the GPU.
+///
+/// Two failures are about the run, not the backend: a missing model, and a
+/// child process that never started. Keeping either muting the preset hides the
+/// Test GPU button, so the only way out was editing the settings file by hand.
+fn stale_gpu_error(error: &str, models_ready: bool) -> bool {
+    if !models_ready {
+        return false;
+    }
+    let error = error.to_ascii_lowercase();
+    error.contains("model not found") || error.contains("could not start the transcription process")
+}
+
 fn drop_overlay<'a>(
     base: impl Into<Element<'a, Message>>,
     scheme: Scheme,
@@ -15159,6 +15167,21 @@ mod tests {
         assert_eq!(SpeakerOpt::Single.value(), Some(1));
         // Multiple hands the diarizer no count, so it detects.
         assert_eq!(SpeakerOpt::Multiple.value(), None);
+    }
+
+    #[test]
+    fn a_failed_child_spawn_does_not_mute_gpu_forever() {
+        // The launcher failed, so nothing is known about the backend: the preset
+        // must offer Test GPU again instead of staying muted.
+        assert!(stale_gpu_error(
+            "could not start the transcription process: No such file or directory (os error 2)",
+            true
+        ));
+        assert!(stale_gpu_error("whisper model not found", true));
+        // A real backend failure stays.
+        assert!(!stale_gpu_error("Vulkan device lost", true));
+        // With the models missing the reason is real, not stale.
+        assert!(!stale_gpu_error("whisper model not found", false));
     }
 
     #[test]
