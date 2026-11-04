@@ -4728,8 +4728,10 @@ impl App {
             self.follow_issue = None;
             self.scroll_seek = false;
         }
-        // The edited row is a field, not a line: the spacers must be re-measured.
-        self.reset_pane_geometry();
+        // The edited row is a field, not a line: re-measure the window, but keep
+        // the measured row height so moving the editor to a neighbouring row
+        // does not flash a different layout for a frame.
+        self.reflow_pane_geometry();
         self.summary_open = false;
         self.rename_open = false;
         self.last_line_click = None;
@@ -4795,7 +4797,9 @@ impl App {
             }
             self.replace_edit_lines(lines);
         }
-        self.reset_pane_geometry();
+        // The edited row stops being a field; re-measure without resetting the
+        // anchor or the row height.
+        self.reflow_pane_geometry();
         if resume {
             // Same path as the play button, so a finished track restarts from
             // the top instead of being left stopped.
@@ -5996,6 +6000,15 @@ impl App {
 
     /// Forget the virtualisation geometry after anything that changes row
     /// heights (new view, zoom, bubble or joined mode).
+    /// Re-measure the rendered window while keeping the measured row height and
+    /// the anchor. Used when a single row changes size - the inline editor
+    /// opening, moving to a neighbouring row, or closing: dropping the latched
+    /// height puts the pane on its estimate for one frame, which reads as a
+    /// jump even though the content never moved.
+    fn reflow_pane_geometry(&mut self) {
+        self.pane_window.set((0, 0, 0.0, 0.0));
+    }
+
     fn reset_pane_geometry(&mut self) {
         self.pane_window.set((0, 0, 0.0, 0.0));
         self.pane_row_height.set(None);
