@@ -7348,7 +7348,7 @@ impl App {
                 } else {
                     String::new()
                 };
-                let bubble = sms_bubble(
+                let bubble: Element<'static, Message> = button(sms_bubble(
                     &line_text(line),
                     &line.speaker,
                     &stamp,
@@ -7360,7 +7360,20 @@ impl App {
                     &query,
                     size,
                     active,
-                );
+                ))
+                // The bubble is its own hit target: a row-level area lost the
+                // press once the bubble's text was the pointer's target, so
+                // only the speaker label inside it still sought. A transparent
+                // button on the bubble itself makes the whole shape clickable.
+                .padding(0)
+                .width(Length::Shrink)
+                .style(|_theme, _status| button::Style {
+                    background: None,
+                    border: iced::border::Border::default(),
+                    ..button::Style::default()
+                })
+                .on_press(Message::LineClicked(idx))
+                .into();
                 // The exchange button belongs to the bubble, not to the pane
                 // edge: it sits against the bubble's inner side and appears on
                 // hover as well as on the playhead row.
