@@ -121,6 +121,11 @@ Two identity rules were measured and rejected, so they are not retried:
   too noisy to confirm which half continues which neighbour. `short-1` fell
   back to 48.65% and `sample-long` rose to 13.62%.
 
+- **Giving the weaker half the other label when both halves prefer the same
+  one**: the clusters are real, so the split was kept and the identity forced.
+  Wrong far more often than right: `mid-1` 34.97% -> 50.83%, `sample-long`
+  10.62% -> 49.19%. Reject the split instead.
+
 The remaining regression is small and confined to the two files where the
 diarizer is already close to the reference; splitting is worth enabling on
 files like `short-1` where one speaker is collapsed for tens of seconds.
