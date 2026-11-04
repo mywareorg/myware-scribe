@@ -8308,10 +8308,13 @@ impl App {
                 scheme.muted,
             )
         };
+        // The field takes every pixel the row can spare, so the count and the
+        // arrows sit at its right edge instead of leaving dead space before the
+        // transcript actions.
         let query_input = text_input("Find", &self.search_query)
             .id(find_id())
             .on_input(Message::SearchChanged)
-            .width(Length::Fixed(80.0))
+            .width(Length::Fill)
             .style(pill_input);
         // Same constructor as the line-edit panel's pills, so both rows are the
         // same height by construction rather than by two numbers agreeing.
@@ -8335,7 +8338,8 @@ impl App {
             .align_x(iced::alignment::Horizontal::Right);
         let mut controls = row![query_input, status, prev, next]
             .spacing(theme::SPACE_SM)
-            .align_y(iced::Alignment::Center);
+            .align_y(iced::Alignment::Center)
+            .width(Length::Fill);
         let speaker_order = self.speaker_order();
         let has_confidence = self.has_confidence();
         if speaker_order.len() > 1 || has_confidence {
@@ -9302,7 +9306,6 @@ impl App {
 
         let search_actions_row: Element<Message> = row![
             self.search_element(&scheme),
-            horizontal_space(),
             actions_row
         ]
         .spacing(4)
