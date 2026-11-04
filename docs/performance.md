@@ -97,6 +97,29 @@ hash of the file bytes. The second exists because a queue restored at startup
 has the file but no decoded samples (`gui/src/backend.rs::load_turns`). Both are
 written together, so they cannot disagree.
 
+## Diarization beside ASR
+
+The overlap schedule only needs one property: diarization must finish before
+ASR, or its tail becomes the file's critical path. Measured on
+`hour-conversation-short-1.mp3` (120 s), debug build, 8 physical cores:
+
+```
+run                                  diarize   asr    total
+default (overlap)                      9.91s  47.97s   73.57s
+with HIPPO_TRANSCRIBE_DIARIZE_SPLIT    10.16s*  -         -
+```
+
+`*` measured through `--diarize-only` on the same file, because a cached run
+reports the diarization stage as `0.00s` and hides it. The split pass adds about
+2.3 s, roughly 30% of the diarization stage and under 5% of ASR, so the headroom
+is large.
+
+Do not read the totals as a benchmark: a second run of the same file selected
+the classic schedule and reported 52 s total because the earlier run had warmed
+the caches. Compare only runs with the same cache state and an idle machine.
+
+Peak memory was not measured - `/usr/bin/time` is unavailable on this machine.
+
 ## Measuring a change
 
 1. Run one file per preset with the default settings and keep the timing line.
