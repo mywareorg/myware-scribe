@@ -509,9 +509,9 @@ pub enum Message {
     Start,
     Cancel,
     Tick,
-    /// One display frame while a follow glide is running. `window::frames()` is
-    /// subscribed only then: the glide is the only thing that needs a frame
-    /// clock.
+    /// One display frame. `window::frames()` is subscribed only while a follow
+    /// glide runs or a click point is waiting for the editor's first layout:
+    /// those are the only things that need a frame clock.
     Frame(Instant),
     RenameName(usize, String),
     RenameSave,
@@ -523,6 +523,11 @@ pub enum Message {
     LineClicked(usize),
     /// A click on a bubble's words, which seeks but never edits.
     LineTextClicked(usize),
+    /// A press on a line's words, at a point in the text's own coordinates.
+    /// Carries the caret position a double-click should open at.
+    LineTextPressed(usize, Point),
+    /// Cycle the edited line through the transcript's speakers.
+    CycleLineSpeaker,
     LineHover(Option<usize>),
     TogglePlayheadLock,
     SelectRelative(i32),
@@ -964,6 +969,10 @@ pub struct App {
     line_edit: Option<LineEdit>,
     /// Playback was running when the inline editor opened; Done resumes it.
     line_edit_resume: bool,
+    /// A click point waiting for the editor to be laid out. The editor's text
+    /// metrics are only known after its first frame, and `Action::Click` maps
+    /// against them.
+    line_edit_caret: Option<Point>,
     /// The speaker picker's own menu is open. Enter belongs to the menu then,
     /// not to the line being edited.
     line_edit_picker_open: bool,
@@ -1188,6 +1197,7 @@ impl App {
             playhead_locked: false,
             line_edit: None,
             line_edit_resume: false,
+            line_edit_caret: None,
             line_edit_picker_open: false,
             delete_confirm: false,
             line_edit_document: None,
@@ -1626,6 +1636,36 @@ impl App {
             .iter()
             .filter(|item| matches!(item.status, ItemStatus::Done))
             .count()
+    }
+
+    /// A press on the line itself: the first click seeks, the second opens the
+    /// editor. `point` is where inside the words the press landed, if it did;
+    /// the editor then puts its caret there.
+    fn line_pressed(&mut self, index: usize, point: Option<Point>) -> Task<Message> {
+        let double = self.last_line_click.is_some_and(|(last, at)| {
+            last == index && at.elapsed() <= Duration::from_millis(400)
+        });
+        if double {
+            self.last_line_click = None;
+            // Double-click always opens the inline editor; opening it turns
+            // Follow off, so the pane stops moving under the pointer before the
+            // first keystroke. Dispatch directly so the field is mounted before
+            // the task loop resumes.
+            return self.begin_inline_edit_at(index, point);
+        }
+        self.last_line_click = Some((index, Instant::now()));
+        // A click on another utterance commits the one being edited and moves
+        // the editor to the clicked line. Clicking the edited row itself never
+        // reaches here: the field owns those clicks.
+        if self.line_edit.as_ref().is_some_and(|edit| edit.index != index) {
+            self.commit_inline_edit(false);
+            return self.begin_inline_edit_at(index, point);
+        }
+        if self.playhead_locked {
+            Task::none()
+        } else {
+            self.select_line_with(index, false)
+        }
     }
 
     fn select_line(&mut self, index: usize) -> Task<Message> {
@@ -2561,11 +2601,12 @@ impl App {
         } else {
             Subscription::none()
         };
-        // The glide is the only frame-driven animation in the app. Subscribing
+        // The glide is the only frame-driven animation in the app, and placing
+        // a caret needs exactly one frame of layout. Subscribing
         // unconditionally would keep a 60 Hz redraw loop (and, through each
         // step's scroll echo, two view builds per frame) running while nothing
         // moves.
-        let frames = if self.scroll_anim.is_some() {
+        let frames = if self.scroll_anim.is_some() || self.line_edit_caret.is_some() {
             iced::window::frames().map(Message::Frame)
         } else {
             Subscription::none()
@@ -2620,6 +2661,14 @@ impl App {
     fn focus_probe() -> Task<bool> {
         iced::advanced::widget::operate(iced::advanced::widget::operation::focusable::count())
             .map(|count| count.focused.is_some())
+    }
+
+    /// Give the open line editor the keyboard: focus the first focusable
+    /// widget, which is the editor whenever it is mounted, and clear every
+    /// other focus (the Find field, in practice). One pass, so the two cannot
+    /// race.
+    fn focus_line_editor() -> Task<Message> {
+        iced::advanced::widget::operate(focus_first::<Message>())
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
@@ -3128,31 +3177,27 @@ impl App {
                 Task::none()
             }
             Message::SelectLine(index) => self.select_line(index),
-            Message::LineClicked(index) => {
-                let double = self.last_line_click.is_some_and(|(last, at)| {
-                    last == index && at.elapsed() <= Duration::from_millis(400)
-                });
-                if double {
-                    self.last_line_click = None;
-                    // Double-click always opens the inline editor; opening it
-                    // turns Follow off, so the pane stops moving under the
-                    // pointer before the first keystroke. Dispatch directly so
-                    // the field is mounted before the task loop resumes.
-                    return self.update(Message::EditLine(index));
+            Message::LineClicked(index) => self.line_pressed(index, None),
+            Message::LineTextPressed(index, point) => self.line_pressed(index, Some(point)),
+            Message::CycleLineSpeaker => {
+                let order = self.speaker_order();
+                if order.len() < 2 {
+                    return Task::none();
                 }
-                self.last_line_click = Some((index, Instant::now()));
-                // A click on another utterance commits the one being edited and
-                // moves the editor to the clicked line. Clicking the edited
-                // row itself never reaches here: the field owns those clicks.
-                if self.line_edit.as_ref().is_some_and(|edit| edit.index != index) {
-                    self.commit_inline_edit(false);
-                    return self.update(Message::EditLine(index));
+                if let Some(edit) = self.line_edit.as_mut() {
+                    let position = edit.current_position();
+                    if let Some(row) = edit.rows.get_mut(position) {
+                        let at = order.iter().position(|name| *name == row.speaker).unwrap_or(0);
+                        let next = order[(at + 1) % order.len()].clone();
+                        row.speaker = next.clone();
+                        self.toast = Some((format!("Speaker: {next}"), Instant::now()));
+                    }
+                    // The press on the chip landed outside the editor, which
+                    // made the editor drop focus; take it back so typing can
+                    // continue.
+                    return Self::focus_line_editor();
                 }
-                if self.playhead_locked {
-                    Task::none()
-                } else {
-                    self.select_line_with(index, false)
-                }
+                Task::none()
             }
             Message::LineTextClicked(index) => {
                 // Bubble text is a seek target only. Clicking away from an open
@@ -4198,17 +4243,41 @@ impl App {
                 Task::none()
             }
             Message::Frame(now) => {
+                // A click point can only be mapped once the editor has been
+                // laid out, which is what a frame proves. Focus it and place
+                // the caret before the glide, so a double-click lands ready to
+                // type.
+                let caret = self
+                    .line_edit_caret
+                    .take()
+                    .filter(|_| self.line_edit.is_some())
+                    .map(|point| {
+                        Task::batch(vec![
+                            Self::focus_line_editor(),
+                            Task::done(Message::LineEditAction(
+                                0,
+                                text_editor::Action::Click(point),
+                            )),
+                        ])
+                    });
                 // A dialog owns the screen: land the move instead of easing
                 // behind it.
                 if self.popup_open() || self.delete_confirm {
-                    return self.stop_glide(true);
+                    return Task::batch([
+                        self.stop_glide(true),
+                        caret.unwrap_or_else(Task::none),
+                    ]);
                 }
-                match self.advance_glide(now) {
+                let glide = match self.advance_glide(now) {
                     Some(y) => scrollable::scroll_to(
                         transcript_id(),
                         scrollable::AbsoluteOffset { x: 0.0, y },
                     ),
                     None => Task::none(),
+                };
+                match caret {
+                    Some(caret) => Task::batch([glide, caret]),
+                    None => glide,
                 }
             }
             Message::Tick => {
@@ -4971,6 +5040,13 @@ impl App {
     /// caret. The same gates as before: Pro editing, a writable output, no live
     /// run, and no joined view.
     fn begin_inline_edit(&mut self, index: usize) -> Task<Message> {
+        self.begin_inline_edit_at(index, None)
+    }
+
+    /// As [`Self::begin_inline_edit`], with the caret placed at `caret` - a
+    /// point in the text's own coordinates - once the editor exists and has
+    /// been laid out.
+    fn begin_inline_edit_at(&mut self, index: usize, caret: Option<Point>) -> Task<Message> {
         if self.join_lines {
             self.toast = Some(("Split the view to edit lines".to_string(), Instant::now()));
             return Task::none();
@@ -5000,6 +5076,7 @@ impl App {
             return Task::none();
         };
         self.line_edit = Some(edit);
+        self.line_edit_caret = caret;
         self.line_edit_document = self.edit_document();
         // Editing while audio plays makes the caret fight the playhead; pause,
         // remember that it was playing, and keep the position.
@@ -5039,6 +5116,7 @@ impl App {
         let Some(edit) = self.line_edit.take() else {
             return;
         };
+        self.line_edit_caret = None;
         self.line_edit_picker_open = false;
         // Whether the user asked to save this line, as opposed to the editor
         // being committed as a side effect of moving elsewhere.
@@ -5134,6 +5212,7 @@ impl App {
     /// Close the inline editor and drop what was typed. Used by Escape and by
     /// anything that replaces the document under it.
     fn cancel_inline_edit(&mut self) {
+        self.line_edit_caret = None;
         if self.line_edit.take().is_some() {
             self.line_edit_resume = false;
             self.line_edit_picker_open = false;
@@ -12030,6 +12109,44 @@ fn speaker_chip(label: &str, accent: Color, ink: Color, size: f32) -> Element<'s
     .into()
 }
 
+/// Focuses the first focusable widget in the tree and unfocuses every other
+/// one. The inline editor is the first focusable while it is open, and the only
+/// way to focus a `text_editor` is through an operation like this one: it has
+/// no id to target.
+fn focus_first<Message: 'static>() -> impl iced::advanced::widget::Operation<Message> {
+    use iced::advanced::widget::operation::Focusable;
+
+    struct FocusFirst {
+        current: usize,
+    }
+
+    impl<Message> iced::advanced::widget::Operation<Message> for FocusFirst {
+        fn focusable(
+            &mut self,
+            state: &mut dyn Focusable,
+            _id: Option<&iced::advanced::widget::Id>,
+        ) {
+            if self.current == 0 {
+                state.focus();
+            } else {
+                state.unfocus();
+            }
+            self.current += 1;
+        }
+
+        fn container(
+            &mut self,
+            _id: Option<&iced::advanced::widget::Id>,
+            _bounds: Rectangle,
+            operate_on_children: &mut dyn FnMut(&mut dyn iced::advanced::widget::Operation<Message>),
+        ) {
+            operate_on_children(self);
+        }
+    }
+
+    FocusFirst { current: 0 }
+}
+
 /// The speaker and text a row would write: one transcript line must stay one
 /// physical line, so newlines typed into the editor collapse into spaces.
 fn line_edit_row_fields(speaker: &str, content: &text_editor::Content) -> (String, String) {
@@ -12272,7 +12389,13 @@ fn inline_line_edit_row<'a>(
         );
     }
     if !speaker.is_empty() {
-        content_row = content_row.push(speaker_chip(speaker, accent, scheme.ink, size));
+        // Clicking the label cycles the line through the transcript's speakers:
+        // the chip is already the line's identity, so it is also the switch.
+        content_row = content_row.push(
+            mouse_area(speaker_chip(speaker, accent, scheme.ink, size))
+                .interaction(mouse::Interaction::Pointer)
+                .on_press(Message::CycleLineSpeaker),
+        );
     }
     content_row = content_row.push(field);
 
@@ -12307,7 +12430,11 @@ fn inline_bubble_edit<'a>(
     if !speaker.is_empty() || !stamp.is_empty() {
         let mut meta = row![].spacing(6).align_y(iced::Alignment::Center);
         if !speaker.is_empty() {
-            meta = meta.push(speaker_chip(speaker, accent, scheme.ink, size * 0.72));
+            meta = meta.push(
+                mouse_area(speaker_chip(speaker, accent, scheme.ink, size * 0.72))
+                    .interaction(mouse::Interaction::Pointer)
+                    .on_press(Message::CycleLineSpeaker),
+            );
         }
         if !stamp.is_empty() {
             meta = meta.push(
@@ -12444,6 +12571,134 @@ fn sms_bubble(
         .into()
 }
 
+/// A transparent wrapper around a line's words that reports where a left press
+/// landed, in the words' own coordinates.
+///
+/// The transcript row's seek target covers the whole row, so it cannot say
+/// *where* it was hit. This sits above that target over the text alone, takes
+/// the press itself, and passes everything else through to the wrapped widget.
+/// Knowing the position is what lets a double-click open the inline editor with
+/// the caret under the pointer instead of at the end of the line.
+struct TextPress<'a> {
+    content: Element<'a, Message>,
+    index: usize,
+}
+
+impl<'a> TextPress<'a> {
+    fn new(content: impl Into<Element<'a, Message>>, index: usize) -> Self {
+        Self {
+            content: content.into(),
+            index,
+        }
+    }
+}
+
+impl<'a> iced::advanced::Widget<Message, Theme, Renderer> for TextPress<'a> {
+    fn tag(&self) -> iced::advanced::widget::tree::Tag {
+        self.content.as_widget().tag()
+    }
+
+    fn state(&self) -> iced::advanced::widget::tree::State {
+        self.content.as_widget().state()
+    }
+
+    fn children(&self) -> Vec<iced::advanced::widget::Tree> {
+        self.content.as_widget().children()
+    }
+
+    fn diff(&self, tree: &mut iced::advanced::widget::Tree) {
+        self.content.as_widget().diff(tree);
+    }
+
+    fn size(&self) -> Size<Length> {
+        self.content.as_widget().size()
+    }
+
+    fn layout(
+        &self,
+        tree: &mut iced::advanced::widget::Tree,
+        renderer: &Renderer,
+        limits: &iced::advanced::layout::Limits,
+    ) -> iced::advanced::layout::Node {
+        self.content.as_widget().layout(tree, renderer, limits)
+    }
+
+    fn operate(
+        &self,
+        tree: &mut iced::advanced::widget::Tree,
+        layout: iced::advanced::Layout<'_>,
+        renderer: &Renderer,
+        operation: &mut dyn iced::advanced::widget::Operation,
+    ) {
+        self.content
+            .as_widget()
+            .operate(tree, layout, renderer, operation);
+    }
+
+    fn on_event(
+        &mut self,
+        tree: &mut iced::advanced::widget::Tree,
+        event: iced::Event,
+        layout: iced::advanced::Layout<'_>,
+        cursor: mouse::Cursor,
+        renderer: &Renderer,
+        clipboard: &mut dyn iced::advanced::Clipboard,
+        shell: &mut iced::advanced::Shell<'_, Message>,
+        viewport: &Rectangle,
+    ) -> iced::event::Status {
+        if let iced::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) = event {
+            if let Some(point) = cursor.position_in(layout.bounds()) {
+                shell.publish(Message::LineTextPressed(self.index, point));
+                return iced::event::Status::Captured;
+            }
+        }
+
+        self.content.as_widget_mut().on_event(
+            tree, event, layout, cursor, renderer, clipboard, shell, viewport,
+        )
+    }
+
+    fn mouse_interaction(
+        &self,
+        tree: &iced::advanced::widget::Tree,
+        layout: iced::advanced::Layout<'_>,
+        cursor: mouse::Cursor,
+        viewport: &Rectangle,
+        renderer: &Renderer,
+    ) -> mouse::Interaction {
+        self.content
+            .as_widget()
+            .mouse_interaction(tree, layout, cursor, viewport, renderer)
+    }
+
+    fn draw(
+        &self,
+        tree: &iced::advanced::widget::Tree,
+        renderer: &mut Renderer,
+        theme: &Theme,
+        style: &iced::advanced::renderer::Style,
+        layout: iced::advanced::Layout<'_>,
+        cursor: mouse::Cursor,
+        viewport: &Rectangle,
+    ) {
+        self.content
+            .as_widget()
+            .draw(tree, renderer, theme, style, layout, cursor, viewport);
+    }
+
+    fn overlay<'b>(
+        &'b mut self,
+        tree: &'b mut iced::advanced::widget::Tree,
+        layout: iced::advanced::Layout<'_>,
+        renderer: &Renderer,
+        translation: Vector,
+    ) -> Option<iced::advanced::overlay::Element<'b, Message, Theme, Renderer>> {
+        self.content
+            .as_widget_mut()
+            .overlay(tree, layout, renderer, translation)
+    }
+}
+
 /// A transcript line with a speaker-coloured accent stripe, an optional
 /// timestamp, a bold speaker label, and clickable select/edit behaviour.
 #[allow(clippy::too_many_arguments)]
@@ -12496,14 +12751,19 @@ fn line_element(
         content = content.push(speaker_chip(&speaker, accent, ink, size));
     }
 
-    content = content.push(rich_text(styled_spans(
-        &rest,
-        query,
-        case_sensitive,
-        whole_word,
-        Some(ink),
-        highlight,
-        size,
+    // A press on the words reports where inside them it landed, so opening the
+    // editor on a double-click can put the caret under the pointer.
+    content = content.push(Element::new(TextPress::new(
+        rich_text(styled_spans(
+            &rest,
+            query,
+            case_sensitive,
+            whole_word,
+            Some(ink),
+            highlight,
+            size,
+        )),
+        idx,
     )));
     content = content.push(horizontal_space());
     // Reserved right-edge slot so revealing the swap button never rewraps the text.
@@ -12544,21 +12804,6 @@ fn line_element(
             radius: 6.0.into(),
         }
     };
-
-    let keyboard_hit = button(
-        container(horizontal_space())
-            .width(Length::Fill)
-            .height(Length::Fill),
-    )
-    .width(Length::Fill)
-    .height(Length::Fill)
-    .padding(0)
-    .style(|_theme, _status| button::Style {
-        background: None,
-        border: iced::border::Border::default(),
-        ..button::Style::default()
-    })
-    .on_press(Message::LineClicked(idx));
 
     // Swap the speaker of this line. It replaces the old pencil in the same
     // reserved slot, so revealing it never rewraps the line. The playhead line
@@ -12601,11 +12846,15 @@ fn line_element(
         )
         .interaction(mouse::Interaction::Pointer)
         .on_right_press(Message::FlipLineSpeaker(idx)),
-        keyboard_hit,
         swap_overlay,
     ]
     .into();
+    // The row's own area takes every press the words and the swap button leave
+    // alone. It is the ancestor of both, so a child that handles a press stops
+    // this one; anything else is a seek.
     mouse_area(line)
+        .interaction(mouse::Interaction::Pointer)
+        .on_press(Message::LineClicked(idx))
         .on_enter(Message::LineHover(Some(idx)))
         .on_exit(Message::LineHover(None))
         .into()
