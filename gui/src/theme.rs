@@ -25,16 +25,11 @@ pub const RADIUS_MD: f32 = 10.0;
 pub const RADIUS_LG: f32 = 16.0;
 
 /// Padding of a compact icon button, in logical pixels. Icon buttons are sized
-/// horizontally by this padding, and carry [`CONTROL_HEIGHT`] so their box
-/// matches a text button: a `Fixed` height shorter than the glyph's line box
-/// plus the vertical padding would cut the glyph.
+/// by this padding rather than by a fixed height: `Button::height(Fixed(h))`
+/// fixes the box *inside* the padding, so 24 px of height with 4 px of vertical
+/// padding leaves 16 px for a glyph whose line box is 18.2 px (a 14 px icon at
+/// iced's 1.3 line height) and the glyph gets cut.
 pub const CONTROL_PADDING: [u16; 2] = [3, 5];
-
-/// Outer height of a control that carries a line of text: iced's 1.3 line box
-/// at the 16 px UI size (20.8 px) plus the 5 px of vertical padding that
-/// `fit_action` uses. Icon buttons take the same height, so a row that mixes
-/// the two is one control height rather than as tall as its tallest child.
-pub const CONTROL_HEIGHT: f32 = 30.8;
 
 /// Type scale.
 pub const TEXT_XS: f32 = 12.0;

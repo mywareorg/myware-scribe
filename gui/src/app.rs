@@ -129,10 +129,9 @@ const LINE_EDIT_PAD_X: f32 = 8.0;
 /// Height reserved below the transcript for the line-editor panel, at all times
 /// so opening and closing the editor never resizes the pane (which would move
 /// the row under the pointer while the caret is being placed). The panel's own
-/// box is a little shorter: it sizes to its controls — one `CONTROL_HEIGHT`
-/// row, 3 px of container padding and a 1 px border, 38.8 px — and the
-/// difference is the gap to the Find row.
-const LINE_EDIT_PANEL_SLOT: f32 = 40.0;
+/// box is a little shorter: it sizes to its controls, and the difference is the
+/// gap to the Find row.
+const LINE_EDIT_PANEL_SLOT: f32 = 36.0;
 
 /// Gap between the panel's controls, and between the two groups inside it
 /// (which line and speaker, then the edits and the commit pair).
@@ -145,16 +144,6 @@ const LINE_EDIT_GROUP_GAP: f32 = 8.0;
 /// the arrows beside it each time; the slot keeps the row's geometry fixed
 /// whether the query is empty or not.
 const FIND_STATUS_WIDTH: f32 = 62.0;
-
-/// The two rows under the transcript: Find on the first, the transcript
-/// actions right-aligned on the second. Each is one row of controls at
-/// `theme::CONTROL_HEIGHT`, with a few pixels of slack so the slot never clips
-/// a button that renders a fraction taller.
-const BOTTOM_ROW_HEIGHT: f32 = 36.0;
-/// Gap between the Find row and the actions row beneath it.
-const BOTTOM_ROW_GAP: f32 = 6.0;
-/// Gap between the transcript card and the rows beneath it.
-const BOTTOM_ROWS_TOP_GAP: f32 = 12.0;
 
 /// Widest the panel's speaker picker may grow, and how many characters of a
 /// speaker name it shows. The picker sits in a row with nine other controls: it
@@ -8150,19 +8139,17 @@ impl App {
         let cancel = icon_pill(ICON_X, scheme.ink)
             .on_press(Message::CancelLineEdit)
             .style(pill_button_secondary);
-        // Padding, not a height, so the label's line box decides the size: the
-        // same 5 x 10 padding and 16 px label as `fit_action`, so Done is the
-        // same control as the buttons it sits among.
+        // Padding, not a height, so the label's line box decides the size.
         let done = action(
             row![
                 icon(ICON_CHECK, 12.0),
-                text("Done").wrapping(NO_WRAP)
+                text("Done").size(theme::TEXT_SM).wrapping(NO_WRAP)
             ]
             .spacing(3)
             .align_y(iced::Alignment::Center),
         )
         .on_press_maybe(allowed.then_some(Message::DoneLineEdit))
-        .padding([5, 10])
+        .padding([theme::CONTROL_PADDING[0], 8])
         .style(color_button(scheme.blue, scheme.on_accent));
 
         // One left-aligned cluster, two small groups inside it: what is being
@@ -8847,9 +8834,7 @@ impl App {
             .into()
     }
 
-    /// Find controls: the query field, the match count, prev/next, the speaker
-    /// filter and Rename All. Occupies a full row of its own under the
-    /// transcript, with the transcript actions on the line beneath it.
+    /// Find controls, always shown on the player row.
     fn search_element(&self, scheme: &Scheme) -> Element<'_, Message> {
         let count = self.matching_lines().len();
         let (status, status_color) = if self.search_query.trim().is_empty() {
@@ -8862,9 +8847,9 @@ impl App {
                 scheme.muted,
             )
         };
-        // The field owns the row: it takes everything the fixed siblings — the
-        // two arrows, the count slot, the speaker picker, Rename All — leave,
-        // which at the 1024 px minimum window is about 260 px.
+        // The field takes every pixel the row can spare, so the count and the
+        // arrows sit at its right edge instead of leaving dead space before the
+        // transcript actions.
         let query_input = text_input("Find", &self.search_query)
             .id(find_id())
             .on_input(Message::SearchChanged)
@@ -9903,23 +9888,14 @@ impl App {
         .spacing(6)
         .align_y(iced::Alignment::Center);
 
-        // Find gets a row of its own, and the transcript actions move to the
-        // line beneath it, right-aligned. Sharing one line left the field
-        // roughly 70 px wide at the 1024 px minimum: it took whatever was left
-        // after the arrows, the fixed count slot, the fixed speaker picker and
-        // the three actions. On its own line the field gets about 260 px there,
-        // and the fixed siblings still never re-flow.
-        let bottom_rows: Element<Message> = match has_queue {
-            true => column![
-                self.search_element(&scheme),
-                row![horizontal_space(), actions_row].align_y(iced::Alignment::Center),
-            ]
-            .spacing(BOTTOM_ROW_GAP)
-            .into(),
-            // Empty queue: two collapsed rows, so the slot keeps its single
-            // child index and the transcript's geometry is unchanged.
-            false => horizontal_space().into(),
-        };
+        let search_actions_row: Element<Message> = row![
+            self.search_element(&scheme),
+            actions_row
+        ]
+        .spacing(4)
+        .align_y(iced::Alignment::Center)
+        .width(Length::Fill)
+        .into();
 
         // The transcript card keeps a fixed child index. Anything that appears
         // or disappears above it (model notice, progress chrome) or below it
@@ -9983,10 +9959,14 @@ impl App {
         })
         .width(Length::Fill)
         .height(Length::Fixed(LINE_EDIT_PANEL_SLOT));
-        let bottom_slot = container(column![panel_slot, bottom_rows].spacing(0))
+        let search_slot: Element<Message> = match has_queue {
+            true => search_actions_row,
+            false => horizontal_space().into(),
+        };
+        let bottom_slot = container(column![panel_slot, search_slot].spacing(0))
             .width(Length::Fill)
             .padding(iced::Padding {
-                top: if has_queue { BOTTOM_ROWS_TOP_GAP } else { 0.0 },
+                top: if has_queue { 12.0 } else { 0.0 },
                 right: 0.0,
                 bottom: 0.0,
                 left: 0.0,
@@ -10003,13 +9983,9 @@ impl App {
         .height(Length::Fill)
         .into();
         // The toast clears the panel when it is open; the slot beneath it is
-        // reserved, so only the open panel changes this offset. Two control
-        // rows sit under the transcript when there is a queue, one when not.
-        let toast_bottom = (if has_queue {
-            BOTTOM_ROWS_TOP_GAP + 2.0 * BOTTOM_ROW_HEIGHT + BOTTOM_ROW_GAP
-        } else {
-            20.0
-        }) + if editing { LINE_EDIT_PANEL_SLOT } else { 0.0 };
+        // reserved, so only the open panel changes this offset.
+        let toast_bottom = (if has_queue { 48.0 } else { 20.0 })
+            + if editing { LINE_EDIT_PANEL_SLOT } else { 0.0 };
         let right_panel = self.with_toast(right_panel, scheme, toast_bottom);
 
         let (theme_icon, theme_tip) = match self.theme_mode {
@@ -12596,17 +12572,13 @@ fn action<'a>(content: impl Into<Element<'a, Message>>) -> iced::widget::Button<
     button(content)
 }
 
-/// A compact icon button, sized by `theme::CONTROL_PADDING` horizontally and by
-/// `theme::CONTROL_HEIGHT` overall.
+/// A compact icon button, sized by `theme::CONTROL_PADDING` alone.
 ///
 /// Every icon control row builds its buttons through this, so the Find row and
-/// the line editor panel cannot drift apart. The height is the height of a
-/// text button, so the icon controls and the panel's "Done" sit on one line
-/// instead of the row being as tall as whichever child is tallest.
+/// the line editor panel cannot drift apart: no `Length::Fixed` height, which
+/// would set the box *inside* the padding and squeeze the glyph's line box.
 fn icon_pill(code: char, colour: Color) -> iced::widget::Button<'static, Message> {
-    action(icon_colored(code, ICON_SIZE, colour))
-        .padding(theme::CONTROL_PADDING)
-        .height(Length::Fixed(theme::CONTROL_HEIGHT))
+    action(icon_colored(code, ICON_SIZE, colour)).padding(theme::CONTROL_PADDING)
 }
 
 /// Fixed width for a text button so its label can never wrap. The iced default
