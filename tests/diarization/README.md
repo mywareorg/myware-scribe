@@ -130,6 +130,30 @@ The remaining regression is small and confined to the two files where the
 diarizer is already close to the reference; splitting is worth enabling on
 files like `short-1` where one speaker is collapsed for tens of seconds.
 
+## Embedding model is a domain lever
+
+`HIPPO_TRANSCRIBE_EMBEDDING_MODEL` already swaps the speaker model; no code
+change. Comparing the default CAM++ against resnet34, same pipeline, same
+`--num-speakers 2`:
+
+```
+file          CAM++ @0.25/@1.0     resnet34 @0.25/@1.0
+short-1          53.89 / 48.13       17.36 / 11.03
+mid-1            34.97 / 26.76       35.25 / 27.49
+sample-long      10.62 /  2.76       34.45 / 26.33
+sample-short     10.36 /  1.60       10.36 /  1.60
+```
+
+The two families of recordings want different models: resnet34 fixes the
+`hour-conversation` short file and destroys `sample-long`, and the reverse is
+true for CAM++. `sample-short` produces byte-identical turns under both, which
+means the model barely matters there.
+
+This is a recording-condition mismatch, not a tuning problem, and it explains
+why every post-pass so far helped one family and hurt the other. A per-file
+choice of embedding model would need a signal that identifies the family
+without a reference; nothing tried so far provides one.
+
 ## Dense window track (measured, removed)
 
 A 1.5 s window track (0.75 s hop, Viterbi with a switch penalty 0.02) that
