@@ -169,9 +169,14 @@ wins on one file and loses by 25 points on another.
 - Gate on **diarize wall time < ASR wall time**, not on a fixed 1.10-1.15x
   factor: that factor is not achievable once 2-3 embeddings per turn are added,
   and the overlap schedule only needs the former.
-- Measure: end-to-end factor, diarize factor, peak memory (the O(n^2) clustering
-  matrix is the reason peak memory is worth watching at all), per-block DER,
-  speaker-attributed WER.
+- (done on Linux) Release build, diarize-only: 0.07-0.09x realtime and peak RSS
+  155 / 519 / 1242 MiB for 2 / 34 / 83 minutes of audio. Memory is linear in
+  audio, not quadratic - the pairwise matrix is sized by turn count (1217 at
+  83 minutes) and is a few megabytes. Full pipeline on the 120 s file peaks at
+  1564 MiB, so Whisper, not diarization, is the memory constraint. Details in
+  `docs/performance.md`.
+- Still open: speaker-attributed WER, the Windows matrix, release timing on the
+  target hardware.
 - Test matrix: CPU-only Windows, GPU with CPU fallback, 2 min / 30 min / 2 h
   files, paths with spaces, offline install, clean MSIX.
 

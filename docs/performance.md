@@ -118,7 +118,23 @@ Do not read the totals as a benchmark: a second run of the same file selected
 the classic schedule and reported 52 s total because the earlier run had warmed
 the caches. Compare only runs with the same cache state and an idle machine.
 
-Peak memory was not measured - `/usr/bin/time` is unavailable on this machine.
+Peak memory was not measured there - `/usr/bin/time` is unavailable - but the
+diarization stage alone was measured through `/proc/<pid>/status` `VmHWM` on a
+release build, which is where the O(n^2) clustering matrix would show up:
+
+```
+audio     diarize   peak RSS   raw turns
+  120 s    10.91 s    155 MiB          21
+ 2040 s   186.77 s    519 MiB         307
+ 5002 s   347.35 s   1242 MiB        1217
+```
+
+The stage runs at 0.07-0.09x realtime and the memory growth is close to linear
+in audio, not quadratic: the pairwise matrix is sized by the turn count, and
+1217 turns is a few megabytes. `VmHWM` includes the ONNX Runtime arenas and the
+feature buffers, which is what the 155 MiB floor is. A full pipeline on the
+120 s file peaks at 1564 MiB, dominated by the Whisper model, so diarization is
+not the memory constraint.
 
 ## Measuring a change
 
