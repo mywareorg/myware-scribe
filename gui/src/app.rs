@@ -2717,7 +2717,16 @@ impl App {
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
+        let menu_was_open = self.menu_open();
         let task = self.dispatch(message);
+        // A menu takes the pointer off whatever it covers: the rows beneath get
+        // no exit event while it is up, so the hover it opened over would stay
+        // lit behind it. Clear it on the way in, not on the way out, so the row
+        // under the pointer after the menu closes starts from nothing rather
+        // than from a state the menu already hid.
+        if !menu_was_open && self.menu_open() {
+            self.transcript_line_hover = None;
+        }
         // The editor strip changes the height of the list, and that has to move the
         // scroll offset in the same update as the layout, before the frame is drawn.
         match self.strip_scroll() {
@@ -3268,8 +3277,8 @@ impl App {
             }
             Message::LineHover(index) => {
                 // As with the transcript chrome: no per-line affordances while
-                // a dialog covers the transcript.
-                if self.popup_open() {
+                // a dialog or a menu owns the pointer.
+                if self.pointer_blocked() {
                     return Task::none();
                 }
                 self.transcript_line_hover = index;
@@ -8081,7 +8090,7 @@ impl App {
                 col = col.push(self.inline_editor_element(size, scheme));
                 continue;
             }
-            let hovered = self.transcript_line_hover == Some(idx) && !self.popup_open();
+            let hovered = self.transcript_line_hover == Some(idx) && !self.pointer_blocked();
             let index = speaker_order
                 .iter()
                 .position(|name| *name == line.speaker)
@@ -9182,6 +9191,25 @@ impl App {
             || self.calibration.is_some()
     }
 
+    /// True while a transient menu owns the pointer: the header's View menu, or
+    /// a pick-list dropdown that reports itself open (the line editor's speaker
+    /// picker).
+    ///
+    /// Kept apart from [`Self::popup_open`] because a menu is not modal. It owns
+    /// the pointer, so nothing under it may light up or take a press, but it
+    /// leaves the keyboard and the tooltips alone: the View menu's own zoom
+    /// buttons carry tooltips, and those must keep working while it is open.
+    fn menu_open(&self) -> bool {
+        self.view_menu_open || self.line_edit_picker_open
+    }
+
+    /// True while nothing under the pointer may react: a dialog is up, or a menu
+    /// is. Every hover and press affordance that the pointer drives is gated on
+    /// this, so an open menu cannot be clicked or hovered through.
+    fn pointer_blocked(&self) -> bool {
+        self.popup_open() || self.menu_open()
+    }
+
     /// Wrap `content` with a tooltip, unless a dialog is open.
     fn tip<'a>(
         &self,
@@ -10200,7 +10228,7 @@ impl App {
         // the scrollable's tree index and offset never change.
         let view_layer: Element<Message> =
             if self.view_menu_open && !self.popup_open() && !self.shown_lines().is_empty() {
-            container(self.view_menu(&scheme))
+            let menu = container(self.view_menu(&scheme))
                 .width(Length::Fill)
                 .height(Length::Fill)
                 .align_x(iced::Alignment::End)
@@ -10210,8 +10238,21 @@ impl App {
                     right: view_menu_inset(),
                     bottom: 0.0,
                     left: 0.0,
-                })
-                .into()
+                });
+            // The layer under the menu swallows the press and nothing else: a
+            // press anywhere on the card while the menu is up only dismisses it,
+            // and the arrow, not a hand, says the card is inert. It sits below
+            // the menu in the stack, so the menu's own items still get the
+            // pointer.
+            let catcher: Element<Message> = mouse_area(
+                container(horizontal_space())
+                    .width(Length::Fill)
+                    .height(Length::Fill),
+            )
+            .interaction(mouse::Interaction::Idle)
+            .on_press(Message::CloseViewMenu)
+            .into();
+            stack![catcher, menu].into()
         } else {
             container(horizontal_space())
                 .width(Length::Fill)
@@ -14755,6 +14796,55 @@ mod tests {
         assert!(std::fs::read_to_string(&transcript)
             .unwrap()
             .contains("edited"));
+
+        let _ = std::fs::remove_dir_all(&media);
+    }
+
+    #[test]
+    fn an_open_menu_takes_the_pointer_off_the_transcript() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("menu-pointer-config");
+        let original = "[00:00] SPEAKER 1: one\n[00:05] SPEAKER 2: two\n";
+        let (mut app, _transcript, media) = line_edit_fixture("menu-pointer", original);
+
+        // With nothing open a row lights up as usual.
+        let _ = app.update(Message::LineHover(Some(0)));
+        assert_eq!(app.transcript_line_hover, Some(0));
+
+        // Opening the View menu takes the pointer off the rows: the row the
+        // pointer happened to be over is cleared, and none can light up again
+        // while the menu is up.
+        let _ = app.update(Message::ToggleViewMenu);
+        assert!(app.view_menu_open);
+        assert!(!app.popup_open(), "a menu is not a dialog");
+        // The catcher and the menu layer build and lay out without the card
+        // losing its shape.
+        let _ = app.view();
+        assert_eq!(app.transcript_line_hover, None);
+        let _ = app.update(Message::LineHover(Some(1)));
+        assert_eq!(
+            app.transcript_line_hover, None,
+            "a row lit up under the open View menu"
+        );
+
+        // Closing it gives the hover back.
+        let _ = app.update(Message::CloseViewMenu);
+        let _ = app.update(Message::LineHover(Some(1)));
+        assert_eq!(app.transcript_line_hover, Some(1));
+
+        // A pick-list dropdown is the same case even though iced draws it as an
+        // overlay rather than a menu layer: it reports open/closed, so it gates
+        // the pointer too.
+        let _ = app.update(Message::LineEditSpeakerMenu(true));
+        assert_eq!(app.transcript_line_hover, None);
+        let _ = app.update(Message::LineHover(Some(0)));
+        assert_eq!(
+            app.transcript_line_hover, None,
+            "a row lit up under the open speaker menu"
+        );
+        let _ = app.update(Message::LineEditSpeakerMenu(false));
+        let _ = app.update(Message::LineHover(Some(0)));
+        assert_eq!(app.transcript_line_hover, Some(0));
 
         let _ = std::fs::remove_dir_all(&media);
     }
