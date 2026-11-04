@@ -180,30 +180,31 @@ const VIEW_MENU_TOP: f32 = 48.0;
 /// menu starts on the same left edge whether its row is checked or not.
 const HEADER_MENU_CHECK: f32 = 16.0;
 
-/// The header's horizontal padding. The menu insets are measured from the same
-/// edge, which is why this is named rather than written into each.
+/// The header's horizontal padding. The menus hang from the same left edge, so
+/// this is named rather than written into both.
 const HEADER_PAD_X: f32 = 8.0;
 
-/// Fixed widths of the header's menu buttons. A menu is anchored by subtracting
-/// the widths of the buttons to its right from the card's right edge, so these
-/// must be the widths the buttons are actually given.
+/// Fixed widths of the header's menu buttons. A menu is anchored by adding the
+/// widths of the buttons to its left, so these must be the widths the buttons
+/// are actually given.
 const FILE_BUTTON_WIDTH: f32 = 78.0;
 const EDIT_BUTTON_WIDTH: f32 = 78.0;
 const VIEW_BUTTON_WIDTH: f32 = 84.0;
 
-/// Right insets of the three menus. The header ends `[File][Edit][View]`, so
-/// View is the anchor at the card's padding, Edit sits one button and a gap to
-/// its left, and File sits one more to its left.
-fn view_menu_inset() -> f32 {
+/// Left offsets of the three menus. The header starts `[File][Edit][View]`, so
+/// File's menu hangs from the card's own padding, Edit's one button and a gap
+/// further right, and View's one more. The menu layer aligns its child to the
+/// start, so these are distances from the card's left edge.
+fn file_menu_offset() -> f32 {
     HEADER_PAD_X
 }
 
-fn edit_menu_inset() -> f32 {
-    view_menu_inset() + VIEW_BUTTON_WIDTH + theme::SPACE_SM
+fn edit_menu_offset() -> f32 {
+    file_menu_offset() + FILE_BUTTON_WIDTH + theme::SPACE_SM
 }
 
-fn file_menu_inset() -> f32 {
-    edit_menu_inset() + EDIT_BUTTON_WIDTH + theme::SPACE_SM
+fn view_menu_offset() -> f32 {
+    edit_menu_offset() + EDIT_BUTTON_WIDTH + theme::SPACE_SM
 }
 
 /// Widest the panel's speaker picker may grow, and how many characters of a
@@ -7780,6 +7781,7 @@ impl App {
                     pick_list(Preset::ALL, Some(Preset::Balanced), Message::PresetChanged,)
                         .style(greyed_pick(scheme))
                         .menu_style(pick_menu_style(scheme))
+                        .handle(caret_handle())
                         .width(Length::Fill),
                     mouse_area(
                         container(horizontal_space())
@@ -7796,6 +7798,7 @@ impl App {
             pick_list(Preset::ALL, Some(self.preset), Message::PresetChanged)
                 .style(pill_pick(scheme))
                 .menu_style(pick_menu_style(scheme))
+                .handle(caret_handle())
                 .width(Length::Fill)
                 .into()
         };
@@ -7805,7 +7808,8 @@ impl App {
             Some(SpeakerOpt::from_value(self.num_speakers)),
             Message::SpeakerCountChanged,
         )
-        .menu_style(pick_menu_style(scheme));
+        .menu_style(pick_menu_style(scheme))
+        .handle(caret_handle());
         let speakers: Element<Message> = if !self.shows(license::Audience::ProOnly) {
             // Free runs ASR only, so the speaker count has no effect.
             self.tip(
@@ -7853,7 +7857,7 @@ impl App {
                 scheme,
             ));
         let body = column![
-            text("Transcription settings").size(20),
+            text("Transcription Settings").size(20),
             output_row,
             options,
             self.acceleration_row(&scheme),
@@ -8868,9 +8872,10 @@ impl App {
             );
         }
 
-        // The header ends with the three menus, left to right File, Edit, View.
-        // Each menu hangs from its own button's right edge; the inset helpers
-        // subtract the fixed button widths to the right of it.
+        // The header starts with the three menus, left to right File, Edit,
+        // View, and ends with the file's own identity. Each menu hangs from its
+        // own button's left edge; the offset helpers add the fixed button widths
+        // to its left.
         let menus: Element<Message> = row![
             self.header_menu_button("File", HeaderMenu::File),
             self.header_menu_button("Edit", HeaderMenu::Edit),
@@ -8880,13 +8885,17 @@ impl App {
         .align_y(iced::Alignment::Center)
         .into();
 
+        // The menus keep their fixed widths; the label group keeps its own, so
+        // the elastic space between them is the only thing that changes with the
+        // window. The group is last, so it is what sits against the card's right
+        // padding however long the filename is.
         let header = container(
             row![
+                menus,
+                horizontal_space(),
                 row![badge, label]
                     .spacing(8)
                     .align_y(iced::Alignment::Center),
-                horizontal_space(),
-                menus,
             ]
             .spacing(theme::SPACE_SM)
             .align_y(iced::Alignment::Center),
@@ -10525,21 +10534,24 @@ impl App {
         // the scrollable's tree index and offset never change.
         let view_layer: Element<Message> = match self.header_menu {
             Some(menu) if !self.popup_open() => {
-                let (body, inset) = match menu {
-                    HeaderMenu::File => (self.file_menu(&scheme), file_menu_inset()),
-                    HeaderMenu::Edit => (self.edit_menu(&scheme), edit_menu_inset()),
-                    HeaderMenu::View => (self.view_menu(&scheme), view_menu_inset()),
+                let (body, offset) = match menu {
+                    HeaderMenu::File => (self.file_menu(&scheme), file_menu_offset()),
+                    HeaderMenu::Edit => (self.edit_menu(&scheme), edit_menu_offset()),
+                    HeaderMenu::View => (self.view_menu(&scheme), view_menu_offset()),
                 };
+                // Start-aligned with a left offset: the container lays its child
+                // out inside the padding, so the menu's left edge sits exactly
+                // `offset` from the card's left edge, under its button.
                 let menu = container(body)
                     .width(Length::Fill)
                     .height(Length::Fill)
-                    .align_x(iced::Alignment::End)
+                    .align_x(iced::Alignment::Start)
                     .align_y(iced::Alignment::Start)
                     .padding(iced::Padding {
                         top: VIEW_MENU_TOP,
-                        right: inset,
+                        right: 0.0,
                         bottom: 0.0,
-                        left: 0.0,
+                        left: offset,
                     });
                 menu.into()
             }
@@ -15280,6 +15292,23 @@ mod tests {
                 "{ratio:.2}:1 is a filled button, not a wash"
             );
         }
+    }
+
+    #[test]
+    fn each_header_menu_offset_advances_by_the_button_before_it() {
+        // The menus hang from their buttons' left edges, so each offset is the
+        // header padding plus the buttons to its left and the gaps between
+        // them. Pinned here because a hardcoded offset would drift from the
+        // button widths it is supposed to match.
+        assert_eq!(file_menu_offset(), HEADER_PAD_X);
+        assert_eq!(
+            edit_menu_offset() - file_menu_offset(),
+            FILE_BUTTON_WIDTH + theme::SPACE_SM
+        );
+        assert_eq!(
+            view_menu_offset() - edit_menu_offset(),
+            EDIT_BUTTON_WIDTH + theme::SPACE_SM
+        );
     }
 
     #[test]
