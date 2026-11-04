@@ -92,6 +92,39 @@ Verdict: **do not enable blocks.** The chained label assignment is the defect â€
 one wrong link in an overlap propagates through every later block. It has to be
 replaced by cluster-mean embedding assignment before this path ships.
 
+## Turn splitting (opt-in)
+
+`HIPPO_TRANSCRIBE_DIARIZE_SPLIT=1` splits turns of 15 s or more when their
+1.5 s windows form two clusters that differ by cosine <= 0.80. Each half is
+assigned by comparing it against per-label centroids built from the nearest
+turns of that label, excluding the turn under test.
+
+```
+file                        single @0.25/@1.0     split @0.25/@1.0
+hour-conversation-short-1      53.89 / 48.13       27.18 / 17.17
+hour-conversation-mid-2        33.45 / 25.47       28.22 / 16.50
+hour-conversation-mid-1        34.97 / 26.76       34.97 / 26.76
+hour-conversation-short-2      13.57 /  1.82       13.57 /  1.82
+sample-end                     10.60 /  3.58       10.60 /  3.58
+sample-short                   10.36 /  1.60       10.36 /  1.60
+sample-long                    10.62 /  2.76       11.31 /  3.92
+sample-full                    14.36 /  6.15       14.55 /  6.27
+```
+
+Two identity rules were measured and rejected, so they are not retried:
+
+- **Continuity** (the half that abuts speaker X is X): forces the closing half
+  onto the following speaker, so every long turn bracketed by the other voice
+  is cut. `sample-short` 10.36% -> 35.02%, `mid-1` 34.97% -> 49.31%,
+  `sample-full` 14.36% -> 33.48%.
+- **Continuity verified against neighbour audio**: 1.5 s neighbour windows are
+  too noisy to confirm which half continues which neighbour. `short-1` fell
+  back to 48.65% and `sample-long` rose to 13.62%.
+
+The remaining regression is small and confined to the two files where the
+diarizer is already close to the reference; splitting is worth enabling on
+files like `short-1` where one speaker is collapsed for tens of seconds.
+
 ## Independent blocks are not an improvement
 
 An ablation, not a test of the shipped blockwise path: the same 300-600 s window

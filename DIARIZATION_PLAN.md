@@ -247,8 +247,12 @@ speaker per line. The ceiling does not pay for the work.
 2. Re-measure both geometries (300/45 and 300/25) against the eight-file table.
    If 300/45 still loses on every file, do not ship it; the chain is the defect,
    not the overlap length.
-3. Split the 70 s collapsed turn in `hour-conversation-short-1` by embedding
-   drift, and check the effect on the other rapid-turn files.
+3. (done, opt-in) Split collapsed turns by embedding drift:
+   `HIPPO_TRANSCRIBE_DIARIZE_SPLIT=1` takes `hour-conversation-short-1` from
+   53.89% to 27.18% and `mid-2` from 33.45% to 28.22%, at the cost of +0.7 and
+   +0.2 points on `sample-long`/`sample-full`. Two identity rules were measured
+   and rejected; see `tests/diarization/README.md`. Promoting it to default
+   needs the two small regressions removed.
 4. Cache/progress corrections (Phase 4 remainder).
 5. Windows and performance validation (Phase 5).
 
