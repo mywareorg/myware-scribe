@@ -937,8 +937,10 @@ impl App {
             calibration_events: Arc::new(Mutex::new(VecDeque::new())),
             show_timestamps: settings.show_timestamps,
             num_speakers: match settings.num_speakers {
-                Some(count) if count > 0 => Some(count),
-                _ => Some(2),
+                Some(1) => Some(1),
+                // Everything else, including settings saved before the picker
+                // became Single/Multiple, is a detect run.
+                _ => None,
             },
             language: settings.language.clone(),
             display_order_cache: RefCell::new(None),
@@ -1140,7 +1142,7 @@ impl App {
         let settings = Settings {
             preset: Some(self.preset.arg().to_string()),
             sms_mode: Some(self.sms_mode),
-            num_speakers: Some(self.num_speakers.unwrap_or(2)),
+            num_speakers: self.num_speakers,
             language: self.language.clone(),
             notifications: self.notifications,
             gpu_profiles: self.gpu_profiles.clone(),
@@ -15148,14 +15150,15 @@ mod tests {
     }
 
     #[test]
-    fn speaker_options_are_fixed_counts() {
-        assert_eq!(SpeakerOpt::ALL.len(), 5);
-        assert_eq!(SpeakerOpt::from_value(None), SpeakerOpt::Two);
-        assert_eq!(SpeakerOpt::from_value(Some(0)), SpeakerOpt::Two);
-        assert_eq!(SpeakerOpt::from_value(Some(2)), SpeakerOpt::Two);
-        assert!(SpeakerOpt::ALL
-            .iter()
-            .all(|option| option.value().is_some()));
+    fn speaker_options_are_single_or_detected() {
+        assert_eq!(SpeakerOpt::ALL.len(), 2);
+        assert_eq!(SpeakerOpt::from_value(None), SpeakerOpt::Multiple);
+        assert_eq!(SpeakerOpt::from_value(Some(0)), SpeakerOpt::Multiple);
+        assert_eq!(SpeakerOpt::from_value(Some(2)), SpeakerOpt::Multiple);
+        assert_eq!(SpeakerOpt::from_value(Some(1)), SpeakerOpt::Single);
+        assert_eq!(SpeakerOpt::Single.value(), Some(1));
+        // Multiple hands the diarizer no count, so it detects.
+        assert_eq!(SpeakerOpt::Multiple.value(), None);
     }
 
     #[test]
