@@ -76,10 +76,25 @@ const FOLLOW_GLIDE_MIN_STEP: f32 = 0.5;
 /// Remaining distance at which the glide lands exactly and ends.
 const FOLLOW_GLIDE_SNAP: f32 = 0.5;
 
-/// Follow glides only moves this many rows or fewer. A longer move is a jump —
-/// a seek, a search hit, a view change — and has to land immediately; easing it
-/// would delay the arrival and is the kind of motion that makes people queasy.
+/// Routine follow moves glide only this many rows or fewer. A longer move that
+/// nobody asked for (a view change, a stall) lands immediately.
 const FOLLOW_GLIDE_ROWS: f32 = 2.0;
+
+/// Time constant of a deliberate jump of [`FOLLOW_JUMP_ROWS`] rows or more. A
+/// fixed routine constant made a screenful arrive in the same time as a
+/// one-row nudge, which reads as a lurch: the longer move starts faster and has
+/// further to go, so it needs longer to feel like travel rather than a cut.
+const FOLLOW_JUMP_TAU: Duration = Duration::from_millis(170);
+
+/// Distance at which a jump reaches [`FOLLOW_JUMP_TAU`]. Between the routine
+/// ceiling and this the constant ramps, so a three-row jump is not slower than
+/// a two-row nudge.
+const FOLLOW_JUMP_ROWS: f32 = 10.0;
+
+/// Two seeks closer together than this are one gesture — a scrubbed playhead or
+/// a held arrow key — and must land at once. Animating each of them would leave
+/// the pane trailing the pointer.
+const FOLLOW_SEEK_QUIET: Duration = Duration::from_millis(200);
 
 /// Logical 4:3 sizing for the window (default) and floors.
 // The transcript header and bottom action row need this much horizontal room
@@ -657,6 +672,22 @@ struct ScrollAnim {
     /// Size of that step, so a report that arrives one issue late still counts
     /// as our own scroll rather than a drag.
     step: f32,
+    /// How long this move takes: quick for a routine advance, longer for a
+    /// deliberate jump.
+    tau: Duration,
+    /// True while this is a jump the user asked for. A jump still in flight is
+    /// retargeted with the jump's shape, so the routine distance cap cannot cut
+    /// it short when the playhead moves on mid-glide.
+    jump: bool,
+}
+
+/// How a follow scroll travels.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Glide {
+    /// Land now: no easing.
+    Snap,
+    /// Ease towards the target with this time constant.
+    Ease { tau: Duration },
 }
 
 /// A scroll the follow logic wants, and whether it comes from tracking the
@@ -688,19 +719,19 @@ impl FollowIssue {
 /// Exponential rather than a fixed-duration curve: a tween restarts its clock
 /// on every retarget, which stutters as soon as lines arrive faster than it
 /// finishes, and it needs a duration that is wrong at every speed but one.
-fn glide_fraction(dt: Duration) -> f32 {
+fn glide_fraction(dt: Duration, tau: Duration) -> f32 {
     if dt >= FOLLOW_GLIDE_MAX_GAP {
         // The window was occluded (frames stop) or the app was stalled: land
         // the move in this step instead of sweeping across the gap.
         return 1.0;
     }
-    1.0 - (-dt.as_secs_f32() / FOLLOW_GLIDE_TAU.as_secs_f32()).exp()
+    1.0 - (-dt.as_secs_f32() / tau.as_secs_f32().max(f32::EPSILON)).exp()
 }
 
 /// One step of the glide: the offset to ask for, and whether that offset is
 /// the target itself (the glide is over).
-fn glide_advance(expected: f32, target: f32, dt: Duration) -> (f32, bool) {
-    let next = expected + (target - expected) * glide_fraction(dt);
+fn glide_advance(expected: f32, target: f32, dt: Duration, tau: Duration) -> (f32, bool) {
+    let next = expected + (target - expected) * glide_fraction(dt, tau);
     if (target - next).abs() <= FOLLOW_GLIDE_SNAP {
         (target, true)
     } else {
@@ -708,17 +739,56 @@ fn glide_advance(expected: f32, target: f32, dt: Duration) -> (f32, bool) {
     }
 }
 
-/// Whether a follow move should glide rather than land.
+/// Time constant for a deliberate jump, ramped by distance.
+fn jump_tau(distance: f32, row_height: f32) -> Duration {
+    let rows = distance.abs() / row_height.max(1.0);
+    if rows <= FOLLOW_GLIDE_ROWS {
+        return FOLLOW_GLIDE_TAU;
+    }
+    if rows >= FOLLOW_JUMP_ROWS {
+        return FOLLOW_JUMP_TAU;
+    }
+    let ramp = (rows - FOLLOW_GLIDE_ROWS) / (FOLLOW_JUMP_ROWS - FOLLOW_GLIDE_ROWS);
+    let tau = FOLLOW_GLIDE_TAU.as_secs_f32()
+        + (FOLLOW_JUMP_TAU.as_secs_f32() - FOLLOW_GLIDE_TAU.as_secs_f32()) * ramp;
+    Duration::from_secs_f32(tau)
+}
+
+/// How a follow move should travel.
 ///
-/// The centred-playhead path only, past the deadband (below it nothing moves at
-/// all) and within [`FOLLOW_GLIDE_ROWS`] rows; the first move after Follow is
-/// switched on always lands, because it can be a screenful.
-fn glide_move(centred: bool, distance: f32, row_height: f32, snap_next: bool) -> bool {
+/// Only the centred-playhead path ever eases: the bottom pin tracks text that is
+/// still arriving, so smoothing it would leave the pane permanently behind the
+/// words. Below the deadband nothing moves at all, and the first move after
+/// Follow is switched on always lands, because it can be a screenful.
+///
+/// A `jump` is a move the user asked for — a timeline click or a seek — and
+/// eases at any distance with [`jump_tau`]. A routine advance eases only within
+/// [`FOLLOW_GLIDE_ROWS`] rows; a longer one nobody asked for lands. A jump still
+/// in flight keeps the jump's shape when the playhead retargets it.
+fn glide_shape(
+    centred: bool,
+    jump: bool,
+    distance: f32,
+    row_height: f32,
+    snap_next: bool,
+    jump_in_flight: bool,
+) -> Glide {
     let distance = distance.abs();
-    centred
-        && !snap_next
-        && distance > FOLLOW_DEADBAND
-        && distance <= row_height * FOLLOW_GLIDE_ROWS
+    if !centred || snap_next || distance <= FOLLOW_DEADBAND {
+        return Glide::Snap;
+    }
+    if jump || jump_in_flight {
+        return Glide::Ease {
+            tau: jump_tau(distance, row_height),
+        };
+    }
+    if distance <= row_height * FOLLOW_GLIDE_ROWS {
+        Glide::Ease {
+            tau: FOLLOW_GLIDE_TAU,
+        }
+    } else {
+        Glide::Snap
+    }
 }
 
 pub struct App {
@@ -810,6 +880,9 @@ pub struct App {
     /// The next follow move must land: switching Follow on can put the pane a
     /// screen away from the playhead, which must not be eased across.
     snap_next_follow: bool,
+    /// When the pane was last moved by a seek. Seeks closer together than
+    /// [`FOLLOW_SEEK_QUIET`] are one scrub and must not each start a glide.
+    last_seek: Option<Instant>,
     /// Row height used to centre the followed line. Re-derived only when the
     /// row count changes or the content height jumps materially, so streamed
     /// growth does not nudge the estimate on every frame.
@@ -1056,6 +1129,7 @@ impl App {
             follow_issue: None,
             scroll_anim: None,
             snap_next_follow: false,
+            last_seek: None,
             follow_row_height: RefCell::new(None),
             pane_window: Cell::new((0, 0, 0.0, 0.0)),
             pane_row_height: Cell::new(None),
@@ -3004,9 +3078,11 @@ impl App {
                     player.seek(self.playhead);
                 }
                 // Scrubbing the timeline jumps the transcript to that moment.
+                // A click eases there; a drag (which arrives as a stream of
+                // seeks) lands at once.
                 self.scroll_seek = true;
                 match self.line_for_playhead(self.playhead) {
-                    Some(line) => self.scroll_to_line(line),
+                    Some(line) => self.seek_to_line(line),
                     None => Task::none(),
                 }
             }
@@ -3569,6 +3645,17 @@ impl App {
                     self.last_tick = Some(Instant::now());
                     if let Some(player) = &self.player {
                         player.seek(playhead);
+                    }
+                    // A seek is a jump the user asked for, so the pane goes with
+                    // it: a single tap eases there, a held key (repeat faster
+                    // than `FOLLOW_SEEK_QUIET`) lands each step. The live
+                    // transcript pins to its newest line rather than the
+                    // playhead, and Follow off means the reader chose where to
+                    // be, so neither is moved here.
+                    if self.follow_playhead && !self.live_streaming() {
+                        if let Some(line) = self.line_for_playhead(self.playhead) {
+                            return self.seek_to_line(line);
+                        }
                     }
                 }
                 Task::none()
@@ -4281,7 +4368,12 @@ impl App {
                     }
                 } else {
                     self.follow_offset = None;
-                    self.scroll_anim = None;
+                    // A jump the user asked for is not a follow move: let it
+                    // finish even though Follow is off, or a timeline click
+                    // would freeze the pane half way.
+                    if !self.scroll_anim.is_some_and(|anim| anim.jump) {
+                        self.scroll_anim = None;
+                    }
                     // Keep the live view pinned to the bottom as text is added,
                     // as long as the user hasn't scrolled away from the bottom.
                     if let Some(y) = self.follow_scroll(None) {
@@ -6399,47 +6491,110 @@ impl App {
         let from = self
             .scroll_anim
             .map_or(self.transcript_offset, |anim| anim.expected);
-        let glide = !self.popup_open()
-            && !self.delete_confirm
-            && glide_move(
+        let jump_in_flight = self.scroll_anim.is_some_and(|anim| anim.jump);
+        let shape = if self.popup_open() || self.delete_confirm {
+            Glide::Snap
+        } else {
+            glide_shape(
                 target.centred,
+                false,
                 target.y - from,
                 self.follow_row_estimate(),
                 self.snap_next_follow,
-            );
+                jump_in_flight,
+            )
+        };
         self.snap_next_follow = false;
-        if glide {
-            self.start_glide(target.y);
-            None
-        } else {
-            // A snap supersedes any glide, which must not keep writing offsets
-            // towards a target the pane is no longer heading for.
-            self.scroll_anim = None;
-            self.scroll_target = Some(target.y);
-            Some(target.y)
+        match shape {
+            Glide::Ease { tau } => {
+                self.start_glide(target.y, tau, jump_in_flight);
+                None
+            }
+            Glide::Snap => {
+                // A snap supersedes any glide, which must not keep writing
+                // offsets towards a target the pane is no longer heading for.
+                self.scroll_anim = None;
+                self.scroll_target = Some(target.y);
+                Some(target.y)
+            }
         }
     }
 
     /// Start easing towards `target`, or retarget a glide already running so
     /// its position and velocity carry over instead of restarting.
-    fn start_glide(&mut self, target: f32) {
+    fn start_glide(&mut self, target: f32, tau: Duration, jump: bool) {
         match self.scroll_anim.as_mut() {
-            Some(anim) => anim.target = target,
+            Some(anim) => {
+                anim.target = target;
+                anim.tau = tau;
+                anim.jump = jump;
+            }
             None => {
                 let expected = self.transcript_offset;
                 self.follow_offset = Some(expected);
-                // The first step is a quarter of the remaining distance, so the
-                // "was that us?" tolerance starts at the size of that step.
-                let step = (target - expected).abs() * glide_fraction(FOLLOW_GLIDE_FRAME);
+                // The first step is roughly a fifth of the remaining distance,
+                // so the "was that us?" tolerance starts at the size of it.
+                let step = (target - expected).abs() * glide_fraction(FOLLOW_GLIDE_FRAME, tau);
                 self.scroll_anim = Some(ScrollAnim {
                     target,
                     expected,
                     last: Instant::now(),
                     step,
+                    tau,
+                    jump,
                 });
             }
         }
         self.scroll_target = Some(target);
+    }
+
+    /// True when this seek is a single deliberate gesture rather than part of a
+    /// scrub or a held key. Two seeks inside [`FOLLOW_SEEK_QUIET`] are one
+    /// gesture, and a glide per event would leave the pane trailing the pointer,
+    /// so only the isolated one eases.
+    fn seek_is_isolated(&mut self, now: Instant) -> bool {
+        let isolated = self
+            .last_seek
+            .is_none_or(|last| now.saturating_duration_since(last) >= FOLLOW_SEEK_QUIET);
+        self.last_seek = Some(now);
+        isolated
+    }
+
+    /// Move the pane to a line the user asked for. A single click eases at any
+    /// distance; a scrub or a held key lands at once.
+    fn seek_to_line(&mut self, line: usize) -> Task<Message> {
+        let isolated = self.seek_is_isolated(Instant::now());
+        let Some(target) = self.follow_target(line) else {
+            return Task::none();
+        };
+        let active = self.follow_line_index();
+        self.note_follow_issue(target, active);
+        let shape = if isolated && !self.popup_open() && !self.delete_confirm {
+            glide_shape(
+                true,
+                true,
+                target - self.transcript_offset,
+                self.follow_row_estimate(),
+                false,
+                false,
+            )
+        } else {
+            Glide::Snap
+        };
+        match shape {
+            Glide::Ease { tau } => {
+                self.start_glide(target, tau, true);
+                Task::none()
+            }
+            Glide::Snap => {
+                self.scroll_anim = None;
+                self.scroll_target = Some(target);
+                scrollable::scroll_to(
+                    transcript_id(),
+                    scrollable::AbsoluteOffset { x: 0.0, y: target },
+                )
+            }
+        }
     }
 
     /// True when a reported offset is one the running glide asked for. Tolerates
@@ -6459,7 +6614,7 @@ impl App {
         if dt < FOLLOW_GLIDE_FRAME {
             return None;
         }
-        let (next, landed) = glide_advance(anim.expected, anim.target, dt);
+        let (next, landed) = glide_advance(anim.expected, anim.target, dt, anim.tau);
         let step = next - anim.expected;
         if !landed && step.abs() < FOLLOW_GLIDE_MIN_STEP {
             // Not worth a scroll (and its echo) for movement nobody can see;
@@ -16121,57 +16276,236 @@ mod tests {
 
     #[test]
     fn the_glide_fraction_eases_and_lands_a_long_frame_in_one_step() {
+        let tau = FOLLOW_GLIDE_TAU;
         // About a sixth of the remaining distance per 60 Hz frame.
-        let frame = glide_fraction(Duration::from_micros(16_667));
+        let frame = glide_fraction(Duration::from_micros(16_667), tau);
         assert!((frame - 0.169).abs() < 0.01, "{frame}");
         // One time constant covers 63 %.
-        let tau = glide_fraction(FOLLOW_GLIDE_TAU);
-        assert!((tau - 0.632).abs() < 0.01, "{tau}");
+        let constant = glide_fraction(tau, tau);
+        assert!((constant - 0.632).abs() < 0.01, "{constant}");
         // Nothing moves in no time, and the curve is monotone.
-        assert_eq!(glide_fraction(Duration::ZERO), 0.0);
-        assert!(glide_fraction(Duration::from_millis(8)) < glide_fraction(Duration::from_millis(20)));
+        assert_eq!(glide_fraction(Duration::ZERO, tau), 0.0);
         assert!(
-            glide_fraction(Duration::from_millis(20)) < glide_fraction(Duration::from_millis(60))
+            glide_fraction(Duration::from_millis(8), tau)
+                < glide_fraction(Duration::from_millis(20), tau)
+        );
+        assert!(
+            glide_fraction(Duration::from_millis(20), tau)
+                < glide_fraction(Duration::from_millis(60), tau)
         );
         // A gap the window could not have shown (occluded, stalled) lands in
         // one step instead of sweeping the pane across it.
-        assert_eq!(glide_fraction(FOLLOW_GLIDE_MAX_GAP), 1.0);
-        assert_eq!(glide_fraction(Duration::from_secs(30)), 1.0);
+        assert_eq!(glide_fraction(FOLLOW_GLIDE_MAX_GAP, tau), 1.0);
+        assert_eq!(glide_fraction(Duration::from_secs(30), tau), 1.0);
+
+        // A longer constant covers less of the distance in the same frame: that
+        // is what stops a screenful arriving as fast as a one-row nudge.
+        let slow = glide_fraction(Duration::from_millis(25), FOLLOW_JUMP_TAU);
+        let quick = glide_fraction(Duration::from_millis(25), FOLLOW_GLIDE_TAU);
+        assert!(slow < quick, "{slow} vs {quick}");
     }
 
     #[test]
     fn the_glide_advance_lands_inside_the_snap_threshold() {
+        let tau = FOLLOW_GLIDE_TAU;
         // Well short of the target: a step, not a landing.
-        let (next, landed) = glide_advance(100.0, 124.0, Duration::from_millis(25));
+        let (next, landed) = glide_advance(100.0, 124.0, Duration::from_millis(25), tau);
         assert!(!landed);
         assert!(next > 100.0 && next < 124.0, "{next}");
         // Inside half a pixel it lands exactly.
-        let (next, landed) = glide_advance(123.8, 124.0, Duration::from_millis(16));
+        let (next, landed) = glide_advance(123.8, 124.0, Duration::from_millis(16), tau);
         assert!(landed);
         assert_eq!(next, 124.0);
         // A long gap lands in one step.
-        let (next, landed) = glide_advance(0.0, 24.0, Duration::from_secs(5));
+        let (next, landed) = glide_advance(0.0, 24.0, Duration::from_secs(5), tau);
         assert!(landed);
         assert_eq!(next, 24.0);
     }
 
     #[test]
-    fn only_small_centred_moves_glide() {
+    fn only_centred_moves_glide_and_deliberate_jumps_glide_further() {
         let row = 24.0;
-        // The playhead path, one row, and exactly the ceiling: glide.
-        assert!(glide_move(true, row, row, false));
-        assert!(glide_move(true, 2.0 * row, row, false));
+        // The playhead path, one row, and exactly the routine ceiling: ease.
+        assert_eq!(
+            glide_shape(true, false, row, row, false, false),
+            Glide::Ease {
+                tau: FOLLOW_GLIDE_TAU
+            }
+        );
+        assert_eq!(
+            glide_shape(true, false, 2.0 * row, row, false, false),
+            Glide::Ease {
+                tau: FOLLOW_GLIDE_TAU
+            }
+        );
         // Only the centred path. The bottom pin follows a target that grows as
         // text streams in, so it must stay instant.
-        assert!(!glide_move(false, row, row, false));
+        assert_eq!(
+            glide_shape(false, false, row, row, false, false),
+            Glide::Snap
+        );
         // Below the deadband nothing moves at all.
-        assert!(!glide_move(true, FOLLOW_DEADBAND - 0.5, row, false));
-        // Past two rows it is a jump: a seek, a search hit, a view change.
-        assert!(!glide_move(true, 2.0 * row + 1.0, row, false));
+        assert_eq!(
+            glide_shape(true, false, FOLLOW_DEADBAND - 0.5, row, false, false),
+            Glide::Snap
+        );
+        // A routine advance past two rows that nobody asked for lands.
+        assert_eq!(
+            glide_shape(true, false, 2.0 * row + 1.0, row, false, false),
+            Glide::Snap
+        );
         // The first move after Follow is switched on always lands.
-        assert!(!glide_move(true, row, row, true));
+        assert_eq!(
+            glide_shape(true, false, row, row, true, false),
+            Glide::Snap
+        );
         // Direction does not matter.
-        assert!(glide_move(true, -row, row, false));
+        assert_eq!(
+            glide_shape(true, false, -row, row, false, false),
+            Glide::Ease {
+                tau: FOLLOW_GLIDE_TAU
+            }
+        );
+
+        // A deliberate jump eases at any distance, with a constant that grows
+        // with the distance so a screenful does not arrive like a nudge.
+        let small = jump_tau(3.0 * row, row);
+        let large = jump_tau(FOLLOW_JUMP_ROWS * row, row);
+        assert!(small >= FOLLOW_GLIDE_TAU && small < large, "{small:?}");
+        assert_eq!(large, FOLLOW_JUMP_TAU);
+        assert_eq!(jump_tau(40.0 * row, row), FOLLOW_JUMP_TAU);
+        assert_eq!(
+            glide_shape(true, true, 20.0 * row, row, false, false),
+            Glide::Ease {
+                tau: FOLLOW_JUMP_TAU
+            }
+        );
+        // A jump still in flight keeps the jump shape when the playhead moves
+        // on mid-glide, so the routine ceiling cannot cut it short.
+        assert_eq!(
+            glide_shape(true, false, 4.0 * row, row, false, true),
+            Glide::Ease {
+                tau: jump_tau(4.0 * row, row)
+            }
+        );
+        // Even a jump lands when it is inside the deadband or a dialog is up.
+        assert_eq!(
+            glide_shape(true, true, FOLLOW_DEADBAND - 0.5, row, false, false),
+            Glide::Snap
+        );
+        assert_eq!(
+            glide_shape(true, true, row, row, true, false),
+            Glide::Snap
+        );
+    }
+
+    #[test]
+    fn a_hand_scroll_ends_the_glide_and_follow() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("hand-scroll-config");
+        let (mut app, media) = follow_app("hand-scroll-media");
+
+        app.transcript_content = 1200.0;
+        app.transcript_viewport = 400.0;
+        app.pane_row_height.set(Some(24.0));
+        app.transcript_offset = 700.0;
+
+        // A jump is running towards the clicked line.
+        let _ = app.update(Message::Seek(5.0));
+        let anim = app.scroll_anim.expect("a click should ease to the line");
+        assert!(anim.jump);
+        let expected = anim.expected;
+
+        // iced reports a scrollbar drag, a track click and a wheel notch the same
+        // way — an offset — so none can be told from the others, and none is
+        // ever eased. A report that is not where the glide asked the pane to be
+        // is the reader taking it: the glide stops and Follow turns off.
+        assert_eq!(
+            app.correct_follow_offset(1200.0, expected + 60.0, 400.0, 1200.0),
+            None
+        );
+        assert!(app.scroll_anim.is_none(), "a hand scroll must stop the glide");
+        assert!(
+            !app.follow_playhead,
+            "a hand scroll must turn Follow off rather than snap back"
+        );
+
+        let _ = std::fs::remove_dir_all(&media);
+    }
+
+    #[test]
+    fn a_jump_the_user_asked_for_survives_with_follow_off() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("jump-no-follow-config");
+        let (mut app, media) = follow_app("jump-no-follow-media");
+
+        app.transcript_content = 1200.0;
+        app.transcript_viewport = 400.0;
+        app.transcript_offset = 700.0;
+        app.follow_playhead = false;
+        // Long enough ago that this seek is a single gesture, not a scrub.
+        app.last_seek = Some(
+            Instant::now()
+                .checked_sub(FOLLOW_SEEK_QUIET + Duration::from_millis(1))
+                .unwrap(),
+        );
+
+        let _ = app.update(Message::Seek(5.0));
+        assert!(
+            app.scroll_anim.is_some_and(|anim| anim.jump),
+            "a timeline click with Follow off should still ease"
+        );
+
+        // The follow tick does not own this move: it must not clear it.
+        let _ = app.update(Message::Tick);
+        assert!(
+            app.scroll_anim.is_some_and(|anim| anim.jump),
+            "the follow tick cleared a jump it did not start"
+        );
+
+        // And the jump lands on its own, with no follow to finish it.
+        let mut now = app.scroll_anim.unwrap().last;
+        for _ in 0..120 {
+            if app.scroll_anim.is_none() {
+                break;
+            }
+            now += FOLLOW_GLIDE_FRAME;
+            app.advance_glide(now);
+        }
+        assert!(app.scroll_anim.is_none(), "the jump did not land");
+
+        let _ = std::fs::remove_dir_all(&media);
+    }
+
+    #[test]
+    fn a_scrubbed_timeline_lands_at_once_and_a_click_eases() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("seek-glide-config");
+        let (mut app, media) = follow_app("seek-glide-media");
+
+        app.transcript_content = 1200.0;
+        app.transcript_viewport = 400.0;
+        app.pane_row_height.set(Some(24.0));
+
+        // A single click is one deliberate jump: it eases, and at a distance
+        // well past the routine ceiling.
+        let _ = app.update(Message::Seek(5.0));
+        let anim = app.scroll_anim.expect("a click should ease to the line");
+        assert!(anim.jump);
+        assert!(anim.tau >= FOLLOW_GLIDE_TAU);
+        let target = app.follow_target(app.line_for_playhead(app.playhead).unwrap()).unwrap();
+        assert_eq!(anim.target, target);
+
+        // The very next seek of a scrub is the same gesture: land at once so the
+        // pane does not trail the pointer.
+        let _ = app.update(Message::Seek(6.0));
+        assert!(
+            app.scroll_anim.is_none(),
+            "a scrub must not start a glide per event"
+        );
+        assert!(app.scroll_target.is_some());
+
+        let _ = std::fs::remove_dir_all(&media);
     }
 
     #[test]
