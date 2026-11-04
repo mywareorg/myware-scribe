@@ -1,53 +1,40 @@
 use std::fmt;
 
-/// Speaker-count picker options: a fixed 1..=5.
+/// Speaker picker options: one voice, or as many as the diarizer finds.
+///
+/// `Multiple` is the auto-detecting case: it hands no count to the diarizer, so
+/// the clustering decides. Asking for a fixed 2 could not be right for a file
+/// with three voices, and asking for 5 on a two-person file invented speakers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SpeakerOpt {
-    One,
-    Two,
-    Three,
-    Four,
-    Five,
+    Single,
+    Multiple,
 }
 
 impl SpeakerOpt {
-    pub(crate) const ALL: [SpeakerOpt; 5] = [
-        SpeakerOpt::One,
-        SpeakerOpt::Two,
-        SpeakerOpt::Three,
-        SpeakerOpt::Four,
-        SpeakerOpt::Five,
-    ];
+    pub(crate) const ALL: [SpeakerOpt; 2] = [SpeakerOpt::Single, SpeakerOpt::Multiple];
 
-    /// The pipeline value.
+    /// The pipeline value. `None` means "detect".
     pub(crate) fn value(self) -> Option<i32> {
         match self {
-            SpeakerOpt::One => Some(1),
-            SpeakerOpt::Two => Some(2),
-            SpeakerOpt::Three => Some(3),
-            SpeakerOpt::Four => Some(4),
-            SpeakerOpt::Five => Some(5),
+            SpeakerOpt::Single => Some(1),
+            SpeakerOpt::Multiple => None,
         }
     }
 
     pub(crate) fn from_value(value: Option<i32>) -> Self {
         match value {
-            None | Some(0) => SpeakerOpt::Two,
-            Some(1) => SpeakerOpt::One,
-            Some(3) => SpeakerOpt::Three,
-            Some(4) => SpeakerOpt::Four,
-            Some(5) => SpeakerOpt::Five,
-            _ => SpeakerOpt::Two,
+            Some(1) => SpeakerOpt::Single,
+            // Anything else, including the old fixed 2..=5 settings, is a
+            // multi-speaker run: detect rather than keep a stale count.
+            _ => SpeakerOpt::Multiple,
         }
     }
 
     pub(crate) fn label(self) -> &'static str {
         match self {
-            SpeakerOpt::One => "1",
-            SpeakerOpt::Two => "2",
-            SpeakerOpt::Three => "3",
-            SpeakerOpt::Four => "4",
-            SpeakerOpt::Five => "5",
+            SpeakerOpt::Single => "Single",
+            SpeakerOpt::Multiple => "Multiple",
         }
     }
 }
