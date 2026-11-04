@@ -178,14 +178,24 @@ const ICON_ONLY_SIZE: f32 = 15.0;
 /// whether the query is empty or not.
 const FIND_STATUS_WIDTH: f32 = 62.0;
 
-/// Width of the transcript's View menu, and where its top-left corner sits
-/// inside the transcript card: below the header (title, meta, divider and the
-/// slot's bottom gap) and inset from the card's right edge by the header's own
-/// padding. A fixed inset keeps the menu under its button without tracking a
-/// window coordinate.
+/// Width of the transcript's View menu, and where its top edge sits inside the
+/// transcript card: below the header (title, meta, divider and the slot's bottom
+/// gap). Its right edge is [`view_menu_inset`] from the card's right edge, so it
+/// stays under the button that opens it without tracking a window coordinate.
 const VIEW_MENU_WIDTH: f32 = 212.0;
 const VIEW_MENU_TOP: f32 = 48.0;
-const VIEW_MENU_INSET: f32 = 8.0;
+
+/// The header's horizontal padding. The View menu's inset is measured from the
+/// same edge, which is why this is named rather than written into both.
+const HEADER_PAD_X: f32 = 8.0;
+
+/// Right inset of the View menu: the header's padding plus everything the header
+/// now puts to the right of the View button — the row gap, the divider and the
+/// Summary button — so the menu hangs from the View button's right edge even
+/// though that button is no longer last in the row.
+fn view_menu_inset() -> f32 {
+    HEADER_PAD_X + theme::SPACE_SM + 1.0 + theme::SPACE_SM + action_width("Summary")
+}
 
 /// Widest the panel's speaker picker may grow, and how many characters of a
 /// speaker name it shows. The picker sits in a row with nine other controls: it
@@ -8578,10 +8588,11 @@ impl App {
             );
         }
 
-        // The right of the header is the document action, then the view
-        // controls. View is last so its menu hangs from the card's own right
-        // edge, which is a fixed inset; a window coordinate would move with
-        // the rest of the layout.
+        // The header reads left to right: the view controls, then a hairline, then
+        // the document action at the far right. The View menu hangs from the View
+        // button's right edge rather than the card's, which is what
+        // `view_menu_inset` accounts for now that the button has a neighbour on its
+        // right.
         let document_controls: Element<Message> = if has_lines {
             let divider = container(horizontal_space())
                 .width(Length::Fixed(1.0))
@@ -8593,8 +8604,8 @@ impl App {
             let summary = action_text("Summary")
                 .on_press_maybe((!running && self.has_results()).then_some(Message::OpenSummary))
                 .style(pill_button_secondary);
-            row![summary, divider]
-                .spacing(6)
+            row![divider, summary]
+                .spacing(theme::SPACE_SM)
                 .align_y(iced::Alignment::Center)
                 .into()
         } else {
@@ -8620,7 +8631,7 @@ impl App {
                 ),
                 self.view_menu_button(),
             ]
-            .spacing(6)
+            .spacing(theme::SPACE_SM)
             .align_y(iced::Alignment::Center)
             .into()
         } else {
@@ -8633,14 +8644,14 @@ impl App {
                     .spacing(8)
                     .align_y(iced::Alignment::Center),
                 horizontal_space(),
-                document_controls,
                 controls,
+                document_controls,
             ]
-            .spacing(6)
+            .spacing(theme::SPACE_SM)
             .align_y(iced::Alignment::Center),
         )
         .width(Length::Fill)
-        .padding([2, 8]);
+        .padding([2, HEADER_PAD_X as u16]);
         let divider = container(horizontal_space())
             .width(Length::Fill)
             .height(Length::Fixed(1.0))
@@ -8653,6 +8664,11 @@ impl App {
 
     /// The transcript header's "View" control. One menu replaces the two
     /// header toggles and the hover strip that used to carry the rest.
+    ///
+    /// Same label size, glyph size, inner gap and padding as `toggle_label` puts
+    /// in Follow and `action_text` puts in Summary — the default 16 px label, a
+    /// 12 px glyph and the button's own default padding — so the three boxes are
+    /// the same height and only the words differ.
     fn view_menu_button(&self) -> Element<'_, Message> {
         let caret = if self.view_menu_open {
             ICON_CARET_UP
@@ -8661,14 +8677,13 @@ impl App {
         };
         action(
             row![
-                text("View").size(theme::TEXT_SM).wrapping(NO_WRAP),
-                icon(caret, 10.0),
+                text("View").wrapping(NO_WRAP),
+                icon(caret, theme::TEXT_XS),
             ]
-            .spacing(5)
+            .spacing(theme::SPACE_XS)
             .align_y(iced::Alignment::Center),
         )
         .on_press(Message::ToggleViewMenu)
-        .padding([5, 10])
         .style(if self.view_menu_open {
             pill_button_toggled
         } else {
@@ -10192,7 +10207,7 @@ impl App {
                 .align_y(iced::Alignment::Start)
                 .padding(iced::Padding {
                     top: VIEW_MENU_TOP,
-                    right: VIEW_MENU_INSET,
+                    right: view_menu_inset(),
                     bottom: 0.0,
                     left: 0.0,
                 })
