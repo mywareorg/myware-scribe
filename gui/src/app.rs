@@ -11325,21 +11325,10 @@ impl canvas::Program<Message> for Timeline {
                     turn.color,
                 );
             }
-            // The playhead is two stacked fills: the foot across the speaker
-            // band, then the line itself. No halo — a translucent band behind a
-            // mark that moves in 100 ms steps reads as a shimmer rather than as
-            // travel, because its edge shifts shade every time it crosses a bar.
+            // The playhead is the line alone. A halo shimmered and a wider foot
+            // over the speaker band read as a block dropped into it; a solid
+            // 2 px line keeps one colour and one width from top to bottom.
             let x = self.x_of((self.playhead / self.duration).clamp(0.0, 1.0), width);
-            // The foot thickens the line across the speaker band, where the
-            // saturated turn colours are the hardest thing to find it against.
-            // 5 px is the most it can take without covering a noticeable slice
-            // of the band it is marking.
-            frame.fill_rectangle(
-                Point::new((x - 2.5).max(0.0), band_y),
-                Size::new(5.0, band_height),
-                self.playhead_color,
-            );
-            // The line last, so its colour and width are exactly what they were.
             frame.fill_rectangle(
                 Point::new((x - 1.0).max(0.0), 0.0),
                 Size::new(2.0, height),
