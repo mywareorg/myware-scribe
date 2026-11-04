@@ -11325,24 +11325,15 @@ impl canvas::Program<Message> for Timeline {
                     turn.color,
                 );
             }
-            // The playhead is three stacked fills, in this order: a soft halo,
-            // the foot across the speaker band, then the line itself.
+            // The playhead is two stacked fills: the foot across the speaker
+            // band, then the line itself. No halo — a translucent band behind a
+            // mark that moves in 100 ms steps reads as a shimmer rather than as
+            // travel, because its edge shifts shade every time it crosses a bar.
             let x = self.x_of((self.playhead / self.duration).clamp(0.0, 1.0), width);
-            // The halo is the ink at 22%, so it darkens the waveform in the
-            // light palette and lifts it in the dark one. Without it a dense run
-            // of bars swallows the line's edges.
-            frame.fill_rectangle(
-                Point::new((x - 3.0).max(0.0), 0.0),
-                Size::new(6.0, height),
-                Color {
-                    a: 0.22,
-                    ..self.playhead_color
-                },
-            );
             // The foot thickens the line across the speaker band, where the
             // saturated turn colours are the hardest thing to find it against.
-            // 5 px keeps the solid core inside the 6 px halo, so the indicator
-            // has one silhouette from top to bottom.
+            // 5 px is the most it can take without covering a noticeable slice
+            // of the band it is marking.
             frame.fill_rectangle(
                 Point::new((x - 2.5).max(0.0), band_y),
                 Size::new(5.0, band_height),
@@ -12185,18 +12176,9 @@ impl canvas::Program<Message> for DeckWaveform {
             );
         }
 
-        // The same halo as the live timeline, and no foot: this preview has no
-        // speaker band to thicken across. No cap either — the stub that used to
-        // sit on top only read as a stray horizontal line over the first bar.
+        // No halo and no cap: the preview is static, so a translucent band or a
+        // stub at the top only reads as a smudge and a stray horizontal line.
         let x = (width * 0.42).clamp(0.0, (width - 2.0).max(0.0));
-        frame.fill_rectangle(
-            Point::new((x - 3.0).max(0.0), 0.0),
-            Size::new(6.0, height),
-            Color {
-                a: 0.22,
-                ..self.playhead
-            },
-        );
         frame.fill_rectangle(Point::new(x, 0.0), Size::new(2.0, height), self.playhead);
 
         vec![frame.into_geometry()]
