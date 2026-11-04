@@ -26,8 +26,9 @@ pub const RADIUS_LG: f32 = 16.0;
 
 /// Height of a compact control-row button. The Find row, the line editor panel
 /// and the bubble row's exchange button share it, so stacked rows do not read as
-/// different widget families.
-pub const CONTROL_HEIGHT: f32 = 28.0;
+/// different widget families. Small enough for the editor panel, still a
+/// comfortable click target.
+pub const CONTROL_HEIGHT: f32 = 24.0;
 
 /// Type scale.
 pub const TEXT_XS: f32 = 12.0;

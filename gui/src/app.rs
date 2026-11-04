@@ -87,9 +87,19 @@ const LINE_EDIT_PAD_X: f32 = 8.0;
 
 /// Height of the line-editor panel, reserved below the transcript at all times
 /// so opening and closing the editor never resizes the pane (which would move
-/// the row under the pointer while the caret is being placed). The panel itself
-/// is this height less the gap to the Find row.
-const LINE_EDIT_PANEL_SLOT: f32 = 46.0;
+/// the row under the pointer while the caret is being placed). The panel's own
+/// box is shorter; the difference is the gap to the Find row.
+const LINE_EDIT_PANEL_SLOT: f32 = 36.0;
+
+/// Height of the panel's box: one control row (24 px) plus 3 px of padding and
+/// a 1 px border either side. Kept within a few pixels of a one-line field, so
+/// the field and the controls under it read as one block.
+const LINE_EDIT_PANEL_HEIGHT: f32 = 32.0;
+
+/// Gap between the panel's controls, and between the two groups inside it
+/// (which line and speaker, then the edits and the commit pair).
+const LINE_EDIT_GAP: f32 = 4.0;
+const LINE_EDIT_GROUP_GAP: f32 = 8.0;
 
 /// Widest the panel's speaker picker may grow, and how many characters of a
 /// speaker name it shows. The picker sits in a row with nine other controls: it
@@ -7489,7 +7499,7 @@ impl App {
                     weight: font::Weight::Bold,
                     ..Font::DEFAULT
                 })
-                .padding([4, 6])
+                .padding([3, 5])
                 .width(Length::Shrink)
                 .on_open(Message::LineEditSpeakerMenu(true))
                 .on_close(Message::LineEditSpeakerMenu(false)),
@@ -7509,24 +7519,17 @@ impl App {
                     .color(scheme.muted)
                     .wrapping(NO_WRAP),
             )
-            .padding([4, 6])
+            .padding([3, 5])
             .into()
         };
 
         // Which line this is, not just "a line": join and split move the indices
-        // around, and a tall field can push the row itself out of sight.
+        // around, and a tall field can push the row itself out of sight. The
+        // time of the line is already in the field's own gutter, so the label
+        // stays as short as the compact row needs it.
         let mut label = format!("Line {} of {}", index + 1, total.max(1));
         if blank {
             label.push_str(" \u{00b7} no text");
-        } else if self.pane_width() >= 700.0 {
-            if let Some(stamp) = self
-                .edit_lines()
-                .get(index)
-                .and_then(|line| line.start)
-                .map(|seconds| format_timestamp(seconds as f64))
-            {
-                label.push_str(&format!(" \u{00b7} {stamp}"));
-            }
         }
         let label = if allowed {
             text(label)
@@ -7546,97 +7549,116 @@ impl App {
         let undo = allowed && self.line_undo_available();
         let redo = allowed && self.line_redo_available();
 
-        let button = |code: char, enabled: bool, message: Message| {
-            action(icon_colored(
-                code,
-                14.0,
-                if enabled { scheme.ink } else { scheme.muted },
-            ))
-            .padding([4, 6])
-            .height(Length::Fixed(theme::CONTROL_HEIGHT))
-            .style(panel_icon_button(scheme, enabled))
-            .on_press_maybe(enabled.then_some(message))
+        // 14 px glyph in a 24 px pill. The deletion is tinted like the danger
+        // it is: with the row compacted it sits mid-cluster, so its colour is
+        // what keeps it from reading as one more neutral edit.
+        let button = |code: char, enabled: bool, danger: bool, message: Message| {
+            let ink = if !enabled {
+                scheme.muted
+            } else if danger {
+                scheme.danger
+            } else {
+                scheme.ink
+            };
+            action(icon_colored(code, 14.0, ink))
+                .padding([3, 5])
+                .height(Length::Fixed(theme::CONTROL_HEIGHT))
+                .style(panel_icon_button(scheme, enabled))
+                .on_press_maybe(enabled.then_some(message))
         };
+        // One hairline, only where the structural edits stop and the commit
+        // pair begins.
         let divider = || {
-            container(horizontal_space())
-                .width(Length::Fixed(1.0))
-                .height(Length::Fixed(18.0))
-                .style(move |_theme| container::Style {
-                    background: Some(scheme.border.into()),
-                    ..container::Style::default()
-                })
+            container(
+                container(horizontal_space())
+                    .width(Length::Fixed(1.0))
+                    .height(Length::Fixed(16.0))
+                    .style(move |_theme| container::Style {
+                        background: Some(scheme.border.into()),
+                        ..container::Style::default()
+                    }),
+            )
+            .padding([0, theme::SPACE_2XS as u16])
         };
 
         // Cancel stays live whatever the state: it is the way out of a row the
         // panel can no longer write to.
         let cancel = action(icon_colored(ICON_X, 14.0, scheme.ink))
             .on_press(Message::CancelLineEdit)
-            .padding([4, 6])
+            .padding([3, 5])
             .height(Length::Fixed(theme::CONTROL_HEIGHT))
             .style(pill_button_secondary);
         let done = action(
-            row![icon(ICON_CHECK, 13.0), text("Done").wrapping(NO_WRAP)]
-                .spacing(4)
-                .align_y(iced::Alignment::Center),
+            row![
+                icon(ICON_CHECK, 12.0),
+                text("Done").size(theme::TEXT_SM).wrapping(NO_WRAP)
+            ]
+            .spacing(3)
+            .align_y(iced::Alignment::Center),
         )
         .on_press_maybe(allowed.then_some(Message::DoneLineEdit))
-        .padding([4, 10])
+        .padding([3, 8])
         .height(Length::Fixed(theme::CONTROL_HEIGHT))
         .style(color_button(scheme.blue, scheme.on_accent));
 
-        let controls = row![
-            label,
-            picker,
-            horizontal_space(),
+        // One left-aligned cluster, two small groups inside it: what is being
+        // edited, then the edits and the way out. No elastic spacer, so the
+        // controls do not drift apart in a wide window.
+        let identity = row![label, picker]
+            .spacing(LINE_EDIT_GAP)
+            .align_y(iced::Alignment::Center);
+        let editing = row![
             text("Join")
                 .size(theme::TEXT_XS)
                 .wrapping(NO_WRAP)
                 .color(scheme.muted),
             self.tip(
-                button(ICON_JOIN_PREV, can_join_prev, Message::MergePrevLine),
+                button(ICON_JOIN_PREV, can_join_prev, false, Message::MergePrevLine),
                 "Join with the line above (Alt+Up)",
                 &scheme,
             ),
             self.tip(
-                button(ICON_JOIN_NEXT, can_join_next, Message::MergeNextLine),
+                button(ICON_JOIN_NEXT, can_join_next, false, Message::MergeNextLine),
                 "Join with the line below (Alt+Down)",
                 &scheme,
             ),
             self.tip(
-                button(ICON_SPLIT, can_split, Message::SplitLineAtCursor),
+                button(ICON_SPLIT, can_split, false, Message::SplitLineAtCursor),
                 "Split at the cursor (Ctrl+Shift+K)",
                 &scheme,
             ),
-            divider(),
             self.tip(
-                button(ICON_TRASH, allowed, Message::DeleteLineEdit),
+                button(ICON_TRASH, allowed, true, Message::DeleteLineEdit),
                 "Delete this line",
                 &scheme,
             ),
             self.tip(
-                button(ICON_UNDO, undo, Message::UndoLineEdit),
+                button(ICON_UNDO, undo, false, Message::UndoLineEdit),
                 "Undo the last line edit (Ctrl+Z inside the field undoes typing)",
                 &scheme,
             ),
             self.tip(
-                button(ICON_REDO, redo, Message::RedoLineEdit),
+                button(ICON_REDO, redo, false, Message::RedoLineEdit),
                 "Redo the last line edit",
                 &scheme,
             ),
-            horizontal_space(),
             divider(),
             self.tip(cancel, "Cancel (Esc) and keep the line as it was", &scheme),
             self.tip(done, "Save this line (Enter)", &scheme),
         ]
-        .spacing(theme::SPACE_SM)
-        .align_y(iced::Alignment::Center)
-        .width(Length::Fill);
+        .spacing(LINE_EDIT_GAP)
+        .align_y(iced::Alignment::Center);
+
+        let controls = row![identity, editing]
+            .spacing(LINE_EDIT_GROUP_GAP)
+            .align_y(iced::Alignment::Center)
+            .width(Length::Fill);
 
         Some(
             container(controls)
                 .width(Length::Fill)
-                .height(Length::Fixed(LINE_EDIT_PANEL_SLOT - theme::SPACE_MD))
-                .padding([theme::SPACE_XS, theme::SPACE_MD])
+                .height(Length::Fixed(LINE_EDIT_PANEL_HEIGHT))
+                .padding([3, theme::SPACE_SM as u16])
                 .align_y(iced::Alignment::Center)
                 .style(move |_theme| container::Style {
                     background: Some(scheme.panel_bg.into()),
