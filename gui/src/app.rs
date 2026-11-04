@@ -10636,12 +10636,14 @@ impl App {
                 .wrapping(NO_WRAP),
             horizontal_space(),
             self.tip(
-                // The same icon-only secondary button the queue's Clear uses:
-                // a 16 px glyph in the button's own padding, so the two cards'
-                // controls are one height and one shape.
+                // The triangle alone: no fill, no border, no shadow, and the
+                // app's `subtle_icon_button` only washes it when the pointer is
+                // on it, so the title row reads as a heading with a caret
+                // rather than as a heading beside a button.
                 action(icon(collapse, 16.0))
                     .on_press(Message::TogglePlayerCollapsed)
-                    .style(pill_button_secondary),
+                    .padding([4, 4])
+                    .style(subtle_icon_button),
                 if self.player_collapsed {
                     "Show the waveform"
                 } else {
