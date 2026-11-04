@@ -875,7 +875,7 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
     let whisper = models::whisper_model(&opts.preset);
     // The salt carries the turn geometry as well as the model pair: a cached
     // single pass must not be served to a blockwise run.
-    let diarizer = format!("{}-{}", models::diarizer_id(), diarize::geometry_id());
+    let diarizer = diarize::cache_salt();
     let diarized = opts.mode.diarizes();
 
     emit(Event::Stage {

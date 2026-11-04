@@ -94,7 +94,8 @@ pub type CompletedDetails = (Option<Vec<Turn>>, Option<(f64, Vec<f32>)>);
 /// turns under both keys for that reason (see `cache_keys` in
 /// `core/src/pipeline.rs`).
 pub fn load_turns(path: &Path, num_speakers: Option<i32>) -> Option<Vec<Turn>> {
-    let diarizer = hippo_transcribe_core::models::diarizer_id();
+    // Same salt the pipeline writes with: model pair *and* turn geometry.
+    let diarizer = hippo_transcribe_core::diarize::cache_salt();
     hippo_transcribe_core::cache::key(path, &diarizer, num_speakers)
         .and_then(|key| hippo_transcribe_core::cache::read(&key))
 }

@@ -315,6 +315,14 @@ fn block_overlap_seconds() -> f32 {
     .min(block_seconds() / 2.0)
 }
 
+/// Salt for the diarization cache: the model pair plus the turn geometry, so a
+/// cached single pass cannot be served to a blockwise run. Both the pipeline and
+/// the GUI's queue restore have to build the key from this, or a restored item
+/// silently loses its speakers.
+pub fn cache_salt() -> String {
+    format!("{}-{}", crate::models::diarizer_id(), geometry_id())
+}
+
 /// Identifier for the shipped turn geometry, folded into the cache key so a
 /// cached single pass cannot be served to a blockwise run.
 pub fn geometry_id() -> String {
