@@ -27,6 +27,18 @@ type SessionPtr = *const c_void;
 #[cfg(not(windows))]
 type SessionPtr = *const ffi::SherpaOnnxOfflineSpeakerDiarization;
 
+/// Opaque speaker-embedding-extractor handle, normalised the same way.
+#[cfg(windows)]
+type EmbedderPtr = *const c_void;
+#[cfg(not(windows))]
+type EmbedderPtr = *const ffi::SherpaOnnxSpeakerEmbeddingExtractor;
+
+/// Opaque online stream used to feed samples to the extractor.
+#[cfg(windows)]
+type StreamPtr = *const c_void;
+#[cfg(not(windows))]
+type StreamPtr = *const ffi::SherpaOnnxOnlineStream;
+
 /// Progress is stored as a fraction scaled by this constant.
 const PROGRESS_SCALE: f32 = 1_000_000.0;
 
@@ -234,6 +246,470 @@ impl Diarizer {
     }
 }
 
+// ---------------------------------------------------------------- embeddings
+
+/// Speaker-embedding extractor, loaded once and reused across windows.
+///
+/// Sherpa's diarizer computes embeddings internally but never exposes them, and
+/// the block/cluster work needs the vectors themselves: to compare a turn
+/// against a centroid, or to notice that one long turn is really two speakers.
+pub struct Embedder {
+    handle: EmbedderPtr,
+    dim: usize,
+    // The C strings must outlive the config the handle was built from.
+    _model: CString,
+    _provider: CString,
+}
+
+// Like the diarizer, the extractor is only driven from one thread at a time.
+unsafe impl Send for Embedder {}
+unsafe impl Sync for Embedder {}
+
+impl Drop for Embedder {
+    fn drop(&mut self) {
+        unsafe { ffi::SherpaOnnxDestroySpeakerEmbeddingExtractor(self.handle) };
+    }
+}
+
+impl Embedder {
+    /// Build an extractor for `model`. `threads` defaults to the diarization
+    /// thread budget, since the two never run at the same moment.
+    pub fn new(model: &Path, threads: Option<i32>) -> Result<Self, String> {
+        #[cfg(windows)]
+        ffi::ensure_loaded()?;
+
+        let threads = threads
+            .filter(|threads| *threads > 0)
+            .unwrap_or_else(diarize_threads);
+        let model = CString::new(model.to_string_lossy().as_bytes())
+            .map_err(|e| format!("embedding path: {e}"))?;
+        let provider = CString::new("cpu").unwrap();
+        let config = ffi::SherpaOnnxSpeakerEmbeddingExtractorConfig {
+            model: model.as_ptr(),
+            num_threads: threads,
+            debug: 0,
+            provider: provider.as_ptr(),
+        };
+        let handle: EmbedderPtr = unsafe { ffi::SherpaOnnxCreateSpeakerEmbeddingExtractor(&config) };
+        if handle.is_null() {
+            return Err("failed to initialize speaker embedding extractor".to_string());
+        }
+        let dim = unsafe { ffi::SherpaOnnxSpeakerEmbeddingExtractorDim(handle) };
+        if dim <= 0 {
+            unsafe { ffi::SherpaOnnxDestroySpeakerEmbeddingExtractor(handle) };
+            return Err("speaker embedding extractor reported no dimensions".to_string());
+        }
+        Ok(Self {
+            handle,
+            dim: dim as usize,
+            _model: model,
+            _provider: provider,
+        })
+    }
+
+    pub fn dim(&self) -> usize {
+        self.dim
+    }
+
+    /// One L2-normalised embedding for `samples` (16 kHz mono).
+    pub fn embed(&self, samples: &[f32]) -> Result<Vec<f32>, String> {
+        if samples.len() < SAMPLE_RATE / 4 {
+            // Under ~250 ms there is not enough signal for a stable vector.
+            return Err("sample too short for an embedding".to_string());
+        }
+        unsafe {
+            let stream: StreamPtr = ffi::SherpaOnnxSpeakerEmbeddingExtractorCreateStream(self.handle);
+            if stream.is_null() {
+                return Err("failed to create embedding stream".to_string());
+            }
+            ffi::SherpaOnnxOnlineStreamAcceptWaveform(
+                stream,
+                SAMPLE_RATE as i32,
+                samples.as_ptr(),
+                samples.len() as i32,
+            );
+            ffi::SherpaOnnxOnlineStreamInputFinished(stream);
+            if ffi::SherpaOnnxSpeakerEmbeddingExtractorIsReady(self.handle, stream) == 0 {
+                ffi::SherpaOnnxDestroyOnlineStream(stream);
+                return Err("embedding stream was not ready".to_string());
+            }
+            let data = ffi::SherpaOnnxSpeakerEmbeddingExtractorComputeEmbedding(self.handle, stream);
+            if data.is_null() {
+                ffi::SherpaOnnxDestroyOnlineStream(stream);
+                return Err("embedding computation failed".to_string());
+            }
+            let mut vector = std::slice::from_raw_parts(data, self.dim).to_vec();
+            ffi::SherpaOnnxSpeakerEmbeddingExtractorDestroyEmbedding(data);
+            ffi::SherpaOnnxDestroyOnlineStream(stream);
+            normalize(&mut vector);
+            Ok(vector)
+        }
+    }
+}
+
+/// Scale a vector to unit length in place. Cosine similarity then equals a dot
+/// product, which is all the centroid code needs.
+fn normalize(vector: &mut [f32]) {
+    let norm = vector.iter().map(|v| v * v).sum::<f32>().sqrt();
+    if norm > f32::EPSILON {
+        for value in vector.iter_mut() {
+            *value /= norm;
+        }
+    }
+}
+
+// ------------------------------------------------------- drift-based splitting
+
+/// A turn longer than this may really hold two speakers: the clustering put
+/// them together and the segmentation never broke the span.
+const SPLIT_MIN_TURN_S: f32 = 15.0;
+/// Window length and hop used to sample a long turn for embeddings.
+const SPLIT_WINDOW_S: f32 = 1.5;
+const SPLIT_HOP_S: f32 = 0.75;
+/// Reject a split whose halves are shorter than this, or too similar to be two
+/// voices. Same-speaker windows typically sit above 0.85 cosine.
+const SPLIT_MIN_PART_S: f32 = 2.0;
+const SPLIT_MAX_CENTROID_SIM: f32 = 0.80;
+/// Runs of windows shorter than this are smoothed into their neighbours.
+const SPLIT_MIN_RUN_S: f32 = 1.5;
+/// How many turns per label are sampled to build the label centroids.
+const CENTROID_SAMPLES: usize = 6;
+
+/// Off by default until it is measured on the eval set.
+pub fn split_enabled() -> bool {
+    crate::env_compat(
+        "HIPPO_TRANSCRIBE_DIARIZE_SPLIT",
+        "TRANSIEL_DIARIZE_SPLIT",
+    )
+    .map(|value| {
+        let value = value.trim().to_ascii_lowercase();
+        value == "1" || value == "true" || value == "yes"
+    })
+    .unwrap_or(false)
+}
+
+/// Split turns that the clustering collapsed onto one speaker, using embedding
+/// drift inside the turn.
+///
+/// A whole-file pass can put two voices in one cluster; when that happens the
+/// turn is long and its windows point at two different centroids. The existing
+/// label centroids decide which half is which speaker, so the split cannot
+/// invent a third identity.
+pub fn split_long_turns(
+    turns: Vec<Turn>,
+    samples: &[f32],
+    embedder: &Embedder,
+) -> Vec<Turn> {
+    split_with(turns, |start, end| embed_span(samples, embedder, start, end))
+}
+
+/// The splitter, with the embedding step injected so the segmentation logic can
+/// be tested without a model.
+fn split_with<F>(turns: Vec<Turn>, embed: F) -> Vec<Turn>
+where
+    F: Fn(f32, f32) -> Option<Vec<f32>>,
+{
+    let labels: Vec<String> = {
+        let mut seen: Vec<String> = Vec::new();
+        for turn in &turns {
+            if !seen.contains(&turn.speaker) {
+                seen.push(turn.speaker.clone());
+            }
+        }
+        seen
+    };
+    if labels.len() != 2 {
+        return turns;
+    }
+    let mut out: Vec<Turn> = Vec::with_capacity(turns.len());
+    for (index, turn) in turns.iter().enumerate() {
+        let duration = turn.end - turn.start;
+        if duration < SPLIT_MIN_TURN_S {
+            out.push(turn.clone());
+            continue;
+        }
+        // The centroids must not be built from the turn under test: a collapsed
+        // turn would pull its own label towards one of the halves and make the
+        // mapping agree with itself.
+        let centroids = local_centroids(&turns, index, &labels, &embed);
+        match centroids.and_then(|centroids| {
+            split_one(turn, &embed, &labels, &centroids)
+        }) {
+            Some(parts) => out.extend(parts),
+            None => out.push(turn.clone()),
+        }
+    }
+    out
+}
+
+/// Mean embedding per speaker label, sampled from the turns of that label that
+/// lie closest to `exclude`. Near neighbours share the recording conditions of
+/// the turn under test better than a turn five minutes away.
+fn local_centroids<F>(
+    turns: &[Turn],
+    exclude: usize,
+    labels: &[String],
+    embed: &F,
+) -> Option<Vec<Vec<f32>>>
+where
+    F: Fn(f32, f32) -> Option<Vec<f32>>,
+{
+    let middle = (turns[exclude].start + turns[exclude].end) / 2.0;
+    let mut centroids = Vec::with_capacity(labels.len());
+    for label in labels {
+        let mut candidates: Vec<(f32, &Turn)> = turns
+            .iter()
+            .enumerate()
+            .filter(|(index, turn)| {
+                *index != exclude
+                    && &turn.speaker == label
+                    && turn.end - turn.start >= 0.75
+            })
+            .map(|(_, turn)| (((turn.start + turn.end) / 2.0 - middle).abs(), turn))
+            .collect();
+        candidates.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+        let mut sum: Vec<f32> = Vec::new();
+        let mut count = 0usize;
+        for (_, turn) in candidates.into_iter().take(CENTROID_SAMPLES * 2) {
+            let centre = (turn.start + turn.end) / 2.0;
+            let half = (turn.end - turn.start).min(SPLIT_WINDOW_S) / 2.0;
+            if let Some(vector) = embed(centre - half, centre + half) {
+                if sum.is_empty() {
+                    sum = vec![0.0f32; vector.len()];
+                }
+                for (slot, value) in sum.iter_mut().zip(vector) {
+                    *slot += value;
+                }
+                count += 1;
+            }
+        }
+        if count == 0 || sum.is_empty() {
+            return None;
+        }
+        normalize(&mut sum);
+        centroids.push(sum);
+    }
+    Some(centroids)
+}
+
+fn embed_span(
+    samples: &[f32],
+    embedder: &Embedder,
+    start: f32,
+    end: f32,
+) -> Option<Vec<f32>> {
+    let first = (start.max(0.0) * SAMPLE_RATE as f32) as usize;
+    let last = ((end * SAMPLE_RATE as f32) as usize).min(samples.len());
+    if last <= first {
+        return None;
+    }
+    embedder.embed(&samples[first..last]).ok()
+}
+
+fn trace() -> bool {
+    crate::env_compat("HIPPO_TRANSCRIBE_DIARIZE_TRACE", "TRANSIEL_DIARIZE_TRACE").is_some()
+}
+
+fn cosine(a: &[f32], b: &[f32]) -> f32 {
+    a.iter().zip(b).map(|(x, y)| x * y).sum()
+}
+
+/// Two-means over unit vectors, seeded with the most distant pair.
+fn two_means(vectors: &[Vec<f32>]) -> Option<([usize; 2], Vec<usize>)> {
+    if vectors.len() < 4 {
+        return None;
+    }
+    let mut seed = [0usize, 1usize];
+    let mut worst = f32::INFINITY;
+    for i in 0..vectors.len() {
+        for j in (i + 1)..vectors.len() {
+            let similarity = cosine(&vectors[i], &vectors[j]);
+            if similarity < worst {
+                worst = similarity;
+                seed = [i, j];
+            }
+        }
+    }
+    let mut centroids = [vectors[seed[0]].clone(), vectors[seed[1]].clone()];
+    let mut assignment = vec![0usize; vectors.len()];
+    for _ in 0..8 {
+        let mut changed = false;
+        for (index, vector) in vectors.iter().enumerate() {
+            let side = if cosine(vector, &centroids[1]) > cosine(vector, &centroids[0]) {
+                1
+            } else {
+                0
+            };
+            if assignment[index] != side {
+                assignment[index] = side;
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+        for side in 0..2 {
+            let mut sum = vec![0.0f32; centroids[side].len()];
+            let mut count = 0usize;
+            for (index, vector) in vectors.iter().enumerate() {
+                if assignment[index] == side {
+                    for (slot, value) in sum.iter_mut().zip(vector) {
+                        *slot += value;
+                    }
+                    count += 1;
+                }
+            }
+            if count == 0 {
+                return None;
+            }
+            normalize(&mut sum);
+            centroids[side] = sum;
+        }
+    }
+    Some(([seed[0], seed[1]], assignment))
+}
+
+fn split_one<F>(
+    turn: &Turn,
+    embed: &F,
+    labels: &[String],
+    centroids: &[Vec<f32>],
+) -> Option<Vec<Turn>>
+where
+    F: Fn(f32, f32) -> Option<Vec<f32>>,
+{
+    let mut starts: Vec<f32> = Vec::new();
+    let mut vectors: Vec<Vec<f32>> = Vec::new();
+    let mut start = turn.start;
+    while start + SPLIT_WINDOW_S <= turn.end {
+        if let Some(vector) = embed(start, start + SPLIT_WINDOW_S) {
+            starts.push(start);
+            vectors.push(vector);
+        }
+        start += SPLIT_HOP_S;
+    }
+    if vectors.len() < 8 {
+        return None;
+    }
+    let (_, mut assignment) = two_means(&vectors)?;
+
+    // The two halves have to be distinguishable; a single voice drifts too.
+    let dim = vectors[0].len();
+    let mut means = [vec![0.0f32; dim], vec![0.0f32; dim]];
+    let mut counts = [0usize; 2];
+    for (index, vector) in vectors.iter().enumerate() {
+        let side = assignment[index];
+        for (slot, value) in means[side].iter_mut().zip(vector) {
+            *slot += value;
+        }
+        counts[side] += 1;
+    }
+    if counts[0] == 0 || counts[1] == 0 {
+        return None;
+    }
+    for side in 0..2 {
+        normalize(&mut means[side]);
+    }
+    let separation = cosine(&means[0], &means[1]);
+    if trace() {
+        eprintln!(
+            "split: turn {:.1}-{:.1}s windows {} separation {:.3} parts {} {}",
+            turn.start,
+            turn.end,
+            vectors.len(),
+            separation,
+            counts[0],
+            counts[1]
+        );
+    }
+    if separation > SPLIT_MAX_CENTROID_SIM {
+        return None;
+    }
+
+    // Smooth short runs so a pause or a breath does not create a speaker turn.
+    let min_run = (SPLIT_MIN_RUN_S / SPLIT_HOP_S).ceil() as usize;
+    let mut index = 0usize;
+    while index < assignment.len() {
+        let mut end = index;
+        while end + 1 < assignment.len() && assignment[end + 1] == assignment[index] {
+            end += 1;
+        }
+        if end - index + 1 < min_run && index > 0 && end + 1 < assignment.len() {
+            let neighbour = assignment[index - 1];
+            for slot in assignment.iter_mut().take(end + 1).skip(index) {
+                *slot = neighbour;
+            }
+        }
+        index = end + 1;
+    }
+
+    // Which global speaker is which half.
+    let mut side_label = [0usize; 2];
+    for side in 0..2 {
+        let mut best = (usize::MAX, f32::NEG_INFINITY);
+        for (label_index, centroid) in centroids.iter().enumerate() {
+            let similarity = cosine(&means[side], centroid);
+            if similarity > best.1 {
+                best = (label_index, similarity);
+            }
+        }
+        side_label[side] = best.0;
+    }
+    if trace() {
+        let sims: Vec<[f32; 2]> = (0..2)
+            .map(|side| {
+                let mut row = [0.0f32; 2];
+                for label in 0..centroids.len().min(2) {
+                    row[label] = cosine(&means[side], &centroids[label]);
+                }
+                row
+            })
+            .collect();
+        eprintln!(
+            "split: sides map to {:?} (labels {:?}) similarities {:?}",
+            side_label, labels, sims
+        );
+    }
+    if side_label[0] == side_label[1] {
+        return None;
+    }
+
+    let mut parts: Vec<Turn> = Vec::new();
+    let mut run_start = 0usize;
+    for index in 1..=assignment.len() {
+        let boundary = index == assignment.len()
+            || assignment[index] != assignment[run_start];
+        if !boundary {
+            continue;
+        }
+        let from = starts[run_start];
+        let to = if index < starts.len() {
+            starts[index]
+        } else {
+            turn.end
+        };
+        let label = labels[side_label[assignment[run_start]]].clone();
+        match parts.last_mut() {
+            Some(last) if last.speaker == label => last.end = to,
+            _ => parts.push(Turn {
+                start: from,
+                end: to,
+                speaker: label,
+            }),
+        }
+        run_start = index;
+    }
+
+    let longest = parts
+        .iter()
+        .map(|part| part.end - part.start)
+        .fold(0.0f32, f32::max);
+    if parts.len() < 2 || longest < SPLIT_MIN_PART_S {
+        return None;
+    }
+    Some(parts)
+}
+
 /// Threads a new diarization session would use, for the CLI's timing line.
 pub fn threads() -> i32 {
     diarize_threads()
@@ -254,11 +730,16 @@ pub fn diarize(
     // A block that really holds one voice is handled afterwards by
     // `merge_small_clusters`, which folds the phantom cluster away.
     let session = Diarizer::new(segmentation, embedding, num_speakers, threshold)?;
-    if blocks_enabled() {
-        run_blockwise(&session, samples, num_speakers, None)
+    let turns = if blocks_enabled() {
+        run_blockwise(&session, samples, num_speakers, None)?
     } else {
-        session.run_with_progress(samples, None)
+        session.run_with_progress(samples, None)?
+    };
+    if split_enabled() {
+        let embedder = Embedder::new(embedding, None)?;
+        return Ok(split_long_turns(turns, samples, &embedder));
     }
+    Ok(turns)
 }
 
 // ------------------------------------------------------------------ blocks
@@ -684,6 +1165,78 @@ mod tests {
             end,
             speaker: speaker.to_string(),
         }
+    }
+
+    #[test]
+    fn normalize_scales_to_unit_length() {
+        let mut vector = vec![3.0f32, 4.0];
+        normalize(&mut vector);
+        assert!((vector[0] - 0.6).abs() < 1e-6);
+        assert!((vector[1] - 0.8).abs() < 1e-6);
+
+        let mut zero = vec![0.0f32; 4];
+        normalize(&mut zero);
+        assert_eq!(zero, vec![0.0f32; 4]);
+    }
+
+    #[test]
+    fn a_collapsed_turn_is_split_by_embedding_drift() {
+        let turns = vec![turn(0.0, 40.0, "A"), turn(50.0, 56.0, "B")];
+        // First 20 s point one way, the rest the other; the B turn agrees with
+        // the second half.
+        let split = split_with(turns, |start, _end| {
+            Some(if start < 20.0 {
+                vec![1.0, 0.0]
+            } else {
+                vec![0.0, 1.0]
+            })
+        });
+        assert_eq!(split.len(), 3, "{split:?}");
+        assert_eq!(split[0].speaker, "A");
+        assert_eq!(split[1].speaker, "B");
+        assert!((split[0].end - 20.0).abs() <= 1.5, "{:?}", split[0]);
+        assert!((split[1].end - 40.0).abs() <= 0.1, "{:?}", split[1]);
+    }
+
+    #[test]
+    fn a_long_single_voice_turn_is_left_alone() {
+        let turns = vec![turn(0.0, 40.0, "A"), turn(50.0, 56.0, "B")];
+        let unchanged = split_with(turns.clone(), |_start, _end| Some(vec![1.0, 0.0]));
+        assert_eq!(unchanged.len(), turns.len());
+        for (kept, original) in unchanged.iter().zip(&turns) {
+            assert_eq!(kept.speaker, original.speaker);
+            assert!((kept.start - original.start).abs() < 1e-6);
+            assert!((kept.end - original.end).abs() < 1e-6);
+        }
+    }
+
+    /// Loads the real model when it is installed. Two different speakers must
+    /// land closer to their own embedding than to each other's, which is the
+    /// assumption every downstream centroid comparison rests on.
+    #[test]
+    fn embeddings_of_different_files_are_not_identical() {
+        let model = crate::models::embedding_model();
+        if !model.is_file() {
+            return;
+        }
+        let Ok(embedder) = Embedder::new(&model, Some(1)) else {
+            return;
+        };
+        assert!(embedder.dim() > 0);
+        let tone = |hz: f32| -> Vec<f32> {
+            (0..SAMPLE_RATE * 2)
+                .map(|i| {
+                    let t = i as f32 / SAMPLE_RATE as f32;
+                    (t * hz * std::f32::consts::TAU).sin() * 0.2
+                })
+                .collect()
+        };
+        let a = embedder.embed(&tone(180.0)).expect("embedding");
+        let b = embedder.embed(&tone(320.0)).expect("embedding");
+        assert_eq!(a.len(), embedder.dim());
+        let norm = a.iter().map(|v| v * v).sum::<f32>().sqrt();
+        assert!((norm - 1.0).abs() < 1e-3, "not normalised: {norm}");
+        assert!(a != b, "different input produced an identical vector");
     }
 
     #[test]

@@ -25,6 +25,11 @@ Subcommands
         `--ref-range START END` scores only a window of the reference and
         `--hyp-offset S` shifts a clip's turns onto the reference timeline.
 
+    report --ref-dir <dir> --hyp-dir <dir> [--collars 0.25 1.0]
+        Score every recorded baseline against its reference and tabulate: DER at
+        each collar, confusion seconds, worst one-directional absorption, short
+        turn recall, and the worst block. One row per file; do not average.
+
     speakers <turns.tsv> [--expect N]
         Count distinct speaker labels, and fail when the count is unexpected --
         the phantom-speaker check for a known single-speaker file.
@@ -55,6 +60,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 FRAME = 0.01  # 10 ms resolution, the usual granularity for DER
+# Blocks below this much reference speech are slivers and are not reported as
+# the worst block.
+MIN_REPORT_BLOCK_S = 5.0
 
 
 TRANSCRIPT_LINE = re.compile(
@@ -551,14 +559,137 @@ def cmd_record(args: argparse.Namespace) -> int:
 
 def cmd_speakers(args: argparse.Namespace) -> int:
     turns = read_tsv(Path(args.tsv))
+    if args.range:
+        turns = restrict(turns, args.range[0], args.range[1])
     names = sorted({turn.speaker for turn in turns})
     print(f"{len(names)} speaker(s): {', '.join(names) if names else '(none)'}")
+
+    # A single-speaker stretch can still attract a phantom label for a few
+    # seconds. Share of speech, not label count, is what decides the check.
+    seconds: dict[str, float] = {}
+    for turn in turns:
+        seconds[turn.speaker] = seconds.get(turn.speaker, 0.0) + turn.duration
+    total = sum(seconds.values())
+    shares = sorted(seconds.items(), key=lambda item: item[1], reverse=True)
+    for name, value in shares:
+        share = value / total if total else 0.0
+        print(f"  {name}: {value:7.2f}s  ({share:6.1%})")
+
+    failed = False
     if args.expect is not None and len(names) != args.expect:
         print(
             f"expected {args.expect} speaker(s), found {len(names)}",
             file=sys.stderr,
         )
-        return 1
+        failed = True
+    if args.dominant is not None:
+        top = (shares[0][1] / total) if total else 0.0
+        if top < args.dominant:
+            print(
+                f"dominant speaker covers {top:.1%}, expected at least "
+                f"{args.dominant:.1%}",
+                file=sys.stderr,
+            )
+            failed = True
+    return 1 if failed else 0
+
+
+def absorption_seconds(result: Score) -> float:
+    """Largest amount of one reference speaker's speech given to another."""
+    worst = 0.0
+    per_ref: dict[str, float] = {}
+    for matrix in result.block_confusion.values():
+        for (ref_name, hyp_name), seconds in matrix.items():
+            if hyp_name is None or hyp_name == ref_name:
+                continue
+            per_ref[ref_name] = per_ref.get(ref_name, 0.0) + seconds
+    if per_ref:
+        worst = max(per_ref.values())
+    return worst
+
+
+def cmd_report(args: argparse.Namespace) -> int:
+    """Score every recorded baseline against its reference and tabulate it."""
+    ref_dir = Path(args.ref_dir)
+    hyp_dir = Path(args.hyp_dir)
+    rows = []
+    for ref_path in sorted(ref_dir.glob("*.rttm")):
+        hyp_path = hyp_dir / f"{ref_path.stem}.tsv"
+        if not hyp_path.exists():
+            print(f"{ref_path.stem}: missing from {hyp_dir}", file=sys.stderr)
+            continue
+        ref = read_rttm(ref_path)
+        hyp = read_tsv(hyp_path)
+        if not ref:
+            continue
+        results = [
+            (collar, score(ref, hyp, collar, args.block))
+            for collar in args.collars
+        ]
+        result = results[0][1]
+        if result.reference_seconds <= 0:
+            continue
+        # A trailing sliver of a block can hold a couple of frames and read as
+        # 100%; only blocks with real speech decide the worst case.
+        worst_block = max(
+            (
+                error / total
+                for total, error in result.per_block.values()
+                if total >= MIN_REPORT_BLOCK_S
+            ),
+            default=0.0,
+        )
+        short = (
+            f"{result.short_turns_found}/{result.short_turns}"
+            if result.short_turns
+            else "-"
+        )
+        rows.append(
+            (
+                ref_path.stem,
+                result.reference_seconds,
+                [r.der for _, r in results],
+                result.confusion_seconds,
+                absorption_seconds(result),
+                short,
+                worst_block,
+            )
+        )
+
+    if not rows:
+        print("no scorable pairs", file=sys.stderr)
+        return 2
+
+    name_width = max(len(name) for name, *_ in rows)
+    header = f"{'file'.ljust(name_width)}  {'ref s':>7}"
+    for collar in args.collars:
+        header += f"  {'DER@' + f'{collar:.2f}':>9}"
+    header += f"  {'conf s':>7}  {'absorb s':>8}  {'short':>7}  {'worst blk':>9}"
+    print(header)
+    for name, ref_seconds, ders, confusion, absorb, short, worst in rows:
+        line = f"{name.ljust(name_width)}  {ref_seconds:7.1f}"
+        for der in ders:
+            line += f"  {der:9.2%}"
+        line += f"  {confusion:7.2f}  {absorb:8.2f}  {short:>7}  {worst:9.2%}"
+        print(line)
+
+    if args.out:
+        Path(args.out).write_text(
+            "\n".join(
+                [
+                    header,
+                    *[
+                        f"{name.ljust(name_width)}  {ref_seconds:7.1f}"
+                        + "".join(f"  {der:9.2%}" for der in ders)
+                        + f"  {confusion:7.2f}  {absorb:8.2f}  {short:>7}  {worst:9.2%}"
+                        for name, ref_seconds, ders, confusion, absorb, short, worst in rows
+                    ],
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        print(f"wrote {args.out}")
     return 0
 
 
@@ -689,14 +820,38 @@ def main(argv: list[str]) -> int:
     )
     score_cmd.set_defaults(func=cmd_score)
 
+    report = sub.add_parser(
+        "report", help="score every baseline against its reference"
+    )
+    report.add_argument("--ref-dir", required=True)
+    report.add_argument("--hyp-dir", required=True)
+    report.add_argument(
+        "--collars", type=float, nargs="+", default=[0.25, 1.0]
+    )
+    report.add_argument("--block", type=float, default=300.0)
+    report.add_argument("--out")
+    report.set_defaults(func=cmd_report)
+
     speakers = sub.add_parser(
         "speakers", help="count distinct speakers in a turn map"
     )
     speakers.add_argument("tsv")
     speakers.add_argument(
+        "--range",
+        type=float,
+        nargs=2,
+        metavar=("START", "END"),
+        help="only count speakers inside this window",
+    )
+    speakers.add_argument(
         "--expect",
         type=int,
         help="exit 1 unless the turn map has exactly this many speakers",
+    )
+    speakers.add_argument(
+        "--dominant",
+        type=float,
+        help="exit 1 unless the top speaker covers at least this share (0-1)",
     )
     speakers.set_defaults(func=cmd_speakers)
 

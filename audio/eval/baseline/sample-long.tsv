@@ -1,4 +1,4 @@
-# diarize 31.34s audio 600.0s threads 8 raw 91 merged 4 dropped 9 kept 78 speaker(s) 2
+# diarize 31.18s audio 600.0s threads 8 raw 91 merged 4 dropped 9 kept 78 speaker(s) 2
 0.031	17.952	spk1
 7.169	7.658	spk0
 18.053	18.475	spk0

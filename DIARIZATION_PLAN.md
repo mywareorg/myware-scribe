@@ -7,31 +7,38 @@ without gated models, and without changing the local-only architecture.
 
 ## What the baseline actually says
 
-Measured on `audio/sample-long.mp3` (10 min, two speakers) against
-`tests/diarization/sample-long.rttm`:
+Eight hand-corrected references, debug build, balanced preset, `--num-speakers 2`
+(full table in `tests/diarization/README.md`):
 
 ```text
-DER @0.25s 13.04%   DER @1.0s 7.08%
-missed 1.08%  false alarm 4.66%  confusion 7.29%
-confusion by ref turn length: <1s 9.4%, 1-3s 27.2%, >3s 63.4%
-diarize stage 31.34s for 600s audio (0.052x realtime, 8 threads)
+file                         DER@0.25   DER@1.00   absorb s   short
+hour-conversation-short-1      53.89%     48.13%      35.03    11/20
+hour-conversation-mid-1        34.97%     26.76%      39.15    27/52
+hour-conversation-mid-2        33.45%     25.47%      43.61    25/50
+sample-full                    14.36%      6.15%      43.94   77/132
+hour-conversation-short-2      13.57%      1.82%       4.67    10/20
+sample-long                    10.62%      2.76%      10.48    40/59
+sample-end                     10.60%      3.58%       2.38    14/20
+sample-short                   10.36%      1.60%       1.26      1/6
 ```
 
-Three conclusions, each of which changed the plan:
+Four conclusions, each of which changed the plan:
 
-1. **The error is one-directional.** SPEAKER 2's speech is credited to
-   SPEAKER 1 for ~24 s across the file. That is absorption/merging, not random
-   frame noise.
-2. **It is not drift.** The two 5-minute blocks lose about the same amount
-   (10.7 s vs 13.5 s); the second block's higher DER comes from false alarm.
-3. **It is not a short-turn problem.** Only 9.4% of confusion sits inside turns
-   under 1 s; 63.4% sits inside turns over 3 s. Half the headline figure is
-   collar noise from estimated reference boundaries.
-
-A 5-minute clip cut from 300-600 s and diarized *alone* scores 12.56% / 4.86%
-(DER@0.25 / DER@1.0) and halves the absorption to 5.7 s on the same reference
-window. Local diarization is materially better on the same audio, so replacing
-the global clustering step has a measured target.
+1. **The spread is the finding.** 10% to 54% DER at identical settings. Judging
+   the diarizer on `sample-long` understated the problem fivefold.
+2. **The worst file is a genuine attribution failure, not boundary noise.**
+   `hour-conversation-short-1` stays at 48% at a 1.0 s collar: the hypothesis
+   collapses 10.4-80.0 s into one speaker while the reference alternates about
+   every 2 s. Rapid turn-taking is not tracked at all.
+3. **Absorption is the shared mechanism.** Every file loses one speaker's speech
+   to the other — 1.3 s to 44 s. `hour-conversation-short-2` is the exception
+   where it is really boundary noise (13.57% -> 1.82% at a 1.0 s collar).
+4. **The blockwise gate failed.** On the same 300-600 s window of `sample-long`,
+   the full-file pass scores 13.15% / 5.55% with 5.6 s absorption; the same audio
+   diarized as a 5-minute clip alone scores 15.89% / 8.26% with 13.7 s. Local
+   clustering with no cross-block information is *worse*. An earlier run on a
+   less-edited reference showed the opposite, which is exactly why the gate had
+   to be re-run after the references were finished.
 
 ## Target pipeline
 
@@ -76,8 +83,8 @@ Delivered:
 - `--diarize-only` now applies the pipeline's own `clean_turns` and prints a
   `#` timing line, so a baseline matches the shipped turn geometry.
 
-Open item: no single-speaker file in the repo, so the phantom-speaker assertion
-is implemented but unexercised.
+Mono check: `sample-full` holds a 2.9-minute single-speaker run at 9:31-12:22.
+Score the restricted window and assert one label; no separate recording needed.
 
 ## Phase 1 - Turn geometry (dropped)
 
@@ -97,12 +104,20 @@ neighbours. Dropped for three reasons, recorded so it is not reopened:
   no embedding extractor, so it is new FFI plus centroid code, not a tuning
   change.
 
-## Phase 2 - Decidability gate (answered)
+## Phase 2 - Decidability gate (failed, superseded)
 
-The gate was run as part of Phase 0 and passed: local diarization on a 5-minute
-slice beats the full-file pass on the same slice (see above). Phase 3 therefore
-proceeds. Keep the script in `tests/diarization/README.md` as the regression
-check for any future blockwise change.
+The gate asked whether local diarization beats the full-file pass on the same
+audio. It does not: on the 300-600 s window of `sample-long`, the full-file pass
+scores 13.15% / 5.55% with 5.6 s absorption, and the same audio diarized as an
+independent 5-minute clip scores 15.89% / 8.26% with 13.7 s. Fewer embeddings per
+cluster and no cross-block evidence lose more than the block boundary gains.
+
+So independent blocks are not the improvement. Blockwise is implemented
+(`4188378`, `69e6a1b`); it chains labels through the overlap, which is exactly
+the part that has to be replaced by cluster-mean embedding assignment. All
+acceptance is measured against the per-file table in
+`tests/diarization/README.md`, including a re-measure of the shipped 300/45
+geometry against the finished references.
 
 ## Phase 3 - Blockwise diarization, cluster-level assignment
 
@@ -144,30 +159,36 @@ Progress:
   to the previous one inside their overlap. `HIPPO_TRANSCRIBE_DIARIZE_BLOCK_S`
   and `..._BLOCK_OVERLAP_S` set the geometry; the geometry is part of the
   diarization cache salt.
-- Measured on `audio/sample-long.mp3` against `tests/diarization/sample-long.rttm`,
-  `--num-speakers 2`, debug build:
+- Re-measured on `audio/sample-long.mp3` against the finished reference
+  (`tests/diarization/sample-long.rttm`, 242 turns), `--num-speakers 2`, debug
+  build. The earlier figures in this section were taken against a less-edited
+  reference and are superseded:
 
   ```text
-  single pass            13.04% @0.25s   7.08% @1.0s   confusion 31.73s
-  blocks 300 / 25        11.45% @0.25s   4.63% @1.0s   confusion 25.07s
-  blocks 300 / 30        11.47% @0.25s   4.63% @1.0s   confusion 25.18s
-  blocks 240 / 60        13.55% @0.25s   6.80% @1.0s   confusion 34.20s
-  blocks 180 / 60        29.01% @0.25s  20.77% @1.0s   confusion 101.62s
-  blocks 300 / 45        23.43% @0.25s  19.15% @1.0s   confusion  77.36s
+  single pass            10.62% @0.25s   2.76% @1.0s   confusion 18.13s
+  blocks 300 / 25        12.29% @0.25s   4.32% @1.0s   confusion 25.93s
+  blocks 300 / 45        21.45% @0.25s  15.71% @1.0s   confusion 65.66s
   ```
 
-  The shipped geometry is 300/45 despite that number. The 25 s overlap wins on
-  this file only because its boundaries happen to link cleanly; the overlap
-  length is not a quality dial, and shipping the 45 s version keeps the
-  comparison honest about the mechanism that still has to be replaced.
+  Both blockwise geometries lose to the single pass, and the configured 300/45
+  loses by a factor of two. The long file confirms it at scale: `sample-full`
+  scores 30.24% / 23.87% under 300/45 against 14.36% / 6.15% single pass, and
+  loses 250.6 s of one speaker to the other versus 43.9 s. Files of 300 s or
+  less are unaffected either way: one block is one pass.
+
+  **The shipped geometry is currently 300/45, and that is indefensible on these
+  numbers**: it doubles confusion against the single pass. The 25 s overlap only
+  loses less, because its boundaries happen to link cleanly; the overlap length
+  is not a quality dial. Until the chain is replaced, blocks should stay
+  opt-in and the default must remain the single pass.
 
   The default single-pass turn map is byte-identical to the recorded baseline.
 
 - **The chained assignment is not good enough to ship.** It is fragile in a way
   the numbers show directly: a block where the overlap contains only one voice
   has no evidence for the other label, and one wrong link inverts every block
-  after it. That is why 300/25 wins and 300/45 loses on the same file — the
-  block boundaries moved and one link broke. The plan's cluster-mean embedding
+  after it. That is why 300/25 loses less and 300/45 loses twice as much on the
+  same file — the block boundaries moved and one link broke. The plan's cluster-mean embedding
   assignment exists precisely to replace this step; it needs the speaker
   embedding extractor bound (`sherpa_dynamic.rs` currently binds the diarizer
   and segmentation configs only), so the remaining work is FFI plus the
@@ -179,8 +200,9 @@ Progress:
 
 Acceptance:
 
-- Beats the Phase 2 slice numbers (12.56% / 4.86%, absorption 5.7 s on
-  300-600 s) without regressing the full file.
+- Beats, on every file in the table, the current absorption figure; `sample-long`
+  (10.48 s) and `sample-full` (43.94 s) must not regress.
+- Does not regress the full-file pass on the 300-600 s window (13.15% / 5.55%).
 - No block where both global speakers collapse into one.
 - No phantom speaker on the single-speaker check once a file exists.
 - Diarize wall time stays below ASR wall time for the same file.
@@ -219,9 +241,16 @@ speaker per line. The ceiling does not pay for the work.
 
 ## Recommended order
 
-1. Blockwise with cluster-level assignment (Phase 3).
-2. Cache/progress corrections (Phase 4 remainder).
-3. Windows and performance validation (Phase 5).
+1. Finish Phase 3: replace the chained block labels with cluster-mean embedding
+   assignment. This needs the speaker embedding extractor bound in
+   `core/src/sherpa_dynamic.rs`, which is not there yet.
+2. Re-measure both geometries (300/45 and 300/25) against the eight-file table.
+   If 300/45 still loses on every file, do not ship it; the chain is the defect,
+   not the overlap length.
+3. Split the 70 s collapsed turn in `hour-conversation-short-1` by embedding
+   drift, and check the effect on the other rapid-turn files.
+4. Cache/progress corrections (Phase 4 remainder).
+5. Windows and performance validation (Phase 5).
 
 Viterbi smoothing, overlap research, forced alignment, and incremental
 attribution are deferred, each with a documented reason above.

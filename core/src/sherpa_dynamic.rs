@@ -84,6 +84,17 @@ type SortFn =
 type DestroySegmentFn = unsafe extern "C" fn(*const SherpaOnnxOfflineSpeakerDiarizationSegment);
 type DestroyResultFn = unsafe extern "C" fn(*const c_void);
 
+type CreateExtractorFn =
+    unsafe extern "C" fn(*const SherpaOnnxSpeakerEmbeddingExtractorConfig) -> *const c_void;
+type ExtractorDimFn = unsafe extern "C" fn(*const c_void) -> i32;
+type ExtractorStreamFn = unsafe extern "C" fn(*const c_void) -> *const c_void;
+type ExtractorReadyFn = unsafe extern "C" fn(*const c_void, *const c_void) -> i32;
+type ExtractorComputeFn = unsafe extern "C" fn(*const c_void, *const c_void) -> *const f32;
+type ExtractorDestroyEmbeddingFn = unsafe extern "C" fn(*const f32);
+type StreamAcceptFn = unsafe extern "C" fn(*const c_void, i32, *const f32, i32);
+type StreamFinishedFn = unsafe extern "C" fn(*const c_void);
+type StreamDestroyFn = unsafe extern "C" fn(*const c_void);
+
 struct Api {
     /// Keeps the DLL loaded for the lifetime of the process.
     _library: Library,
@@ -94,6 +105,16 @@ struct Api {
     sort: SortFn,
     destroy_segment: DestroySegmentFn,
     destroy_result: DestroyResultFn,
+    create_extractor: CreateExtractorFn,
+    destroy_extractor: DestroyFn,
+    extractor_dim: ExtractorDimFn,
+    extractor_stream: ExtractorStreamFn,
+    extractor_ready: ExtractorReadyFn,
+    extractor_compute: ExtractorComputeFn,
+    extractor_destroy_embedding: ExtractorDestroyEmbeddingFn,
+    stream_accept: StreamAcceptFn,
+    stream_finished: StreamFinishedFn,
+    stream_destroy: StreamDestroyFn,
 }
 
 static API: OnceLock<Result<Api, String>> = OnceLock::new();
@@ -177,6 +198,34 @@ fn load() -> Result<Api, String> {
                 &library,
                 b"SherpaOnnxOfflineSpeakerDiarizationDestroyResult\0",
             )?,
+            create_extractor: resolve(
+                &library,
+                b"SherpaOnnxCreateSpeakerEmbeddingExtractor\0",
+            )?,
+            destroy_extractor: resolve(
+                &library,
+                b"SherpaOnnxDestroySpeakerEmbeddingExtractor\0",
+            )?,
+            extractor_dim: resolve(&library, b"SherpaOnnxSpeakerEmbeddingExtractorDim\0")?,
+            extractor_stream: resolve(
+                &library,
+                b"SherpaOnnxSpeakerEmbeddingExtractorCreateStream\0",
+            )?,
+            extractor_ready: resolve(
+                &library,
+                b"SherpaOnnxSpeakerEmbeddingExtractorIsReady\0",
+            )?,
+            extractor_compute: resolve(
+                &library,
+                b"SherpaOnnxSpeakerEmbeddingExtractorComputeEmbedding\0",
+            )?,
+            extractor_destroy_embedding: resolve(
+                &library,
+                b"SherpaOnnxSpeakerEmbeddingExtractorDestroyEmbedding\0",
+            )?,
+            stream_accept: resolve(&library, b"SherpaOnnxOnlineStreamAcceptWaveform\0")?,
+            stream_finished: resolve(&library, b"SherpaOnnxOnlineStreamInputFinished\0")?,
+            stream_destroy: resolve(&library, b"SherpaOnnxDestroyOnlineStream\0")?,
             _library: library,
         })
     }
@@ -236,6 +285,61 @@ pub unsafe fn SherpaOnnxOfflineSpeakerDiarizationDestroySegment(
 
 pub unsafe fn SherpaOnnxOfflineSpeakerDiarizationDestroyResult(result: *const c_void) {
     (api().destroy_result)(result)
+}
+
+pub unsafe fn SherpaOnnxCreateSpeakerEmbeddingExtractor(
+    config: *const SherpaOnnxSpeakerEmbeddingExtractorConfig,
+) -> *const c_void {
+    (api().create_extractor)(config)
+}
+
+pub unsafe fn SherpaOnnxDestroySpeakerEmbeddingExtractor(handle: *const c_void) {
+    (api().destroy_extractor)(handle)
+}
+
+pub unsafe fn SherpaOnnxSpeakerEmbeddingExtractorDim(handle: *const c_void) -> i32 {
+    (api().extractor_dim)(handle)
+}
+
+pub unsafe fn SherpaOnnxSpeakerEmbeddingExtractorCreateStream(
+    handle: *const c_void,
+) -> *const c_void {
+    (api().extractor_stream)(handle)
+}
+
+pub unsafe fn SherpaOnnxSpeakerEmbeddingExtractorIsReady(
+    handle: *const c_void,
+    stream: *const c_void,
+) -> i32 {
+    (api().extractor_ready)(handle, stream)
+}
+
+pub unsafe fn SherpaOnnxSpeakerEmbeddingExtractorComputeEmbedding(
+    handle: *const c_void,
+    stream: *const c_void,
+) -> *const f32 {
+    (api().extractor_compute)(handle, stream)
+}
+
+pub unsafe fn SherpaOnnxSpeakerEmbeddingExtractorDestroyEmbedding(v: *const f32) {
+    (api().extractor_destroy_embedding)(v)
+}
+
+pub unsafe fn SherpaOnnxOnlineStreamAcceptWaveform(
+    stream: *const c_void,
+    sample_rate: i32,
+    samples: *const f32,
+    n: i32,
+) {
+    (api().stream_accept)(stream, sample_rate, samples, n)
+}
+
+pub unsafe fn SherpaOnnxOnlineStreamInputFinished(stream: *const c_void) {
+    (api().stream_finished)(stream)
+}
+
+pub unsafe fn SherpaOnnxDestroyOnlineStream(stream: *const c_void) {
+    (api().stream_destroy)(stream)
 }
 
 #[cfg(test)]

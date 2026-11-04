@@ -276,10 +276,60 @@ class HarnessTests(unittest.TestCase):
         # The window is clipped on both sides, so nothing lands as false alarm.
         self.assertIn("false alarm      :     0.00s", out.getvalue())
 
+    def test_absorption_reports_the_worst_one_way_transfer(self) -> None:
+        rttm = (
+            "SPEAKER f 1 0.0 6.0 <NA> <NA> spk0 <NA> <NA>\n"
+            "SPEAKER f 1 6.0 4.0 <NA> <NA> spk1 <NA> <NA>\n"
+        )
+        # spk1 loses 3 of its 4 seconds to spk0; the 0.25 s collar eats 0.25 s
+        # at the 6 s boundary, so 2.75 s is scored.
+        hyp = "0.0\t9.0\tA\n9.0\t10.0\tB\n"
+        result = self.score(rttm, hyp)
+        self.assertAlmostEqual(harness.absorption_seconds(result), 2.75, places=1)
+
+    def test_report_scores_every_pair_in_a_directory(self) -> None:
+        refs = self.root / "refs"
+        hyps = self.root / "hyps"
+        refs.mkdir()
+        hyps.mkdir()
+        write(refs, "talk.rttm", RTTM)
+        write(hyps, "talk.tsv", MATCHING_TSV)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = harness.main(
+                [
+                    "report",
+                    "--ref-dir",
+                    str(refs),
+                    "--hyp-dir",
+                    str(hyps),
+                ]
+            )
+        self.assertEqual(code, 0)
+        printed = out.getvalue()
+        self.assertIn("talk", printed)
+        self.assertIn("DER@0.25", printed)
+        # The exact hypothesis is 0% DER at the primary collar.
+        self.assertIn("0.00%", printed)
+
     def test_speakers_expect_fails_on_a_phantom(self) -> None:
         tsv = write(self.root, "turns.tsv", MATCHING_TSV)
         self.assertEqual(harness.main(["speakers", str(tsv), "--expect", "2"]), 0)
         self.assertEqual(harness.main(["speakers", str(tsv), "--expect", "1"]), 1)
+
+    def test_speakers_dominant_share_not_label_count(self) -> None:
+        tsv = write(
+            self.root,
+            "mono.tsv",
+            "0.0\t119.0\tA\n119.0\t120.0\tB\n",
+        )
+        # Two labels, but B is a sliver: the mono check passes.
+        self.assertEqual(
+            harness.main(["speakers", str(tsv), "--dominant", "0.95"]), 0
+        )
+        self.assertEqual(
+            harness.main(["speakers", str(tsv), "--dominant", "0.999"]), 1
+        )
 
     def test_compare_reports_added_removed_and_relabelled(self) -> None:
         golden = [harness.Turn(0.0, 1.0, "A"), harness.Turn(1.0, 2.0, "A")]

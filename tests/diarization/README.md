@@ -1,115 +1,132 @@
 # Diarization references
 
-`sample-long.rttm` is a real reference: it was derived from a transcript
-corrected in the app (`audio/sample-long-accuracy-transcription-2speakers-ts-corrected.txt`,
-233 lines, 2 speakers) with
+`*.rttm` here are hand-corrected references, each derived from a transcript
+corrected in the app (double-click to flip a speaker, right-click to edit,
+merge or split). They are not diarizer output: nothing in this directory is
+generated from the system under test.
+
+Boundaries are ASR line starts capped by a words-per-second estimate, so these
+references measure **speaker attribution**, not exact turn timing. Quote DER at
+both collars; the 0.25 s figure carries boundary disagreement that no diarizer
+can remove.
+
+## References
+
+Eight corrected transcripts, each converted with `from-transcript`:
 
 ```
-scripts/diarize-score.py from-transcript \
-    audio/sample-long-accuracy-transcription-2speakers-ts-corrected.txt \
-    sample-long --out tests/diarization/sample-long.rttm
+for f in sample-end sample-short hour-conversation-short-1 hour-conversation-short-2 \
+         hour-conversation-mid-1 hour-conversation-mid-2 sample-long sample-full; do
+  scripts/diarize-score.py from-transcript "audio/$f-accuracy-transcription-2speakers-ts.txt" \
+      "$f" --out "tests/diarization/$f.rttm"
+done
 ```
 
-Its boundaries are ASR line starts, capped by a words-per-second estimate, so it
-measures speaker attribution rather than exact turn timing.
+The 83-minute `hour-conversation-full` is deliberately left out: its content is
+covered by the others and correcting 2559 lines buys no new failure mode.
 
-The other files are **drafts** generated from the current diarizer:
+Content overlap: `sample-short`, `sample-long` and `sample-end` are excerpts of
+`sample-full` (text alignment confirms `sample-long` at a +1 line offset, labels
+agreeing 25/27). They are scored against their own file and are **region
+checks**, not independent evidence. Do not average across files.
 
-- `hour-conversation-short-1.rttm` — 2 minutes, 21 turns.
-- `hour-conversation-mid-1.rttm` — 5 minutes, 78 turns.
-- `sample-short.rttm` — 2 minutes, 9 turns.
+## Baseline (2026-11-03)
 
-They exist only as something to correct. Every draft contains nested turns: a
-long dominant-speaker turn with the other speaker's short turns inside it. Split
-the long turn around the interjections rather than deleting them.
-
-Preferred replacement: correct the speakers in the app and regenerate with
-`from-transcript` (see `docs/diarization-eval.md`), then delete the draft.
-
-Do not regenerate a reference from the pipeline *after* changing the diarizer —
-that makes the reference agree with the system under test.
-
-Overlap is encoded in the source transcript as two lines sharing a timestamp;
-`from-transcript` turns those into two overlapping RTTM turns.
-
-Score with:
+Debug build, balanced preset, `--num-speakers 2`, after `clean_turns`:
 
 ```
-scripts/diarize-score.py score --ref tests/diarization/sample-long.rttm \
-    --hyp audio/eval/baseline/sample-long.tsv --matrices
-```
-
-## Recorded baseline
-
-10 minutes, debug build, balanced preset, `--num-speakers 2`, and -- since
-`--diarize-only` now applies the pipeline's own `clean_turns` -- the turn
-geometry the app actually ships:
-
-```
-reference speech : 435.08s
-missed speech    :   4.72s ( 1.08%)
-false alarm      :  20.29s ( 4.66%)
-speaker confusion:  31.73s ( 7.29%)
-correct          : 398.63s (91.62%)
-DER @0.25s       :  13.04%
-DER @1.00s       :   7.08%
-reference overlap:   4.56s
-short turns <1s  : 31/58 (53.4%)
-confusion by ref turn length: <1s 2.98s, 1-3s 8.62s, >3s 20.13s
-per block        : 10.23% (0-5 min), 16.10% (5-10 min)
-diarize stage    : 31.34s for 600s audio (0.052x realtime, 8 threads)
-```
-
-The ref-vs-hyp matrices:
-
-```
-0-5 min            hyp S1     hyp S2   missed
-ref SPEAKER 1      168.5        3.7      0.5
-ref SPEAKER 2       10.7       43.4      0.0
-5-10 min
-ref SPEAKER 1      112.6        5.3      1.8
-ref SPEAKER 2       13.5       72.7      2.5
-```
-
-What this says, and it is not what the original plan assumed:
-
-- **Most of the error is one-directional**: SPEAKER 2's speech is credited to
-  SPEAKER 1 for ~24 s across the file. That is a merge/absorption error, which
-  is what cluster-level reassignment is meant to fix.
-- **It is not drift.** The two blocks lose about the same amount of SPEAKER 2
-  (10.7 s vs 13.5 s). The block DER difference comes from false alarm, not from
-  the second half degrading.
-- **It is not primarily short turns.** Only 9.4% of confusion sits inside
-  reference turns under 1 s; 63.4% sits inside turns over 3 s.
-- **Half the headline is boundary noise.** 13.04% at a 0.25 s collar is 7.08% at
-  1.0 s; the reference's turn ends are word-rate estimates, not measured.
-
-`--collars` reports both by default. `--ref-range START END` scores a window of
-the reference and `--hyp-offset S` shifts a clip's turns onto it, so a 5-minute
-cut can be compared against the matching slice.
-
-## First decisive comparison (2026-11-03)
-
-Same 300-600 s window of `sample-long`, same reference slice, two hypotheses:
-
-```
-                        DER@0.25   DER@1.0   confusion   S2 -> S1
-full-file single pass    16.10%     10.27%     17.51s       13.5s
-5-min clip, alone        12.56%      4.86%     10.21s        5.7s
+file                         ref s   DER@0.25   DER@1.00   conf s  absorb s    short  worst blk
+hour-conversation-mid-1      201.2     34.97%     26.76%    60.99     39.15    27/52     34.97%
+hour-conversation-mid-2      193.6     33.45%     25.47%    53.77     43.61    25/50     33.09%
+hour-conversation-short-1     75.8     53.89%     48.13%    36.53     35.03    11/20     53.89%
+hour-conversation-short-2     79.8     13.57%      1.82%     7.23      4.67    10/20     13.57%
+sample-end                    82.4     10.60%      3.58%     3.61      2.38    14/20     10.60%
+sample-full                 1471.4     14.36%      6.15%    73.10     43.94   77/132     18.54%
+sample-long                  429.3     10.62%      2.76%    18.13     10.48    40/59     13.13%
+sample-short                  88.9     10.36%      1.60%     2.11      1.26      1/6     10.36%
 ```
 
 Reproduce with:
 
 ```
-ffmpeg -ss 300 -t 300 -i audio/sample-long.mp3 -ac 1 -ar 16000 /tmp/clip.wav
 scripts/diarize-score.py record --bin target/debug/hippo-transcribe --speakers 2 \
-    --out /tmp/clip /tmp/clip.wav
-scripts/diarize-score.py score --ref tests/diarization/sample-long.rttm \
-    --hyp /tmp/clip/clip.tsv --ref-range 300 600 --hyp-offset 300
-scripts/diarize-score.py score --ref tests/diarization/sample-long.rttm \
-    --hyp audio/eval/baseline/sample-long.tsv --ref-range 300 600
+    --out audio/eval/baseline <audio>...
+scripts/diarize-score.py report --ref-dir tests/diarization --hyp-dir audio/eval/baseline
 ```
 
-Local diarization halves the one-directional absorption on the same audio, so
-the global clustering step is the thing to replace. That is the Phase 3 target,
-and it is measured, not assumed.
+`report` prints one row per file: DER at each collar, confusion seconds, the
+largest one-directional absorption, short-turn recall, and the worst block
+(slivers under 5 s of reference speech are ignored).
+
+### What the table says
+
+- **The spread is the finding.** 10% to 54% DER at the same settings. Any claim
+  based on `sample-long` alone understated the problem by a factor of five.
+- **`hour-conversation-short-1` is the real failure.** 48.13% even at a 1.0 s
+  collar, i.e. attribution, not boundaries. The hypothesis collapses 10.4-80.0 s
+  into one speaker while the reference alternates roughly every 2 s. This is
+  rapid turn-taking, and the diarizer does not track it at all.
+- **`hour-conversation-mid-1`/`-2` fail the same way**, less severely: one
+  speaker is absorbed at 39-44 s.
+- **`hour-conversation-short-2` is boundary noise, not speaker error**: 13.57%
+  at 0.25 s collapses to 1.82% at 1.0 s.
+- **Absorption is everywhere.** Every file loses one speaker's speech to the
+  other; it is the single recurring mechanism.
+
+## Blockwise vs single pass
+
+The blockwise path (`HIPPO_TRANSCRIBE_DIARIZE_BLOCKS=1`) only changes files
+longer than one 300 s block. On those it is worse, badly:
+
+```
+file            ref s   single @0.25  single @1.0   blocks @0.25  blocks @1.0
+sample-long     429.3          10.62%        2.76%         21.45%       15.71%
+sample-full    1471.4          14.36%        6.15%         30.24%       23.87%
+```
+
+`sample-full` also loses 250.6 s of one speaker to the other under blocks versus
+43.9 s in the single pass. Files at or under 300 s are byte-identical either
+way, which is why the other rows are unchanged.
+
+Verdict: **do not enable blocks.** The chained label assignment is the defect —
+one wrong link in an overlap propagates through every later block. It has to be
+replaced by cluster-mean embedding assignment before this path ships.
+
+## Independent blocks are not an improvement
+
+An ablation, not a test of the shipped blockwise path: the same 300-600 s window
+of `sample-long`, diarized once as part of the full file and once as a 5-minute
+clip on its own.
+
+```
+sample-long, 300-600 s window      DER@0.25   DER@1.0   absorption
+full-file pass, scored on window     13.15%      5.55%        5.6s
+5-min clip diarized alone            15.89%      8.26%       13.7s
+```
+
+Splitting into independent blocks and trusting their local labels is worse:
+fewer embeddings per cluster, no cross-block evidence. That is why the blockwise
+path chains labels through the overlap, and why the remaining work is cluster-mean
+embedding assignment rather than more blocks.
+
+The earlier version of this note claimed local diarization was better (12.56% vs
+16.10%). That was measured against the previous, less-edited reference; the
+finer reference reversed the result. Re-run any headline number after the
+references change.
+
+## Monologue check
+
+`sample-full` has a single-speaker run at 9:31-12:22 (2.9 min). Score the
+hypothesis restricted to that window and assert one label; no new recording:
+
+```
+scripts/diarize-score.py score --ref tests/diarization/sample-full.rttm \
+    --hyp audio/eval/baseline/sample-full.tsv --ref-range 571 742
+scripts/diarize-score.py speakers audio/eval/baseline/sample-full.tsv \
+    --range 571 742 --dominant 0.95
+```
+
+`--dominant` is the right check, not `--expect 1`: a phantom label usually
+covers a few seconds of a one-voice stretch. Current single-pass output gives
+97.1% `spk1` / 2.9% `spk0` in that window — passing, but with a phantom label
+present.

@@ -1167,7 +1167,7 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
                     let global_speakers = opts.num_speakers;
                     let handle = std::thread::spawn(move || {
                         let started = Instant::now();
-                        let result = if diarize::blocks_enabled() {
+                        let raw = if diarize::blocks_enabled() {
                             diarize::run_blockwise(
                                 &session,
                                 audio.as_slice(),
@@ -1180,6 +1180,24 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
                                 Some(progress_for_thread),
                             )
                         };
+                        // A collapsed turn is the failure that survives the
+                        // clustering: one speaker is credited with a stretch
+                        // that holds both. Splitting it by embedding drift is
+                        // the only pass that can recover those turns.
+                        let result = raw.and_then(|turns| {
+                            if !diarize::split_enabled() {
+                                return Ok(turns);
+                            }
+                            let embedder = diarize::Embedder::new(
+                                &crate::models::embedding_model(),
+                                None,
+                            )?;
+                            Ok(diarize::split_long_turns(
+                                turns,
+                                audio.as_slice(),
+                                &embedder,
+                            ))
+                        });
                         (result, started.elapsed().as_secs_f64())
                     });
                     DiarizeJob::Running(handle, progress)
