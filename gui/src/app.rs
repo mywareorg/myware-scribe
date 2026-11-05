@@ -530,6 +530,10 @@ struct Settings {
     show_timestamps: bool,
     #[serde(default = "notifications_default")]
     notifications: bool,
+    /// Show the Editing Tips card at the end of a run, until the reader ticks
+    /// "Don't show these tips again".
+    #[serde(default = "editing_tips_default")]
+    editing_tips: bool,
     #[serde(default)]
     gpu_profiles: HashMap<String, GpuProfile>,
     font_scale: Option<f32>,
@@ -560,6 +564,10 @@ fn timestamps_default() -> bool {
     true
 }
 
+fn editing_tips_default() -> bool {
+    true
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Self {
@@ -569,6 +577,7 @@ impl Default for Settings {
             language: None,
             show_timestamps: true,
             notifications: true,
+            editing_tips: true,
             gpu_profiles: HashMap::new(),
             font_scale: None,
             playback_speed: None,
@@ -801,6 +810,8 @@ pub enum Message {
     UndoLineEdit,
     RedoLineEdit,
     CloseSummary,
+    /// Turn the end-of-run Editing Tips card on or off. Saved at once.
+    SetEditingTips(bool),
     AddFiles,
     FilesPicked(Option<Vec<PathBuf>>),
     AddFolder,
@@ -1072,6 +1083,10 @@ pub struct App {
     reset_confirm: bool,
     /// The Transcribe/Retranscribe setup dialog is showing.
     run_setup_open: bool,
+    /// Show the Editing Tips card at the end of a run.
+    editing_tips: bool,
+    /// This completion still owes the tips card, before any pending rename.
+    pending_tips: bool,
     transcript_dirty: bool,
     follow_offset: Option<f32>,
     /// Horizontal target of the last programmatic transcript scroll, used to
@@ -1350,6 +1365,8 @@ impl App {
             header_menu: None,
             reset_confirm: false,
             run_setup_open: false,
+            editing_tips: settings.editing_tips,
+            pending_tips: false,
             transcript_dirty: false,
             follow_offset: None,
             scroll_target: None,
@@ -1552,6 +1569,7 @@ impl App {
             num_speakers: self.num_speakers,
             language: self.language.clone(),
             notifications: self.notifications,
+            editing_tips: self.editing_tips,
             gpu_profiles: self.gpu_profiles.clone(),
             show_timestamps: self.show_timestamps,
             font_scale: Some(self.font_scale),
@@ -2950,6 +2968,15 @@ impl App {
     /// Handles one message. [`Self::update`] wraps this with the scroll the editor
     /// strip's appearance or disappearance needs.
     fn dispatch(&mut self, message: Message) -> Task<Message> {
+        // A dialog owns the pointer, so nothing behind its scrim may keep a
+        // pointer-shaped state alive. Clearing it here rather than at each of
+        // the nine open paths is what makes that true for all of them, and it
+        // stops a picker that was unmounted mid-open from blocking hover after
+        // the dialog closes.
+        if self.open_modal().is_some() {
+            self.line_edit_picker_open = false;
+            self.transcript_line_hover = None;
+        }
         match message {
             Message::TogglePlayerCollapsed => {
                 self.player_collapsed = !self.player_collapsed;
@@ -3933,10 +3960,9 @@ impl App {
                 }
                 Task::none()
             }
-            Message::CloseHelp => {
-                self.help_open = None;
-                Task::none()
-            }
+            // One close, whether from the card's button or from Escape: the
+            // tips are a link in the completion chain and must hand off.
+            Message::CloseHelp => self.close_modal(Modal::Help),
             Message::Noop => Task::none(),
             Message::Escape => {
                 // A dialog in front takes the key, whatever it is. This now
@@ -4300,6 +4326,7 @@ impl App {
                     self.output_txt = None;
                     self.summary_open = false;
                     self.pending_rename = false;
+                    self.pending_tips = false;
                     self.rename_open = false;
                     self.rename_fields.clear();
                     self.rename_focus = 0;
@@ -4330,7 +4357,9 @@ impl App {
                 self.header_menu = None;
                 if self.has_results() {
                     self.summary_open = true;
+                    // Opened by hand, so it carries none of the chain's follow-ups.
                     self.pending_rename = false;
+                    self.pending_tips = false;
                     self.toast = None;
                     return scrollable::snap_to(
                         summary_id(),
@@ -4339,12 +4368,10 @@ impl App {
                 }
                 Task::none()
             }
-            Message::CloseSummary => {
-                self.summary_open = false;
-                if self.pending_rename {
-                    self.pending_rename = false;
-                    return self.open_rename();
-                }
+            Message::CloseSummary => self.close_modal(Modal::Summary),
+            Message::SetEditingTips(show) => {
+                self.editing_tips = show;
+                self.save_settings();
                 Task::none()
             }
             Message::OpenRename => {
@@ -5053,6 +5080,7 @@ impl App {
         if self.shows(license::Audience::FreeOnly) && upsell_roll() {
             self.summary_open = false;
             self.pending_rename = false;
+            self.pending_tips = false;
             self.paywall_open = true;
             self.toast = None;
             if self.notifications {
@@ -5061,8 +5089,11 @@ impl App {
             return true;
         }
         self.summary_open = true;
-        self.pending_rename =
-            self.can(license::Feature::Editing) && generated == 1 && self.completed_count() == 1;
+        // The tips explain editing, so they follow the same gate as the rename
+        // that shares this chain: no editing, no card.
+        let editing = self.can(license::Feature::Editing);
+        self.pending_tips = editing && self.editing_tips;
+        self.pending_rename = editing && generated == 1 && self.completed_count() == 1;
         self.toast = None;
         if self.notifications {
             notify("Hippo Transcribe", "Finished \u{00b7} saved locally");
@@ -8682,7 +8713,11 @@ impl App {
         // already carries, without the arrow and the menu that would only ever
         // hold the one name back.
         let can_change_speaker = allowed && choices.len() > 1;
-        let picker: Element<Message> = if can_change_speaker {
+        // A pick list draws its menu in iced's overlay tree, which sits above
+        // this dialog stack and would therefore float over a dialog's scrim.
+        // Not building the widget while one is open is the only way to close it
+        // from here; the chip that replaces it is behind the scrim anyway.
+        let picker: Element<Message> = if can_change_speaker && !self.popup_open() {
             container(
                 pick_list(
                     choices,
@@ -8705,8 +8740,9 @@ impl App {
             .max_width(Pixels(LINE_EDIT_PICKER_WIDTH))
             .into()
         } else {
-            // Read-only, or the only speaker there is: show whose line this is
-            // in its own colour, without a control that cannot change anything.
+            // Read-only, the only speaker there is, or a dialog in front: show
+            // whose line this is in its own colour, without a control that
+            // cannot change anything from here.
             container(
                 text(ellipsize_middle(&row.speaker, LINE_EDIT_PICKER_CHARS))
                     .size(theme::TEXT_SM)
@@ -9264,6 +9300,13 @@ impl App {
                 action: Some(Message::HelpChoice(HelpKind::Shortcuts)),
             },
             MenuRow {
+                label: "Editing Tips",
+                key: None,
+                checked: false,
+                enabled: true,
+                action: Some(Message::HelpChoice(HelpKind::EditingTips)),
+            },
+            MenuRow {
                 label: "Console",
                 key: None,
                 checked: self.console_open,
@@ -9727,12 +9770,9 @@ impl App {
             Modal::Reset => self.reset_confirm = false,
             Modal::Summary => {
                 self.summary_open = false;
-                // Rename was asked for before the summary was ready to show;
-                // closing the summary is the moment to honour it.
-                if self.pending_rename {
-                    self.pending_rename = false;
-                    return self.open_rename();
-                }
+                // The tips and the rename were asked for before the summary was
+                // ready to show; closing it is the moment to work through them.
+                return self.after_completion();
             }
             Modal::DeleteLine => self.delete_confirm = false,
             Modal::Calibration => {
@@ -9752,9 +9792,40 @@ impl App {
             }
             Modal::Paywall => self.paywall_open = false,
             Modal::Settings => self.settings_open = false,
-            Modal::Help => self.help_open = None,
+            Modal::Help => {
+                let was_tips = self.help_open == Some(HelpKind::EditingTips);
+                self.help_open = None;
+                // The tips are the middle of the completion chain; a reference
+                // dialog the reader opened themselves is not.
+                if was_tips {
+                    return self.after_completion();
+                }
+            }
             Modal::RunSetup => self.run_setup_open = false,
             Modal::Rename => self.rename_open = false,
+        }
+        Task::none()
+    }
+
+    /// What to show after a dialog in the completion chain closes: the Editing
+    /// Tips card first (unless turned off), then the Rename Speakers form if the
+    /// run was the one that called for it.
+    ///
+    /// The flag is re-read here rather than when it was set, so ticking the box
+    /// on the card takes effect at once and an unticked box brings the card back
+    /// on the next run.
+    fn after_completion(&mut self) -> Task<Message> {
+        if self.pending_tips {
+            self.pending_tips = false;
+            if self.editing_tips {
+                self.help_open = Some(HelpKind::EditingTips);
+                self.toast = None;
+                return Task::none();
+            }
+        }
+        if self.pending_rename {
+            self.pending_rename = false;
+            return self.open_rename();
         }
         Task::none()
     }
@@ -10403,6 +10474,45 @@ impl App {
                     ]
                     .spacing(4),
                 );
+            }
+            HelpKind::EditingTips => {
+                for (title, detail) in [
+                    (
+                        "Double-click an utterance",
+                        "Opens it in place. The caret lands where you clicked; \
+                         Enter saves the line, Esc cancels.",
+                    ),
+                    (
+                        "Right-click an utterance",
+                        "Moves it to the next speaker.",
+                    ),
+                    (
+                        "Edit \u{2192} Rename Speakers",
+                        "Renames one speaker everywhere in the transcript at once.",
+                    ),
+                ] {
+                    col = col.push(
+                        column![
+                            text(title).size(theme::TEXT_MD).font(Font {
+                                weight: font::Weight::Medium,
+                                ..Font::DEFAULT
+                            }),
+                            text(detail).size(theme::TEXT_SM).color(scheme.muted),
+                        ]
+                        .spacing(2),
+                    );
+                }
+                col = col.push(settings_divider(scheme));
+                // The same check-slot row the header menus use: the app has no
+                // other checkbox, and this one matches the palette for free.
+                col = col.push(header_menu_item(
+                    "Don't show these tips again",
+                    !self.editing_tips,
+                    true,
+                    Some(Message::SetEditingTips(!self.editing_tips)),
+                    None,
+                    scheme,
+                ));
             }
             HelpKind::Console | HelpKind::Settings => {}
         }
@@ -12868,14 +12978,19 @@ fn modal_overlay<'a>(
     .interaction(mouse::Interaction::Idle)
     .on_press(Message::Noop)
     .on_right_press(Message::Noop)
-    .on_middle_press(Message::Noop);
+    .on_middle_press(Message::Noop)
+    // The stack already withholds the wheel from layers under an area that
+    // reports an interaction, but capturing it here says so outright: a
+    // scrollable behind the scrim must never move.
+    .on_scroll(|_| Message::Noop);
     // The dialog itself also consumes stray clicks and keeps an arrow cursor
     // on its non-interactive areas, so nothing behind it is clickable.
     let dialog = mouse_area(dialog)
         .interaction(mouse::Interaction::Idle)
         .on_press(Message::Noop)
         .on_right_press(Message::Noop)
-        .on_middle_press(Message::Noop);
+        .on_middle_press(Message::Noop)
+        .on_scroll(|_| Message::Noop);
     let centered = container(dialog)
         .center(Length::Fill)
         .width(Length::Fill)
@@ -17047,6 +17162,125 @@ mod tests {
             raise_modal(&mut app, modal);
             let _ = app.view();
         }
+
+        let _ = std::fs::remove_dir_all(&media);
+    }
+
+    #[test]
+    fn the_editing_tips_follow_the_summary_before_the_rename() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("tips-chain");
+        let original = "[00:00] SPEAKER 1: one\n[00:05] SPEAKER 2: two\n";
+        let (mut app, _transcript, media) = line_edit_fixture("tips-chain", original);
+
+        app.summary_open = true;
+        app.pending_tips = true;
+        app.pending_rename = true;
+
+        // Summary -> tips -> rename, in that order, each closing handing on.
+        let _ = app.update(Message::CloseSummary);
+        assert_eq!(app.help_open, Some(HelpKind::EditingTips));
+        assert!(!app.rename_open);
+
+        let _ = app.update(Message::CloseHelp);
+        assert_eq!(app.help_open, None);
+        assert!(app.rename_open);
+
+        let _ = std::fs::remove_dir_all(&media);
+    }
+
+    #[test]
+    fn ticking_the_tips_box_skips_them_and_still_renames() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("tips-off");
+        let original = "[00:00] SPEAKER 1: one\n[00:05] SPEAKER 2: two\n";
+        let (mut app, _transcript, media) = line_edit_fixture("tips-off", original);
+
+        let _ = app.update(Message::SetEditingTips(false));
+        assert!(!app.editing_tips);
+
+        app.summary_open = true;
+        app.pending_tips = true;
+        app.pending_rename = true;
+        let _ = app.update(Message::CloseSummary);
+        assert_eq!(app.help_open, None, "the card was turned off");
+        assert!(app.rename_open, "the rename still gets its turn");
+
+        // The next completion does not queue the card at all.
+        app.rename_open = false;
+        app.pending_rename = false;
+        assert!(app.present_completion());
+        assert!(!app.pending_tips);
+
+        let _ = std::fs::remove_dir_all(&media);
+    }
+
+    #[test]
+    fn the_tips_are_still_reachable_from_the_help_menu_when_suppressed() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("tips-help");
+        let original = "[00:00] SPEAKER 1: one\n";
+        let (mut app, _transcript, media) = line_edit_fixture("tips-help", original);
+
+        let _ = app.update(Message::SetEditingTips(false));
+        let _ = app.update(Message::HelpChoice(HelpKind::EditingTips));
+        assert_eq!(app.help_open, Some(HelpKind::EditingTips));
+        let _ = app.view();
+
+        let _ = std::fs::remove_dir_all(&media);
+    }
+
+    #[test]
+    fn the_editing_tips_setting_round_trips_through_settings() {
+        let _guard = env_lock();
+        let _dir = ConfigEnv::new("editing-tips");
+
+        let mut app = pro_app();
+        assert!(app.editing_tips, "a fresh profile shows the tips");
+
+        let _ = app.update(Message::SetEditingTips(false));
+        let reloaded = pro_app();
+        assert!(!reloaded.editing_tips);
+    }
+
+    #[test]
+    fn a_dialog_hides_the_line_editor_speaker_picker() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("picker-behind-dialog");
+        let original = "[00:00] SPEAKER 1: one\n[00:05] SPEAKER 2: two\n";
+        let (mut app, _transcript, media) = line_edit_fixture("picker-dialog", original);
+
+        open_line_edit(&mut app, 1);
+        let _ = app.update(Message::LineEditSpeakerMenu(true));
+        assert!(app.line_edit_picker_open);
+
+        // A pick list's menu is drawn in the overlay tree, above the dialog
+        // stack: while a dialog is up the widget must not exist at all.
+        app.settings_open = true;
+        let _ = app.update(Message::Noop);
+        assert!(!app.line_edit_picker_open);
+        let _ = app.line_edit_panel(app.scheme());
+        let _ = app.view();
+
+        let _ = std::fs::remove_dir_all(&media);
+    }
+
+    #[test]
+    fn a_dialog_drops_the_hovered_row_and_refuses_new_hover() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("hover-behind-dialog");
+        let original = "[00:00] SPEAKER 1: one\n[00:05] SPEAKER 2: two\n";
+        let (mut app, _transcript, media) = line_edit_fixture("hover-dialog", original);
+
+        let _ = app.update(Message::LineHover(Some(0)));
+        assert_eq!(app.transcript_line_hover, Some(0));
+
+        app.settings_open = true;
+        let _ = app.update(Message::Noop);
+        assert_eq!(app.transcript_line_hover, None, "no chrome under a scrim");
+
+        let _ = app.update(Message::LineHover(Some(1)));
+        assert_eq!(app.transcript_line_hover, None);
 
         let _ = std::fs::remove_dir_all(&media);
     }

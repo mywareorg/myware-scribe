@@ -220,6 +220,9 @@ impl fmt::Display for Speed {
 pub(crate) enum HelpKind {
     About,
     Shortcuts,
+    /// What the transcript lets you edit, and how. Also shown at the end of a
+    /// run until the reader turns it off.
+    EditingTips,
     Console,
     Settings,
 }
@@ -229,6 +232,7 @@ impl HelpKind {
         match self {
             HelpKind::About => "About",
             HelpKind::Shortcuts => "Shortcuts",
+            HelpKind::EditingTips => "Editing Tips",
             HelpKind::Console => "Console",
             HelpKind::Settings => "Settings",
         }
