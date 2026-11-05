@@ -1,0 +1,51 @@
+﻿Hippo Transcribe GPU build diagnostics
+  host           WU-PRO-8
+  powershell     5.1.19041.6456
+  repo           C:\Users\wuphy\Documents\hippo-transcribe
+
+=== Toolchain ===
+  cargo       C:\Users\wuphy\.cargo\bin\cargo.exe
+  rustc       C:\Users\wuphy\.cargo\bin\rustc.exe
+  cmake       C:\Program Files\CMake\bin\cmake.exe
+  ninja       C:\Users\wuphy\AppData\Local\Microsoft\WinGet\Packages\Ninja-build.Ninja_Microsoft.Winget.Source_8wekyb3d8bbwe\ninja.exe
+  cl          (not on PATH)
+  link        (not on PATH)
+  glslc       C:\VulkanSDK\1.4.363.0\Bin\glslc.exe
+  makeappx    (not on PATH)
+
+=== Environment ===
+  VULKAN_SDK      C:\VulkanSDK\1.4.363.0
+  VSCMD_VER       (unset)
+  VCINSTALLDIR    (unset)
+  CMAKE_GENERATOR (unset)
+  RUSTFLAGS       (unset)
+  CC              (unset)
+  CXX             (unset)
+  C:\VulkanSDK -> 1.4.363.0
+
+=== CMake caches ===
+
+  C:\Users\wuphy\hb\release\build\whisper-rs-sys-e90bd669a06643ef\out\build\CMakeCache.txt
+    CMAKE_CXX_COMPILER:STRING=C:/Program Files (x86)/Microsoft Visual Studio/2022/BuildTools/VC/Tools/MSVC/14.44.35207/bin/HostX64/x64/cl.exe
+    CMAKE_C_COMPILER:STRING=C:/Program Files (x86)/Microsoft Visual Studio/2022/BuildTools/VC/Tools/MSVC/14.44.35207/bin/HostX64/x64/cl.exe
+    CMAKE_GENERATOR:UNINITIALIZED=Ninja
+    GGML_NATIVE:BOOL=ON
+    GGML_VULKAN:BOOL=ON
+
+  C:\Users\wuphy\hb\release\build\whisper-rs-sys-e90bd669a06643ef\out\build\ggml\src\ggml-vulkan\vulkan-shaders-gen-prefix\src\vulkan-shaders-gen-build\CMakeCache.txt
+    CMAKE_CXX_COMPILER:FILEPATH=C:/Program Files (x86)/Microsoft Visual Studio/2022/BuildTools/VC/Tools/MSVC/14.44.35207/bin/Hostx64/x64/cl.exe
+    CMAKE_C_COMPILER:FILEPATH=C:/Program Files (x86)/Microsoft Visual Studio/2022/BuildTools/VC/Tools/MSVC/14.44.35207/bin/Hostx64/x64/cl.exe
+    CMAKE_GENERATOR:INTERNAL=Ninja
+
+=== Shader sub-build output ===
+
+  C:\Users\wuphy\hb\release\build\whisper-rs-sys-e90bd669a06643ef\out\build\ggml\src\ggml-vulkan\vulkan-shaders-gen-prefix\src\vulkan-shaders-gen-stamp
+
+=== Build log ===
+  C:\Users\wuphy\Documents\hippo-transcribe\build-windows.log
+  no matching lines
+
+=== Verdict ===
+  Generator: Ninja
+
+Full report: C:\Users\wuphy\Documents\hippo-transcribe\dist\gpu-diagnose.txt
