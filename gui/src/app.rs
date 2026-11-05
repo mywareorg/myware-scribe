@@ -242,11 +242,6 @@ fn view_menu_offset() -> f32 {
     edit_menu_offset() + EDIT_BUTTON_WIDTH + theme::SPACE_SM
 }
 
-/// Widest the panel's speaker picker may grow, and how many characters of a
-/// speaker name it shows. The picker sits in a row with nine other controls: it
-/// sizes to the names it holds and ellipsizes the middle past this point, so a
-/// renamed speaker stays identifiable without pushing Done off the row.
-const LINE_EDIT_PICKER_CHARS: usize = 18;
 
 /// iced's default text line height, as a multiple of the font size.
 const LINE_HEIGHT_FACTOR: f32 = 1.3;
@@ -8831,36 +8826,6 @@ impl App {
         // that shows, so the row is disabled as a whole rather than half-live.
         let writable = self.shown_output().is_some();
         let allowed = writable && self.can(license::Feature::Editing);
-        let order = self.speaker_order();
-        let accent = line_accent(&order, &row.speaker, &scheme);
-
-        // The line's speaker is shown, not changed: which speaker owns a line
-        // belongs to the transcript -- the bubble's exchange button and the
-        // right-click flip -- not to a strip about the line's text.
-        let picker: Element<Message> = container(
-            text(ellipsize_middle(&row.speaker, LINE_EDIT_PICKER_CHARS))
-                .size(theme::TEXT_SM)
-                .font(Font {
-                    weight: font::Weight::Bold,
-                    ..Font::DEFAULT
-                })
-                .color(if allowed { accent } else { scheme.muted })
-                .wrapping(NO_WRAP),
-        )
-        .padding([3, 5])
-        .into();
-
-        // No line-number label: the field's own gutter says when the line is and
-        // the panel is only ever about the line that is already open under it.
-        // The one case that still needs words is a transcript that cannot be
-        // written to, where the greyed controls would otherwise go unexplained.
-        let read_only = (!allowed).then(|| {
-            text("Read-only transcript")
-                .size(theme::TEXT_XS)
-                .wrapping(NO_WRAP)
-                .color(scheme.muted)
-        });
-
         let can_join_prev = allowed && index > 0;
         let can_join_next = allowed && index + 1 < total;
         let can_split = allowed && split_at_caret(row).is_some();
@@ -8909,11 +8874,6 @@ impl App {
         // commit pair at the right where a dialog's buttons would. The middle
         // group is centred by the two elastic gaps around it, which are equal, so
         // it stays put when the pane is wide.
-        let mut identity = row![].spacing(LINE_EDIT_GAP).align_y(iced::Alignment::Center);
-        if let Some(read_only) = read_only {
-            identity = identity.push(read_only);
-        }
-        identity = identity.push(picker);
         let history = row![
             self.tip(
                 button(ICON_UNDO, undo, false, Message::UndoLineEdit),
@@ -8931,8 +8891,9 @@ impl App {
         // No "Join" label: the two arrows carry their own tooltips, and the
         // word made the strip read as a labelled group where the rest of it is
         // icons.
+        // Words have no place in this row: the edited line above already shows
+        // whose it is and when, so the strip is controls only.
         let edits = row![
-            identity,
             self.tip(
                 button(ICON_SPEAKERS, allowed, false, Message::OpenRename),
                 "Rename speakers across the transcript",
