@@ -604,6 +604,40 @@ enum Status {
     Error(String),
 }
 
+/// The phase a run is in, as the readout names it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EtaPhase {
+    Preparing,
+    Transcribing,
+    Diarizing,
+    Writing,
+    Finishing,
+}
+
+impl EtaPhase {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Preparing => "preparing",
+            Self::Transcribing => "transcribing",
+            Self::Diarizing => "diarizing",
+            Self::Writing => "writing",
+            Self::Finishing => "finishing",
+        }
+    }
+}
+
+/// What the readout says: which phase the run is in, and seconds left when that
+/// phase can honestly be estimated.
+///
+/// `remaining: None` is a real answer, not a failure: a phase that reports no
+/// rate gets its name and no digits, rather than a number made up from another
+/// phase's rate.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct EtaView {
+    phase: EtaPhase,
+    remaining: Option<f32>,
+}
+
 /// State of an in-flight model download.
 struct ModelDownload {
     label: String,
@@ -999,12 +1033,17 @@ pub struct App {
     provider: Box<dyn license::Provider>,
     paywall_open: bool,
     stage: String,
+    /// The pipeline's stage id for the same event `stage` labels: `decoding`,
+    /// `transcription`, `diarization`, `loading`, `done`. The label is what the
+    /// status line prints; this is what the readout reasons about.
+    stage_id: String,
     progress: f32,
     progress_shown: f32,
     overall_shown: f32,
     run_start: Option<Instant>,
     elapsed_final: Option<f64>,
-    eta_shown: Option<f32>,
+    /// The readout's phase, and how much of it is left when it can be priced.
+    eta_shown: Option<EtaView>,
     /// Audio seconds transcribed in the current file, and its duration.
     work_done: f64,
     work_total: f64,
@@ -1302,6 +1341,7 @@ impl App {
             provider,
             paywall_open: false,
             stage: "idle".to_string(),
+            stage_id: "idle".to_string(),
             progress: 0.0,
             progress_shown: 0.0,
             overall_shown: 0.0,
@@ -1314,8 +1354,8 @@ impl App {
             eta_throughput: None,
             eta_prior: settings.eta_throughput.and_then(App::usable_throughput),
             diarize_fraction: 0.0,
-            diarize_prior: settings.eta_diarize,
-            prepare_prior: settings.eta_prepare,
+            diarize_prior: settings.eta_diarize.and_then(App::usable_diarize),
+            prepare_prior: settings.eta_prepare.and_then(App::usable_prepare),
             eta_pending: 0,
             status: Status::Idle,
             transcript: String::new(),
@@ -4341,6 +4381,7 @@ impl App {
                     self.progress_shown = 0.0;
                     self.overall_shown = 0.0;
                     self.stage = "idle".to_string();
+                    self.stage_id = "idle".to_string();
                     self.status = Status::Idle;
                     self.invalidate_derived();
                     self.save_queue();
@@ -4711,27 +4752,44 @@ impl App {
                     self.eta_pending = pending_now;
                     match self.estimate_remaining() {
                         Some(raw) => {
-                            // Median of the last two estimates smooths the
-                            // readout without lagging a phase change the way
-                            // an average over the whole run would.
-                            let smoothed = match self.eta_shown {
-                                Some(previous) => (previous + raw) * 0.5,
-                                None => raw,
-                            };
-                            // A shrinking workload can drop the estimate fast;
-                            // letting it climb more than 10% per tick would
-                            // spike on a stalled sample, unless new files were
-                            // queued.
-                            let ceiling = self
+                            // A new phase is a new measurement: seed it rather
+                            // than blending it into the last phase's number, or
+                            // the smoothing and the cap would hold a stale
+                            // estimate across the boundary.
+                            let phase_changed = self
                                 .eta_shown
-                                .map(|previous| previous * 1.1)
-                                .unwrap_or(f32::INFINITY);
-                            let shown = if smoothed > ceiling && !queue_grew {
-                                ceiling
-                            } else {
-                                smoothed
+                                .is_some_and(|shown| shown.phase != raw.phase);
+                            let remaining = match (phase_changed, raw.remaining) {
+                                (true, _) | (false, None) => raw.remaining,
+                                (false, Some(raw_left)) => {
+                                    let smoothed = match self
+                                        .eta_shown
+                                        .and_then(|shown| shown.remaining)
+                                    {
+                                        Some(previous) => (previous + raw_left) * 0.5,
+                                        None => raw_left,
+                                    };
+                                    // A shrinking workload can drop the estimate
+                                    // fast; letting it climb more than 10% per
+                                    // tick would spike on a stalled sample,
+                                    // unless new files were queued.
+                                    let ceiling = self
+                                        .eta_shown
+                                        .and_then(|shown| shown.remaining)
+                                        .map(|previous| previous * 1.1)
+                                        .unwrap_or(f32::INFINITY);
+                                    Some(if smoothed > ceiling && !queue_grew {
+                                        ceiling
+                                    } else {
+                                        smoothed
+                                    }
+                                    .max(0.0))
+                                }
                             };
-                            self.eta_shown = Some(shown.max(0.0));
+                            self.eta_shown = Some(EtaView {
+                                phase: raw.phase,
+                                remaining,
+                            });
                         }
                         None => self.eta_shown = None,
                     }
@@ -5301,6 +5359,7 @@ impl App {
         self.current_index = None;
         self.status = Status::Running;
         self.stage = "starting".to_string();
+        self.stage_id = "starting".to_string();
         self.progress = 0.0;
         self.progress_shown = 0.0;
         self.overall_shown = 0.0;
@@ -5311,6 +5370,9 @@ impl App {
         self.work_total = 0.0;
         self.diarize_fraction = 0.0;
         self.eta_samples.clear();
+        // A sample measured on another run's workload must not set the pace for
+        // this one; the persisted prior still does.
+        self.eta_throughput = None;
         self.eta_pending = 0;
         // Whatever was being typed into the outgoing transcript is saved
         // before its lines are replaced by the new run.
@@ -5410,6 +5472,7 @@ impl App {
         self.scroll_anim = None;
         self.status = Status::Cancelled;
         self.stage = "cancelled".to_string();
+        self.stage_id = "cancelled".to_string();
         self.progress = 0.0;
         self.progress_shown = 0.0;
         self.overall_shown = 0.0;
@@ -6107,7 +6170,12 @@ impl App {
                     label,
                     progress,
                 } => {
-                    self.stage = if label.is_empty() { stage } else { label };
+                    self.stage = if label.is_empty() {
+                        stage.clone()
+                    } else {
+                        label
+                    };
+                    self.stage_id = stage;
                     self.progress = progress.clamp(0.0, 1.0);
                 }
                 Event::Backend {
@@ -6194,6 +6262,7 @@ impl App {
                     }
                     self.status = Status::Running;
                     self.stage = "loading".to_string();
+                    self.stage_id = "loading".to_string();
                     self.progress = 0.0;
                     self.progress_shown = 0.0;
                     self.eta_shown = None;
@@ -6201,6 +6270,8 @@ impl App {
                     self.work_total = 0.0;
                     self.diarize_fraction = 0.0;
                     self.eta_samples.clear();
+                    // Per file: the pace is re-measured from this file's work.
+                    self.eta_throughput = None;
                     self.eta_pending = 0;
                     self.elapsed_final = None;
                     self.transcript.clear();
@@ -6273,48 +6344,17 @@ impl App {
                     });
                 }
                 Event::Done { txt, stats, .. } => {
-                    // The file itself is the best throughput sample: audio
-                    // seconds per ASR second, blended into the persisted prior.
-                    let mut learned = false;
-                    if stats.asr_seconds > 0.0 && stats.audio_seconds > 0.0 {
-                        let sample = (stats.audio_seconds / stats.asr_seconds) as f32;
-                        if let Some(sample) = Self::usable_throughput(sample) {
-                            self.eta_prior = Some(match self.eta_prior {
-                                Some(prior) => prior * 0.5 + sample * 0.5,
-                                None => sample,
-                            });
-                            learned = true;
-                        }
-                    }
-                    // Diarization cost is measured the same way, so an
-                    // ASR-first run still has a rate to wait against.
-                    if stats.diarize_seconds > 0.0 && stats.audio_seconds > 0.0 {
-                        let sample = (stats.diarize_seconds / stats.audio_seconds) as f32;
-                        self.diarize_prior = Some(match self.diarize_prior {
-                            Some(prior) => prior * 0.5 + sample * 0.5,
-                            None => sample,
-                        });
-                        learned = true;
-                    }
-                    // The post-ASR tail (attribution, writing) is the last
-                    // phase, so it needs its own rate to estimate.
-                    if stats.prepare_seconds > 0.0 && stats.audio_seconds > 0.0 {
-                        let sample = (stats.prepare_seconds / stats.audio_seconds) as f32;
-                        self.prepare_prior = Some(match self.prepare_prior {
-                            Some(prior) => prior * 0.5 + sample * 0.5,
-                            None => sample,
-                        });
-                        learned = true;
-                    }
-                    if learned {
+                    if self.learn_from_stats(&stats) {
                         self.save_settings();
                     }
+
                     // Finish revealing any queued utterances immediately.
                     while let Some(line) = self.pending_lines.pop_front() {
                         self.reveal_line(line);
                     }
                     self.reveal_accum = 0.0;
                     self.stage = "done".to_string();
+                    self.stage_id = "done".to_string();
                     // Target 100%; the bar eases there over the next ticks.
                     self.progress = 1.0;
                     // A finished run is always the live buffer: the item it
@@ -6348,6 +6388,7 @@ impl App {
                     self.disable_gpu_after_failure(&message);
                     self.gpu_retry_pending = was_gpu;
                     self.stage = "error".to_string();
+                    self.stage_id = "error".to_string();
                     let had_current = self.current.is_some();
                     if let Some(index) = self.current.take() {
                         self.queue[index].status = ItemStatus::Failed(message.clone());
@@ -6396,6 +6437,7 @@ impl App {
                     self.batch = false;
                     self.current = None;
                     self.stage = "done".to_string();
+                    self.stage_id = "done".to_string();
                     self.progress = 1.0;
                     self.elapsed_final = self.run_start.map(|s| s.elapsed().as_secs_f64());
                     self.eta_shown = None;
@@ -6668,49 +6710,103 @@ impl App {
         (completed / total).clamp(0.0, 1.0)
     }
 
-    /// Estimated wall-clock seconds left, derived from measured throughput
-    /// (audio seconds transcribed per wall second).
-    fn estimate_remaining(&self) -> Option<f32> {
-        let throughput = self
-            .eta_throughput
-            .or(self.eta_prior)
-            .and_then(Self::usable_throughput)?;
-        if !throughput.is_finite() || throughput <= 0.0 {
+    /// Fold a finished file's timings into the priors the readout prices with.
+    /// Returns whether anything changed, so the caller can persist it.
+    ///
+    /// Only measurements that describe the phase they are stored for:
+    ///
+    /// * Throughput needs real ASR time and real audio. `usable_throughput`
+    ///   rejects a rate no decode could have produced.
+    /// * Diarization is learned only when a pass actually ran. A one-speaker
+    ///   run, ASR-only mode and a cached pass all return immediately, and the
+    ///   core still reports their leftover interval as `diarize_seconds`;
+    ///   blending that is what dragged the stored rate to 0.0018. A real pass
+    ///   over any audio takes more than half a second, so anything under that is
+    ///   a skipped pass, not a measurement.
+    /// * The post-ASR tail is never learned. `prepare_seconds` is the pre-ASR
+    ///   clip-building gap in the classic path and the attribution window in the
+    ///   overlap path, and the GUI gets no mode signal, so half of every sample
+    ///   would describe the wrong phase. The estimate uses the stored value or
+    ///   the built-in default instead.
+    fn learn_from_stats(&mut self, stats: &backend::Stats) -> bool {
+        if stats.audio_seconds <= 0.0 {
+            return false;
+        }
+        let mut learned = false;
+        if stats.asr_seconds > 0.0 {
+            let sample = (stats.audio_seconds / stats.asr_seconds) as f32;
+            if let Some(sample) = Self::usable_throughput(sample) {
+                self.eta_prior = Some(match self.eta_prior {
+                    Some(prior) => prior * 0.5 + sample * 0.5,
+                    None => sample,
+                });
+                learned = true;
+            }
+        }
+        const DIARIZE_FLOOR_SECONDS: f64 = 0.5;
+        let diarized = stats.num_speakers != Some(1)
+            && stats.diarize_seconds >= DIARIZE_FLOOR_SECONDS;
+        if diarized {
+            let sample = (stats.diarize_seconds / stats.audio_seconds) as f32;
+            self.diarize_prior = Some(match self.diarize_prior {
+                Some(prior) => prior * 0.5 + sample * 0.5,
+                None => sample,
+            });
+            learned = true;
+        }
+        learned
+    }
+
+    /// What the run is doing and how long it has left.
+    ///
+    /// The tail is sequential: after ASR, whatever diarization is still behind
+    /// has to finish and then the attribution/write pass runs, so their
+    /// estimates add. Only inside ASR do decoding and diarization overlap, and
+    /// there the longer of the two is the wait.
+    ///
+    /// A phase with no rate to price it with returns `remaining: None` rather
+    /// than borrowing another phase's rate: that is what stopped a finished ASR
+    /// pass from printing a five-second estimate over a three-minute tail.
+    fn estimate_remaining(&self) -> Option<EtaView> {
+        if !matches!(self.status, Status::Running) {
             return None;
         }
-        // Remaining audio in the current file.
-        // Diarization runs beside ASR in the overlap schedule and can finish
-        // after it, so the wait is whichever phase is still behind.
-        let diarize_rate = self.diarize_prior.unwrap_or(0.08).max(0.0);
-        let current_remaining = if self.work_total > 0.0 {
-            let asr_remaining = (self.work_total - self.work_done).max(0.0) as f32 / throughput;
-            let duration = self
-                .work_total
-                .max(self.shown_duration().unwrap_or(0.0) as f64) as f32;
-            let diarize_remaining =
-                (1.0 - self.diarize_fraction).max(0.0) * duration * diarize_rate;
-            // Once the decoder is spent, attribution and writing decide the
-            // wait; before that they are small beside ASR.
-            let asr_finished = self.work_done >= self.work_total - 1.0;
-            let prepare_rate = self.prepare_prior.unwrap_or(0.01).max(0.0);
-            let prepare_remaining = if asr_finished {
-                duration * prepare_rate
-            } else {
-                0.0
-            };
-            asr_remaining
-                .max(diarize_remaining)
-                .max(prepare_remaining)
-        } else if let Some(duration) = self.shown_duration() {
-            let audio = (duration * (1.0 - self.progress.clamp(0.0, 1.0))).max(0.0);
-            audio / throughput
-        } else {
-            0.0
+        let phase = self.eta_phase();
+        let duration = self.eta_duration();
+        // Attribution and writing, which no event reports: the migrated prior
+        // or the built-in default. Unknown audio length means unknown tail.
+        let tail = (duration > 0.0)
+            .then(|| duration * self.prepare_prior.unwrap_or(PREPARE_DEFAULT).max(0.0));
+
+        let current = match phase {
+            // Nothing measures decode or the final hand-off, so neither gets a
+            // number.
+            EtaPhase::Preparing | EtaPhase::Finishing => None,
+            EtaPhase::Transcribing => self
+                .eta_throughput
+                .or(self.eta_prior)
+                .and_then(Self::usable_throughput)
+                .map(|throughput| {
+                    let audio_left = (self.work_total - self.work_done).max(0.0) as f32;
+                    // Diarization runs beside ASR in the overlap schedule and
+                    // can finish after it; only count it while it is mid-flight.
+                    let diarizing =
+                        self.diarize_fraction > 0.0 && self.diarize_fraction < 1.0;
+                    let diarize_left = if diarizing {
+                        self.diarize_remaining(duration).unwrap_or(0.0)
+                    } else {
+                        0.0
+                    };
+                    (audio_left / throughput).max(diarize_left) + tail.unwrap_or(0.0)
+                }),
+            EtaPhase::Diarizing => self
+                .diarize_remaining(duration)
+                .map(|left| left + tail.unwrap_or(0.0)),
+            EtaPhase::Writing => tail,
         };
-        let current_remaining = current_remaining.max(0.0);
 
         // Files queued after the current one. Unknown durations use the same
-        // average as `queue_weight`, and 0.08 covers decode + diarize.
+        // average as `queue_weight`, and the same diarize rate as above.
         let start = self.current_index.map_or(0, |index| index + 1);
         let pending: Vec<&QueueItem> = self
             .queue
@@ -6728,13 +6824,61 @@ impl App {
         } else {
             known.iter().sum::<f32>() / known.len() as f32
         };
-        let queued: f32 = pending
-            .iter()
-            .map(|item| queue_weight(item, fallback) * (1.0 / throughput + diarize_rate))
-            .sum();
+        let throughput = self
+            .eta_throughput
+            .or(self.eta_prior)
+            .and_then(Self::usable_throughput);
+        // A one-speaker setting never diarizes, so a queued file costs only
+        // its decode and ASR.
+        let diarize_rate = if self.num_speakers == Some(1) {
+            0.0
+        } else {
+            self.diarize_prior.unwrap_or(DIARIZE_DEFAULT).max(0.0)
+        };
+        let queued: f32 = match throughput {
+            Some(rate) => pending
+                .iter()
+                .map(|item| queue_weight(item, fallback) * (1.0 / rate + diarize_rate))
+                .sum(),
+            None => 0.0,
+        };
 
-        let estimate = current_remaining + queued;
-        estimate.is_finite().then_some(estimate.max(0.0))
+        let remaining = current.map(|current| current + queued);
+        Some(EtaView {
+            phase,
+            remaining: remaining.filter(|left| left.is_finite()).map(|left| left.max(0.0)),
+        })
+    }
+
+    /// Which phase the pipeline's last stage belongs to.
+    ///
+    /// The core writes the transcript under the `transcription` stage with its
+    /// own label, so the write is told apart by the label rather than the id.
+    fn eta_phase(&self) -> EtaPhase {
+        match self.stage_id.as_str() {
+            "loading" | "decoding" | "starting" | "idle" => EtaPhase::Preparing,
+            "diarization" => EtaPhase::Diarizing,
+            "done" => EtaPhase::Finishing,
+            "transcription" if self.stage.starts_with("Writing") => EtaPhase::Writing,
+            _ => EtaPhase::Transcribing,
+        }
+    }
+
+    /// The audio length the phase rates are priced against: the decoder's own
+    /// total when it has one, the probed duration otherwise.
+    fn eta_duration(&self) -> f32 {
+        self.work_total
+            .max(self.shown_duration().unwrap_or(0.0) as f64)
+            .max(0.0) as f32
+    }
+
+    /// Diarization still to run, when there is a rate to price it with.
+    ///
+    /// The prior is only `Some` after a pass that actually diarized (see
+    /// `learn_from_stats`), so a skipped pass does not price this at zero.
+    fn diarize_remaining(&self, duration: f32) -> Option<f32> {
+        let rate = self.diarize_prior?;
+        Some((1.0 - self.diarize_fraction.clamp(0.0, 1.0)) * duration * rate.max(0.0))
     }
 
     /// Audio seconds per wall second above which a sample cannot be real.
@@ -6747,31 +6891,36 @@ impl App {
         (rate.is_finite() && rate > 0.02 && rate <= MAX_THROUGHPUT).then_some(rate)
     }
 
+    /// A stored diarization rate below this is a skipped pass, not a
+    /// measurement: no real pass can run faster than 1% of the audio length.
+    /// Loaded as unknown, which restores the built-in default.
+    fn usable_diarize(rate: f32) -> Option<f32> {
+        (rate.is_finite() && rate >= 0.01).then_some(rate)
+    }
+
+    /// Same for the post-ASR tail, whose stored values were dragged down by a
+    /// value that was never attribution in the first place.
+    fn usable_prepare(rate: f32) -> Option<f32> {
+        (rate.is_finite() && rate >= 0.001).then_some(rate)
+    }
+
     fn timer_text(&self) -> String {
         let elapsed = self.elapsed().unwrap_or_else(|| "00:00".to_string());
         if !matches!(self.status, Status::Running) {
             return elapsed;
         }
-        let Some(eta) = self.eta_shown.filter(|eta| eta.is_finite()) else {
+        let Some(view) = self.eta_shown else {
             return elapsed;
         };
-        // Coarse buckets: the underlying throughput is only good to about
-        // this resolution, so finer digits would be false precision.
-        if eta < 5.0 {
-            // The estimate collapses to zero at the end of a phase, while the
-            // tail still runs; the elapsed clock is the only honest number.
-            return format!("{elapsed} \u{00b7} finishing\u{2026}");
+        let phase = view.phase.label();
+        match view.remaining.filter(|left| left.is_finite()) {
+            Some(left) => format!(
+                "{elapsed} \u{00b7} {phase} \u{00b7} ~{} left",
+                eta_bucket(left)
+            ),
+            // No rate for this phase: its name, and no number to be wrong.
+            None => format!("{elapsed} \u{00b7} {phase}\u{2026}"),
         }
-        if eta > 600.0 {
-            let minutes = ((eta / 60.0) / 5.0).round().max(1.0) * 5.0;
-            return format!("{elapsed} \u{00b7} ~{minutes:.0} min left");
-        }
-        if eta >= 60.0 {
-            let seconds = ((eta / 5.0).round() * 5.0).max(5.0);
-            return format!("{elapsed} \u{00b7} ~{} left", format_secs(seconds as f64));
-        }
-        let seconds = ((eta / 5.0).round() * 5.0).max(5.0);
-        format!("{elapsed} \u{00b7} ~{seconds:.0}s left")
     }
 
     /// Collapsible console showing backend log output.
@@ -12928,6 +13077,21 @@ fn queue_weight(item: &QueueItem, fallback: f32) -> f32 {
         .unwrap_or(fallback)
 }
 
+/// Coarse "time left" text: the throughput is only good to about this
+/// resolution, so finer digits would be false precision.
+fn eta_bucket(left: f32) -> String {
+    if left >= 600.0 {
+        let minutes = ((left / 60.0) / 5.0).round().max(1.0) * 5.0;
+        format!("{minutes:.0} min")
+    } else if left >= 60.0 {
+        let seconds = ((left / 5.0).round() * 5.0).max(5.0);
+        format_secs(seconds as f64)
+    } else {
+        let seconds = ((left / 5.0).round() * 5.0).max(5.0);
+        format!("{seconds:.0} s")
+    }
+}
+
 /// Median of an already-sorted slice.
 fn median(sorted: &[f32]) -> f32 {
     let mid = sorted.len() / 2;
@@ -13841,6 +14005,15 @@ const ICON_SIZE: f32 = 14.0;
 /// Ceiling for a believable audio-seconds-per-wall-second sample. See
 /// `App::usable_throughput`.
 const MAX_THROUGHPUT: f32 = 200.0;
+
+/// Built-in phase rates, wall seconds per audio second, used until a run
+/// measures its own.
+///
+/// Diarization takes roughly this share of the audio length on the reference
+/// machine (210 s for an hour); the post-ASR tail is small beside it. These
+/// replace the priors a skipped diarization pass used to drag to zero.
+const DIARIZE_DEFAULT: f32 = 0.08;
+const PREPARE_DEFAULT: f32 = 0.01;
 
 /// The exchange glyph is the only one that has to read at a glance while the
 /// pointer is already on the row, so it is drawn larger than the control icons.
@@ -16296,9 +16469,14 @@ mod tests {
         let _config = ConfigEnv::new("eta-implausible");
         let mut app = pro_app();
         app.status = Status::Running;
-        // A value already saved by an older build is ignored rather than used.
+        app.stage_id = "transcription".to_string();
+        app.work_done = 10.0;
+        app.work_total = 100.0;
+        // A value already saved by an older build is ignored rather than used:
+        // the phase still has a view, but no number.
         app.eta_prior = Some(3004.33);
-        assert!(app.estimate_remaining().is_none());
+        let view = app.estimate_remaining().expect("a phase");
+        assert_eq!(view.remaining, None);
     }
 
     #[test]
@@ -16317,7 +16495,11 @@ mod tests {
         assert!(!text.contains('\u{00b7}'));
 
         // With an estimate the elapsed time still leads the string.
-        app.eta_shown = Some(900.0);
+        app.stage_id = "transcription".to_string();
+        app.eta_shown = Some(EtaView {
+            phase: EtaPhase::Transcribing,
+            remaining: Some(900.0),
+        });
         let text = app.timer_text();
         assert!(text.starts_with("0:4"), "elapsed dropped: {text}");
         assert!(text.contains("min left"), "estimate missing: {text}");
@@ -19394,15 +19576,27 @@ mod tests {
     }
 
     #[test]
-    fn eta_is_absent_until_throughput_is_measured() {
+    fn eta_has_no_number_until_the_phase_can_be_priced() {
         let _guard = env_lock();
         let _config = ConfigEnv::new("eta-absent");
         let mut app = pro_app();
         app.status = Status::Running;
+        app.stage_id = "transcription".to_string();
         app.work_done = 10.0;
         app.work_total = 100.0;
         assert!(app.eta_prior.is_none());
-        assert!(app.estimate_remaining().is_none());
+
+        let view = app.estimate_remaining().expect("a phase, even without a number");
+        assert_eq!(view.phase, EtaPhase::Transcribing);
+        assert_eq!(view.remaining, None, "a rate was invented");
+
+        // The readout names the phase instead of printing digits.
+        app.eta_shown = Some(view);
+        app.run_start = Some(Instant::now() - Duration::from_secs(42));
+        let text = app.timer_text();
+        assert!(text.contains("transcribing"), "{text}");
+        assert!(!text.contains("left"), "{text}");
+        assert!(!text.contains("finishing"), "{text}");
     }
 
     #[test]
@@ -19411,13 +19605,25 @@ mod tests {
         let _config = ConfigEnv::new("eta-throughput");
         let mut app = pro_app();
         app.status = Status::Running;
+        app.stage_id = "transcription".to_string();
         app.queue.clear();
         app.current_index = None;
         app.work_done = 100.0;
         app.work_total = 400.0;
         app.eta_throughput = Some(2.0);
-        let eta = app.estimate_remaining().expect("estimate");
+        // Isolate ASR: no tail on this one.
+        app.prepare_prior = Some(0.0);
+        let view = app.estimate_remaining().expect("estimate");
+        assert_eq!(view.phase, EtaPhase::Transcribing);
+        let eta = view.remaining.expect("number");
         assert!((eta - 150.0).abs() <= 1.0, "{eta}");
+
+        // And it reaches the label with the phase in front of it.
+        app.eta_shown = Some(view);
+        app.run_start = Some(Instant::now() - Duration::from_secs(42));
+        let text = app.timer_text();
+        assert!(text.contains("transcribing"), "{text}");
+        assert!(text.contains("left"), "{text}");
     }
 
     #[test]
@@ -19426,6 +19632,7 @@ mod tests {
         let config = ConfigEnv::new("eta-queue");
         let mut app = pro_app();
         app.status = Status::Running;
+        app.stage_id = "transcription".to_string();
         app.queue.clear();
         app.queue
             .push(eta_item(&config.dir, "current.mp3", ItemStatus::Running, Some(400.0)));
@@ -19437,12 +19644,42 @@ mod tests {
         app.work_done = 100.0;
         app.work_total = 400.0;
         app.eta_throughput = Some(2.0);
+        app.prepare_prior = Some(0.0);
+        app.diarize_prior = None;
 
-        let eta = app.estimate_remaining().expect("estimate");
+        let eta = app
+            .estimate_remaining()
+            .expect("estimate")
+            .remaining
+            .expect("number");
         // 150 s left in this file, plus 500 s of queued audio at 0.58 wall
-        // seconds per audio second (ASR + fixed decode/diarize cost).
+        // seconds per audio second (ASR + the built-in diarize share).
         let expected = 150.0 + 500.0 * (1.0 / 2.0 + 0.08);
         assert!((eta - expected).abs() <= 1.0, "{eta} vs {expected}");
+    }
+
+    #[test]
+    fn the_asr_estimate_includes_the_tail_that_follows_it() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("eta-tail-composition");
+        let mut app = pro_app();
+        app.status = Status::Running;
+        app.stage_id = "transcription".to_string();
+        app.queue.clear();
+        app.current_index = None;
+        app.work_done = 0.0;
+        app.work_total = 600.0;
+        app.eta_throughput = Some(2.0);
+        app.prepare_prior = Some(0.01);
+
+        // 300 s of ASR plus 6 s of attribution and writing: the tail is
+        // sequential after the decode, so it adds rather than competing.
+        let eta = app
+            .estimate_remaining()
+            .expect("estimate")
+            .remaining
+            .expect("number");
+        assert!((eta - 306.0).abs() <= 1.0, "{eta}");
     }
 
     #[test]
@@ -19464,8 +19701,10 @@ mod tests {
 
         assert_eq!(app.eta_prior, Some(3.0));
         assert_eq!(App::load_settings().eta_throughput, Some(3.0));
-        assert_eq!(app.prepare_prior, Some(0.1));
-        assert_eq!(App::load_settings().eta_prepare, Some(0.1));
+        // The tail is not learned: `prepare_seconds` cannot be told apart from
+        // the pre-ASR clip gap, so the stored value is left alone.
+        assert_eq!(app.prepare_prior, None);
+        assert_eq!(App::load_settings().eta_prepare, None);
     }
 
     #[test]
@@ -19474,6 +19713,7 @@ mod tests {
         let _config = ConfigEnv::new("eta-prepare-tail");
         let mut app = pro_app();
         app.status = Status::Running;
+        app.stage_id = "transcription".to_string();
         app.queue.clear();
         app.current_index = None;
         app.work_done = 4800.0;
@@ -19485,23 +19725,62 @@ mod tests {
         app.eta_throughput = Some(2.0);
 
         // Decoder and diarizer are spent; only the post-ASR tail is left.
-        let eta = app.estimate_remaining().expect("estimate");
+        let eta = app
+            .estimate_remaining()
+            .expect("estimate")
+            .remaining
+            .expect("number");
         assert!((eta - 48.0).abs() <= 2.0, "{eta}");
     }
 
     #[test]
-    fn eta_says_finishing_instead_of_one_second() {
+    fn a_small_estimate_is_a_number_not_a_handoff() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("eta-small");
+        let mut app = pro_app();
+        app.status = Status::Running;
+        app.stage_id = "transcription".to_string();
+        app.run_start = Some(Instant::now() - Duration::from_secs(42));
+        app.eta_shown = Some(EtaView {
+            phase: EtaPhase::Transcribing,
+            remaining: Some(4.9),
+        });
+
+        // Four-odd seconds left is a number. The word for the hand-off is not
+        // allowed to stand in for a small count.
+        let text = app.timer_text();
+        assert!(text.starts_with("0:4"), "elapsed dropped: {text}");
+        assert!(text.contains("5 s left"), "{text}");
+        assert!(!text.contains("finishing"), "{text}");
+
+        // The last phase before the write has a number too.
+        app.stage_id = "transcription".to_string();
+        app.eta_shown = Some(EtaView {
+            phase: EtaPhase::Writing,
+            remaining: Some(4.0),
+        });
+        let text = app.timer_text();
+        assert!(text.contains("writing"), "{text}");
+        assert!(text.contains("5 s left"), "{text}");
+        assert!(!text.contains("finishing"), "{text}");
+    }
+
+    #[test]
+    fn finishing_is_only_the_last_handoff() {
         let _guard = env_lock();
         let _config = ConfigEnv::new("eta-finishing");
         let mut app = pro_app();
         app.status = Status::Running;
         app.run_start = Some(Instant::now() - Duration::from_secs(42));
-        app.eta_shown = Some(0.0);
-
+        app.stage = "Done".to_string();
+        app.stage_id = "done".to_string();
+        let view = app.estimate_remaining().expect("a view");
+        assert_eq!(view.phase, EtaPhase::Finishing);
+        assert_eq!(view.remaining, None);
+        app.eta_shown = Some(view);
         let text = app.timer_text();
-        assert!(text.starts_with("0:4"), "elapsed dropped: {text}");
         assert!(text.contains("finishing"), "{text}");
-        assert!(!text.contains("1s left"), "{text}");
+        assert!(!text.contains("left"), "{text}");
     }
 
     #[test]
@@ -19510,6 +19789,7 @@ mod tests {
         let _config = ConfigEnv::new("eta-diarize-wait");
         let mut app = pro_app();
         app.status = Status::Running;
+        app.stage_id = "diarization".to_string();
         app.queue.clear();
         app.current_index = None;
         app.work_done = 600.0;
@@ -19517,11 +19797,27 @@ mod tests {
         app.timeline_duration = Some(600.0);
         app.diarize_fraction = 0.5;
         app.diarize_prior = Some(0.1);
+        app.prepare_prior = Some(0.0);
         app.eta_throughput = Some(2.0);
 
-        // ASR is done but half of a 600 s file is still to diarize.
-        let eta = app.estimate_remaining().expect("estimate");
+        // ASR is done but half of a 600 s file is still to diarize, and the
+        // phase says so.
+        let view = app.estimate_remaining().expect("estimate");
+        assert_eq!(view.phase, EtaPhase::Diarizing);
+        let eta = view.remaining.expect("number");
         assert!((eta - 30.0).abs() <= 2.0, "{eta}");
+
+        // Without a diarization rate there is nothing to price it with, so the
+        // label carries no digits rather than a borrowed number.
+        app.diarize_prior = None;
+        let view = app.estimate_remaining().expect("estimate");
+        assert_eq!(view.phase, EtaPhase::Diarizing);
+        assert_eq!(view.remaining, None);
+        app.eta_shown = Some(view);
+        app.run_start = Some(Instant::now() - Duration::from_secs(42));
+        let text = app.timer_text();
+        assert!(text.contains("diarizing"), "{text}");
+        assert!(!text.contains("left"), "{text}");
     }
 
     #[test]
@@ -19530,6 +19826,7 @@ mod tests {
         let _config = ConfigEnv::new("eta-diarize-done");
         let mut app = pro_app();
         app.status = Status::Running;
+        app.stage_id = "transcription".to_string();
         app.queue.clear();
         app.current_index = None;
         app.work_done = 100.0;
@@ -19537,10 +19834,48 @@ mod tests {
         app.timeline_duration = Some(400.0);
         app.diarize_fraction = 1.0;
         app.diarize_prior = Some(0.1);
+        app.prepare_prior = Some(0.0);
         app.eta_throughput = Some(2.0);
 
-        let eta = app.estimate_remaining().expect("estimate");
+        let eta = app
+            .estimate_remaining()
+            .expect("estimate")
+            .remaining
+            .expect("number");
         assert!((eta - 150.0).abs() <= 1.0, "{eta}");
+    }
+
+    #[test]
+    fn a_phase_change_reseeds_the_shown_estimate() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("eta-phase-reseed");
+        let mut app = pro_app();
+        app.status = Status::Running;
+        app.stage_id = "transcription".to_string();
+        app.queue.clear();
+        app.current_index = None;
+        app.work_done = 100.0;
+        app.work_total = 400.0;
+        app.timeline_duration = Some(400.0);
+        app.eta_throughput = Some(2.0);
+        app.prepare_prior = Some(0.0);
+        app.diarize_prior = Some(0.1);
+        let _ = app.update(Message::Tick);
+        assert_eq!(
+            app.eta_shown.map(|view| view.phase),
+            Some(EtaPhase::Transcribing)
+        );
+
+        // The decode is spent and the diarizer is half way: the new phase's
+        // estimate seeds the readout instead of being blended into, and capped
+        // by, the old one.
+        app.work_done = 400.0;
+        app.stage_id = "diarization".to_string();
+        app.diarize_fraction = 0.5;
+        let _ = app.update(Message::Tick);
+        let shown = app.eta_shown.expect("estimate");
+        assert_eq!(shown.phase, EtaPhase::Diarizing);
+        assert!((shown.remaining.expect("number") - 20.0).abs() <= 2.0, "{shown:?}");
     }
 
     #[test]
@@ -19561,6 +19896,62 @@ mod tests {
 
         assert_eq!(app.diarize_prior, Some(0.1));
         assert_eq!(App::load_settings().eta_diarize, Some(0.1));
+    }
+
+    #[test]
+    fn a_run_that_did_not_diarize_does_not_learn_a_rate() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("eta-diarize-skip");
+        let mut app = pro_app();
+        app.status = Status::Running;
+        app.diarize_prior = Some(0.06);
+        // One speaker: the pipeline returns immediately and still reports the
+        // leftover interval. It must not drag the rate down.
+        app.events.lock().unwrap().push_back(Event::Done {
+            txt: String::new(),
+            stats: backend::Stats {
+                audio_seconds: 600.0,
+                diarize_seconds: 0.01,
+                num_speakers: Some(1),
+                ..Default::default()
+            },
+        });
+        let _ = app.update(Message::Tick);
+        assert_eq!(app.diarize_prior, Some(0.06));
+
+        // Nor a cached pass, whose reported interval is under the floor.
+        app.events.lock().unwrap().push_back(Event::Done {
+            txt: String::new(),
+            stats: backend::Stats {
+                audio_seconds: 600.0,
+                diarize_seconds: 0.2,
+                ..Default::default()
+            },
+        });
+        let _ = app.update(Message::Tick);
+        assert_eq!(app.diarize_prior, Some(0.06));
+    }
+
+    #[test]
+    fn a_stored_rate_from_a_skipped_pass_loads_as_unknown() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("eta-migrate");
+        let path = App::settings_path().expect("settings path");
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(
+            &path,
+            r#"{"eta_diarize":0.0018,"eta_prepare":0.000061}"#,
+        )
+        .unwrap();
+
+        let app = pro_app();
+        assert_eq!(app.diarize_prior, None, "garbage kept as a measurement");
+        assert_eq!(app.prepare_prior, None);
+
+        // And the estimate falls back to the built-in rates rather than zero.
+        assert_eq!(app.diarize_prior.unwrap_or(DIARIZE_DEFAULT), DIARIZE_DEFAULT);
     }
 
     #[test]
