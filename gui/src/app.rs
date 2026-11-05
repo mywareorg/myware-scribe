@@ -8604,14 +8604,26 @@ impl App {
                 size,
                 self.inline_bubble_width(size),
             );
+            // The row being edited keeps its exchange button: the field is
+            // where the pointer already is, and changing which speaker owns the
+            // line while typing it is exactly when the button is wanted. It
+            // sits on the bubble's inner side, as it does un-edited, and the
+            // reserved slot keeps the field from moving when it appears.
+            let swap = (!single_speaker).then(|| sms_swap_button(row.index, &scheme));
             let mut content = row![]
                 .spacing(theme::SPACE_SM)
                 .align_y(iced::Alignment::Center)
                 .width(Length::Fill);
             if index.is_multiple_of(2) || single_speaker {
                 content = content.push(bubble);
+                if let Some(swap) = swap {
+                    content = content.push(swap);
+                }
             } else {
                 content = content.push(horizontal_space());
+                if let Some(swap) = swap {
+                    content = content.push(swap);
+                }
                 content = content.push(bubble);
             }
             return content.into();
@@ -8635,9 +8647,11 @@ impl App {
     /// Width the bubble editor's text well has to wrap to.
     ///
     /// The pane, less the transcript's own padding and scrollbar, less the
-    /// bubble's padding and border, capped at the width a bubble may reach.
+    /// bubble's padding and border, less the exchange button's reserved slot --
+    /// which the row keeps whether or not the button is showing, so the field
+    /// never rewraps when it appears -- capped at the width a bubble may reach.
     fn inline_bubble_width(&self, size: f32) -> f32 {
-        let pane = (self.pane_width() - 2.0 * 8.0 - 12.0).max(240.0);
+        let pane = (self.pane_width() - 2.0 * 8.0 - 12.0).max(240.0) - SWAP_RESERVED_WIDTH;
         (pane - 30.0).min((size * 28.0).clamp(240.0, 620.0) - 20.0)
     }
 
