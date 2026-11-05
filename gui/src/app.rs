@@ -6936,6 +6936,9 @@ impl App {
         container(
             scrollable(col)
                 .id(console_id())
+                // Log lines wrap to the full width, so the rail needs a lane of
+                // its own here too.
+                .spacing(theme::SPACE_SM)
                 .height(Length::Fill)
                 .width(Length::Fill),
         )
@@ -8218,7 +8221,7 @@ impl App {
                 scrollable(rows)
                     .width(Length::Fill)
                     .height(Length::Fill)
-                    .style(queue_scrollbar_style),
+                    .style(visible_scrollbar_style),
             )
             .on_move(Message::QueuePointerMoved)
             .on_exit(Message::QueuePointerLeft);
@@ -10331,6 +10334,8 @@ impl App {
 
         let scroll = scrollable(body)
             .id(summary_id())
+            .spacing(theme::SPACE_SM)
+            .style(visible_scrollbar_style)
             .width(Length::Fill)
             .height(Length::Fixed(height));
 
@@ -10423,25 +10428,34 @@ impl App {
         let mut col = column![text(kind.label()).size(20)].spacing(8);
         match kind {
             HelpKind::Shortcuts => {
-                // Key in a fixed-width column so the descriptions line up.
-                const KEY_WIDTH: f32 = 150.0;
+                // Key in a fixed-width column so the descriptions line up. 140
+                // leaves the longest description room to sit on one line in the
+                // 460 px card.
+                const KEY_WIDTH: f32 = 140.0;
                 for (key, description) in [
                     ("Ctrl+O", "Add files"),
+                    ("Ctrl+S", "Save transcript as"),
                     ("Ctrl+,", "Settings"),
                     ("Ctrl+F", "Find"),
                     ("Ctrl+Enter", "Transcribe"),
                     ("Ctrl + / - / 0", "Transcript font zoom"),
                     ("Space", "Play / pause"),
+                    ("Left / Right", "Seek \u{00b1}5 s"),
+                    ("Up / Down", "Move through the transcript"),
                     ("F", "Follow the active line"),
                     ("T / S / J / C", "Timestamps / SMS / Join / Confidence"),
-                    ("Left / Right", "Seek \u{00b1}5s"),
-                    ("Up / Down", "Move through transcript"),
-                    ("Alt+Enter", "Edit active line"),
-                    ("Enter / Esc", "Save / cancel the line being edited"),
-                    ("Alt+Up / Alt+Down", "Join the edited line with the one above / below"),
-                    ("Ctrl+Shift+K", "Split the edited line at the cursor"),
+                    ("Alt+Enter", "Edit the active line"),
+                    ("Alt+Up / Alt+Down", "Join the edited line up / down"),
+                    ("Ctrl+Shift+K", "Split the edited line at cursor"),
                     ("Ctrl+Z", "Undo typing in the line field"),
-                    ("Esc", "Dismiss"),
+                    // Enter means one thing in the search and another in the
+                    // editor, so each context gets its own row rather than one
+                    // line standing for both.
+                    ("Enter", "Search: next match"),
+                    ("Shift+Enter", "Search: previous match"),
+                    ("Enter", "Line editor: save"),
+                    ("Esc", "Cancel the editor or dismiss"),
+                    ("Tab", "Rename dialog: next field"),
                 ] {
                     col = col.push(
                         row![
@@ -10914,7 +10928,11 @@ impl App {
         ));
 
         let height = (self.window_size.height * 0.46).clamp(300.0, 360.0);
+        // `spacing` embeds the rail and reserves its lane, so the right-hand
+        // column of controls cannot end up underneath it.
         let scroll = scrollable(body)
+            .spacing(theme::SPACE_SM)
+            .style(visible_scrollbar_style)
             .width(Length::Fill)
             .height(Length::Fixed(height));
 
@@ -13219,8 +13237,11 @@ fn scrollbar_style(theme: &iced::Theme, status: scrollable::Status) -> scrollabl
     style
 }
 
-/// Queue scrollbar: always visible when the list overflows.
-fn queue_scrollbar_style(theme: &iced::Theme, status: scrollable::Status) -> scrollable::Style {
+/// Always-visible scrollbar, for the queue and any dialog that scrolls.
+///
+/// A dialog's scroller is its only cue that more rows exist below the fold, and
+/// a rail that only appears on hover reads as an empty gutter until then.
+fn visible_scrollbar_style(theme: &iced::Theme, status: scrollable::Status) -> scrollable::Style {
     let mut style = scrollable::default(theme, status);
     let active = matches!(
         status,
