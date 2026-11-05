@@ -10397,24 +10397,14 @@ impl App {
             }
             HelpKind::EditingTips => {
                 for (title, detail) in [
-                    (
-                        "Double-click an utterance",
-                        "Opens it in place. The caret lands where you clicked; \
-                         Enter saves the line, Esc cancels.",
-                    ),
-                    (
-                        "Right-click an utterance",
-                        "Moves it to the next speaker.",
-                    ),
-                    (
-                        "Edit \u{2192} Rename Speakers",
-                        "Renames one speaker everywhere in the transcript at once.",
-                    ),
+                    ("Double-click Speaker", "Enter editing mode"),
+                    ("Right-Click Speaker", "Change Speaker"),
+                    ("Edit >> Rename Speakers", "Bulk rename speakers"),
                 ] {
                     col = col.push(
                         column![
                             text(title).size(theme::TEXT_MD).font(Font {
-                                weight: font::Weight::Medium,
+                                weight: font::Weight::Bold,
                                 ..Font::DEFAULT
                             }),
                             text(detail).size(theme::TEXT_SM).color(scheme.muted),
@@ -10423,29 +10413,38 @@ impl App {
                     );
                 }
                 col = col.push(settings_divider(scheme));
-                // The same check-slot row the header menus use: the app has no
-                // other checkbox, and this one matches the palette for free.
-                col = col.push(header_menu_item(
-                    "Don't show these tips again",
-                    !self.editing_tips,
-                    true,
-                    Some(Message::SetEditingTips(!self.editing_tips)),
-                    None,
-                    scheme,
-                ));
             }
             HelpKind::Console | HelpKind::Settings => {}
         }
-        col = col.push(
-            container(
-                row![action_text("Close")
-                    .on_press(Message::CloseHelp)
-                    .style(color_button(scheme.blue, scheme.on_accent))]
-                .spacing(8),
-            )
-            .width(Length::Fill)
-            .align_x(iced::Alignment::End),
+        // The tips carry their own switch, and it shares the row with Close:
+        // an opt-out next to the acknowledgement reads as part of closing, not
+        // as another paragraph.
+        let mut footer = row![].spacing(8).align_y(iced::Alignment::Center);
+        if kind == HelpKind::EditingTips {
+            footer = footer.push(
+                action(
+                    row![
+                        tips_check(!self.editing_tips, scheme),
+                        text("Don't show these tips again")
+                            .size(theme::TEXT_XS)
+                            .wrapping(NO_WRAP)
+                            .color(scheme.muted),
+                    ]
+                    .spacing(7)
+                    .align_y(iced::Alignment::Center),
+                )
+                .padding([4, 6])
+                .style(header_menu_item_style(scheme, true))
+                .on_press(Message::SetEditingTips(!self.editing_tips)),
+            );
+        }
+        footer = footer.push(horizontal_space());
+        footer = footer.push(
+            action_text("Close")
+                .on_press(Message::CloseHelp)
+                .style(color_button(scheme.blue, scheme.on_accent)),
         );
+        col = col.push(container(footer).width(Length::Fill));
         modal_card(col, 460.0, scheme)
     }
 
@@ -14011,6 +14010,33 @@ fn card_menu_layer<'a>(body: Element<'a, Message>, offset: f32) -> Element<'a, M
             left: offset,
         })
         .into()
+}
+
+/// The Editing Tips opt-out: a square that fills when set, with the tick drawn
+/// a little larger than the box so it reads as a mark struck through it rather
+/// than a glyph sitting inside a frame.
+fn tips_check<'a>(checked: bool, scheme: Scheme) -> Element<'a, Message> {
+    const BOX: f32 = 13.0;
+    let square = container(horizontal_space())
+        .width(Length::Fixed(BOX))
+        .height(Length::Fixed(BOX))
+        .style(move |_theme| container::Style {
+            background: checked.then(|| scheme.dialog_bg.into()),
+            border: iced::border::Border {
+                color: if checked { scheme.blue } else { scheme.border },
+                width: 1.0,
+                radius: 3.0.into(),
+            },
+            ..container::Style::default()
+        });
+    let tick: Element<'a, Message> = if checked {
+        container(icon_colored(ICON_CHECK, BOX + 2.0, scheme.blue))
+            .center(Length::Fixed(BOX))
+            .into()
+    } else {
+        horizontal_space().into()
+    };
+    stack![square, tick].into()
 }
 
 /// A hairline between two menu groups.
