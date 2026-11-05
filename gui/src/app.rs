@@ -9012,43 +9012,33 @@ impl App {
             || self.output_dir.is_some();
         let running = matches!(self.status, Status::Running);
         let summary = !running && self.has_results();
-        // The same rows the card is built from, so its width follows the labels
-        // and the shortcut rather than a fixed 212.
-        let rows = [
-            ("Save As", Some("Ctrl+S")),
-            ("Reveal", None),
-            ("Summary", None),
-        ];
-        header_menu_card(
-            column![
-                header_menu_item(
-                    "Save As",
-                    false,
-                    has_text,
-                    has_text.then_some(Message::SaveTranscriptAs),
-                    Some("Ctrl+S"),
-                    scheme,
-                ),
-                header_menu_item(
-                    "Reveal",
-                    false,
-                    has_target,
-                    has_target.then_some(Message::RevealOutput),
-                    None,
-                    scheme,
-                ),
-                header_menu_item(
-                    "Summary",
-                    false,
-                    summary,
-                    summary.then_some(Message::OpenSummary),
-                    None,
-                    scheme,
-                ),
-            ]
-            .spacing(2)
-            .width(Length::Fill),
-            &rows,
+        menu_card(
+            vec![MenuSection {
+                rows: vec![
+                    MenuRow {
+                        label: "Save As",
+                        key: Some("Ctrl+S"),
+                        checked: false,
+                        enabled: has_text,
+                        action: has_text.then_some(Message::SaveTranscriptAs),
+                    },
+                    MenuRow {
+                        label: "Reveal",
+                        key: None,
+                        checked: false,
+                        enabled: has_target,
+                        action: has_target.then_some(Message::RevealOutput),
+                    },
+                    MenuRow {
+                        label: "Summary",
+                        key: None,
+                        checked: false,
+                        enabled: summary,
+                        action: summary.then_some(Message::OpenSummary),
+                    },
+                ],
+                footer: None,
+            }],
             scheme,
         )
     }
@@ -13875,15 +13865,34 @@ fn header_identity_budgets(window_width: f32) -> (usize, usize) {
     (budget(13.0), budget(11.0))
 }
 
+/// One row of a transcript header menu. The label, trailing key, check state and
+/// action are one value, so the card's body and the width it is sized to cannot
+/// disagree — the duplication the old parallel `rows` arrays allowed.
+#[derive(Debug, Clone)]
+struct MenuRow<'a> {
+    label: &'a str,
+    key: Option<&'a str>,
+    checked: bool,
+    enabled: bool,
+    action: Option<Message>,
+}
+
+/// A group of rows in a header menu, optionally followed by custom controls
+/// (the View menu's zoom pair). Groups are separated by a hairline.
+struct MenuSection<'a> {
+    rows: Vec<MenuRow<'a>>,
+    footer: Option<Element<'a, Message>>,
+}
+
 /// Width a header menu needs: the widest of its rows, each being the check slot
 /// and its gap, the label, the minimum gap before a trailing key and the key,
 /// plus the row's and the card's padding.
 ///
-/// `rows` is the same list the menu's items are built from. Rows keep their
-/// `Fill` width inside that card so every row — and its hover tint — is the
-/// menu's full width and the trailing keys line up in one column.
-fn header_menu_width(rows: &[(&str, Option<&str>)]) -> f32 {
-    let row = |label: &str, shortcut: Option<&str>| {
+/// The rows are the same values the body is built from. Rows keep their `Fill`
+/// width inside the card so every row — and its hover tint — is the menu's full
+/// width and the trailing keys line up in one column.
+fn header_menu_width<'r, 'a: 'r>(rows: impl IntoIterator<Item = &'r MenuRow<'a>>) -> f32 {
+    let row_width = |label: &str, shortcut: Option<&str>| {
         theme::SPACE_MD * 2.0                       // card padding, both sides
             + theme::SPACE_SM * 2.0                 // row padding `[5, 6]`, both sides
             + HEADER_MENU_CHECK
@@ -13893,8 +13902,8 @@ fn header_menu_width(rows: &[(&str, Option<&str>)]) -> f32 {
                 theme::SPACE_2XL + estimated_text_width(key, theme::TEXT_XS)
             })
     };
-    rows.iter()
-        .map(|(label, shortcut)| row(label, *shortcut))
+    rows.into_iter()
+        .map(|row| row_width(row.label, row.key))
         .fold(0.0, f32::max)
 }
 
@@ -13918,13 +13927,89 @@ fn card_menu_layer<'a>(body: Element<'a, Message>, offset: f32) -> Element<'a, M
         .into()
 }
 
+/// A hairline between two menu groups.
+fn menu_divider(scheme: Scheme) -> Element<'static, Message> {
+    container(
+        container(horizontal_space())
+            .width(Length::Fill)
+            .height(Length::Fixed(1.0))
+            .style(move |_theme| container::Style {
+                background: Some(scheme.border.into()),
+                ..container::Style::default()
+            }),
+    )
+    .padding([4, 0])
+    .into()
+}
+
+/// The card every transcript-header menu is drawn in: raised, hairline-outlined
+/// and sized to its rows. Clicks inside it, including its padding, are consumed
+/// so only a press outside dismisses the menu.
+fn menu_card<'a>(sections: Vec<MenuSection<'a>>, scheme: Scheme) -> Element<'a, Message> {
+    let width = header_menu_width(sections.iter().flat_map(|section| section.rows.iter()));
+    let mut body = column![].spacing(theme::SPACE_SM).width(Length::Fill);
+    for (index, section) in sections.into_iter().enumerate() {
+        if index > 0 {
+            body = body.push(menu_divider(scheme));
+        }
+        let mut rows = column![].spacing(2).width(Length::Fill);
+        for row in section.rows {
+            rows = rows.push(header_menu_item(
+                row.label,
+                row.checked,
+                row.enabled,
+                row.action,
+                row.key,
+                scheme,
+            ));
+        }
+        body = body.push(rows);
+        if let Some(footer) = section.footer {
+            body = body.push(menu_divider(scheme));
+            body = body.push(footer);
+        }
+    }
+    let card = container(body)
+        .width(Length::Fixed(width))
+        .padding(8)
+        .style(move |_theme| container::Style {
+            background: Some(scheme.dialog_bg.into()),
+            border: iced::border::Border {
+                color: scheme.border,
+                width: 1.0,
+                radius: theme::RADIUS_MD.into(),
+            },
+            shadow: soft_shadow(),
+            ..container::Style::default()
+        });
+    mouse_area(card)
+        .interaction(mouse::Interaction::Idle)
+        .on_press(Message::Noop)
+        .on_right_press(Message::Noop)
+        .on_middle_press(Message::Noop)
+        .into()
+}
+
 fn header_menu_card<'a>(
     body: impl Into<Element<'a, Message>>,
     rows: &[(&str, Option<&str>)],
     scheme: Scheme,
 ) -> Element<'a, Message> {
+    let width = {
+        let rows: Vec<MenuRow<'_>> = rows
+            .iter()
+            .map(|(label, key)| MenuRow {
+                label,
+                key: *key,
+                checked: false,
+                enabled: true,
+                action: None,
+            })
+            .collect();
+        header_menu_width(&rows)
+    };
     let card = container(body)
-        .width(Length::Fixed(header_menu_width(rows)))
+        .width(Length::Fixed(width))
         .padding(8)
         .style(move |_theme| container::Style {
             background: Some(scheme.dialog_bg.into()),
@@ -15742,6 +15827,46 @@ mod tests {
             view_menu_offset() - edit_menu_offset(),
             EDIT_BUTTON_WIDTH + theme::SPACE_SM
         );
+    }
+
+    #[test]
+    fn a_menu_row_with_a_key_is_no_wider_than_its_label_plus_key() {
+        let wide = [
+            MenuRow {
+                label: "Timestamps",
+                key: Some("t"),
+                checked: false,
+                enabled: true,
+                action: None,
+            },
+            MenuRow {
+                label: "Join",
+                key: Some("j"),
+                checked: false,
+                enabled: true,
+                action: None,
+            },
+        ];
+        let narrow = [MenuRow {
+            label: "Join",
+            key: Some("j"),
+            checked: false,
+            enabled: true,
+            action: None,
+        }];
+        assert!(header_menu_width(&wide) > header_menu_width(&narrow));
+
+        // The card is sized from the same row value the body is built from: one
+        // card padding, one row padding, the check slot, its gap, the label, the
+        // minimum gap before a key and the key itself.
+        let expected = theme::SPACE_MD * 2.0
+            + theme::SPACE_SM * 2.0
+            + HEADER_MENU_CHECK
+            + theme::SPACE_SM
+            + estimated_text_width("Timestamps", 16.0)
+            + theme::SPACE_2XL
+            + estimated_text_width("t", theme::TEXT_XS);
+        assert!((header_menu_width(&wide) - expected).abs() < 0.01);
     }
 
     #[test]
