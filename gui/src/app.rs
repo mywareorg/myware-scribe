@@ -9185,86 +9185,60 @@ impl App {
     /// placeholder after every choice, so it could only ever act.
     fn help_menu(&self, scheme: &Scheme) -> Element<'_, Message> {
         let scheme = *scheme;
-        let actions = column![
-            header_menu_item(
-                "About",
-                false,
-                true,
-                Some(Message::HelpChoice(HelpKind::About)),
-                None,
-                scheme,
-            ),
-            header_menu_item(
-                "Shortcuts",
-                false,
-                true,
-                Some(Message::HelpChoice(HelpKind::Shortcuts)),
-                None,
-                scheme,
-            ),
-            header_menu_item(
-                "Console",
-                self.console_open,
-                true,
-                Some(Message::HelpChoice(HelpKind::Console)),
-                None,
-                scheme,
-            ),
-            header_menu_item(
-                "Settings",
-                false,
-                true,
-                Some(Message::HelpChoice(HelpKind::Settings)),
-                None,
-                scheme,
-            ),
-        ]
-        .spacing(2)
-        .width(Length::Fill);
-
-        // One row per mode, in the order `AppTheme::ALL` declares, checked when
-        // it is the mode in force.
-        let mut appearance = column![].spacing(2).width(Length::Fill);
-        for mode in AppTheme::ALL {
-            appearance = appearance.push(header_menu_item(
-                mode.label(),
-                self.theme_mode == mode,
-                true,
-                Some(Message::SetTheme(mode)),
-                None,
-                scheme,
-            ));
-        }
-
-        // The actions and the appearance are two kinds of entry, so they get a
-        // rule between them rather than reading as seven equal choices.
-        let divider = container(horizontal_space())
-            .width(Length::Fill)
-            .height(Length::Fixed(1.0))
-            .style(move |_theme| container::Style {
-                background: Some(scheme.border.into()),
-                ..container::Style::default()
-            });
-
-        // The same rows the card is built from, so its width follows the labels.
-        let mut rows = vec![
-            ("About", None),
-            ("Shortcuts", None),
-            ("Console", None),
-            ("Settings", None),
+        let actions = vec![
+            MenuRow {
+                label: "About",
+                key: None,
+                checked: false,
+                enabled: true,
+                action: Some(Message::HelpChoice(HelpKind::About)),
+            },
+            MenuRow {
+                label: "Shortcuts",
+                key: None,
+                checked: false,
+                enabled: true,
+                action: Some(Message::HelpChoice(HelpKind::Shortcuts)),
+            },
+            MenuRow {
+                label: "Console",
+                key: None,
+                checked: self.console_open,
+                enabled: true,
+                action: Some(Message::HelpChoice(HelpKind::Console)),
+            },
+            MenuRow {
+                label: "Settings",
+                key: None,
+                checked: false,
+                enabled: true,
+                action: Some(Message::HelpChoice(HelpKind::Settings)),
+            },
         ];
-        for mode in AppTheme::ALL {
-            rows.push((mode.label(), None));
-        }
-        header_menu_card(
-            column![
-                actions,
-                container(divider).padding([4, 0]),
-                appearance,
-            ]
-            .spacing(theme::SPACE_SM)
-            .width(Length::Fill),
-            &rows,
+        // One row per mode, in the order `AppTheme::ALL` declares, checked when
+        // it is the mode in force. One pass: the rows are both the body and the
+        // width, so the modes cannot appear twice.
+        let appearance: Vec<MenuRow> = AppTheme::ALL
+            .iter()
+            .map(|mode| MenuRow {
+                label: mode.label(),
+                key: None,
+                checked: self.theme_mode == *mode,
+                enabled: true,
+                action: Some(Message::SetTheme(*mode)),
+            })
+            .collect();
+        menu_card(
+            vec![
+                MenuSection {
+                    rows: actions,
+                    footer: None,
+                },
+                MenuSection {
+                    rows: appearance,
+                    footer: None,
+                },
+            ],
             scheme,
         )
     }
@@ -13961,45 +13935,6 @@ fn menu_card<'a>(sections: Vec<MenuSection<'a>>, scheme: Scheme) -> Element<'a, 
         .into()
 }
 
-fn header_menu_card<'a>(
-    body: impl Into<Element<'a, Message>>,
-    rows: &[(&str, Option<&str>)],
-    scheme: Scheme,
-) -> Element<'a, Message> {
-    let width = {
-        let rows: Vec<MenuRow<'_>> = rows
-            .iter()
-            .map(|(label, key)| MenuRow {
-                label,
-                key: *key,
-                checked: false,
-                enabled: true,
-                action: None,
-            })
-            .collect();
-        header_menu_width(&rows)
-    };
-    let card = container(body)
-        .width(Length::Fixed(width))
-        .padding(8)
-        .style(move |_theme| container::Style {
-            background: Some(scheme.dialog_bg.into()),
-            border: iced::border::Border {
-                color: scheme.border,
-                width: 1.0,
-                radius: theme::RADIUS_MD.into(),
-            },
-            shadow: soft_shadow(),
-            ..container::Style::default()
-        });
-    mouse_area(card)
-        .interaction(mouse::Interaction::Idle)
-        .on_press(Message::Noop)
-        .on_right_press(Message::Noop)
-        .on_middle_press(Message::Noop)
-        .into()
-}
-
 /// One row of a header menu: a leading check slot that keeps every label on the
 /// same left edge, the label, then the key that toggles it at the trailing
 /// edge. Disabled rows stay in place so the menu's height does not change with
@@ -15798,6 +15733,24 @@ mod tests {
             view_menu_offset() - edit_menu_offset(),
             EDIT_BUTTON_WIDTH + theme::SPACE_SM
         );
+    }
+
+    #[test]
+    fn every_header_menu_renders() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("all-menus-config");
+        let original = "[00:00] SPEAKER 1: one\n[00:05] SPEAKER 2: two\n";
+        let (mut app, _transcript, media) = line_edit_fixture("all-menus", original);
+        for menu in [
+            HeaderMenu::File,
+            HeaderMenu::Edit,
+            HeaderMenu::View,
+            HeaderMenu::Help,
+        ] {
+            app.header_menu = Some(menu);
+            let _ = app.view();
+        }
+        let _ = std::fs::remove_dir_all(&media);
     }
 
     #[test]
