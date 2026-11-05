@@ -1014,10 +1014,19 @@ pub struct App {
     /// Pending-file count at the previous tick, to notice a growing queue.
     eta_pending: usize,
     status: Status,
+    /// The live transcript: what the current run wrote, and what the live file
+    /// holds. With an item selected this is not what the screen shows — that is
+    /// `selected_view`. Read through `document_transcript` / `shown_transcript`
+    /// unless you mean this buffer specifically (writing its file, rebuilding
+    /// its text after an edit).
     transcript: String,
+    /// The live transcript's lines, on the same terms as `transcript`: read
+    /// through `document_lines` / `shown_lines` unless the live buffer itself is
+    /// meant.
     lines: Vec<DocLine>,
     pending_lines: VecDeque<DocLine>,
     reveal_accum: f32,
+    /// The live transcript's speaker turns, on the same terms as `lines`.
     turns: Vec<backend::Turn>,
     peaks: Arc<Vec<f32>>,
     peaks_for: Option<PathBuf>,
@@ -1697,21 +1706,42 @@ impl App {
         }
     }
 
-    fn shown_lines(&self) -> &[DocLine] {
-        if self.join_lines {
-            return &self.joined_lines;
-        }
+    /// The document the screen is about, before the Join preview rewrites it:
+    /// the selected queue item, or the live buffer when nothing is selected.
+    ///
+    /// Everything that means "the transcript on screen" starts here. The
+    /// `shown_*` accessors add the Join preview on top; `document_*` is what the
+    /// editor writes to.
+    fn document_lines(&self) -> &[DocLine] {
         match &self.selected_view {
             Some(view) => &view.lines,
             None => &self.lines,
         }
     }
 
-    fn shown_turns(&self) -> &[backend::Turn] {
+    fn document_turns(&self) -> &[backend::Turn] {
         match &self.selected_view {
             Some(view) => &view.turns,
             None => &self.turns,
         }
+    }
+
+    fn document_transcript(&self) -> &str {
+        match &self.selected_view {
+            Some(view) => &view.transcript,
+            None => &self.transcript,
+        }
+    }
+
+    fn shown_lines(&self) -> &[DocLine] {
+        if self.join_lines {
+            return &self.joined_lines;
+        }
+        self.document_lines()
+    }
+
+    fn shown_turns(&self) -> &[backend::Turn] {
+        self.document_turns()
     }
 
     fn shown_peaks(&self) -> &[f32] {
@@ -1753,18 +1783,11 @@ impl App {
         if self.join_lines {
             return &self.joined_transcript;
         }
-        match &self.selected_view {
-            Some(view) => &view.transcript,
-            None => &self.transcript,
-        }
+        self.document_transcript()
     }
 
     fn rebuild_joined_preview(&mut self) {
-        let base = match &self.selected_view {
-            Some(view) => &view.lines,
-            None => &self.lines,
-        };
-        self.joined_lines = join_adjacent(base);
+        self.joined_lines = join_adjacent(self.document_lines());
         self.joined_transcript = self
             .joined_lines
             .iter()
@@ -4609,6 +4632,10 @@ impl App {
                 {
                     self.refresh_models();
                 }
+                // The live buffer, deliberately: this rebuilds the text that is
+                // written to the file, and the Join preview must not reach it.
+                // The `selected_view.is_none()` guard is what makes the raw
+                // buffer the document on screen here.
                 if self.transcript_dirty && self.selected_view.is_none() {
                     self.transcript_dirty = false;
                     let mut out = String::new();
@@ -4817,6 +4844,10 @@ impl App {
         }
     }
 
+    /// Rewrite the live transcript text and its file from the live lines.
+    ///
+    /// Deliberately the live buffer: an item view has its own file, written by
+    /// its own path, and must not be overwritten from here.
     fn refresh_transcript(&mut self) {
         self.transcript = lines_text(&self.lines);
         if let Some(path) = &self.output_txt {
@@ -5763,10 +5794,7 @@ impl App {
 
     /// The lines of the document the line editor writes to.
     fn edit_lines(&self) -> &[DocLine] {
-        match &self.selected_view {
-            Some(view) => &view.lines,
-            None => &self.lines,
-        }
+        self.document_lines()
     }
 
     fn edit_history_is_current(&self) -> bool {
@@ -6272,6 +6300,8 @@ impl App {
                     self.stage = "done".to_string();
                     // Target 100%; the bar eases there over the next ticks.
                     self.progress = 1.0;
+                    // A finished run is always the live buffer: the item it
+                    // belongs to is only opened later, when the user picks it.
                     if let Ok(contents) = std::fs::read_to_string(&txt) {
                         self.transcript = contents;
                     }
@@ -17034,6 +17064,53 @@ mod tests {
         let confidence = app.confidence_view;
         let _ = app.update(Message::ViewShortcutChecked(ViewShortcut::Confidence, false));
         assert_eq!(app.confidence_view, confidence);
+
+        let _ = std::fs::remove_dir_all(&media);
+    }
+
+    #[test]
+    fn the_join_preview_rewrites_the_shown_document_not_the_editable_one() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("shown-doc");
+        let media = temp_dir("shown-doc-media");
+        let audio = media.join("talk.mp3");
+        std::fs::write(&audio, b"audio").unwrap();
+        let transcript = media.join("talk.txt");
+        std::fs::write(
+            &transcript,
+            "[00:00] SPEAKER 1: one\n\
+             [00:02] SPEAKER 1: two\n\
+             [00:09] SPEAKER 2: three\n",
+        )
+        .unwrap();
+
+        let mut app = pro_app();
+        app.queue.push(QueueItem {
+            path: audio.clone(),
+            audio: Some(audio),
+            status: ItemStatus::Done,
+            duration: Some(10.0),
+            transcript: Some(transcript),
+            stats: None,
+            turns: Vec::new(),
+            peaks: Arc::new(vec![0.2; 16]),
+        });
+        open_test_item(&mut app, 0);
+
+        // No run filled the live buffer: the screen is showing the item, and
+        // both the shown and the editable document are that item's lines.
+        assert!(app.lines.is_empty());
+        assert_eq!(app.shown_lines().len(), 3);
+        assert_eq!(app.document_lines().len(), 3);
+        assert_eq!(app.edit_lines().len(), 3);
+
+        // Join rewrites what is shown. The document underneath — and so the
+        // editor and the file — keeps its own lines.
+        let _ = app.update(Message::ToggleJoinLines);
+        assert_eq!(app.shown_lines().len(), 2);
+        assert_eq!(app.document_lines().len(), 3);
+        assert_eq!(app.edit_lines().len(), 3);
+        assert!(app.shown_transcript().contains("one two"));
 
         let _ = std::fs::remove_dir_all(&media);
     }
