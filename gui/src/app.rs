@@ -3010,6 +3010,7 @@ impl App {
         // the dialog closes.
         if self.open_modal().is_some() {
             self.transcript_line_hover = None;
+            self.queue_hover = None;
         }
         match message {
             Message::TogglePlayerCollapsed => {
@@ -3427,7 +3428,7 @@ impl App {
                 Task::none()
             }
             Message::QueueDragStart(index) => {
-                if index >= self.queue.len() {
+                if self.pointer_blocked() || index >= self.queue.len() {
                     return Task::none();
                 }
                 if !matches!(self.status, Status::Running) {
@@ -3496,6 +3497,13 @@ impl App {
                 Task::none()
             }
             Message::QueueHover(index) => {
+                // A dialog owns the pointer: a row under the scrim must not
+                // light up as the pointer crosses it. Leaving is always allowed
+                // through, or a hover set before the dialog opened could never
+                // be cleared.
+                if index.is_some() && self.pointer_blocked() {
+                    return Task::none();
+                }
                 self.queue_hover = index;
                 Task::none()
             }
@@ -17311,6 +17319,28 @@ mod tests {
         assert!(app.line_edit.is_none(), "the edit is committed, not lost");
         assert!(app.rename_open);
         assert_eq!(app.rename_fields.len(), 2);
+
+        let _ = std::fs::remove_dir_all(&media);
+    }
+
+    #[test]
+    fn a_dialog_keeps_the_pointer_off_the_queue() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("queue-behind-dialog");
+        let original = "[00:00] SPEAKER 1: one\n[00:05] SPEAKER 2: two\n";
+        let (mut app, _transcript, media) = line_edit_fixture("queue-dialog", original);
+
+        let _ = app.update(Message::QueueHover(Some(0)));
+        assert_eq!(app.queue_hover, Some(0));
+
+        app.summary_open = true;
+        let _ = app.update(Message::Noop);
+        assert_eq!(app.queue_hover, None, "no row lights up under the scrim");
+
+        // Moving across the queue behind the summary changes nothing.
+        let _ = app.update(Message::QueueHover(Some(1)));
+        assert_eq!(app.queue_hover, None);
+        let _ = app.view();
 
         let _ = std::fs::remove_dir_all(&media);
     }
