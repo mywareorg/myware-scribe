@@ -10416,34 +10416,30 @@ impl App {
             }
             HelpKind::Console | HelpKind::Settings => {}
         }
-        // The tips carry their own switch, and it shares the row with Close:
-        // an opt-out next to the acknowledgement reads as part of closing, not
-        // as another paragraph.
+        // The tips carry their own switch, and it shares the row with Close.
+        // Only the box is pressable: the words beside it are a label, not a
+        // second way to hit the same toggle.
         let mut footer = row![].spacing(8).align_y(iced::Alignment::Center);
-        if kind == HelpKind::EditingTips {
-            footer = footer.push(
-                action(
-                    row![
-                        tips_check(!self.editing_tips, scheme),
-                        text("Don't show these tips again")
-                            .size(theme::TEXT_XS)
-                            .wrapping(NO_WRAP)
-                            .color(scheme.muted),
-                    ]
-                    .spacing(7)
-                    .align_y(iced::Alignment::Center),
-                )
-                .padding([4, 6])
-                .style(header_menu_item_style(scheme, true))
-                .on_press(Message::SetEditingTips(!self.editing_tips)),
-            );
-        }
-        footer = footer.push(horizontal_space());
         footer = footer.push(
             action_text("Close")
                 .on_press(Message::CloseHelp)
                 .style(color_button(scheme.blue, scheme.on_accent)),
         );
+        footer = footer.push(horizontal_space());
+        if kind == HelpKind::EditingTips {
+            footer = footer.push(
+                action(tips_check(!self.editing_tips, scheme))
+                    .padding([4, 4])
+                    .style(header_menu_item_style(scheme, true))
+                    .on_press(Message::SetEditingTips(!self.editing_tips)),
+            );
+            footer = footer.push(
+                text("Don't show these tips again")
+                    .size(theme::TEXT_XS)
+                    .wrapping(NO_WRAP)
+                    .color(scheme.muted),
+            );
+        }
         col = col.push(container(footer).width(Length::Fill));
         modal_card(col, 460.0, scheme)
     }
@@ -14029,14 +14025,19 @@ fn tips_check<'a>(checked: bool, scheme: Scheme) -> Element<'a, Message> {
             },
             ..container::Style::default()
         });
-    let tick: Element<'a, Message> = if checked {
-        container(icon_colored(ICON_CHECK, BOX + 2.0, scheme.blue))
-            .center(Length::Fixed(BOX))
-            .into()
-    } else {
-        horizontal_space().into()
-    };
-    stack![square, tick].into()
+    if !checked {
+        return square.into();
+    }
+    // No wrapping: the glyph is deliberately larger than the box and must be
+    // measured at its own width, or the box's limits truncate it to nothing.
+    let tick = text(ICON_CHECK.to_string())
+        .font(Font::with_name("bootstrap-icons"))
+        .size(BOX + 2.0)
+        .wrapping(NO_WRAP)
+        .style(move |_theme| text::Style {
+            color: Some(scheme.blue),
+        });
+    stack![square, container(tick).center(Length::Fixed(BOX))].into()
 }
 
 /// A hairline between two menu groups.
