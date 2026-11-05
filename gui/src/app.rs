@@ -8799,12 +8799,11 @@ impl App {
             identity = identity.push(read_only);
         }
         identity = identity.push(picker);
+        // No "Join" label: the two arrows carry their own tooltips, and the
+        // word made the strip read as a labelled group where the rest of it is
+        // icons.
         let controls = row![
             identity,
-            text("Join")
-                .size(theme::TEXT_XS)
-                .wrapping(NO_WRAP)
-                .color(scheme.muted),
             self.tip(
                 button(ICON_JOIN_PREV, can_join_prev, false, Message::MergePrevLine),
                 "Join with the line above (Alt+Up)",
@@ -12561,15 +12560,18 @@ const ICON_HOURGLASS: char = '\u{f421}';
 const ICON_CHECK: char = '\u{f633}';
 const ICON_X: char = '\u{f659}';
 const ICON_CARET_DOWN: char = '\u{f229}';
-/// Two-way arrow: exchange, used to swap a line's speaker.
-const ICON_SWAP: char = '\u{f12b}';
-/// Join this line with the one above / below. Plain short arrows inside the
-/// panel's "Join" group: the bar-arrow pair read as "move the line to the top",
-/// which is not what the button does.
+/// Crossing arrows: the two speakers exchange places. The left-right pair it
+/// replaced read as up-and-down movement at this size, because its two arrows
+/// sit one above the other.
+const ICON_SWAP: char = '\u{f544}';
+/// Join this line with the one above / below. Plain short arrows, one per
+/// direction: the bar-arrow pair read as "move the line to the top", which is
+/// not what the button does.
 const ICON_JOIN_PREV: char = '\u{f145}';
 const ICON_JOIN_NEXT: char = '\u{f124}';
-/// Cut this line at the caret.
-const ICON_SPLIT: char = '\u{f528}';
+/// A path forking: cut this line at the caret. Scissors were the obvious
+/// choice but collapse into an X at the panel's glyph size, next to a trash can.
+const ICON_SPLIT: char = '\u{f549}';
 const ICON_UNDO: char = '\u{f117}';
 /// Clockwise arrow: redo. Deliberately not shared with `ICON_RETRY` — one glyph
 /// for two verbs is the sort of collision that makes an icon row unreadable.
