@@ -8790,19 +8790,35 @@ impl App {
         .style(color_button(scheme.blue, scheme.on_accent));
 
         // The strip is a full-width band inside the card, so it follows the same
-        // grammar as the header above it and the Find row below: the line's own
-        // identity and the edits stay left, and the commit pair sits at the far
-        // edge where a dialog's buttons would. One elastic gap, after everything
-        // that edits, so only the pair moves when the pane is wide.
+        // grammar as the header above it and the Find row below. Three groups:
+        // history at the left edge, what the line can become in the middle, the
+        // commit pair at the right where a dialog's buttons would. The middle
+        // group is centred by the two elastic gaps around it, which are equal, so
+        // it stays put when the pane is wide.
         let mut identity = row![].spacing(LINE_EDIT_GAP).align_y(iced::Alignment::Center);
         if let Some(read_only) = read_only {
             identity = identity.push(read_only);
         }
         identity = identity.push(picker);
+        let history = row![
+            self.tip(
+                button(ICON_UNDO, undo, false, Message::UndoLineEdit),
+                "Undo the last line edit (Ctrl+Z inside the field undoes typing)",
+                &scheme,
+            ),
+            self.tip(
+                button(ICON_REDO, redo, false, Message::RedoLineEdit),
+                "Redo the last line edit",
+                &scheme,
+            ),
+            divider(),
+        ]
+        .spacing(LINE_EDIT_GAP)
+        .align_y(iced::Alignment::Center);
         // No "Join" label: the two arrows carry their own tooltips, and the
         // word made the strip read as a labelled group where the rest of it is
         // icons.
-        let controls = row![
+        let edits = row![
             identity,
             self.tip(
                 button(ICON_JOIN_PREV, can_join_prev, false, Message::MergePrevLine),
@@ -8824,17 +8840,13 @@ impl App {
                 "Delete this line",
                 &scheme,
             ),
-            divider(),
-            self.tip(
-                button(ICON_UNDO, undo, false, Message::UndoLineEdit),
-                "Undo the last line edit (Ctrl+Z inside the field undoes typing)",
-                &scheme,
-            ),
-            self.tip(
-                button(ICON_REDO, redo, false, Message::RedoLineEdit),
-                "Redo the last line edit",
-                &scheme,
-            ),
+        ]
+        .spacing(LINE_EDIT_GAP)
+        .align_y(iced::Alignment::Center);
+        let controls = row![
+            history,
+            horizontal_space(),
+            edits,
             horizontal_space(),
             self.tip(cancel, "Cancel (Esc) and keep the line as it was", &scheme),
             self.tip(done, "Save this line (Enter)", &scheme),
