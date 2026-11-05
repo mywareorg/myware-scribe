@@ -645,6 +645,28 @@ pub enum HeaderMenu {
     Help,
 }
 
+/// The dialog that owns the screen, if any. One at a time.
+///
+/// The variants are listed in paint order: when more than one of the backing
+/// flags happens to be set, the first is the one drawn and the one Escape
+/// closes. `view` matches on [`App::open_modal`], so the order here is the only
+/// place the precedence is written down.
+///
+/// A header menu is not a modal: it takes the pointer but leaves the keyboard
+/// and tooltips alone, so it is tracked separately (`header_menu`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Modal {
+    Reset,
+    Summary,
+    DeleteLine,
+    Calibration,
+    Paywall,
+    Settings,
+    Help,
+    RunSetup,
+    Rename,
+}
+
 #[derive(Debug, Clone)]
 pub enum Message {
     PickOutput,
@@ -2856,7 +2878,7 @@ impl App {
     /// A dialog or an open picker owns the keyboard, so a line-edit shortcut
     /// that arrives from the global key subscription must not fire behind it.
     fn line_edit_shortcut_blocked(&self) -> bool {
-        self.delete_confirm || self.line_edit_picker_open || self.popup_open()
+        self.line_edit_picker_open || self.popup_open()
     }
 
     /// A single-key View toggle is off while a dialog owns the keyboard or the
@@ -3884,30 +3906,12 @@ impl App {
             }
             Message::Noop => Task::none(),
             Message::Escape => {
-                if let Some(calibration) = &self.calibration {
-                    if calibration.testing() {
-                        return Task::none();
-                    }
-                    let preset = calibration.preset;
-                    let run = calibration.start_run;
-                    self.calibration = None;
-                    self.remember_skip(preset);
-                    if run {
-                        self.begin_batch(false);
-                    }
-                    return Task::none();
-                }
-                if self.delete_confirm {
-                    self.delete_confirm = false;
-                    return Task::none();
-                }
-                if self.reset_confirm {
-                    self.reset_confirm = false;
-                    return Task::none();
-                }
-                if self.run_setup_open {
-                    self.run_setup_open = false;
-                    return Task::none();
+                // A dialog in front takes the key, whatever it is. This now
+                // covers Help and the paywall too: they were in `popup_open`
+                // but missing from the escape chain, so Escape fell through to
+                // the run/view state behind them.
+                if let Some(modal) = self.open_modal() {
+                    return self.close_modal(modal);
                 }
                 if self.header_menu.is_some() {
                     self.header_menu = None;
@@ -3915,16 +3919,6 @@ impl App {
                 }
                 if self.line_edit.is_some() {
                     self.cancel_inline_edit();
-                } else if self.rename_open {
-                    self.rename_open = false;
-                } else if self.settings_open {
-                    self.settings_open = false;
-                } else if self.summary_open {
-                    self.summary_open = false;
-                    if self.pending_rename {
-                        self.pending_rename = false;
-                        return self.open_rename();
-                    }
                 } else if self.find_open {
                     self.close_find();
                 } else if !self.search_query.is_empty() {
@@ -4560,7 +4554,7 @@ impl App {
                 };
                 // A dialog owns the screen: land the move instead of easing
                 // behind it.
-                if self.popup_open() || self.delete_confirm {
+                if self.popup_open() {
                     let mut tasks = vec![self.stop_glide(true)];
                     if let Some(caret) = caret {
                         tasks.push(caret);
@@ -5716,6 +5710,10 @@ impl App {
             self.line_edit_resume = false;
             self.line_edit_picker_open = false;
             self.line_edit_document = None;
+            // The delete confirmation belongs to the line being edited. Without
+            // this it could outlive its editor and hold the pointer with no
+            // dialog left to draw.
+            self.delete_confirm = false;
             self.reset_pane_geometry();
         }
     }
@@ -7075,7 +7073,7 @@ impl App {
             .scroll_anim
             .map_or(self.transcript_offset, |anim| anim.expected);
         let jump_in_flight = self.scroll_anim.is_some_and(|anim| anim.jump);
-        let shape = if self.popup_open() || self.delete_confirm {
+        let shape = if self.popup_open() {
             Glide::Snap
         } else {
             glide_shape(
@@ -7152,7 +7150,7 @@ impl App {
         };
         let active = self.follow_line_index();
         self.note_follow_issue(target, active);
-        let shape = if isolated && !self.popup_open() && !self.delete_confirm {
+        let shape = if isolated && !self.popup_open() {
             glide_shape(
                 true,
                 true,
@@ -9624,19 +9622,84 @@ impl App {
         self.search_index = 0;
     }
 
+    /// The dialog that owns the screen, if any. One at a time.
+    ///
+    /// This is the only place the precedence between dialogs is stated: the
+    /// order is [`Modal`]'s variant order, which is also the paint order in
+    /// `view`. Escape, the pointer gate and the view all ask this one question,
+    /// so they cannot disagree about which dialog is in front.
+    fn open_modal(&self) -> Option<Modal> {
+        if self.reset_confirm {
+            Some(Modal::Reset)
+        } else if self.summary_open {
+            Some(Modal::Summary)
+        } else if self.delete_confirm {
+            Some(Modal::DeleteLine)
+        } else if self.calibration.is_some() {
+            Some(Modal::Calibration)
+        } else if self.paywall_open {
+            Some(Modal::Paywall)
+        } else if self.settings_open {
+            Some(Modal::Settings)
+        } else if self.help_open.is_some() {
+            Some(Modal::Help)
+        } else if self.run_setup_open {
+            Some(Modal::RunSetup)
+        } else if self.rename_open {
+            Some(Modal::Rename)
+        } else {
+            None
+        }
+    }
+
+    /// Close one dialog. Returns the follow-up work a close owes.
+    ///
+    /// Calibration is the only close with side effects: it remembers the preset
+    /// that was skipped and starts the queued run if the run was waiting on the
+    /// offer. While it is still testing the device it ignores the request.
+    fn close_modal(&mut self, modal: Modal) -> Task<Message> {
+        match modal {
+            Modal::Reset => self.reset_confirm = false,
+            Modal::Summary => {
+                self.summary_open = false;
+                // Rename was asked for before the summary was ready to show;
+                // closing the summary is the moment to honour it.
+                if self.pending_rename {
+                    self.pending_rename = false;
+                    return self.open_rename();
+                }
+            }
+            Modal::DeleteLine => self.delete_confirm = false,
+            Modal::Calibration => {
+                let Some(calibration) = &self.calibration else {
+                    return Task::none();
+                };
+                if calibration.testing() {
+                    return Task::none();
+                }
+                let preset = calibration.preset;
+                let run = calibration.start_run;
+                self.calibration = None;
+                self.remember_skip(preset);
+                if run {
+                    self.begin_batch(false);
+                }
+            }
+            Modal::Paywall => self.paywall_open = false,
+            Modal::Settings => self.settings_open = false,
+            Modal::Help => self.help_open = None,
+            Modal::RunSetup => self.run_setup_open = false,
+            Modal::Rename => self.rename_open = false,
+        }
+        Task::none()
+    }
+
     /// True while any modal dialog is showing.
     ///
     /// The inline line editor is deliberately not a popup: it lives in the
     /// transcript, so hover chrome and tooltips keep working around it.
     fn popup_open(&self) -> bool {
-        self.settings_open
-            || self.paywall_open
-            || self.summary_open
-            || self.help_open.is_some()
-            || self.rename_open
-            || self.reset_confirm
-            || self.run_setup_open
-            || self.calibration.is_some()
+        self.open_modal().is_some()
     }
 
     /// True while a transient menu owns the pointer: one of the transcript
@@ -10856,128 +10919,132 @@ impl App {
         // Always present for the same reason as the wrap above.
         base = stack![base, self.help_menu_layer(&scheme)].into();
 
-        if self.reset_confirm {
-            let body = column![
-                text("Warning").size(20),
-                text("Resetting reverts to the initial transcript.")
-                    .size(theme::TEXT_SM)
-                    .color(scheme.muted),
-                row![
-                    horizontal_space(),
-                    action_text("Cancel")
-                        .on_press(Message::CloseResetConfirm)
-                        .style(pill_button_secondary),
-                    action_text("Reset")
-                        .on_press(Message::ConfirmResetTranscript)
-                        .style(color_button(scheme.danger, scheme.on_accent)),
-                ]
-                .spacing(8),
-            ]
-            .spacing(10);
-            let dialog = modal_card(body, 420.0, scheme);
-            return modal_overlay(base, dialog, scheme);
-        }
-
-        if self.summary_open {
-            let lines = self.stats_lines();
-            // Same typography and section treatment as the About dialog: a
-            // 20 px title, muted body copy, section labels and dividers.
-            enum Block {
-                Section(String, Vec<String>),
-                Table(Vec<String>, Vec<Vec<String>>),
-            }
-            let mut blocks: Vec<Block> = Vec::new();
-            for line in &lines {
-                match line {
-                    SummaryLine::File(name) => {
-                        blocks.push(Block::Section(name.clone(), Vec::new()))
-                    }
-                    SummaryLine::Body(text_line) => match blocks.last_mut() {
-                        Some(Block::Section(_, rows)) => rows.push(text_line.clone()),
-                        Some(Block::Table(..)) | None => {
-                            blocks.push(Block::Section(String::new(), vec![text_line.clone()]))
-                        }
-                    },
-                    SummaryLine::Table(headers, rows) => {
-                        blocks.push(Block::Table(headers.clone(), rows.clone()))
-                    }
-                }
-            }
-
-            let mut body = column![text("Summary").size(20)].spacing(8);
-            for (index, block) in blocks.iter().enumerate() {
-                if index > 0 {
-                    body = body.push(settings_divider(scheme));
-                }
-                match block {
-                    Block::Section(name, rows) => {
-                        let mut section = column![].spacing(4);
-                        if !name.is_empty() {
-                            // Owned string: the dialog outlives the local list.
-                            section = section.push(
-                                text(name.clone())
-                                    .size(11)
-                                    .wrapping(NO_WRAP)
-                                    .font(Font {
-                                        weight: font::Weight::Bold,
-                                        ..Font::DEFAULT
-                                    })
-                                    .color(scheme.muted),
-                            );
-                        }
-                        for row in rows {
-                            section = section.push(
-                                text(row.clone()).size(theme::TEXT_SM).color(scheme.muted),
-                            );
-                        }
-                        body = body.push(section);
-                    }
-                    Block::Table(headers, rows) => {
-                        body = body.push(summary_table(headers, rows, scheme));
-                    }
-                }
-            }
-
-            // Cap the scrollable height so long queues stay usable.
-            let cap = (self.window_size.height * 0.8).max(300.0);
-            let table_rows: f32 = blocks
-                .iter()
-                .map(|block| match block {
-                    Block::Table(_, rows) => rows.len() as f32 + 1.0,
-                    Block::Section(..) => 0.0,
-                })
-                .sum();
-            let estimated =
-                (lines.len() as f32 + blocks.len() as f32 + table_rows + 1.0) * 22.0 + 24.0;
-            let height = estimated.min(cap);
-
-            let scroll = scrollable(body)
-                .id(summary_id())
-                .width(Length::Fill)
-                .height(Length::Fixed(height));
-
-            let col = column![
-                container(scroll).width(Length::Fill),
-                container(
-                    row![action_text("Close")
-                        .on_press(Message::CloseSummary)
-                        .style(color_button(scheme.blue, scheme.on_accent))]
+        match self.open_modal() {
+            None => base,
+            Some(Modal::Reset) => {
+                let body = column![
+                    text("Warning").size(20),
+                    text("Resetting reverts to the initial transcript.")
+                        .size(theme::TEXT_SM)
+                        .color(scheme.muted),
+                    row![
+                        horizontal_space(),
+                        action_text("Cancel")
+                            .on_press(Message::CloseResetConfirm)
+                            .style(pill_button_secondary),
+                        action_text("Reset")
+                            .on_press(Message::ConfirmResetTranscript)
+                            .style(color_button(scheme.danger, scheme.on_accent)),
+                    ]
                     .spacing(8),
-                )
-                .width(Length::Fill)
-                .align_x(iced::Alignment::End),
-            ]
-            .spacing(8);
+                ]
+                .spacing(10);
+                let dialog = modal_card(body, 420.0, scheme);
+                return modal_overlay(base, dialog, scheme);
+            }
 
-            // The tabulation needs six columns; the plain per-file summary
-            // does not.
-            let wide = blocks.iter().any(|block| matches!(block, Block::Table(..)));
-            let dialog = modal_card(col, if wide { 520.0 } else { 460.0 }, scheme);
-            return modal_overlay(base, dialog, scheme);
-        }
+            Some(Modal::Summary) => {
+                let lines = self.stats_lines();
+                // Same typography and section treatment as the About dialog: a
+                // 20 px title, muted body copy, section labels and dividers.
+                enum Block {
+                    Section(String, Vec<String>),
+                    Table(Vec<String>, Vec<Vec<String>>),
+                }
+                let mut blocks: Vec<Block> = Vec::new();
+                for line in &lines {
+                    match line {
+                        SummaryLine::File(name) => {
+                            blocks.push(Block::Section(name.clone(), Vec::new()))
+                        }
+                        SummaryLine::Body(text_line) => match blocks.last_mut() {
+                            Some(Block::Section(_, rows)) => rows.push(text_line.clone()),
+                            Some(Block::Table(..)) | None => {
+                                blocks.push(Block::Section(String::new(), vec![text_line.clone()]))
+                            }
+                        },
+                        SummaryLine::Table(headers, rows) => {
+                            blocks.push(Block::Table(headers.clone(), rows.clone()))
+                        }
+                    }
+                }
 
-        if self.delete_confirm {
-            if let Some(row) = self.line_edit.as_ref().and_then(|edit| edit.current_row()) {
+                let mut body = column![text("Summary").size(20)].spacing(8);
+                for (index, block) in blocks.iter().enumerate() {
+                    if index > 0 {
+                        body = body.push(settings_divider(scheme));
+                    }
+                    match block {
+                        Block::Section(name, rows) => {
+                            let mut section = column![].spacing(4);
+                            if !name.is_empty() {
+                                // Owned string: the dialog outlives the local list.
+                                section = section.push(
+                                    text(name.clone())
+                                        .size(11)
+                                        .wrapping(NO_WRAP)
+                                        .font(Font {
+                                            weight: font::Weight::Bold,
+                                            ..Font::DEFAULT
+                                        })
+                                        .color(scheme.muted),
+                                );
+                            }
+                            for row in rows {
+                                section = section.push(
+                                    text(row.clone()).size(theme::TEXT_SM).color(scheme.muted),
+                                );
+                            }
+                            body = body.push(section);
+                        }
+                        Block::Table(headers, rows) => {
+                            body = body.push(summary_table(headers, rows, scheme));
+                        }
+                    }
+                }
+
+                // Cap the scrollable height so long queues stay usable.
+                let cap = (self.window_size.height * 0.8).max(300.0);
+                let table_rows: f32 = blocks
+                    .iter()
+                    .map(|block| match block {
+                        Block::Table(_, rows) => rows.len() as f32 + 1.0,
+                        Block::Section(..) => 0.0,
+                    })
+                    .sum();
+                let estimated =
+                    (lines.len() as f32 + blocks.len() as f32 + table_rows + 1.0) * 22.0 + 24.0;
+                let height = estimated.min(cap);
+
+                let scroll = scrollable(body)
+                    .id(summary_id())
+                    .width(Length::Fill)
+                    .height(Length::Fixed(height));
+
+                let col = column![
+                    container(scroll).width(Length::Fill),
+                    container(
+                        row![action_text("Close")
+                            .on_press(Message::CloseSummary)
+                            .style(color_button(scheme.blue, scheme.on_accent))]
+                        .spacing(8),
+                    )
+                    .width(Length::Fill)
+                    .align_x(iced::Alignment::End),
+                ]
+                .spacing(8);
+
+                // The tabulation needs six columns; the plain per-file summary
+                // does not.
+                let wide = blocks.iter().any(|block| matches!(block, Block::Table(..)));
+                let dialog = modal_card(col, if wide { 520.0 } else { 460.0 }, scheme);
+                return modal_overlay(base, dialog, scheme);
+            }
+
+            Some(Modal::DeleteLine) => {
+                let Some(row) = self.line_edit.as_ref().and_then(|edit| edit.current_row()) else {
+                    return base;
+                };
                 let preview = row.content.text().trim_end().replace(['\n', '\r'], " ");
                 let preview = ellipsize(preview.trim(), 72);
                 let speaker = row.speaker.trim();
@@ -11029,185 +11096,186 @@ impl App {
                 let dialog = modal_card(body, 440.0, scheme);
                 return modal_overlay(base, dialog, scheme);
             }
-        }
 
-        if self.calibration.is_some() {
-            let dialog = self.calibration_dialog(&scheme);
-            return modal_overlay(base, dialog, scheme);
-        }
+            Some(Modal::Calibration) => {
+                let dialog = self.calibration_dialog(&scheme);
+                return modal_overlay(base, dialog, scheme);
+            }
 
-        if self.paywall_open {
-            let dialog = self.paywall_dialog(&scheme);
-            return modal_overlay(base, dialog, scheme);
-        }
+            Some(Modal::Paywall) => {
+                let dialog = self.paywall_dialog(&scheme);
+                return modal_overlay(base, dialog, scheme);
+            }
 
-        if self.settings_open {
-            let dialog = self.settings_dialog(&scheme);
-            return modal_overlay(base, dialog, scheme);
-        }
+            Some(Modal::Settings) => {
+                let dialog = self.settings_dialog(&scheme);
+                return modal_overlay(base, dialog, scheme);
+            }
 
-        if let Some(kind) = self.help_open {
-            let mut col = column![text(kind.label()).size(20)].spacing(8);
-            match kind {
-                HelpKind::Shortcuts => {
-                    // Key in a fixed-width column so the descriptions line up.
-                    const KEY_WIDTH: f32 = 150.0;
-                    for (key, description) in [
-                        ("Ctrl+O", "Add files"),
-                        ("Ctrl+,", "Settings"),
-                        ("Ctrl+F", "Find"),
-                        ("Ctrl+Enter", "Transcribe"),
-                        ("Ctrl + / - / 0", "Transcript font zoom"),
-                        ("Space", "Play / pause"),
-                        ("F", "Follow the active line"),
-                        ("T / S / J / C", "Timestamps / SMS / Join / Confidence"),
-                        ("Left / Right", "Seek \u{00b1}5s"),
-                        ("Up / Down", "Move through transcript"),
-                        ("Alt+Enter", "Edit active line"),
-                        ("Enter / Esc", "Save / cancel the line being edited"),
-                        ("Alt+Up / Alt+Down", "Join the edited line with the one above / below"),
-                        ("Ctrl+Shift+K", "Split the edited line at the cursor"),
-                        ("Ctrl+Z", "Undo typing in the line field"),
-                        ("Esc", "Dismiss"),
-                    ] {
-                        col = col.push(
-                            row![
-                                text(key)
-                                    .size(theme::TEXT_SM)
-                                    .width(Length::Fixed(KEY_WIDTH)),
-                                text(description).size(theme::TEXT_SM).color(scheme.muted),
-                            ]
-                            .spacing(12),
-                        );
+            Some(Modal::Help) => {
+                let Some(kind) = self.help_open else {
+                    return base;
+                };
+                let mut col = column![text(kind.label()).size(20)].spacing(8);
+                match kind {
+                    HelpKind::Shortcuts => {
+                        // Key in a fixed-width column so the descriptions line up.
+                        const KEY_WIDTH: f32 = 150.0;
+                        for (key, description) in [
+                            ("Ctrl+O", "Add files"),
+                            ("Ctrl+,", "Settings"),
+                            ("Ctrl+F", "Find"),
+                            ("Ctrl+Enter", "Transcribe"),
+                            ("Ctrl + / - / 0", "Transcript font zoom"),
+                            ("Space", "Play / pause"),
+                            ("F", "Follow the active line"),
+                            ("T / S / J / C", "Timestamps / SMS / Join / Confidence"),
+                            ("Left / Right", "Seek \u{00b1}5s"),
+                            ("Up / Down", "Move through transcript"),
+                            ("Alt+Enter", "Edit active line"),
+                            ("Enter / Esc", "Save / cancel the line being edited"),
+                            ("Alt+Up / Alt+Down", "Join the edited line with the one above / below"),
+                            ("Ctrl+Shift+K", "Split the edited line at the cursor"),
+                            ("Ctrl+Z", "Undo typing in the line field"),
+                            ("Esc", "Dismiss"),
+                        ] {
+                            col = col.push(
+                                row![
+                                    text(key)
+                                        .size(theme::TEXT_SM)
+                                        .width(Length::Fixed(KEY_WIDTH)),
+                                    text(description).size(theme::TEXT_SM).color(scheme.muted),
+                                ]
+                                .spacing(12),
+                            );
+                        }
                     }
-                }
-                HelpKind::About => {
-                    col =
-                        col.push(
+                    HelpKind::About => {
+                        col =
+                            col.push(
+                                column![
+                                text(format!("Hippo Transcribe {}", env!("CARGO_PKG_VERSION")))
+                                    .size(theme::TEXT_MD)
+                                    .font(Font {
+                                        weight: font::Weight::Medium,
+                                        ..Font::DEFAULT
+                                    }),
+                                text("Private, offline speaker diarization + transcription.")
+                                    .size(theme::TEXT_SM)
+                                    .color(scheme.muted),
+                                text("The name comes from HIPAA. Your recordings stay on this machine.")
+                                    .size(theme::TEXT_SM)
+                                    .color(scheme.muted),
+                                text("Diarization: pyannote segmentation + wespeaker (sherpa-onnx).")
+                                    .size(theme::TEXT_SM)
+                                    .color(scheme.muted),
+                                text("Transcription: whisper.cpp.")
+                                    .size(theme::TEXT_SM)
+                                    .color(scheme.muted),
+                                text("Runs offline once the models are downloaded.")
+                                    .size(theme::TEXT_SM)
+                                    .color(scheme.muted),
+                            ]
+                                .spacing(4),
+                            );
+                        col = col.push(settings_divider(scheme));
+                        col = col.push(
                             column![
-                            text(format!("Hippo Transcribe {}", env!("CARGO_PKG_VERSION")))
-                                .size(theme::TEXT_MD)
-                                .font(Font {
-                                    weight: font::Weight::Medium,
-                                    ..Font::DEFAULT
-                                }),
-                            text("Private, offline speaker diarization + transcription.")
-                                .size(theme::TEXT_SM)
-                                .color(scheme.muted),
-                            text("The name comes from HIPAA. Your recordings stay on this machine.")
-                                .size(theme::TEXT_SM)
-                                .color(scheme.muted),
-                            text("Diarization: pyannote segmentation + wespeaker (sherpa-onnx).")
-                                .size(theme::TEXT_SM)
-                                .color(scheme.muted),
-                            text("Transcription: whisper.cpp.")
-                                .size(theme::TEXT_SM)
-                                .color(scheme.muted),
-                            text("Runs offline once the models are downloaded.")
-                                .size(theme::TEXT_SM)
-                                .color(scheme.muted),
-                        ]
+                                settings_section_label("Privacy", scheme),
+                                text("No cloud. No account. No telemetry.")
+                                    .size(theme::TEXT_SM)
+                                    .color(scheme.text),
+                                text("Audio and transcripts stay on this device.")
+                                    .size(theme::TEXT_SM)
+                                    .color(scheme.muted),
+                                text("Once models are installed the free tier makes no network requests.")
+                                    .size(theme::TEXT_SM)
+                                    .color(scheme.muted),
+                            ]
                             .spacing(4),
                         );
-                    col = col.push(settings_divider(scheme));
-                    col = col.push(
-                        column![
-                            settings_section_label("Privacy", scheme),
-                            text("No cloud. No account. No telemetry.")
-                                .size(theme::TEXT_SM)
-                                .color(scheme.text),
-                            text("Audio and transcripts stay on this device.")
-                                .size(theme::TEXT_SM)
-                                .color(scheme.muted),
-                            text("Once models are installed the free tier makes no network requests.")
-                                .size(theme::TEXT_SM)
-                                .color(scheme.muted),
-                        ]
-                        .spacing(4),
-                    );
-                    col = col.push(settings_divider(scheme));
-                    col = col.push(
-                        column![
-                            settings_section_label("License", scheme),
-                            text("Free software, licensed under GPLv3.").size(theme::TEXT_MD),
-                            text("Copyright (C) 2026 Sean Wu.")
-                                .size(theme::TEXT_SM)
-                                .color(scheme.muted),
-                            // TODO: add "Source: <repository URL>" once published.
-                            text("Provided without warranty; see the license for details.")
-                                .size(theme::TEXT_SM)
-                                .color(scheme.muted),
-                            settings_section_label("Models", scheme),
-                            text("pyannote (MIT), wespeaker (CC BY 4.0), Whisper (MIT).")
-                                .size(theme::TEXT_SM)
-                                .color(scheme.muted),
-                        ]
-                        .spacing(4),
-                    );
+                        col = col.push(settings_divider(scheme));
+                        col = col.push(
+                            column![
+                                settings_section_label("License", scheme),
+                                text("Free software, licensed under GPLv3.").size(theme::TEXT_MD),
+                                text("Copyright (C) 2026 Sean Wu.")
+                                    .size(theme::TEXT_SM)
+                                    .color(scheme.muted),
+                                // TODO: add "Source: <repository URL>" once published.
+                                text("Provided without warranty; see the license for details.")
+                                    .size(theme::TEXT_SM)
+                                    .color(scheme.muted),
+                                settings_section_label("Models", scheme),
+                                text("pyannote (MIT), wespeaker (CC BY 4.0), Whisper (MIT).")
+                                    .size(theme::TEXT_SM)
+                                    .color(scheme.muted),
+                            ]
+                            .spacing(4),
+                        );
+                    }
+                    HelpKind::Console | HelpKind::Settings => {}
                 }
-                HelpKind::Console | HelpKind::Settings => {}
+                col = col.push(
+                    container(
+                        row![action_text("Close")
+                            .on_press(Message::CloseHelp)
+                            .style(color_button(scheme.blue, scheme.on_accent))]
+                        .spacing(8),
+                    )
+                    .width(Length::Fill)
+                    .align_x(iced::Alignment::End),
+                );
+                let dialog = modal_card(col, 460.0, scheme);
+                return modal_overlay(base, dialog, scheme);
+            }
+
+            Some(Modal::RunSetup) => {
+                let dialog = self.run_setup_dialog(&scheme);
+                return modal_overlay(base, dialog, scheme);
+            }
+
+            Some(Modal::Rename) => {
+                let mut col = column![text("Rename Speakers").size(20)].spacing(8);
+                if self.rename_fields.is_empty() {
+                    col = col.push(text("No speakers to rename."));
+            }
+            for (index, (original, value)) in self.rename_fields.iter().enumerate() {
+                col = col.push(
+                    row![
+                        text(original.clone())
+                            .wrapping(NO_WRAP)
+                            .width(Length::Fixed(120.0)),
+                        text_input(original.as_str(), value)
+                            .id(rename_id(index))
+                            .on_input(move |text| Message::RenameName(index, text))
+                            .on_submit(Message::RenameSave)
+                            .width(Length::Fill)
+                            .style(pill_input),
+                    ]
+                    .spacing(8)
+                    .align_y(iced::Alignment::Center),
+                );
             }
             col = col.push(
                 container(
-                    row![action_text("Close")
-                        .on_press(Message::CloseHelp)
-                        .style(color_button(scheme.blue, scheme.on_accent))]
+                    row![
+                        action_text("Save")
+                            .on_press(Message::RenameSave)
+                            .style(color_button(scheme.blue, scheme.on_accent)),
+                        action_text("Cancel")
+                            .on_press(Message::RenameCancel)
+                            .style(pill_button_secondary),
+                    ]
                     .spacing(8),
                 )
                 .width(Length::Fill)
                 .align_x(iced::Alignment::End),
             );
-            let dialog = modal_card(col, 460.0, scheme);
-            return modal_overlay(base, dialog, scheme);
+            let dialog = modal_card(col, 380.0, scheme);
+            modal_overlay(base, dialog, scheme)
+            }
         }
-
-        if self.run_setup_open {
-            let dialog = self.run_setup_dialog(&scheme);
-            return modal_overlay(base, dialog, scheme);
-        }
-
-        if !self.rename_open {
-            return base;
-        }
-
-        let mut col = column![text("Rename Speakers").size(20)].spacing(8);
-        if self.rename_fields.is_empty() {
-            col = col.push(text("No speakers to rename."));
-        }
-        for (index, (original, value)) in self.rename_fields.iter().enumerate() {
-            col = col.push(
-                row![
-                    text(original.clone())
-                        .wrapping(NO_WRAP)
-                        .width(Length::Fixed(120.0)),
-                    text_input(original.as_str(), value)
-                        .id(rename_id(index))
-                        .on_input(move |text| Message::RenameName(index, text))
-                        .on_submit(Message::RenameSave)
-                        .width(Length::Fill)
-                        .style(pill_input),
-                ]
-                .spacing(8)
-                .align_y(iced::Alignment::Center),
-            );
-        }
-        col = col.push(
-            container(
-                row![
-                    action_text("Save")
-                        .on_press(Message::RenameSave)
-                        .style(color_button(scheme.blue, scheme.on_accent)),
-                    action_text("Cancel")
-                        .on_press(Message::RenameCancel)
-                        .style(pill_button_secondary),
-                ]
-                .spacing(8),
-            )
-            .width(Length::Fill)
-            .align_x(iced::Alignment::End),
-        );
-        let dialog = modal_card(col, 380.0, scheme);
-        modal_overlay(base, dialog, scheme)
     }
 }
 
@@ -16764,6 +16832,83 @@ mod tests {
         let _ = app.update(Message::OpenRunSetup);
         let _ = app.update(Message::ConfirmRunSetup);
         assert!(!app.run_setup_open);
+
+        let _ = std::fs::remove_dir_all(&media);
+    }
+
+    #[test]
+    fn escape_closes_every_open_modal() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("escape-modals");
+        let original = "[00:00] SPEAKER 1: one\n[00:05] SPEAKER 2: two\n";
+        let (mut app, _transcript, media) = line_edit_fixture("escape-modals", original);
+
+        // One entry per variant: how to raise it, so a dialog added to `Modal`
+        // without a way out — or without a way in — fails here.
+        let openers: Vec<(Modal, fn(&mut App))> = vec![
+            (Modal::Reset, |app| app.reset_confirm = true),
+            (Modal::Summary, |app| app.summary_open = true),
+            (Modal::DeleteLine, |app| app.delete_confirm = true),
+            (Modal::Calibration, |app| {
+                app.calibration = Some(Calibration::new(Preset::Accuracy, false))
+            }),
+            (Modal::Paywall, |app| app.paywall_open = true),
+            (Modal::Settings, |app| app.settings_open = true),
+            (Modal::Help, |app| app.help_open = Some(HelpKind::About)),
+            (Modal::RunSetup, |app| app.run_setup_open = true),
+            (Modal::Rename, |app| app.rename_open = true),
+        ];
+        for (modal, open) in openers {
+            open(&mut app);
+            assert_eq!(app.open_modal(), Some(modal), "{modal:?} did not open");
+            assert!(app.popup_open(), "{modal:?} is not a popup");
+            let _ = app.update(Message::Escape);
+            assert_eq!(app.open_modal(), None, "{modal:?} survived Escape");
+        }
+
+        let _ = std::fs::remove_dir_all(&media);
+    }
+
+    #[test]
+    fn the_front_modal_is_the_one_escape_closes() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("modal-precedence");
+        let original = "[00:00] SPEAKER 1: one\n";
+        let (mut app, _transcript, media) = line_edit_fixture("modal-precedence", original);
+
+        // Two dialogs can be set at once in edge cases. `open_modal` states the
+        // order once, so the dialog drawn is the dialog Escape closes rather
+        // than two separate chains disagreeing.
+        app.summary_open = true;
+        app.settings_open = true;
+        assert_eq!(app.open_modal(), Some(Modal::Summary));
+        let _ = app.view();
+
+        let _ = app.update(Message::Escape);
+        assert_eq!(app.open_modal(), Some(Modal::Settings));
+        let _ = app.update(Message::Escape);
+        assert_eq!(app.open_modal(), None);
+
+        let _ = std::fs::remove_dir_all(&media);
+    }
+
+    #[test]
+    fn closing_the_line_editor_drops_its_delete_confirmation() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("stale-delete");
+        let original = "[00:00] SPEAKER 1: one\n[00:05] SPEAKER 2: two\n";
+        let (mut app, _transcript, media) = line_edit_fixture("stale-delete", original);
+
+        open_line_edit(&mut app, 1);
+        let _ = app.update(Message::DeleteLineEdit);
+        assert!(app.delete_confirm);
+
+        // The confirmation belongs to the line being edited. Cancelling the
+        // editor must not leave a modal flag behind with nothing to draw.
+        let _ = app.update(Message::CancelLineEdit);
+        assert!(!app.delete_confirm);
+        assert!(!app.popup_open());
+        let _ = app.view();
 
         let _ = std::fs::remove_dir_all(&media);
     }
