@@ -693,6 +693,7 @@ pub enum Message {
     /// Cycle the edited line through the transcript's speakers.
     CycleLineSpeaker,
     LineHover(Option<usize>),
+    LineUnhover(usize),
     SelectRelative(i32),
     SelectRelativeChecked(i32, bool),
     EditActiveLine,
@@ -2926,16 +2927,13 @@ impl App {
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
-        let menu_was_open = self.menu_open();
         let task = self.dispatch(message);
-        // A menu takes the pointer off whatever it covers: the rows beneath get
-        // no exit event while it is up, so the hover it opened over would stay
-        // lit behind it. Clear it on the way in, not on the way out, so the row
-        // under the pointer after the menu closes starts from nothing rather
-        // than from a state the menu already hid.
-        if !menu_was_open && self.menu_open() {
-            self.transcript_line_hover = None;
-        }
+        // A menu takes the pointer, but the remembered row is left alone:
+        // `pointer_blocked` already hides its affordances while the menu is up,
+        // and clearing it meant that after the menu closed nothing re-entered
+        // the row -- the row's `on_enter` does not fire again while the pointer
+        // stays inside it -- so the swap button stayed gone until the pointer
+        // left and came back.
         // A dialog takes the keyboard: the Find field has lost focus even when a
         // dialog input has taken it next.
         if self.popup_open() && self.find_open {
@@ -3557,6 +3555,18 @@ impl App {
                     return Task::none();
                 }
                 self.transcript_line_hover = index;
+                Task::none()
+            }
+            // An exit names the row it left, so it cannot clear a hover that a
+            // newer enter already set. Column children are visited in index
+            // order and both messages land in the same update when the pointer
+            // moves up a row: the entering row's `Some(i)` was being overwritten
+            // by the leaving row's `None`, and the row's own `on_enter` never
+            // fires again while the pointer stays inside it.
+            Message::LineUnhover(index) => {
+                if self.transcript_line_hover == Some(index) {
+                    self.transcript_line_hover = None;
+                }
                 Task::none()
             }
             Message::SelectRelative(delta) => {
@@ -8518,7 +8528,7 @@ impl App {
                         .on_press(Message::LineClicked(idx))
                         .on_right_press(Message::FlipLineSpeaker(idx))
                         .on_enter(Message::LineHover(Some(idx)))
-                        .on_exit(Message::LineHover(None)),
+                        .on_exit(Message::LineUnhover(idx)),
                 );
             } else {
                 col = col.push(line_element(
@@ -13233,7 +13243,7 @@ fn empty_line_element(
             .on_right_press(Message::FlipLineSpeaker(idx)),
     )
     .on_enter(Message::LineHover(Some(idx)))
-    .on_exit(Message::LineHover(None))
+    .on_exit(Message::LineUnhover(idx))
     .into()
 }
 
@@ -13395,7 +13405,13 @@ fn inline_bubble_edit<'a>(
     );
     container(body)
         .width(Length::Shrink)
-        .max_width(Pixels((size * 28.0).clamp(240.0, 620.0)))
+        // The swap button's slot is reserved whether or not it is showing, so
+        // hovering cannot narrow the bubble and rewrap its text: the button
+        // appears inside space the row already accounts for, and the wrap is
+        // the same in both states. Line mode reserves the same way.
+        .max_width(Pixels(
+            (size * 28.0).clamp(240.0, 620.0) - SWAP_RESERVED_WIDTH,
+        ))
         .align_x(iced::Alignment::Start)
         .padding([6, 9])
         .style(move |_theme| container::Style {
@@ -13477,23 +13493,32 @@ fn sms_bubble(
                     .color(Color { a: 0.70, ..ink }),
             );
         }
-        // In bubble mode the label and the timestamp are the only way into the
-        // editor: the words themselves stay a plain seek target, so reading a
-        // transcript cannot put it into edit mode by accident.
+        // The label and the timestamp open the editor too: they are the only
+        // target on a bubble with no words, and pressing the chip is a direct
+        // request for that line.
         body = body.push(
             mouse_area(meta)
                 .interaction(mouse::Interaction::Pointer)
                 .on_press(Message::LineClicked(index)),
         );
     }
-    body = body.push(rich_text(styled_spans(
-        content,
-        query,
-        false,
-        false,
-        Some(ink),
-        scheme.search_hl,
-        size,
+    // The words take the press themselves, exactly as they do in line mode.
+    // iced's `Rich` text captures a left press over any glyph before the row's
+    // own `mouse_area` ever sees it, so a bare `rich_text` here made every word
+    // a dead target: the first click never reached `line_pressed`, and a double
+    // click could not open the editor. `TextPress` handles the press first and
+    // passes the point on, which also puts the caret under the pointer.
+    body = body.push(Element::new(TextPress::new(
+        rich_text(styled_spans(
+            content,
+            query,
+            false,
+            false,
+            Some(ink),
+            scheme.search_hl,
+            size,
+        )),
+        index,
     )));
     container(body)
         .width(Length::Shrink)
@@ -13793,7 +13818,7 @@ fn line_element(
         .interaction(mouse::Interaction::Pointer)
         .on_press(Message::LineClicked(idx))
         .on_enter(Message::LineHover(Some(idx)))
-        .on_exit(Message::LineHover(None))
+        .on_exit(Message::LineUnhover(idx))
         .into()
 }
 
@@ -13809,6 +13834,11 @@ const MAX_THROUGHPUT: f32 = 200.0;
 /// The exchange glyph is the only one that has to read at a glance while the
 /// pointer is already on the row, so it is drawn larger than the control icons.
 const SWAP_ICON_SIZE: f32 = 20.0;
+
+/// Width a bubble gives up for the speaker-swap button it may show on hover:
+/// the glyph, the button's horizontal padding, and the row's gap. Reserved in
+/// both states so the bubble never rewraps when the button appears.
+const SWAP_RESERVED_WIDTH: f32 = SWAP_ICON_SIZE + 2.0 * theme::CONTROL_PADDING[1] as f32 + theme::SPACE_SM;
 
 /// A button (content-sized / minimum width).
 fn action<'a>(content: impl Into<Element<'a, Message>>) -> iced::widget::Button<'a, Message> {
@@ -15727,19 +15757,22 @@ mod tests {
         let _ = app.update(Message::LineHover(Some(0)));
         assert_eq!(app.transcript_line_hover, Some(0));
 
-        // Opening the View menu takes the pointer off the rows: the row the
-        // pointer happened to be over is cleared, and none can light up again
-        // while the menu is up.
+        // Opening the View menu takes the pointer off the rows: no other row can
+        // light up while the menu is up. The remembered row is kept, because
+        // clearing it meant nothing re-entered it when the menu closed -- the
+        // row's `on_enter` does not fire again while the pointer stays inside --
+        // so its swap button stayed gone until the pointer left and came back.
         let _ = app.update(Message::ToggleHeaderMenu(HeaderMenu::View));
         assert_eq!(app.header_menu, Some(HeaderMenu::View));
         assert!(!app.popup_open(), "a menu is not a dialog");
         // The catcher and the menu layer build and lay out without the card
         // losing its shape.
         let _ = app.view();
-        assert_eq!(app.transcript_line_hover, None);
+        assert_eq!(app.transcript_line_hover, Some(0));
         let _ = app.update(Message::LineHover(Some(1)));
         assert_eq!(
-            app.transcript_line_hover, None,
+            app.transcript_line_hover,
+            Some(0),
             "a row lit up under the open View menu"
         );
 
@@ -15752,10 +15785,11 @@ mod tests {
         // overlay rather than a menu layer: it reports open/closed, so it gates
         // the pointer too.
         let _ = app.update(Message::LineEditSpeakerMenu(true));
-        assert_eq!(app.transcript_line_hover, None);
+        assert_eq!(app.transcript_line_hover, Some(1));
         let _ = app.update(Message::LineHover(Some(0)));
         assert_eq!(
-            app.transcript_line_hover, None,
+            app.transcript_line_hover,
+            Some(1),
             "a row lit up under the open speaker menu"
         );
         let _ = app.update(Message::LineEditSpeakerMenu(false));
@@ -16664,6 +16698,54 @@ mod tests {
         app.scroll_target = None;
         let _ = app.update(Message::CancelLineEdit);
         assert_eq!(app.scroll_target, Some(0.0));
+
+        let _ = std::fs::remove_dir_all(&media);
+    }
+
+    #[test]
+    fn a_bubble_word_press_reaches_the_edit_path() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("bubble-word-config");
+        let original = "[00:00] SPEAKER 1: one\n[00:05] SPEAKER 2: two\n";
+        let (mut app, _transcript, media) = line_edit_fixture("bubble-word", original);
+
+        // This is what the wrapped words send. iced's rich text swallows a press
+        // over a glyph before the row's `mouse_area` sees it, so the bubble's
+        // words carry `TextPress` exactly as line mode's do.
+        app.sms_mode = true;
+        let point = Point::new(12.0, 6.0);
+        let _ = app.update(Message::LineTextPressed(1, point));
+        assert!(app.line_edit.is_none(), "one click must not open the field");
+        assert_eq!(app.playhead, 5.0, "the first click still seeks");
+
+        let _ = app.update(Message::LineTextPressed(1, point));
+        assert_eq!(app.line_edit.as_ref().map(|edit| edit.index), Some(1));
+        assert_eq!(
+            app.line_edit_caret,
+            Some(point),
+            "the caret lands where the press did, as it does in line mode"
+        );
+
+        let _ = std::fs::remove_dir_all(&media);
+    }
+
+    #[test]
+    fn an_exit_never_clears_a_newer_hover() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("hover-order-config");
+        let original = "[00:00] SPEAKER 1: one\n[00:05] SPEAKER 2: two\n";
+        let (mut app, _transcript, media) = line_edit_fixture("hover-order", original);
+
+        // Moving up a row enqueues the entering row's `Some(i)` and the leaving
+        // row's exit in the same update. A bare `None` on exit wiped the newer
+        // hover, and the row could not re-enter while the pointer stayed on it,
+        // so its swap button disappeared until the pointer left and returned.
+        let _ = app.update(Message::LineHover(Some(1)));
+        let _ = app.update(Message::LineUnhover(0));
+        assert_eq!(app.transcript_line_hover, Some(1));
+
+        let _ = app.update(Message::LineUnhover(1));
+        assert_eq!(app.transcript_line_hover, None);
 
         let _ = std::fs::remove_dir_all(&media);
     }
