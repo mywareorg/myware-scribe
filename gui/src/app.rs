@@ -9097,65 +9097,47 @@ impl App {
     /// The open View menu: the display toggles, then text zoom.
     ///
     /// Every row is a plain message, never a pick-list selection, so the menu
-    /// stays mounted while several are pressed. The zoom pair is the same: two
-    /// buttons with the percentage between them, so a long stretch can be sized
-    /// in one visit.
+    /// stays mounted while several are pressed. The zoom pair is the section's
+    /// footer and works the same way.
     fn view_menu(&self, scheme: &Scheme) -> Element<'_, Message> {
         let scheme = *scheme;
         let confidence = self.has_confidence();
-        let items = column![
-            header_menu_item(
-                "Follow",
-                self.follow_playhead,
-                true,
-                Some(Message::ToggleFollowPlayhead),
-                Some(ViewShortcut::Follow.key()),
-                scheme,
-            ),
-            header_menu_item(
-                "Timestamps",
-                self.show_timestamps,
-                true,
-                Some(Message::TimestampsToggled(!self.show_timestamps)),
-                Some(ViewShortcut::Timestamps.key()),
-                scheme,
-            ),
-            header_menu_item(
-                "SMS Mode",
-                self.sms_mode,
-                true,
-                Some(Message::SmsToggled(!self.sms_mode)),
-                Some(ViewShortcut::Sms.key()),
-                scheme,
-            ),
-            header_menu_item(
-                "Join",
-                self.join_lines,
-                true,
-                Some(Message::ToggleJoinLines),
-                Some(ViewShortcut::Join.key()),
-                scheme,
-            ),
-            header_menu_item(
-                "Confidence",
-                self.confidence_view,
-                confidence,
-                confidence.then_some(Message::ToggleConfidenceView),
-                Some(ViewShortcut::Confidence.key()),
-                scheme,
-            ),
-        ]
-        .spacing(2)
-        .width(Length::Fill);
-
-        // One key per toggle, so the card is the width of "Timestamps" plus its
-        // trailing key.
-        let rows = [
-            ("Follow", Some(ViewShortcut::Follow.key())),
-            ("Timestamps", Some(ViewShortcut::Timestamps.key())),
-            ("SMS Mode", Some(ViewShortcut::Sms.key())),
-            ("Join", Some(ViewShortcut::Join.key())),
-            ("Confidence", Some(ViewShortcut::Confidence.key())),
+        let rows = vec![
+            MenuRow {
+                label: "Follow",
+                key: Some(ViewShortcut::Follow.key()),
+                checked: self.follow_playhead,
+                enabled: true,
+                action: Some(Message::ToggleFollowPlayhead),
+            },
+            MenuRow {
+                label: "Timestamps",
+                key: Some(ViewShortcut::Timestamps.key()),
+                checked: self.show_timestamps,
+                enabled: true,
+                action: Some(Message::TimestampsToggled(!self.show_timestamps)),
+            },
+            MenuRow {
+                label: "SMS Mode",
+                key: Some(ViewShortcut::Sms.key()),
+                checked: self.sms_mode,
+                enabled: true,
+                action: Some(Message::SmsToggled(!self.sms_mode)),
+            },
+            MenuRow {
+                label: "Join",
+                key: Some(ViewShortcut::Join.key()),
+                checked: self.join_lines,
+                enabled: true,
+                action: Some(Message::ToggleJoinLines),
+            },
+            MenuRow {
+                label: "Confidence",
+                key: Some(ViewShortcut::Confidence.key()),
+                checked: self.confidence_view,
+                enabled: confidence,
+                action: confidence.then_some(Message::ToggleConfidenceView),
+            },
         ];
 
         let font_on = self.font_scale;
@@ -9182,25 +9164,15 @@ impl App {
         ]
         .spacing(6)
         .align_y(iced::Alignment::Center);
-        let divider = container(horizontal_space())
+        let footer = container(zoom)
             .width(Length::Fill)
-            .height(Length::Fixed(1.0))
-            .style(move |_theme| container::Style {
-                background: Some(scheme.border.into()),
-                ..container::Style::default()
-            });
-
-        header_menu_card(
-            column![
-                items,
-                container(divider).padding([4, 0]),
-                container(zoom)
-                    .width(Length::Fill)
-                    .align_x(iced::Alignment::Center),
-            ]
-            .spacing(6)
-            .width(Length::Fill),
-            &rows,
+            .align_x(iced::Alignment::Center)
+            .into();
+        menu_card(
+            vec![MenuSection {
+                rows,
+                footer: Some(footer),
+            }],
             scheme,
         )
     }
