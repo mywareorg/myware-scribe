@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["core", "gui"]
+members = ["core", "gui", "ui-kit"]
 default-members = ["gui"]
 
 [profile.release]

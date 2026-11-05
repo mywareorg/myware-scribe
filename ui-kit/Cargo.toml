@@ -1,0 +1,14 @@
+[package]
+name = "ui-kit"
+version = "0.1.0"
+edition = "2021"
+description = "Iced UI primitives: palette, styles, buttons, menus and dialogs."
+repository = "https://gitlab.com/librewarelive/hippo-transcribe"
+
+[lib]
+name = "ui_kit"
+
+[dependencies]
+# The same iced the app is built against. No renderer feature: this is a library
+# of widget builders, and the application chooses its own renderer.
+iced = { version = "0.13", default-features = false, features = ["advanced"] }
