@@ -162,6 +162,15 @@ const LINE_EDIT_GAP: f32 = 4.0;
 /// two is one control height rather than as tall as its tallest child.
 const CONTROL_HEIGHT: f32 = 30.8;
 
+/// The type size of every button label. One value on purpose: a button that
+/// needs to look smaller changes its kind, never its text. Buttons used to set
+/// their own size at the call site, which is how a 12 px label ended up beside a
+/// 16 px one in the same row.
+const BUTTON_LABEL_SIZE: f32 = 16.0;
+
+/// Width of an on/off button. Fixed so `On` and `Off` share one box.
+const TOGGLE_WIDTH: f32 = 64.0;
+
 /// Diameter of the panel's circular icon buttons: a standard control height, so
 /// they line up with the text buttons around them.
 const PANEL_ICON_DIAMETER: f32 = CONTROL_HEIGHT;
@@ -10755,43 +10764,28 @@ impl App {
 
         let follow_on = self.follow_playhead;
         let follow = settings_control(
-            action(text(if follow_on { "On" } else { "Off" }).size(theme::TEXT_XS))
-                .on_press(Message::ToggleFollowPlayhead)
-                .style(move |theme, status| {
-                    if follow_on {
-                        pill_button_active(theme, status)
-                    } else {
-                        pill_button_secondary(theme, status)
-                    }
-                })
-                .width(Length::Fixed(64.0)),
+            toggle_button(
+                if follow_on { "On" } else { "Off" },
+                follow_on,
+                Message::ToggleFollowPlayhead,
+            ),
         );
 
         let timestamps_on = self.show_timestamps;
         let timestamps = settings_control(
-            action(text(if timestamps_on { "On" } else { "Off" }).size(theme::TEXT_XS))
-                .on_press(Message::TimestampsToggled(!timestamps_on))
-                .style(move |theme, status| {
-                    if timestamps_on {
-                        pill_button_active(theme, status)
-                    } else {
-                        pill_button_secondary(theme, status)
-                    }
-                })
-                .width(Length::Fixed(64.0)),
+            toggle_button(
+                if timestamps_on { "On" } else { "Off" },
+                timestamps_on,
+                Message::TimestampsToggled(!timestamps_on),
+            ),
         );
         let notifications_on = self.notifications;
         let notifications = settings_control(
-            action(text(if notifications_on { "On" } else { "Off" }).size(theme::TEXT_XS))
-                .on_press(Message::NotificationsToggled(!notifications_on))
-                .style(move |theme, status| {
-                    if notifications_on {
-                        pill_button_active(theme, status)
-                    } else {
-                        pill_button_secondary(theme, status)
-                    }
-                })
-                .width(Length::Fixed(64.0)),
+            toggle_button(
+                if notifications_on { "On" } else { "Off" },
+                notifications_on,
+                Message::NotificationsToggled(!notifications_on),
+            ),
         );
 
         let location = self
@@ -14070,8 +14064,44 @@ fn action_width(label: &str) -> f32 {
 }
 
 /// A button with a single-line text label.
+///
+/// The box is a fixed height with no vertical padding and the label is centred
+/// inside it by layout, so the label's line box can never move the text up or
+/// down: the size decides the box, not the padding. Every text button in the app
+/// comes through here, which is what keeps one row's buttons the same height as
+/// the next row's.
 fn action_text<'a>(label: &'a str) -> iced::widget::Button<'a, Message> {
-    action(text(label).wrapping(NO_WRAP)).width(Length::Fixed(action_width(label)))
+    action(
+        container(text(label).size(BUTTON_LABEL_SIZE).wrapping(NO_WRAP))
+            .height(Length::Fill)
+            .center_y(Length::Fill),
+    )
+    .width(Length::Fixed(action_width(label)))
+    .height(Length::Fixed(CONTROL_HEIGHT))
+    .padding([0, 10])
+}
+
+/// An on/off button: the same box as [`action_text`], filled when on.
+///
+/// The three toggles in Settings were three copies of this, each choosing its
+/// own type size; they now differ only by what they toggle.
+fn toggle_button<'a>(label: &'a str, on: bool, message: Message) -> iced::widget::Button<'a, Message> {
+    action(
+        container(text(label).size(BUTTON_LABEL_SIZE))
+            .height(Length::Fill)
+            .center_y(Length::Fill),
+    )
+    .on_press(message)
+    .style(move |theme, status| {
+        if on {
+            pill_button_active(theme, status)
+        } else {
+            pill_button_secondary(theme, status)
+        }
+    })
+    .width(Length::Fixed(TOGGLE_WIDTH))
+    .height(Length::Fixed(CONTROL_HEIGHT))
+    .padding([0, 10])
 }
 
 /// Rough advance width of a run of text: the same 10 px per character
