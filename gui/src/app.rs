@@ -12560,10 +12560,11 @@ const ICON_HOURGLASS: char = '\u{f421}';
 const ICON_CHECK: char = '\u{f633}';
 const ICON_X: char = '\u{f659}';
 const ICON_CARET_DOWN: char = '\u{f229}';
-/// Crossing arrows: the two speakers exchange places. The left-right pair it
-/// replaced read as up-and-down movement at this size, because its two arrows
-/// sit one above the other.
-const ICON_SWAP: char = '\u{f544}';
+/// Two arrows making a half square: the speakers exchange places. The
+/// left-right pair it replaced read as up-and-down movement at this size,
+/// because its two arrows sit one above the other; this one bends them round
+/// each other so the exchange is the shape.
+const ICON_SWAP: char = '\u{f813}';
 /// Join this line with the one above / below. Plain short arrows, one per
 /// direction: the bar-arrow pair read as "move the line to the top", which is
 /// not what the button does.
