@@ -9049,7 +9049,10 @@ impl App {
         let scheme = *scheme;
         let running = matches!(self.status, Status::Running);
         let editing = self.can(license::Feature::Editing);
-        let can_rename = editing && !running && self.shown_output().is_some() && !self.shown_lines().is_empty();
+        let can_rename = editing
+            && !running
+            && self.shown_output().is_some()
+            && !self.shown_lines().is_empty();
         // Without a licence the row still explains itself rather than going dead.
         let rename_message = if can_rename {
             Some(Message::OpenRename)
@@ -9060,37 +9063,33 @@ impl App {
         };
         let has_text = !self.shown_transcript().is_empty();
         let reset = self.reset_available();
-        let rows = [("Rename All", None), ("Copy", None), ("Reset", None)];
-        header_menu_card(
-            column![
-                header_menu_item(
-                    "Rename All",
-                    false,
-                    can_rename,
-                    rename_message,
-                    None,
-                    scheme,
-                ),
-                header_menu_item(
-                    "Copy",
-                    false,
-                    has_text,
-                    has_text.then_some(Message::CopyTranscript),
-                    None,
-                    scheme,
-                ),
-                header_menu_item(
-                    "Reset",
-                    false,
-                    reset,
-                    reset.then_some(Message::RequestResetTranscript),
-                    None,
-                    scheme,
-                ),
-            ]
-            .spacing(2)
-            .width(Length::Fill),
-            &rows,
+        menu_card(
+            vec![MenuSection {
+                rows: vec![
+                    MenuRow {
+                        label: "Rename All",
+                        key: None,
+                        checked: false,
+                        enabled: can_rename,
+                        action: rename_message,
+                    },
+                    MenuRow {
+                        label: "Copy",
+                        key: None,
+                        checked: false,
+                        enabled: has_text,
+                        action: has_text.then_some(Message::CopyTranscript),
+                    },
+                    MenuRow {
+                        label: "Reset",
+                        key: None,
+                        checked: false,
+                        enabled: reset,
+                        action: reset.then_some(Message::RequestResetTranscript),
+                    },
+                ],
+                footer: None,
+            }],
             scheme,
         )
     }
