@@ -14158,14 +14158,37 @@ fn card_menu_layer<'a>(body: Element<'a, Message>, offset: f32) -> Element<'a, M
         .into()
 }
 
-/// The Editing Tips opt-out: a square that fills when set, with the tick drawn
-/// a little larger than the box so it reads as a mark struck through it rather
-/// than a glyph sitting inside a frame.
+/// The Editing Tips opt-out: a square that fills when set, with the tick centred
+/// inside it.
+///
+/// The tick goes *inside* the bordered box, at the tightened icon line height,
+/// so the paragraph it is measured from fits within the box. A line box taller
+/// than the space offered leaves cosmic-text with no vertical room for the
+/// baseline and it then yields no layout run at all, which measures and draws as
+/// nothing.
 fn tips_check<'a>(checked: bool, scheme: Scheme) -> Element<'a, Message> {
-    const BOX: f32 = 13.0;
-    let square = container(horizontal_space())
+    const BOX: f32 = 14.0;
+    const TICK: f32 = 12.0;
+
+    let content: Element<'a, Message> = if checked {
+        text(ICON_CHECK.to_string())
+            .font(Font::with_name("bootstrap-icons"))
+            .size(TICK)
+            .line_height(icon_line_height(TICK))
+            .wrapping(NO_WRAP)
+            .style(move |_theme| text::Style {
+                color: Some(scheme.blue),
+            })
+            .into()
+    } else {
+        horizontal_space().into()
+    };
+
+    container(content)
         .width(Length::Fixed(BOX))
         .height(Length::Fixed(BOX))
+        .align_x(iced::Alignment::Center)
+        .align_y(iced::Alignment::Center)
         .style(move |_theme| container::Style {
             background: checked.then(|| scheme.dialog_bg.into()),
             border: iced::border::Border {
@@ -14174,20 +14197,8 @@ fn tips_check<'a>(checked: bool, scheme: Scheme) -> Element<'a, Message> {
                 radius: 3.0.into(),
             },
             ..container::Style::default()
-        });
-    if !checked {
-        return square.into();
-    }
-    // No wrapping: the glyph is deliberately larger than the box and must be
-    // measured at its own width, or the box's limits truncate it to nothing.
-    let tick = text(ICON_CHECK.to_string())
-        .font(Font::with_name("bootstrap-icons"))
-        .size(BOX + 2.0)
-        .wrapping(NO_WRAP)
-        .style(move |_theme| text::Style {
-            color: Some(scheme.blue),
-        });
-    stack![square, container(tick).center(Length::Fixed(BOX))].into()
+        })
+        .into()
 }
 
 /// A hairline between two menu groups.
