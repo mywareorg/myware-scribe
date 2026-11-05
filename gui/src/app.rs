@@ -8777,6 +8777,11 @@ impl App {
         let edits = row![
             identity,
             self.tip(
+                button(ICON_SPEAKERS, allowed, false, Message::OpenRename),
+                "Rename speakers across the transcript",
+                &scheme,
+            ),
+            self.tip(
                 button(ICON_JOIN_PREV, can_join_prev, false, Message::MergePrevLine),
                 "Join with the line above (Alt+Up)",
                 &scheme,
@@ -12625,6 +12630,9 @@ const ICON_PLUS: char = '\u{f4fe}';
 const ICON_FOLDER_PLUS: char = '\u{f3d3}';
 const ICON_FOLDER_OPEN: char = '\u{f3d8}';
 const ICON_TRASH: char = '\u{f5de}';
+/// A group of people: the speakers, not the line. The strip's other glyphs are
+/// about this one line; this one opens the transcript-wide rename.
+const ICON_SPEAKERS: char = '\u{f4d0}';
 /// A repeat arrow for retrying a failed item. Distinct from the editor's redo
 /// glyph, which used to share this codepoint.
 const ICON_RETRY: char = '\u{f130}';
@@ -17106,6 +17114,24 @@ mod tests {
         assert!(!reloaded.editing_tips);
     }
 
+
+    #[test]
+    fn the_editor_strip_can_open_the_speaker_rename() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("strip-rename");
+        let original = "[00:00] SPEAKER 1: one\n[00:05] SPEAKER 2: two\n";
+        let (mut app, _transcript, media) = line_edit_fixture("strip-rename", original);
+
+        open_line_edit(&mut app, 1);
+        // The strip's Rename Speakers button sends the same message as Edit ->
+        // Rename Speakers: the typed row is committed before the form takes over.
+        let _ = app.update(Message::OpenRename);
+        assert!(app.line_edit.is_none(), "the edit is committed, not lost");
+        assert!(app.rename_open);
+        assert_eq!(app.rename_fields.len(), 2);
+
+        let _ = std::fs::remove_dir_all(&media);
+    }
 
     #[test]
     fn a_dialog_drops_the_hovered_row_and_refuses_new_hover() {
