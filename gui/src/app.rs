@@ -246,7 +246,6 @@ fn view_menu_offset() -> f32 {
 /// speaker name it shows. The picker sits in a row with nine other controls: it
 /// sizes to the names it holds and ellipsizes the middle past this point, so a
 /// renamed speaker stays identifiable without pushing Done off the row.
-const LINE_EDIT_PICKER_WIDTH: f32 = 160.0;
 const LINE_EDIT_PICKER_CHARS: usize = 18;
 
 /// iced's default text line height, as a multiple of the font size.
@@ -791,9 +790,7 @@ pub enum Message {
     OpenRename,
     EditLine(usize),
     FlipLineSpeaker(usize),
-    LineEditSpeaker(usize, String),
     /// The line editor's speaker picker opened or closed its menu.
-    LineEditSpeakerMenu(bool),
     LineEditAction(usize, text_editor::Action),
     /// Commit the inline editor and close it, resuming playback if it was
     /// playing when the edit started.
@@ -1201,7 +1198,6 @@ pub struct App {
     line_edit_caret: Option<Point>,
     /// The speaker picker's own menu is open. Enter belongs to the menu then,
     /// not to the line being edited.
-    line_edit_picker_open: bool,
     /// A line delete is waiting on the confirmation dialog.
     delete_confirm: bool,
     /// Document the open editor writes to, so a view change cannot commit its
@@ -1432,7 +1428,6 @@ impl App {
             line_edit: None,
             line_edit_resume: false,
             line_edit_caret: None,
-            line_edit_picker_open: false,
             delete_confirm: false,
             line_edit_document: None,
             line_history: LineHistory::default(),
@@ -2920,7 +2915,7 @@ impl App {
     /// A dialog or an open picker owns the keyboard, so a line-edit shortcut
     /// that arrives from the global key subscription must not fire behind it.
     fn line_edit_shortcut_blocked(&self) -> bool {
-        self.line_edit_picker_open || self.popup_open()
+        self.menu_open() || self.popup_open()
     }
 
     /// A single-key View toggle is off while a dialog owns the keyboard or the
@@ -2974,7 +2969,6 @@ impl App {
         // stops a picker that was unmounted mid-open from blocking hover after
         // the dialog closes.
         if self.open_modal().is_some() {
-            self.line_edit_picker_open = false;
             self.transcript_line_hover = None;
         }
         match message {
@@ -4382,20 +4376,6 @@ impl App {
             }
             Message::FlipLineSpeaker(index) => self.flip_line_speaker(index),
             Message::EditLine(index) => self.begin_inline_edit(index),
-            Message::LineEditSpeaker(position, value) => {
-                if let Some(row) = self
-                    .line_edit
-                    .as_mut()
-                    .and_then(|edit| edit.rows.get_mut(position))
-                {
-                    row.speaker = value;
-                }
-                Task::none()
-            }
-            Message::LineEditSpeakerMenu(open) => {
-                self.line_edit_picker_open = open;
-                Task::none()
-            }
             Message::LineEditAction(position, action) => {
                 if let Some(row) = self
                     .line_edit
@@ -5583,7 +5563,6 @@ impl App {
         self.summary_open = false;
         self.rename_open = false;
         self.last_line_click = None;
-        self.line_edit_picker_open = false;
         self.toast = None;
         // With the strip appearing, `strip_scroll` shifts the offset and keeps the
         // edited row below it. Nothing else moves the pane when the strip was
@@ -5682,7 +5661,6 @@ impl App {
             return;
         };
         self.line_edit_caret = None;
-        self.line_edit_picker_open = false;
         // Whether the user asked to save this line, as opposed to the editor
         // being committed as a side effect of moving elsewhere.
         let asked = resume;
@@ -5768,7 +5746,6 @@ impl App {
         self.replace_edit_lines(lines);
         self.line_edit = None;
         self.line_edit_resume = false;
-        self.line_edit_picker_open = false;
         self.line_edit_document = None;
         self.reset_pane_geometry();
         self.toast = Some(("Deleted line".to_string(), Instant::now()));
@@ -5780,7 +5757,6 @@ impl App {
         self.line_edit_caret = None;
         if self.line_edit.take().is_some() {
             self.line_edit_resume = false;
-            self.line_edit_picker_open = false;
             self.line_edit_document = None;
             // The delete confirmation belongs to the line being edited. Without
             // this it could outlive its editor and hold the pointer with no
@@ -8701,61 +8677,21 @@ impl App {
         let order = self.speaker_order();
         let accent = line_accent(&order, &row.speaker, &scheme);
 
-        // The picker's options are the names themselves, so the handle sizes to
-        // the longest label and the menu — which inherits the handle's width —
-        // shows the same text instead of clipping it.
-        let mut names = order.clone();
-        if !names.iter().any(|name| name == &row.speaker) {
-            names.push(row.speaker.clone());
-        }
-        let choices: Vec<SpeakerChoice> = names.into_iter().map(SpeakerChoice::new).collect();
-        // With one speaker there is nothing to choose: show the label the row
-        // already carries, without the arrow and the menu that would only ever
-        // hold the one name back.
-        let can_change_speaker = allowed && choices.len() > 1;
-        // A pick list draws its menu in iced's overlay tree, which sits above
-        // this dialog stack and would therefore float over a dialog's scrim.
-        // Not building the widget while one is open is the only way to close it
-        // from here; the chip that replaces it is behind the scrim anyway.
-        let picker: Element<Message> = if can_change_speaker && !self.popup_open() {
-            container(
-                pick_list(
-                    choices,
-                    Some(SpeakerChoice::new(row.speaker.clone())),
-                    |choice| Message::LineEditSpeaker(0, choice.name),
-                )
-                .style(speaker_pick(accent, scheme))
-                .menu_style(pick_menu_style(scheme))
-                .handle(caret_handle())
-                .text_size(theme::TEXT_SM)
+        // The line's speaker is shown, not changed: which speaker owns a line
+        // belongs to the transcript -- the bubble's exchange button and the
+        // right-click flip -- not to a strip about the line's text.
+        let picker: Element<Message> = container(
+            text(ellipsize_middle(&row.speaker, LINE_EDIT_PICKER_CHARS))
+                .size(theme::TEXT_SM)
                 .font(Font {
                     weight: font::Weight::Bold,
                     ..Font::DEFAULT
                 })
-                .padding([3, 5])
-                .width(Length::Shrink)
-                .on_open(Message::LineEditSpeakerMenu(true))
-                .on_close(Message::LineEditSpeakerMenu(false)),
-            )
-            .max_width(Pixels(LINE_EDIT_PICKER_WIDTH))
-            .into()
-        } else {
-            // Read-only, the only speaker there is, or a dialog in front: show
-            // whose line this is in its own colour, without a control that
-            // cannot change anything from here.
-            container(
-                text(ellipsize_middle(&row.speaker, LINE_EDIT_PICKER_CHARS))
-                    .size(theme::TEXT_SM)
-                    .font(Font {
-                        weight: font::Weight::Bold,
-                        ..Font::DEFAULT
-                    })
-                    .color(if allowed { accent } else { scheme.muted })
-                    .wrapping(NO_WRAP),
-            )
-            .padding([3, 5])
-            .into()
-        };
+                .color(if allowed { accent } else { scheme.muted })
+                .wrapping(NO_WRAP),
+        )
+        .padding([3, 5])
+        .into();
 
         // No line-number label: the field's own gutter says when the line is and
         // the panel is only ever about the line that is already open under it.
@@ -8789,21 +8725,6 @@ impl App {
                 .style(panel_icon_button(scheme, enabled))
                 .on_press_maybe(enabled.then_some(message))
         };
-        // One hairline, only where the structural edits stop and the commit
-        // pair begins.
-        let divider = || {
-            container(
-                container(horizontal_space())
-                    .width(Length::Fixed(1.0))
-                    .height(Length::Fixed(16.0))
-                    .style(move |_theme| container::Style {
-                        background: Some(scheme.border.into()),
-                        ..container::Style::default()
-                    }),
-            )
-            .padding([0, theme::SPACE_2XS as u16])
-        };
-
         // Cancel stays live whatever the state: it is the way out of a row the
         // panel can no longer write to.
         let cancel = icon_circle(ICON_X, scheme.ink)
@@ -8847,7 +8768,6 @@ impl App {
                 "Redo the last line edit",
                 &scheme,
             ),
-            divider(),
         ]
         .spacing(LINE_EDIT_GAP)
         .align_y(iced::Alignment::Center);
@@ -9847,7 +9767,7 @@ impl App {
     /// leaves the keyboard and the tooltips alone: a menu's own buttons carry
     /// tooltips, and those must keep working while it is open.
     fn menu_open(&self) -> bool {
-        self.header_menu.is_some() || self.line_edit_picker_open
+        self.header_menu.is_some()
     }
 
     /// True while nothing under the pointer may react: a dialog is up, or a menu
@@ -12687,11 +12607,11 @@ const ICON_CARET_DOWN: char = '\u{f229}';
 /// because its two arrows sit one above the other; this one bends them round
 /// each other so the exchange is the shape.
 const ICON_SWAP: char = '\u{f813}';
-/// Join this line with the one above / below. Plain short arrows, one per
-/// direction: the bar-arrow pair read as "move the line to the top", which is
-/// not what the button does.
-const ICON_JOIN_PREV: char = '\u{f145}';
-const ICON_JOIN_NEXT: char = '\u{f124}';
+/// Join this line with the one above / below. An arrow into an edge, so the bar
+/// is the neighbouring line it merges with: plain arrows read as moving the row,
+/// which is not what the button does.
+const ICON_JOIN_PREV: char = '\u{f115}';
+const ICON_JOIN_NEXT: char = '\u{f112}';
 /// A path forking: cut this line at the caret. Scissors were the obvious
 /// choice but collapse into an X at the panel's glyph size, next to a trash can.
 const ICON_SPLIT: char = '\u{f549}';
@@ -13260,32 +13180,6 @@ fn split_at_caret(row: &LineEditRow) -> Option<(String, String)> {
         .map(|(left, right)| (left.to_string(), right.to_string()))
 }
 
-/// A speaker name as the line editor's picker shows it: the stored name, with
-/// the middle ellipsized so the handle — and the menu, which inherits the
-/// handle's width — fits the panel without cutting a name mid-glyph.
-#[derive(Clone)]
-struct SpeakerChoice {
-    name: String,
-}
-
-impl SpeakerChoice {
-    fn new(name: String) -> Self {
-        Self { name }
-    }
-}
-
-impl std::fmt::Display for SpeakerChoice {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(&ellipsize_middle(&self.name, LINE_EDIT_PICKER_CHARS))
-    }
-}
-
-impl PartialEq for SpeakerChoice {
-    fn eq(&self, other: &Self) -> bool {
-        self.name == other.name
-    }
-}
-
 /// The accent colour of a speaker, resolved through the transcript's speaker
 /// order so the line editor tints a line exactly as the transcript pane does.
 fn line_accent(order: &[String], speaker: &str, scheme: &Scheme) -> Color {
@@ -13389,36 +13283,6 @@ fn empty_line_element(
     .on_enter(Message::LineHover(Some(idx)))
     .on_exit(Message::LineUnhover(idx))
     .into()
-}
-
-/// The speaker dropdown of the line editor, drawn as the transcript's speaker
-/// label: the speaker's own colour, no field chrome, and a small highlight on
-/// hover so it still reads as something that opens a list.
-fn speaker_pick(
-    accent: Color,
-    scheme: Scheme,
-) -> impl Fn(&iced::Theme, pick_list::Status) -> pick_list::Style {
-    move |_theme, status| {
-        let open = matches!(
-            status,
-            pick_list::Status::Hovered | pick_list::Status::Opened
-        );
-        pick_list::Style {
-            text_color: accent,
-            placeholder_color: accent,
-            handle_color: accent,
-            background: if open {
-                scheme.track.into()
-            } else {
-                Color::TRANSPARENT.into()
-            },
-            border: iced::border::Border {
-                color: Color::TRANSPARENT,
-                width: 0.0,
-                radius: 4.0.into(),
-            },
-        }
-    }
 }
 
 /// The editor's own chrome is transparent: the surrounding field draws the
@@ -15873,14 +15737,14 @@ mod tests {
         open_line_edit(&mut app, 0);
         current_row_mut(&mut app).content = text_editor::Content::with_text("edited");
 
-        // The menu owns Enter while it is open.
-        let _ = app.update(Message::LineEditSpeakerMenu(true));
+        // A menu owns Enter while it is open.
+        let _ = app.update(Message::ToggleHeaderMenu(HeaderMenu::View));
         let _ = app.update(Message::EnterSubmit);
         assert!(app.line_edit.is_some(), "Enter committed under the menu");
         assert_eq!(std::fs::read_to_string(&transcript).unwrap(), original);
 
         // With the menu closed Enter saves, as Done does.
-        let _ = app.update(Message::LineEditSpeakerMenu(false));
+        let _ = app.update(Message::CloseHeaderMenu);
         let _ = app.update(Message::EnterSubmit);
         assert!(app.line_edit.is_none());
         assert!(std::fs::read_to_string(&transcript)
@@ -15924,21 +15788,6 @@ mod tests {
         let _ = app.update(Message::CloseHeaderMenu);
         let _ = app.update(Message::LineHover(Some(1)));
         assert_eq!(app.transcript_line_hover, Some(1));
-
-        // A pick-list dropdown is the same case even though iced draws it as an
-        // overlay rather than a menu layer: it reports open/closed, so it gates
-        // the pointer too.
-        let _ = app.update(Message::LineEditSpeakerMenu(true));
-        assert_eq!(app.transcript_line_hover, Some(1));
-        let _ = app.update(Message::LineHover(Some(0)));
-        assert_eq!(
-            app.transcript_line_hover,
-            Some(1),
-            "a row lit up under the open speaker menu"
-        );
-        let _ = app.update(Message::LineEditSpeakerMenu(false));
-        let _ = app.update(Message::LineHover(Some(0)));
-        assert_eq!(app.transcript_line_hover, Some(0));
 
         let _ = std::fs::remove_dir_all(&media);
     }
@@ -16084,19 +15933,6 @@ mod tests {
         assert_eq!(HELP_MENU_TOP, 85.0);
     }
 
-    #[test]
-    fn the_speaker_picker_shortens_names_without_losing_the_tail() {
-        let label = SpeakerChoice::new("SPEAKER INTERVIEW ROOM 1".to_string()).to_string();
-        assert_eq!(label.chars().count(), LINE_EDIT_PICKER_CHARS);
-        assert!(label.contains('\u{2026}'));
-        // The tail is what tells two long names apart.
-        assert!(label.ends_with("ROOM 1"), "{label}");
-        // Short names are untouched.
-        assert_eq!(
-            SpeakerChoice::new("SPEAKER 1".to_string()).to_string(),
-            "SPEAKER 1"
-        );
-    }
 
     #[test]
     fn the_line_editor_keys_are_wired_to_their_actions() {
@@ -17243,27 +17079,6 @@ mod tests {
         assert!(!reloaded.editing_tips);
     }
 
-    #[test]
-    fn a_dialog_hides_the_line_editor_speaker_picker() {
-        let _guard = env_lock();
-        let _config = ConfigEnv::new("picker-behind-dialog");
-        let original = "[00:00] SPEAKER 1: one\n[00:05] SPEAKER 2: two\n";
-        let (mut app, _transcript, media) = line_edit_fixture("picker-dialog", original);
-
-        open_line_edit(&mut app, 1);
-        let _ = app.update(Message::LineEditSpeakerMenu(true));
-        assert!(app.line_edit_picker_open);
-
-        // A pick list's menu is drawn in the overlay tree, above the dialog
-        // stack: while a dialog is up the widget must not exist at all.
-        app.settings_open = true;
-        let _ = app.update(Message::Noop);
-        assert!(!app.line_edit_picker_open);
-        let _ = app.line_edit_panel(app.scheme());
-        let _ = app.view();
-
-        let _ = std::fs::remove_dir_all(&media);
-    }
 
     #[test]
     fn a_dialog_drops_the_hovered_row_and_refuses_new_hover() {
