@@ -118,7 +118,7 @@ Models are non-gated and installed into `%LOCALAPPDATA%\hippo-transcribe\models`
 and confirming a Pro purchase are the only reasons the app uses the network; the
 transcription pipeline itself never does.
 
-Download everything at once (also what `deploy.bat` runs on Windows):
+Download everything at once:
 
 ```bash
 hippo-transcribe --cli models download --verify
@@ -347,10 +347,10 @@ left to continue.
 
 `deploy.bat` (shipped beside `hippo-transcribe.exe`) installs the exe to
 `%LOCALAPPDATA%\Programs\hippo-transcribe`, creates a Start Menu shortcut named
-`Hippo Transcribe`, adds it to the user `PATH`, and downloads the models with the
-built-in `curl.exe` (progress shows in the console). Then open a new terminal and
-run `hippo-transcribe`. `undeploy.bat` removes the install and shortcut
-(`/keepmodels` keeps the models).
+`Hippo Transcribe`, adds it to the user `PATH`, and reports whether the bundled
+models are present. The app downloads any missing models on first launch. Then
+open a new terminal and run `hippo-transcribe`. `undeploy.bat` removes the
+install and shortcut (`/keepmodels` keeps the models).
 
 ## Logs
 

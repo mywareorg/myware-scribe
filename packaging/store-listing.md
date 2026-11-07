@@ -88,31 +88,29 @@ counts in mind, they are the limits the form enforces.
 
 - Support contact: the address registered in Partner Center.
 - Website: optional, leave blank.
-- Privacy policy URL: `https://librewarelive.gitlab.io/hippo-transcribe/` (live; serves the generated privacy page)
+- Privacy policy URL: `https://hippo-transcribe-1f7a72.gitlab.io/` (live; serves the generated privacy page)
   (the `pages` job in `.gitlab-ci.yml` publishes `PRIVACY.md` there on every push
   to `main`; confirm Pages is enabled for the project).
 - Copyright: `(c) 2026 Sean Wu`.
 
 ## Screenshot shot list
 
-Capture on the Windows build machine at 1920x1080, window maximised, no personal
-file names in the queue, one shot in the dark theme. The Store needs at least
-one image and accepts up to ten, each at least 1366x768.
+Capture on the Windows build machine at native 1920x1080 with 100% display
+scaling, the window maximised, and the app installed from the candidate MSIX.
+Use a clean queue and neutral file names, no personal paths, and one shot in the
+dark theme. The Store needs at least one image and accepts up to ten, each at
+least 1366x768. Do not upscale partial-window captures.
 
 The eight files in `packaging/screenshots/` are the listing set, in order:
 
-1. `01-drop.png` — a finished transcript with the queue, player and speaker bar.
+1. `01-queue-transcript.png` — a finished multi-speaker transcript with the queue, player and speaker bar.
 2. `02-running.png` — a run in progress: stage label, progress, elapsed time.
-3. `03-transcript.png` — a finished multi-speaker transcript with labels and timestamps.
-4. `04-summary.png` — the completion summary.
-5. `05-speakers.png` — speaker labels and renaming.
-6. `06-settings.png` — Settings: storage, models and the Diagnostics row.
-7. `07-sms.png` — the SMS/text-message output mode.
+3. `03-karaoke.png` — word-level timestamps and the karaoke band on the active line.
+4. `04-record.png` — the Record dialog and microphone meter.
+5. `05-export.png` — the export format picker, or the saved Word document.
+6. `06-briefing.png` — a briefing with cited action items.
+7. `07-settings.png` — Settings: storage, models and the Diagnostics row.
 8. `08-dark.png` — the dark theme.
-
-They were captured as partial window shots, so each was scaled with Lanczos to
-clear the 1366x768 minimum (factor `max(1366/width, 768/height)`, aspect
-preserved). Replace them with full-screen 1920x1080 captures when convenient.
 
 ## Before submitting
 

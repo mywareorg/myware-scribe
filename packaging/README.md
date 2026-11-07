@@ -11,8 +11,10 @@ values in `identity.json`, then packs the executable and its runtime DLLs.
    - `Package/Identity/Name` → `packageName`
    - `Package/Identity/Publisher` → `publisher`
    - `Package/Properties/PublisherDisplayName` → `publisherDisplayName`
-3. Bump `version` (or pass `-Version`) for every submission. The manifest needs
-   four parts; the script appends `.0` to a three-part version.
+3. Pass `-Version` for every submission, for example `-Version 1.0.0`. The
+   manifest needs four parts; the script appends `.0` to a three-part version.
+   The version in the Cargo manifests is what the app reports in About, so keep
+   the two in step.
 
 The Store rejects any package whose identity does not match the reservation
 character for character, so these values are not optional.
