@@ -1,5 +1,5 @@
 use std::cell::{Cell, RefCell};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -992,10 +992,15 @@ pub enum Message {
     /// One found transcript, read and measured off the UI thread.
     TranscriptAdopted(bool, AdoptedTranscript),
     RemoveItem(usize),
+    /// Open a finished transcript from the history list.
+    #[allow(dead_code)] // The history tab that sends this lands in the next phase.
+    OpenRecent(usize),
+    /// Delete a history entry; the pane clears if it is showing that entry.
+    #[allow(dead_code)] // The history tab that sends this lands in the next phase.
+    RemoveRecent(usize),
     ClearQueue,
     ItemDurationProbed(PathBuf, Option<f64>),
     ViewDetailsLoaded(PathBuf, Option<Vec<backend::Turn>>, Option<(f64, Vec<f32>)>),
-    QueueWaveformLoaded(PathBuf, Option<(f64, Vec<f32>)>),
     RetryItem(usize),
     QueueDragStart(usize),
     QueueDrop(usize),
@@ -1403,9 +1408,6 @@ pub struct App {
     line_edit_document: Option<PathBuf>,
     /// Undo/redo for transcript edits made through the inline editor.
     line_history: LineHistory,
-    /// Background waveform backfill for completed items without cached peaks.
-    backfill_active: bool,
-    waveform_tried: HashSet<PathBuf>,
     /// Presence of the bundled-on-demand models, refreshed periodically.
     models: Vec<ModelStatus>,
     model_download: Option<ModelDownload>,
@@ -1644,8 +1646,6 @@ impl App {
             delete_confirm: false,
             line_edit_document: None,
             line_history: LineHistory::default(),
-            backfill_active: false,
-            waveform_tried: HashSet::new(),
             models: download::status(),
             model_download: None,
             model_error: None,
@@ -1968,12 +1968,26 @@ impl App {
     /// source replaces its entry instead of adding a second row.
     #[allow(dead_code)] // No production caller until the history UI lands.
     fn upsert_recent(&mut self, entry: RecentEntry) {
-        let same_source = |other: &RecentEntry| match (&entry.audio, &other.audio) {
-            (Some(audio), Some(other_audio)) => audio == other_audio,
-            (None, None) => entry.transcript.is_some() && entry.transcript == other.transcript,
-            _ => false,
-        };
-        if let Some(index) = self.recent.iter().position(same_source) {
+        let existing = entry
+            .audio
+            .as_deref()
+            .and_then(|audio| self.recent_for_audio(audio))
+            .or_else(|| {
+                if entry.audio.is_none() {
+                    entry
+                        .transcript
+                        .as_ref()
+                        .and_then(|transcript| {
+                            self.recent.iter().position(|other| {
+                                other.audio.is_none()
+                                    && other.transcript.as_ref() == Some(transcript)
+                            })
+                        })
+                } else {
+                    None
+                }
+            });
+        if let Some(index) = existing {
             self.recent[index] = entry;
         } else {
             self.recent.push(entry);
@@ -1989,19 +2003,28 @@ impl App {
     }
 
     /// Index of the recent entry backed by this audio file, if any.
-    #[allow(dead_code)] // No caller until the history UI lands.
     fn recent_for_audio(&self, path: &Path) -> Option<usize> {
         self.recent
             .iter()
             .position(|entry| entry.audio.as_deref() == Some(path))
     }
 
-    /// Drop a recent entry and persist the shortened history.
-    #[allow(dead_code)] // No caller until the history UI lands.
+    /// Drop a recent entry and persist the shortened history. If the pane is
+    /// showing that entry, fall back to the live transcript so a deleted
+    /// history row cannot stay on screen.
     fn remove_recent(&mut self, index: usize) {
-        if index < self.recent.len() {
-            self.recent.remove(index);
-            self.save_queue();
+        let Some(entry) = self.recent.get(index).cloned() else {
+            return;
+        };
+        self.recent.remove(index);
+        self.save_queue();
+        let source = entry.transcript.or(entry.audio);
+        let showing_removed = self
+            .selected_view
+            .as_ref()
+            .is_some_and(|view| source.as_deref() == Some(view.source.as_path()));
+        if showing_removed {
+            self.return_to_live();
         }
     }
 
@@ -2299,23 +2322,20 @@ impl App {
         self.open_item_view(index, None)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn install_transcript_view(
         &mut self,
-        index: usize,
         source: PathBuf,
         text: String,
         lines: Vec<DocLine>,
-        output: Option<PathBuf>,
+        mut turns: Vec<backend::Turn>,
+        peaks: Arc<Vec<f32>>,
+        duration: Option<f32>,
+        audio: Option<PathBuf>,
         num_speakers: Option<i32>,
+        output: Option<PathBuf>,
+        finished: bool,
     ) -> Task<Message> {
-        let Some(item) = self.queue.get(index) else {
-            return Task::none();
-        };
-        let audio = item.audio.clone();
-        let duration = item.duration.map(|seconds| seconds as f32);
-        let mut turns = item.turns.clone();
-        let peaks = item.peaks.clone();
-
         if turns.is_empty() {
             turns = lines
                 .iter()
@@ -2349,7 +2369,7 @@ impl App {
         self.modified = false;
         self.selected_view = Some(ItemView {
             source: source.clone(),
-            finished: true,
+            finished,
             transcript: text,
             lines,
             turns,
@@ -2487,12 +2507,16 @@ impl App {
         if let Some((text, output)) = preloaded {
             let confidences = backend::read_confidences(&source);
             return self.install_transcript_view(
-                index,
                 source,
                 text.clone(),
                 attach_confidences(parse_lines(&text), &confidences),
-                output,
+                turns,
+                peaks,
+                duration,
+                audio,
                 num_speakers,
+                output,
+                true,
             );
         }
         let Some(text) = backend::read_transcript(&source) else {
@@ -2513,12 +2537,104 @@ impl App {
         };
         let confidences = backend::read_confidences(&source);
         self.install_transcript_view(
-            index,
             source,
             text.clone(),
             attach_confidences(parse_lines(&text), &confidences),
-            output,
+            turns,
+            peaks,
+            duration,
+            audio,
             num_speakers,
+            output,
+            true,
+        )
+    }
+
+    /// Open a finished transcript from the history, with the same pane reset as
+    /// a completed queue row. The history entry is the source of truth: nothing
+    /// here depends on the queue still holding the item.
+    fn open_recent(
+        &mut self,
+        index: usize,
+        preloaded: Option<(String, Option<PathBuf>)>,
+    ) -> Task<Message> {
+        self.header_menu = None;
+        self.close_find();
+        self.commit_inline_edit(false);
+        let Some(entry) = self.recent.get(index).cloned() else {
+            return Task::none();
+        };
+        let Some(source) = entry.transcript.clone().or_else(|| entry.audio.clone()) else {
+            return Task::none();
+        };
+
+        self.speaker_filter = None;
+        self.invalidate_derived();
+        self.selected = None;
+        self.player = None;
+        self.playhead = 0.0;
+        self.last_tick = None;
+        self.search_query.clear();
+        self.search_index = 0;
+        self.follow_offset = None;
+        self.scroll_anim = None;
+        self.follow_issue = None;
+        *self.follow_row_height.borrow_mut() = None;
+        self.reset_pane_geometry();
+        self.scroll_seek = false;
+        self.transcript_viewport = 0.0;
+        self.transcript_content = 0.0;
+        self.transcript_offset = 0.0;
+        self.transcript_at_bottom = true;
+
+        let duration = entry.duration.map(|seconds| seconds as f32);
+        let audio = entry.audio;
+        let num_speakers = entry.speakers.map(i32::from);
+        let output = source
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .map(|ext| ext.eq_ignore_ascii_case("txt"))
+            .unwrap_or(false)
+            .then(|| source.clone());
+
+        let (text, output) = match preloaded {
+            Some(pair) => pair,
+            None => match backend::read_transcript(&source) {
+                Some(text) => (text, output),
+                None => {
+                    self.join_lines = false;
+                    self.joined_lines.clear();
+                    self.joined_transcript.clear();
+                    self.modified = false;
+                    self.line_history = LineHistory::default();
+                    self.selected_view = Some(ItemView {
+                        source: source.clone(),
+                        finished: true,
+                        transcript: String::new(),
+                        lines: Vec::new(),
+                        turns: Vec::new(),
+                        peaks: Arc::new(Vec::new()),
+                        duration,
+                        audio,
+                        output,
+                    });
+                    self.view_error = Some(format!("Could not read {}", source.display()));
+                    return Task::none();
+                }
+            },
+        };
+        let confidences = backend::read_confidences(&source);
+        self.install_transcript_view(
+            source,
+            text.clone(),
+            attach_confidences(parse_lines(&text), &confidences),
+            Vec::new(),
+            Arc::new(Vec::new()),
+            duration,
+            audio,
+            num_speakers,
+            output,
+            true,
         )
     }
 
@@ -3670,28 +3786,6 @@ impl App {
                 }
                 Task::none()
             }
-            Message::QueueWaveformLoaded(path, probe) => {
-                self.backfill_active = false;
-                if let Some((duration, peaks)) = probe {
-                    let peaks = Arc::new(peaks);
-                    if let Some(item) = self
-                        .queue
-                        .iter_mut()
-                        .find(|item| item.audio.as_deref() == Some(path.as_path()))
-                    {
-                        item.duration = Some(duration);
-                        item.peaks = peaks.clone();
-                    }
-                    if let Some(view) = self.selected_view.as_mut() {
-                        if view.audio.as_deref() == Some(path.as_path()) {
-                            view.duration = Some(duration as f32);
-                            view.peaks = peaks;
-                        }
-                    }
-                    self.save_queue();
-                }
-                self.backfill_next_waveform()
-            }
             Message::RetryItem(index) => {
                 if matches!(self.status, Status::Running) {
                     return Task::none();
@@ -4805,6 +4899,11 @@ impl App {
                 }
                 Task::none()
             }
+            Message::OpenRecent(index) => self.open_recent(index, None),
+            Message::RemoveRecent(index) => {
+                self.remove_recent(index);
+                Task::none()
+            }
             Message::ClearQueue => {
                 if !matches!(self.status, Status::Running) {
                     // "Clear" is a full reset: queue, transcript and run state,
@@ -5446,7 +5545,6 @@ impl App {
                 {
                     self.toast = None;
                 }
-                tasks.push(self.backfill_next_waveform());
                 Task::batch(tasks)
             }
             Message::RenameSave => {
@@ -5870,35 +5968,6 @@ impl App {
         self.lines.push(line);
         self.transcript_dirty = true;
         self.invalidate_derived();
-    }
-
-    /// Probe one completed item's waveform in the background. Results are
-    /// persisted so subsequent clicks show the waveform immediately.
-    fn backfill_next_waveform(&mut self) -> Task<Message> {
-        if self.backfill_active || matches!(self.status, Status::Running) {
-            return Task::none();
-        }
-        let next = self.queue.iter().find_map(|item| {
-            if !matches!(item.status, ItemStatus::Done) || !item.peaks.is_empty() {
-                return None;
-            }
-            let audio = item.audio.as_ref()?;
-            if !audio.is_file() || self.waveform_tried.contains(audio) {
-                return None;
-            }
-            Some(audio.clone())
-        });
-        let Some(path) = next else {
-            return Task::none();
-        };
-        self.waveform_tried.insert(path.clone());
-        self.backfill_active = true;
-        let probe_path = path.clone();
-        let message_path = path;
-        Task::perform(
-            async move { backend::probe_waveform(&probe_path, TIMELINE_BUCKETS) },
-            move |probe| Message::QueueWaveformLoaded(message_path.clone(), probe),
-        )
     }
 
     /// Start or pause playback for the transcript currently on screen.
@@ -8417,7 +8486,7 @@ impl App {
         let running = matches!(self.status, Status::Running);
         let selected = self.selected_view.is_some();
         let has_queue = !self.queue.is_empty();
-        let has_done = self.has_results();
+        let has_done = !self.recent.is_empty();
         let pending = self
             .queue
             .iter()
@@ -9861,13 +9930,14 @@ impl App {
     /// Header above the transcript: what is on screen plus reading controls.
     fn transcript_header(&self, scheme: &Scheme) -> Option<Element<'_, Message>> {
         let scheme = *scheme;
-        if self.queue.is_empty() {
+        let has_live = !self.lines.is_empty() || !self.transcript.is_empty();
+        if self.queue.is_empty() && self.selected_view.is_none() && !has_live {
             return None;
         }
         let has_lines = !self.shown_lines().is_empty();
         let viewing = self.selected_view.is_some();
         let running = matches!(self.status, Status::Running);
-        if !has_lines && !viewing && !running {
+        if !has_lines && !viewing && !running && !has_live {
             return None;
         }
 
@@ -12654,7 +12724,9 @@ impl App {
         // row) would shift that index, which remounts the scrollable and resets its
         // offset to the top. The conditional content lives in slots instead, and the
         // gaps between islands are slot padding, so the child indices never change.
-        let show_middle = has_queue || self.selected_view.is_some() || running;
+        let has_live = !self.lines.is_empty() || !self.transcript.is_empty();
+        let show_middle =
+            has_queue || self.selected_view.is_some() || running || has_live;
         let mut top_slot_col = column![].spacing(ISLAND_GAP).width(Length::Fill);
         let mut has_top = false;
         if let Some(notice) = self.model_notice(&scheme) {
@@ -16892,6 +16964,161 @@ mod tests {
             Some(Path::new("a-again.txt"))
         );
         assert_eq!(app.recent_for_audio(&audio_a), Some(0));
+    }
+
+    #[test]
+    fn open_recent_shows_the_history_transcript_and_loads_details() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("open-recent");
+        let media = temp_dir("open-recent-media");
+        let audio = media.join("talk.mp3");
+        std::fs::write(&audio, b"audio").unwrap();
+        let transcript = media.join("talk.txt");
+        std::fs::write(
+            &transcript,
+            "[00:00] SPEAKER 1: hello\n[00:05] SPEAKER 2: hi\n",
+        )
+        .unwrap();
+
+        let mut app = pro_app();
+        app.recent.push(RecentEntry {
+            audio: Some(audio.clone()),
+            transcript: Some(transcript.clone()),
+            finished_at: 5,
+            duration: Some(8.0),
+            speakers: Some(2),
+        });
+
+        let _ = app.update(Message::OpenRecent(0));
+        let view = app.selected_view.as_ref().expect("history entry did not open");
+        assert!(view.finished);
+        assert_eq!(app.selected, None);
+        assert_eq!(view.source, transcript);
+        assert_eq!(view.lines.len(), 2);
+        assert_eq!(view.duration, Some(8.0));
+        assert_eq!(view.audio.as_deref(), Some(audio.as_path()));
+        assert_eq!(view.peaks.as_ref(), &Vec::<f32>::new());
+        assert!(!view.turns.is_empty());
+
+        let turn = backend::Turn {
+            start: 1.0,
+            end: 2.0,
+            speaker: "SPEAKER 2".to_string(),
+        };
+        let _ = app.update(Message::ViewDetailsLoaded(
+            transcript.clone(),
+            Some(vec![turn]),
+            Some((9.5, vec![0.1, 0.2, 0.3])),
+        ));
+        let view = app.selected_view.as_ref().unwrap();
+        assert_eq!(view.duration, Some(9.5));
+        assert_eq!(view.peaks.as_ref(), &vec![0.1, 0.2, 0.3]);
+        assert_eq!(view.turns.len(), 1);
+        assert_eq!(view.turns[0].speaker, "SPEAKER 2");
+
+        let _ = std::fs::remove_dir_all(&media);
+    }
+
+    #[test]
+    fn remove_recent_clears_only_the_entry_on_screen() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("remove-recent");
+        let media = temp_dir("remove-recent-media");
+        let audio_a = media.join("a.mp3");
+        std::fs::write(&audio_a, b"audio").unwrap();
+        let transcript_a = media.join("a.txt");
+        std::fs::write(&transcript_a, "[00:00] SPEAKER 1: a\n").unwrap();
+        let audio_b = media.join("b.mp3");
+        std::fs::write(&audio_b, b"audio").unwrap();
+        let transcript_b = media.join("b.txt");
+        std::fs::write(&transcript_b, "[00:00] SPEAKER 1: b\n").unwrap();
+
+        let mut app = pro_app();
+        app.recent = vec![
+            RecentEntry {
+                audio: Some(audio_a),
+                transcript: Some(transcript_a.clone()),
+                finished_at: 20,
+                duration: Some(1.0),
+                speakers: Some(1),
+            },
+            RecentEntry {
+                audio: Some(audio_b),
+                transcript: Some(transcript_b),
+                finished_at: 10,
+                duration: Some(1.0),
+                speakers: Some(1),
+            },
+        ];
+
+        let _ = app.update(Message::OpenRecent(0));
+        app.playhead = 3.0;
+        assert_eq!(
+            app.selected_view.as_ref().unwrap().source.as_path(),
+            transcript_a.as_path()
+        );
+
+        // Removing the other entry leaves the open transcript alone.
+        let _ = app.update(Message::RemoveRecent(1));
+        assert!(app.selected_view.is_some());
+        assert_eq!(
+            app.selected_view.as_ref().unwrap().source.as_path(),
+            transcript_a.as_path()
+        );
+        assert_eq!(app.recent.len(), 1);
+
+        // Removing the open entry drops the pane back to the live view.
+        let _ = app.update(Message::RemoveRecent(0));
+        assert!(app.selected_view.is_none());
+        assert_eq!(app.selected, None);
+        assert_eq!(app.playhead, 0.0);
+        assert!(app.recent.is_empty());
+
+        let _ = std::fs::remove_dir_all(&media);
+    }
+
+    #[test]
+    fn view_details_for_another_source_is_ignored() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("view-details-other-source");
+        let media = temp_dir("view-details-other-source-media");
+        let audio = media.join("talk.mp3");
+        std::fs::write(&audio, b"audio").unwrap();
+        let transcript = media.join("talk.txt");
+        std::fs::write(
+            &transcript,
+            "[00:00] SPEAKER 1: hello\n[00:05] SPEAKER 2: hi\n",
+        )
+        .unwrap();
+
+        let mut app = pro_app();
+        app.recent.push(RecentEntry {
+            audio: Some(audio),
+            transcript: Some(transcript.clone()),
+            finished_at: 5,
+            duration: Some(8.0),
+            speakers: Some(2),
+        });
+        let _ = app.update(Message::OpenRecent(0));
+        let turns_before = app.selected_view.as_ref().unwrap().turns.len();
+
+        let _ = app.update(Message::ViewDetailsLoaded(
+            PathBuf::from("somewhere-else.txt"),
+            Some(vec![backend::Turn {
+                start: 1.0,
+                end: 2.0,
+                speaker: "SPEAKER 1".to_string(),
+            }]),
+            Some((99.0, vec![0.9])),
+        ));
+
+        let view = app.selected_view.as_ref().unwrap();
+        assert_eq!(view.source.as_path(), transcript.as_path());
+        assert_eq!(view.duration, Some(8.0));
+        assert_eq!(view.peaks.as_ref(), &Vec::<f32>::new());
+        assert_eq!(view.turns.len(), turns_before);
+
+        let _ = std::fs::remove_dir_all(&media);
     }
 
     #[test]

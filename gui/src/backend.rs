@@ -269,11 +269,6 @@ pub fn load_completed(
     (turns, probe)
 }
 
-/// Fast waveform-only probe for backfilling restored queue items.
-pub fn probe_waveform(path: &Path, buckets: usize) -> Option<(f64, Vec<f32>)> {
-    hippo_transcribe_core::audio::waveform(path, buckets).ok()
-}
-
 pub fn kill(pid: u32) {
     #[cfg(windows)]
     {
