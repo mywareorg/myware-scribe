@@ -287,6 +287,11 @@ Keyboard: Up/Down moves through the transcript, Alt+Enter edits the active line,
 Space toggles playback, and Left/Right seek ±5 seconds while no text field has
 focus. Editing and playback keys require Pro.
 
+The Edit and Help menus both open Custom Vocabulary, where names, acronyms and
+jargon can be listed for the decoder and misheard words can be paired with their
+correct spelling. Terms apply to the next run; replacements are applied to the
+transcript text afterwards.
+
 Transcript search supports a speaker filter, match case (`Aa`) and whole-word
 (`W`) matching. Right-click a line to edit it; the editor can copy the line,
 merge it with the next line, or split it at the playhead. Line deletion asks for

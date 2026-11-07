@@ -84,6 +84,10 @@ pub struct Transcriber {
     threads: i32,
     backend: Backend,
     fallback: Option<String>,
+    /// Decoder hint from the user's vocabulary. Shared by every call; it is
+    /// part of the clip cache key, so cached clips are never reused across a
+    /// different prompt.
+    prompt: Option<String>,
 }
 
 impl Transcriber {
@@ -119,6 +123,7 @@ impl Transcriber {
             threads: Self::default_threads(),
             backend,
             fallback,
+            prompt: None,
         })
     }
 
@@ -152,6 +157,7 @@ impl Transcriber {
             threads: Self::default_threads(),
             backend,
             fallback: None,
+            prompt: None,
         })
     }
 
@@ -174,6 +180,16 @@ impl Transcriber {
     /// Why the GPU path failed, when it did.
     pub fn fallback_reason(&self) -> Option<&str> {
         self.fallback.as_deref()
+    }
+
+    /// Set the decoder prompt used by every later call.
+    pub fn set_prompt(&mut self, prompt: Option<String>) {
+        self.prompt = prompt;
+    }
+
+    /// The decoder prompt in force, if any.
+    pub fn prompt(&self) -> Option<&str> {
+        self.prompt.as_deref()
     }
 
     /// Transcribe 16 kHz mono samples using the default thread count.
@@ -254,6 +270,9 @@ impl Transcriber {
             best_of: best_of.max(1),
         });
         params.set_language(language);
+        if let Some(prompt) = &self.prompt {
+            params.set_initial_prompt(prompt);
+        }
         params.set_translate(false);
         params.set_no_context(true);
         params.set_print_special(false);

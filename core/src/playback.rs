@@ -12,9 +12,9 @@ use std::fs::File;
 use std::time::Duration;
 
 use symphonia::core::audio::{AudioBufferRef, SampleBuffer, SignalSpec};
-use symphonia::core::codecs::{Decoder, DecoderOptions, CODEC_TYPE_NULL};
+use symphonia::core::codecs::Decoder;
 use symphonia::core::errors::Error as SymphoniaError;
-use symphonia::core::formats::{FormatOptions, FormatReader, SeekMode, SeekTo};
+use symphonia::core::formats::{FormatReader, SeekMode, SeekTo};
 use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
@@ -51,37 +51,19 @@ impl AudioStream {
             .format(
                 &hint,
                 mss,
-                &FormatOptions::default(),
+                &crate::audio::format_options(),
                 &MetadataOptions::default(),
             )
             .map_err(|e| format!("probe {}: {e}", path.display()))?;
         let mut format = probed.format;
 
-        // Prefer a track that also reports a sample rate; a container can list
-        // an unknown codec first.
-        let track = format
-            .tracks()
-            .iter()
-            .find(|t| t.codec_params.codec != CODEC_TYPE_NULL && t.codec_params.sample_rate.is_some())
-            .or_else(|| {
-                format
-                    .tracks()
-                    .iter()
-                    .find(|t| t.codec_params.codec != CODEC_TYPE_NULL)
-            })
-            .ok_or_else(|| "no audio track".to_string())?;
-
-        let track_id = track.id;
-        let params = track.codec_params.clone();
+        // The first decodable track, not merely the first listed one.
+        let (track_id, params, mut decoder) = crate::audio::open_track(format.as_ref())?;
         let duration = params
             .time_base
             .zip(params.n_frames)
             .map(|(base, frames)| base.calc_time(frames))
             .map(Duration::from);
-
-        let mut decoder = crate::codec::registry()
-            .make(&params, &DecoderOptions::default())
-            .map_err(|e| format!("decoder: {e}"))?;
 
         // Decode the first audio packet so `channels`/`sample_rate` are known
         // before iteration starts; the UI needs them when the player is built.

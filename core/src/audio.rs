@@ -5,14 +5,48 @@ use std::time::{Duration, Instant};
 
 use rubato::Resampler;
 use symphonia::core::audio::SampleBuffer;
-use symphonia::core::codecs::{DecoderOptions, CODEC_TYPE_NULL};
+use symphonia::core::codecs::{CodecParameters, Decoder, DecoderOptions, CODEC_TYPE_NULL};
 use symphonia::core::errors::Error as SymphoniaError;
 use symphonia::core::formats::FormatOptions;
+use symphonia::core::formats::FormatReader;
 use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
 
 pub const SAMPLE_RATE: u32 = 16000;
+
+/// Format options shared by every open.
+///
+/// Gapless trims encoder delay and padding, so a line's start is the line's
+/// actual start rather than its start plus a codec's priming samples.
+pub(crate) fn format_options() -> FormatOptions {
+    FormatOptions {
+        enable_gapless: true,
+        ..FormatOptions::default()
+    }
+}
+
+/// Open the first track this build can actually decode.
+///
+/// A container can list a track whose codec has no decoder (AC-3 in an MKV, for
+/// instance) ahead of one that plays. Taking the first non-null track would
+/// then fail a file that is perfectly transcribable, so each candidate is
+/// tried in order.
+pub(crate) fn open_track(
+    format: &dyn FormatReader,
+) -> Result<(u32, CodecParameters, Box<dyn Decoder>), String> {
+    for track in format.tracks() {
+        if track.codec_params.codec == CODEC_TYPE_NULL {
+            continue;
+        }
+        if let Ok(decoder) =
+            crate::codec::registry().make(&track.codec_params, &DecoderOptions::default())
+        {
+            return Ok((track.id, track.codec_params.clone(), decoder));
+        }
+    }
+    Err("no audio track".to_string())
+}
 
 /// Minimum spacing between two progress callbacks.
 const REPORT_INTERVAL: Duration = Duration::from_millis(100);
@@ -44,29 +78,20 @@ pub fn decode_with_progress(
         .format(
             &hint,
             mss,
-            &FormatOptions::default(),
+            &format_options(),
             &MetadataOptions::default(),
         )
         .map_err(|e| format!("probe {}: {e}", path.display()))?;
     let mut format = probed.format;
 
-    let track = format
-        .tracks()
-        .iter()
-        .find(|t| t.codec_params.codec != CODEC_TYPE_NULL)
-        .ok_or_else(|| "no audio track".to_string())?;
-    let track_id = track.id;
+    let (track_id, params, mut decoder) = open_track(format.as_ref())?;
 
-    let mut decoder = crate::codec::registry()
-        .make(&track.codec_params, &DecoderOptions::default())
-        .map_err(|e| format!("decoder: {e}"))?;
-
-    let mut sample_rate = track.codec_params.sample_rate.unwrap_or(0);
+    let mut sample_rate = params.sample_rate.unwrap_or(0);
     // Container frame count drives decode progress; absent for some streams.
-    let total_frames = track.codec_params.n_frames;
+    let total_frames = params.n_frames;
     // Pre-allocate from container metadata: avoiding repeated growth copies is
     // a measurable win on hour-long files.
-    let mut mono: Vec<f32> = Vec::with_capacity(track.codec_params.n_frames.unwrap_or(0) as usize);
+    let mut mono: Vec<f32> = Vec::with_capacity(total_frames.unwrap_or(0) as usize);
     // Reuse one conversion buffer across packets instead of allocating per
     // packet (a one-hour MP3 is ~140k packets).
     let mut sample_buffer: Option<SampleBuffer<f32>> = None;
@@ -192,24 +217,15 @@ pub fn waveform(path: &Path, buckets: usize) -> Result<(f64, Vec<f32>), String> 
         .format(
             &hint,
             mss,
-            &FormatOptions::default(),
+            &format_options(),
             &MetadataOptions::default(),
         )
         .map_err(|e| format!("probe {}: {e}", path.display()))?;
     let mut format = probed.format;
 
-    let track = format
-        .tracks()
-        .iter()
-        .find(|t| t.codec_params.codec != CODEC_TYPE_NULL)
-        .ok_or_else(|| "no audio track".to_string())?;
-    let track_id = track.id;
+    let (track_id, params, mut decoder) = open_track(format.as_ref())?;
 
-    let mut decoder = crate::codec::registry()
-        .make(&track.codec_params, &DecoderOptions::default())
-        .map_err(|e| format!("decoder: {e}"))?;
-
-    let mut sample_rate = track.codec_params.sample_rate.unwrap_or(0);
+    let mut sample_rate = params.sample_rate.unwrap_or(0);
     let mut total_frames: u64 = 0;
     let mut chunk_frames: usize = 0;
     let mut chunk_sq: f64 = 0.0;
@@ -352,7 +368,7 @@ pub fn duration_fast(path: &Path) -> Option<f64> {
         .format(
             &hint,
             mss,
-            &FormatOptions::default(),
+            &format_options(),
             &MetadataOptions::default(),
         )
         .ok()?;

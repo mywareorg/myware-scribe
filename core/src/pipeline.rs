@@ -341,6 +341,7 @@ fn segment_lines(
     segment: &Segment,
     turns: &[Turn],
     stats: &mut SplitStats,
+    vocabulary: &crate::vocabulary::Vocabulary,
 ) -> Vec<Line> {
     stats.segments += 1;
     let speaker_for = |turn: Option<usize>| {
@@ -355,7 +356,7 @@ fn segment_lines(
             clip.start + segment.start,
             clip.start + segment.end,
         )),
-        text: segment.text.clone(),
+        text: vocabulary.apply(&segment.text),
         confidence: segment.confidence,
     };
 
@@ -403,7 +404,7 @@ fn segment_lines(
     groups
         .into_iter()
         .filter_map(|(turn, text, start, _, _)| {
-            let text = text.trim().to_string();
+            let text = vocabulary.apply(text.trim());
             (!text.is_empty()).then(|| Line {
                 start,
                 speaker: speaker_for(turn),
@@ -484,6 +485,7 @@ fn run_asr_pool(
                         best_of,
                         fast,
                         token_timestamps,
+                        transcriber.prompt(),
                     )
                 });
                 let result = match key.as_ref().and_then(|key| cache::read_segments(key)) {
@@ -891,8 +893,14 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
         }
     }
 
+    let vocabulary = crate::vocabulary::Vocabulary::load();
+    let prompt = vocabulary.prompt(crate::vocabulary::PROMPT_BUDGET);
+    if let Some(prompt) = &prompt {
+        crate::logging::info(format!("vocabulary: {} character prompt", prompt.len()));
+    }
+
     let load_started = Instant::now();
-    let transcriber = match Transcriber::load(&whisper) {
+    let mut transcriber = match Transcriber::load(&whisper) {
         Ok(transcriber) => Some(transcriber),
         Err(message) => {
             // Fail before diarization/processing: never write an empty
@@ -916,6 +924,9 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
             return;
         }
     };
+    if let Some(transcriber) = &mut transcriber {
+        transcriber.set_prompt(prompt);
+    }
 
     if let Some(transcriber) = &transcriber {
         crate::logging::info(format!("ASR backend: {}", transcriber.backend().label()));
@@ -1376,7 +1387,13 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
                 match results[index].take() {
                     Some(Ok(segments)) => {
                         for segment in segments {
-                            lines.extend(segment_lines(&clip, &segment, &turns, &mut split_stats));
+                            lines.extend(segment_lines(
+                                &clip,
+                                &segment,
+                                &turns,
+                                &mut split_stats,
+                                &vocabulary,
+                            ));
                         }
                     }
                     Some(Err(message)) => emit(Event::Log { message }),
@@ -1515,6 +1532,7 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
                                             &segment,
                                             &turns,
                                             &mut split_stats,
+                                            &vocabulary,
                                         ));
                                     }
                                 }
@@ -1880,7 +1898,13 @@ mod tests {
             ],
         };
         let mut stats = SplitStats::default();
-        let lines = segment_lines(&clip, &segment, &turns, &mut stats);
+        let lines = segment_lines(
+            &clip,
+            &segment,
+            &turns,
+            &mut stats,
+            &crate::vocabulary::Vocabulary::default(),
+        );
         assert_eq!(lines.len(), 2);
         assert_eq!(lines[0].speaker, "SPEAKER 1");
         assert_eq!(lines[0].text, "hello there");
@@ -1896,7 +1920,13 @@ mod tests {
         short.tokens[2].start = 0.95;
         short.tokens[2].end = 1.0;
         let mut stats = SplitStats::default();
-        let lines = segment_lines(&clip, &short, &turns, &mut stats);
+        let lines = segment_lines(
+            &clip,
+            &short,
+            &turns,
+            &mut stats,
+            &crate::vocabulary::Vocabulary::default(),
+        );
         assert_eq!(lines.len(), 1);
         assert_eq!(stats.collapsed, 1);
 
@@ -1906,11 +1936,46 @@ mod tests {
         spoken.tokens[2].end = 1.75;
         spoken.tokens.truncate(3);
         let mut stats = SplitStats::default();
-        let lines = segment_lines(&clip, &spoken, &turns, &mut stats);
+        let lines = segment_lines(
+            &clip,
+            &spoken,
+            &turns,
+            &mut stats,
+            &crate::vocabulary::Vocabulary::default(),
+        );
         assert_eq!(lines.len(), 2);
         assert_eq!(lines[1].speaker, "SPEAKER 2");
         assert_eq!(lines[1].text, "general");
         assert_eq!(stats.collapsed, 0);
+    }
+
+    #[test]
+    fn vocabulary_replacements_reach_the_transcript_text() {
+        let turns = vec![Turn {
+            start: 0.0,
+            end: 2.0,
+            speaker: "SPEAKER 1".to_string(),
+        }];
+        let clip = Clip {
+            turns: vec![(0, 0.0, 2.0)],
+            start: 0.0,
+            from: 0,
+            to: 32_000,
+        };
+        let segment = Segment {
+            start: 0.0,
+            end: 2.0,
+            text: "we use pie torch".to_string(),
+            confidence: 0.0,
+            tokens: Vec::new(),
+        };
+        let vocabulary = crate::vocabulary::Vocabulary::from_fields("", "pie torch = PyTorch");
+        let mut stats = SplitStats::default();
+
+        let lines = segment_lines(&clip, &segment, &turns, &mut stats, &vocabulary);
+
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].text, "we use PyTorch");
     }
 
     #[test]

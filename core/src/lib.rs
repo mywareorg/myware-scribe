@@ -17,6 +17,7 @@ pub mod paths;
 pub mod pipeline;
 pub mod playback;
 pub mod sidecar;
+pub mod vocabulary;
 
 #[cfg(windows)]
 mod sherpa_dynamic;

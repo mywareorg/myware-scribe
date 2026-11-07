@@ -21,8 +21,11 @@ the network.
   diarization settings.
 - **Settings and queue** — window layout, presets, save location, queue state and
   transcript paths, stored under the platform configuration directory.
-- **Outputs** — the `.txt` transcript and timestamped variant you generate, plus
-  the `.hippo-transcribe.bak` backup written when a transcript is edited.
+- **Outputs** — the `.txt` transcript and timestamped variant you generate, the
+  `.json` sidecar holding speaker ids, line bounds and confidences, plus the
+  `.hippo-transcribe.bak` backup written when a transcript is edited.
+- **Custom vocabulary** — the terms and replacements you enter, stored as
+  `vocabulary.json` beside the settings. It holds only what you typed.
 
 - **Entitlement** — a Pro purchase writes the tier and the last verified state to
   `license.json` beside the settings. It holds no audio, no transcript and no

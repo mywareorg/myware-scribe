@@ -110,6 +110,7 @@ pub fn clip_key(
     best_of: i32,
     fast: bool,
     token_timestamps: bool,
+    prompt: Option<&str>,
 ) -> String {
     let mut hasher = Sha256::new();
     hasher.update(audio_hash.as_bytes());
@@ -120,6 +121,12 @@ pub fn clip_key(
     hasher.update(best_of.to_string().as_bytes());
     hasher.update([fast as u8]);
     hasher.update([token_timestamps as u8]);
+    // Only a non-empty prompt changes the decode, so a run without one keeps
+    // hitting the clips cached before the vocabulary existed.
+    if let Some(prompt) = prompt.map(str::trim).filter(|prompt| !prompt.is_empty()) {
+        hasher.update(b"prompt");
+        hasher.update(prompt.as_bytes());
+    }
     // v3: token timestamps are optional per span, and the overlap schedule
     // caches fixed windows rather than per-turn clips.
     hasher.update(b"tokens-v3");
