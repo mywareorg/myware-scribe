@@ -27,6 +27,7 @@ use hippo_transcribe_core::download::{self, DownloadEvent, ModelStatus};
 use hippo_transcribe_core::export::ExportFormat;
 use hippo_transcribe_core::license;
 use hippo_transcribe_core::models;
+use hippo_briefing::{Briefing, BriefingLine};
 use hippo_transcribe_core::playback::AudioStream;
 use hippo_transcribe_core::vocabulary::Vocabulary;
 
@@ -550,6 +551,31 @@ impl Calibration {
     }
 }
 
+/// The briefing dialog's state.
+enum BriefingState {
+    /// The model has not been downloaded yet.
+    NeedsModel,
+    /// The helper is running.
+    Running(BriefingRun),
+    Ready {
+        briefing: Briefing,
+        lines: Vec<BriefingLine>,
+        source: Option<PathBuf>,
+    },
+    Failed(String),
+}
+
+struct BriefingRun {
+    events: Arc<Mutex<VecDeque<backend::BriefingEvent>>>,
+    pid: Arc<AtomicU32>,
+    response: PathBuf,
+    lines: Vec<BriefingLine>,
+    source: Option<PathBuf>,
+    stage: String,
+    fraction: f32,
+    started: Instant,
+}
+
 #[derive(Serialize, Deserialize)]
 struct Settings {
     preset: Option<String>,
@@ -743,6 +769,7 @@ pub enum Modal {
     RunSetup,
     Rename,
     Vocabulary,
+    Briefing,
 }
 
 #[derive(Debug, Clone)]
@@ -869,6 +896,12 @@ pub enum Message {
     StartRecording,
     StopRecording,
     InputDeviceChanged(String),
+    OpenBriefing,
+    CloseBriefing,
+    RetryBriefing,
+    SaveBriefing,
+    DownloadBriefingModel,
+    LockedBriefing,
     EditLine(usize),
     FlipLineSpeaker(usize),
     /// The line editor's speaker picker opened or closed its menu.
@@ -1133,6 +1166,8 @@ pub struct App {
     input_device: Option<String>,
     /// Capture in progress, if any.
     recording: Option<crate::recording::Recorder>,
+    /// The briefing dialog: absent when closed.
+    briefing: Option<BriefingState>,
     summary_open: bool,
     pending_rename: bool,
     completion_pending: bool,
@@ -1430,6 +1465,7 @@ impl App {
             output_txt: None,
             input_device: settings.input_device.clone(),
             recording: None,
+            briefing: None,
             summary_open: false,
             pending_rename: false,
             completion_pending: false,
@@ -2849,6 +2885,13 @@ impl App {
     /// Start the one-time model download on a background thread. Progress is
     /// delivered through `model_events` and drained on `Tick`.
     fn start_model_download(&mut self) {
+        let ids = download::required_for(self.preset.arg(), self.pipelines_diarize());
+        self.start_model_download_for(ids);
+    }
+
+    /// Download an explicit set of models; the briefing model is fetched on
+    /// first use rather than with every preset.
+    fn start_model_download_for(&mut self, ids: Vec<&'static str>) {
         if self.model_download.is_some() {
             return;
         }
@@ -2864,7 +2907,6 @@ impl App {
         if let Ok(mut queue) = events.lock() {
             queue.clear();
         }
-        let ids = download::required_for(self.preset.arg(), self.pipelines_diarize());
         let spawned = std::thread::Builder::new()
             .name("model-download".to_string())
             .spawn(move || {
@@ -3719,6 +3761,7 @@ impl App {
             Message::SelectRelative(delta) => {
                 if self.rename_open
                     || self.vocabulary_open
+                    || self.briefing.is_some()
                     || self.line_edit.is_some()
                     || self.settings_open
                     || self.calibration.is_some()
@@ -3732,6 +3775,7 @@ impl App {
                 if focused
                     || self.rename_open
                     || self.vocabulary_open
+                    || self.briefing.is_some()
                     || self.line_edit.is_some()
                     || self.settings_open
                 {
@@ -3753,6 +3797,7 @@ impl App {
             Message::EditActiveLine => {
                 if self.rename_open
                     || self.vocabulary_open
+                    || self.briefing.is_some()
                     || self.settings_open
                     || self.calibration.is_some()
                 {
@@ -4052,6 +4097,38 @@ impl App {
                 self.settings_open = false;
                 Task::none()
             }
+            Message::OpenBriefing => {
+                self.header_menu = None;
+                if !self.can(license::Feature::Briefing) {
+                    self.toast = Some(("Briefing is a Pro feature".to_string(), Instant::now()));
+                    return Task::none();
+                }
+                self.open_briefing();
+                Task::none()
+            }
+            Message::CloseBriefing => {
+                if let Some(modal) = self.open_modal() {
+                    return self.close_modal(modal);
+                }
+                self.briefing = None;
+                Task::none()
+            }
+            Message::RetryBriefing => {
+                self.open_briefing();
+                Task::none()
+            }
+            Message::SaveBriefing => {
+                self.save_briefing();
+                Task::none()
+            }
+            Message::DownloadBriefingModel => {
+                self.start_model_download_for(vec!["briefing"]);
+                Task::none()
+            }
+            Message::LockedBriefing => {
+                self.toast = Some(("Briefing is a Pro feature".to_string(), Instant::now()));
+                Task::none()
+            }
             Message::DownloadModels => {
                 self.start_model_download();
                 Task::none()
@@ -4126,6 +4203,7 @@ impl App {
             Message::ShortcutPlay => {
                 if self.rename_open
                     || self.vocabulary_open
+                    || self.briefing.is_some()
                     || self.line_edit.is_some()
                     || self.settings_open
                     || self.calibration.is_some()
@@ -4138,6 +4216,7 @@ impl App {
                 if !focused
                     && !self.rename_open
                     && !self.vocabulary_open
+                    && self.briefing.is_none()
                     && self.line_edit.is_none()
                     && !self.settings_open
                     && self.calibration.is_none()
@@ -4187,6 +4266,7 @@ impl App {
             Message::SeekBy(delta) => {
                 if self.rename_open
                     || self.vocabulary_open
+                    || self.briefing.is_some()
                     || self.line_edit.is_some()
                     || self.settings_open
                     || self.calibration.is_some()
@@ -4965,6 +5045,7 @@ impl App {
                 Task::batch(tasks)
             }
             Message::Tick => {
+                self.poll_briefing();
                 if self.feature_deck_auto_advance() {
                     if self.feature_slide_at.elapsed() >= Duration::from_secs(7) {
                         self.feature_slide = (self.feature_slide + 1) % FEATURE_DECK.len();
@@ -5219,6 +5300,147 @@ impl App {
             Task::none()
         } else {
             text_input::focus(rename_id(0))
+        }
+    }
+
+    /// Open the briefing for the document on screen.
+    ///
+    /// The transcript is the input; no audio is re-read. A missing model opens
+    /// the download prompt instead of failing.
+    fn open_briefing(&mut self) {
+        self.commit_inline_edit(false);
+        let source = self.shown_output().map(Path::to_path_buf);
+        let cues = backend::export_cues(source.as_deref(), self.shown_lines());
+        if cues.is_empty() {
+            self.toast = Some((
+                "Transcribe something before asking for a briefing".to_string(),
+                Instant::now(),
+            ));
+            return;
+        }
+        let lines: Vec<BriefingLine> = cues
+            .into_iter()
+            .map(|cue| BriefingLine {
+                start: cue.start.unwrap_or(0.0),
+                end: cue.end,
+                speaker: cue.speaker,
+                text: cue.text,
+            })
+            .collect();
+        if !download::briefing_ready() {
+            self.briefing = Some(BriefingState::NeedsModel);
+            return;
+        }
+        self.spawn_briefing(lines, source);
+    }
+
+    fn spawn_briefing(&mut self, lines: Vec<BriefingLine>, source: Option<PathBuf>) {
+        let events = Arc::new(Mutex::new(VecDeque::new()));
+        let pid = Arc::new(AtomicU32::new(0));
+        match backend::spawn_briefing(
+            lines.clone(),
+            models::briefing_model(),
+            events.clone(),
+            pid.clone(),
+        ) {
+            Ok(response) => {
+                self.briefing = Some(BriefingState::Running(BriefingRun {
+                    events,
+                    pid,
+                    response,
+                    lines,
+                    source,
+                    stage: "Starting".to_string(),
+                    fraction: 0.0,
+                    started: Instant::now(),
+                }));
+            }
+            Err(message) => self.briefing = Some(BriefingState::Failed(message)),
+        }
+    }
+
+    /// Move helper events into the dialog, and settle when it finishes.
+    fn poll_briefing(&mut self) {
+        let events: Vec<backend::BriefingEvent> = match self.briefing.as_ref() {
+            Some(BriefingState::Running(run)) => run
+                .events
+                .lock()
+                .map(|mut queue| queue.drain(..).collect())
+                .unwrap_or_default(),
+            _ => return,
+        };
+        let mut terminal: Option<Result<(), String>> = None;
+        if let Some(BriefingState::Running(run)) = self.briefing.as_mut() {
+            for event in events {
+                match event {
+                    backend::BriefingEvent::Stage { label, fraction } => {
+                        run.stage = label;
+                        run.fraction = fraction.clamp(0.0, 1.0);
+                    }
+                    backend::BriefingEvent::Done => terminal = Some(Ok(())),
+                    backend::BriefingEvent::Failed(message) => terminal = Some(Err(message)),
+                }
+            }
+        }
+        let Some(result) = terminal else {
+            return;
+        };
+        let Some(BriefingState::Running(run)) = self.briefing.take() else {
+            return;
+        };
+        let response = std::fs::read_to_string(&run.response);
+        let _ = std::fs::remove_file(&run.response);
+        self.briefing = Some(match result {
+            Ok(()) => match response
+                .map_err(|error| format!("could not read the briefing: {error}"))
+                .and_then(|text| {
+                    serde_json::from_str::<Briefing>(&text)
+                        .map_err(|error| format!("invalid briefing: {error}"))
+                }) {
+                Ok(briefing) => BriefingState::Ready {
+                    briefing,
+                    lines: run.lines,
+                    source: run.source,
+                },
+                Err(message) => BriefingState::Failed(message),
+            },
+            Err(message) => BriefingState::Failed(message),
+        });
+    }
+
+    fn save_briefing(&mut self) {
+        let Some(BriefingState::Ready {
+            briefing,
+            lines,
+            source,
+        }) = self.briefing.as_ref()
+        else {
+            return;
+        };
+        let target = source.clone().or_else(|| self.shown_output().map(Path::to_path_buf));
+        let Some(target) = target else {
+            self.toast = Some((
+                "Nowhere to save the briefing".to_string(),
+                Instant::now(),
+            ));
+            return;
+        };
+        let stem = target
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or("transcript");
+        let path = target.with_file_name(format!("{stem}-briefing.md"));
+        let text = hippo_briefing::markdown(briefing, lines);
+        match write_atomic(&path, &text) {
+            Ok(()) => {
+                self.toast = Some((format!("Saved {}", path.display()), Instant::now()));
+            }
+            Err(error) => {
+                self.toast = Some((
+                    format!("Could not save {}: {error}", path.display()),
+                    Instant::now(),
+                ));
+            }
         }
     }
 
@@ -9627,6 +9849,17 @@ impl App {
                         enabled: summary,
                         action: summary.then_some(Message::OpenSummary),
                     },
+                    MenuRow {
+                        label: "Briefing",
+                        key: None,
+                        checked: false,
+                        enabled: has_text,
+                        action: has_text.then_some(if self.can(license::Feature::Briefing) {
+                            Message::OpenBriefing
+                        } else {
+                            Message::LockedBriefing
+                        }),
+                    },
                 ],
                 footer: None,
             }],
@@ -10263,6 +10496,8 @@ impl App {
             Some(Modal::Rename)
         } else if self.vocabulary_open {
             Some(Modal::Vocabulary)
+        } else if self.briefing.is_some() {
+            Some(Modal::Briefing)
         } else {
             None
         }
@@ -10312,6 +10547,12 @@ impl App {
             Modal::RunSetup => self.run_setup_open = false,
             Modal::Rename => self.rename_open = false,
             Modal::Vocabulary => self.vocabulary_open = false,
+            Modal::Briefing => {
+                if let Some(BriefingState::Running(run)) = self.briefing.take() {
+                    backend::kill(run.pid.load(Ordering::SeqCst));
+                }
+                self.briefing = None;
+            }
         }
         Task::none()
     }
@@ -11084,6 +11325,181 @@ impl App {
             .align_x(iced::Alignment::End),
         );
         modal_card(col, 380.0, scheme)
+    }
+
+    fn briefing_dialog(&self, scheme: &Scheme) -> Element<'_, Message> {
+        let scheme = *scheme;
+        let title = text("Briefing").size(theme::TEXT_LG);
+        let close = action_text("Close")
+            .on_press(Message::CloseBriefing)
+            .style(pill_button_secondary);
+
+        let mut body = column![title].spacing(theme::SPACE_MD).width(Length::Fill);
+
+        match &self.briefing {
+            Some(BriefingState::NeedsModel) => {
+                body = body.push(
+                    text(
+                        "A briefing needs a one-time 1.1 GB model. It runs on this machine; \
+                         the transcript is not uploaded.",
+                    )
+                    .size(theme::TEXT_XS)
+                    .color(scheme.muted),
+                );
+                if let Some(state) = &self.model_download {
+                    let fraction = state
+                        .total
+                        .filter(|total| *total > 0)
+                        .map(|total| (state.done as f32 / total as f32).clamp(0.0, 1.0))
+                        .unwrap_or(0.0);
+                    body = body
+                        .push(text(state.label.clone()).size(theme::TEXT_SM))
+                        .push(
+                            progress_bar(0.0..=1.0, fraction)
+                                .height(Length::Fixed(8.0))
+                                .style(move |_theme| progress_bar::Style {
+                                    background: scheme.bar_track.into(),
+                                    bar: scheme.progress.into(),
+                                    border: iced::border::rounded(4.0),
+                                }),
+                        )
+                        .push(right_aligned(row![
+                            action_text("Cancel")
+                                .on_press(Message::CancelModelDownload)
+                                .style(pill_button_secondary),
+                        ]));
+                } else if download::briefing_ready() {
+                    body = body.push(right_aligned(
+                        row![
+                            action_text("Create briefing")
+                                .on_press(Message::RetryBriefing)
+                                .style(color_button(scheme.blue, scheme.on_accent)),
+                            close,
+                        ]
+                        .spacing(theme::SPACE_MD),
+                    ));
+                } else {
+                    if let Some(error) = &self.model_error {
+                        body = body.push(
+                            text(error.clone())
+                                .size(theme::TEXT_XS)
+                                .color(scheme.danger),
+                        );
+                    }
+                    body = body.push(right_aligned(
+                        row![
+                            action_text("Download model")
+                                .on_press(Message::DownloadBriefingModel)
+                                .style(color_button(scheme.blue, scheme.on_accent)),
+                            close,
+                        ]
+                        .spacing(theme::SPACE_MD),
+                    ));
+                }
+            }
+            Some(BriefingState::Running(run)) => {
+                body = body
+                    .push(text(run.stage.clone()).size(theme::TEXT_SM).color(scheme.text))
+                    .push(
+                        progress_bar(0.0..=1.0, run.fraction)
+                            .height(Length::Fixed(8.0))
+                            .style(move |_theme| progress_bar::Style {
+                                background: scheme.bar_track.into(),
+                                bar: scheme.progress.into(),
+                                border: iced::border::rounded(4.0),
+                            }),
+                    )
+                    .push(
+                        text(format!(
+                            "{} elapsed. A long recording can take several minutes on a CPU; \
+                             cancelling is always safe.",
+                            format_secs(run.started.elapsed().as_secs_f64())
+                        ))
+                        .size(theme::TEXT_XS)
+                        .color(scheme.muted),
+                    )
+                    .push(right_aligned(row![
+                        action_text("Cancel")
+                            .on_press(Message::CloseBriefing)
+                            .style(pill_button_secondary),
+                    ]));
+            }
+            Some(BriefingState::Failed(message)) => {
+                body = body
+                    .push(
+                        text(message.clone())
+                            .size(theme::TEXT_SM)
+                            .color(scheme.danger),
+                    )
+                    .push(right_aligned(
+                        row![
+                            action_text("Try again")
+                                .on_press(Message::RetryBriefing)
+                                .style(color_button(scheme.blue, scheme.on_accent)),
+                            close,
+                        ]
+                        .spacing(theme::SPACE_MD),
+                    ));
+            }
+            Some(BriefingState::Ready { briefing, lines, .. }) => {
+                let mut content = column![].spacing(theme::SPACE_MD).width(Length::Fill);
+                if !briefing.overview.trim().is_empty() {
+                    content = content.push(
+                        text(briefing.overview.clone())
+                            .size(theme::TEXT_SM)
+                            .color(scheme.text),
+                    );
+                }
+                for (heading, items) in [
+                    ("Key points", &briefing.points),
+                    ("Decisions", &briefing.decisions),
+                    ("Action items", &briefing.actions),
+                ] {
+                    if items.is_empty() {
+                        continue;
+                    }
+                    content = content.push(
+                        text(heading.to_string()).size(theme::TEXT_SM).font(Font {
+                            weight: font::Weight::Bold,
+                            ..Font::DEFAULT
+                        }),
+                    );
+                    for item in items {
+                        let cite = hippo_briefing::citation(item, lines).unwrap_or_default();
+                        content = content.push(
+                            row![
+                                text("\u{2022}").size(theme::TEXT_SM).color(scheme.muted),
+                                text(item.text.clone())
+                                    .size(theme::TEXT_SM)
+                                    .width(Length::Fill),
+                                text(cite).size(theme::TEXT_XS).color(scheme.muted),
+                            ]
+                            .spacing(theme::SPACE_SM)
+                            .align_y(iced::Alignment::Start),
+                        );
+                    }
+                }
+                body = body
+                    .push(
+                        scrollable(content)
+                            .height(Length::Fixed(360.0))
+                            .width(Length::Fill)
+                            .style(visible_scrollbar_style),
+                    )
+                    .push(right_aligned(
+                        row![
+                            action_text("Save as Markdown")
+                                .on_press(Message::SaveBriefing)
+                                .style(color_button(scheme.blue, scheme.on_accent)),
+                            close,
+                        ]
+                        .spacing(theme::SPACE_MD),
+                    ));
+            }
+            None => {}
+        }
+
+        modal_card(body, 520.0, scheme)
     }
 
     fn vocabulary_dialog(&self, scheme: &Scheme) -> Element<'_, Message> {
@@ -12072,6 +12488,7 @@ impl App {
             Some(Modal::RunSetup) => self.run_setup_dialog(&scheme),
             Some(Modal::Rename) => self.rename_dialog(&scheme),
             Some(Modal::Vocabulary) => self.vocabulary_dialog(&scheme),
+            Some(Modal::Briefing) => self.briefing_dialog(&scheme),
         };
         modal_overlay(base, dialog, scheme)
     }
@@ -14843,6 +15260,14 @@ fn card_menu_layer<'a>(body: Element<'a, Message>, offset: f32) -> Element<'a, M
 /// than the space offered leaves cosmic-text with no vertical room for the
 /// baseline and it then yields no layout run at all, which measures and draws as
 /// nothing.
+/// A row of dialog buttons, pushed to the right edge.
+fn right_aligned<'a>(content: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
+    container(content)
+        .width(Length::Fill)
+        .align_x(iced::Alignment::End)
+        .into()
+}
+
 fn tips_check<'a>(checked: bool, scheme: Scheme) -> Element<'a, Message> {
     const BOX: f32 = 14.0;
     const TICK: f32 = 12.0;
@@ -17844,6 +18269,7 @@ mod tests {
             Modal::Vocabulary => {
                 let _ = app.open_vocabulary();
             }
+            Modal::Briefing => app.briefing = Some(BriefingState::NeedsModel),
         }
     }
 
@@ -18495,6 +18921,71 @@ mod tests {
         let mut app = pro_app();
         let _ = app.update(Message::StopRecording);
         assert!(app.recording.is_none());
+    }
+
+    #[test]
+    fn a_briefing_without_a_transcript_says_so() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("briefing-empty");
+
+        let mut app = pro_app();
+        let _ = app.update(Message::OpenBriefing);
+
+        assert!(app.briefing.is_none());
+        assert!(app
+            .toast
+            .as_ref()
+            .is_some_and(|(message, _)| message.contains("Transcribe")));
+    }
+
+    #[test]
+    fn a_missing_briefing_model_offers_the_download() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("briefing-model");
+        let (media, transcript) = export_fixture("briefing-media");
+
+        // Keep the real model directory out of the test's way.
+        let models_dir = media.join("models");
+        std::env::set_var("HIPPO_TRANSCRIBE_MODELS_DIR", &models_dir);
+
+        let mut app = pro_app();
+        let audio = media.join("talk.mp3");
+        app.queue.push(QueueItem {
+            path: audio.clone(),
+            audio: Some(audio),
+            status: ItemStatus::Done,
+            duration: Some(10.0),
+            transcript: Some(transcript),
+            stats: None,
+            turns: Vec::new(),
+            peaks: Arc::new(vec![0.2; 16]),
+        });
+        open_test_item(&mut app, 0);
+
+        let _ = app.update(Message::OpenBriefing);
+
+        assert!(matches!(app.briefing, Some(BriefingState::NeedsModel)));
+        assert_eq!(app.open_modal(), Some(Modal::Briefing));
+        let _ = app.update(Message::CloseBriefing);
+        assert!(app.briefing.is_none());
+
+        std::env::remove_var("HIPPO_TRANSCRIBE_MODELS_DIR");
+        let _ = std::fs::remove_dir_all(&media);
+    }
+
+    #[test]
+    fn a_briefing_is_a_pro_feature() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("briefing-free");
+
+        let mut app = App::new();
+        let _ = app.update(Message::OpenBriefing);
+
+        assert!(app.briefing.is_none());
+        assert!(app
+            .toast
+            .as_ref()
+            .is_some_and(|(message, _)| message.contains("Pro")));
     }
 
     #[test]

@@ -16,19 +16,23 @@ the network.
 
 - **Models** — downloaded once into the model directory
   (`%LOCALAPPDATA%\hippo-transcribe\models` on Windows,
-  `~/.cache/hippo-transcribe/models` on Linux/macOS).
+  `~/.cache/hippo-transcribe/models` on Linux/macOS). The 1.1 GB briefing model
+  is fetched only when someone asks for a briefing.
 - **Diarization cache** — optional local cache keyed by audio content and
   diarization settings.
 - **Settings and queue** — window layout, presets, save location, queue state and
   transcript paths, stored under the platform configuration directory.
 - **Outputs** — the `.txt` transcript and timestamped variant you generate, the
   `.json` sidecar holding speaker ids, line bounds and confidences, plus the
-  `.hippo-transcribe.bak` backup written when a transcript is edited. While a
-  run is in progress its lines are parked in a hidden
-  `.<audio>.hippo-transcribe.partial` file beside the audio; it is removed when
-  the file finishes.
+  `.hippo-transcribe.bak` backup written when a transcript is edited, and any
+  `<transcript>-briefing.md` you save. While a run is in progress its lines are
+  parked in a hidden `.<audio>.hippo-transcribe.partial` file beside the audio;
+  it is removed when the file finishes.
 - **Custom vocabulary** — the terms and replacements you enter, stored as
   `vocabulary.json` beside the settings. It holds only what you typed.
+- **Briefings** are generated on this machine from the transcript text. The
+  text is not uploaded, and the model that writes it is the same kind of local
+  file as the transcription models.
 - **Microphone recordings** — only when you press Record. Capture happens on
   the machine and the WAV is written where your transcripts go; nothing is sent
   anywhere.

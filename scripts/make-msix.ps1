@@ -93,6 +93,9 @@ New-Item -ItemType Directory -Path $layout -Force | Out-Null
 # executable links the DLL CRT, and the certification machine has no
 # redistributable installed.
 Copy-Item (Join-Path $Stage "hippo-transcribe.exe") $layout
+# The briefing runs in its own process so llama.cpp's ggml never meets
+# whisper.cpp's inside one binary.
+Copy-Item (Join-Path $Stage "hippo-summarize.exe") $layout
 $runtimeDlls = @("sherpa-onnx-c-api.dll", "onnxruntime.dll", "vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll")
 if (Test-Path -LiteralPath (Join-Path $Stage "vcomp140.dll")) {
     $runtimeDlls += "vcomp140.dll"
@@ -207,7 +210,7 @@ if ($absent.Count -gt 0) {
     throw ("The package is missing " + $absent.Count + " file(s) from the layout: " + ($absent -join ", "))
 }
 $required = @(
-    "hippo-transcribe.exe", "AppxManifest.xml", "resources.pri",
+    "hippo-transcribe.exe", "hippo-summarize.exe", "AppxManifest.xml", "resources.pri",
     "sherpa-onnx-c-api.dll", "onnxruntime.dll",
     "vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll",
     "sample-short.mp3", "Assets\StoreLogo.png"

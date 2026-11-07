@@ -56,7 +56,8 @@ powershell -ExecutionPolicy Bypass -File .\scripts\build-windows.ps1
 ```
 
 It enters the Visual Studio developer environment, runs the release tests,
-builds, then stages the executable together with the sherpa-onnx and Visual C++
+builds both executables (`hippo-transcribe` and the briefing worker
+`hippo-summarize`), then stages them together with the sherpa-onnx and Visual C++
 runtime DLLs and the bundled model set from `models.lock.json`, and writes a
 release folder and zip under `dist\`. Use `-SkipModels` to stage only the
 executable and DLLs. With `-Msix` the package leaves the models out (the Store
@@ -136,6 +137,12 @@ Every preset uses a multilingual model:
 - `ggml-large-v3-turbo-q5_0.bin` (accuracy) — downloaded on demand
 - `sherpa-onnx-pyannote-segmentation-3-0/model.onnx`
 - `wespeaker_en_voxceleb_CAM++_LM.onnx`
+
+The briefing uses a separate model, downloaded the first time someone asks for
+one rather than with any preset:
+
+- `qwen2.5-1.5b-instruct-q4_k_m.gguf` — Qwen2.5-1.5B-Instruct, Apache-2.0,
+  1.1 GB
 
 `models.lock.json` is the single source of truth for file names, sizes,
 SHA-256 hashes, licenses and mirrors. The application compiles it in, and
@@ -255,7 +262,7 @@ over a corpus for backend and preset comparisons.
 The free tier is the full-length pipeline: the balanced model, one speaker,
 unlimited files, no minutes and no account. Copy, save and search are included.
 Pro adds the Speed and Accuracy presets, speaker diarization (speaker labels),
-batch transcription, transcript editing and audio playback.
+batch transcription, transcript editing, audio playback and the briefing.
 
 Pro is a one-time purchase on both stores. A 7-day trial is available once per
 install. Entitlement state lives in `license.json` beside the settings and is
@@ -285,6 +292,13 @@ theme button cycles them. Files added while a run is active join the queue and
 are processed in a follow-up pass automatically. The gear button (or `Ctrl+,`)
 opens Settings for transcript text size, preset, speaker count, language,
 playback speed, follow mode, notifications, save location, and model storage.
+
+**File → Briefing** (Pro) reads the finished transcript and writes an overview,
+key points, decisions and action items, each citing the transcript lines it came
+from; **Save as Markdown** writes `<transcript>-briefing.md`. The first briefing
+downloads a 1.1 GB model once; generation runs on this machine and can be
+cancelled while it works. It is a derived document, not a record: the transcript
+stays the source of truth.
 
 The Export picker writes the current transcript as plain text, SRT, WebVTT,
 JSON, Markdown, or CSV. Subtitle formats use the exact line bounds stored in the

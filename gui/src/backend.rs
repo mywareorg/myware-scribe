@@ -509,6 +509,169 @@ fn read_stderr(stderr: Option<ChildStderr>) -> Vec<String> {
     lines
 }
 
+// ---- briefing worker ----
+
+use hippo_briefing::BriefingLine;
+
+/// Progress from the briefing helper, in the order it happened.
+#[derive(Debug, Clone)]
+pub enum BriefingEvent {
+    Stage { label: String, fraction: f32 },
+    Done,
+    Failed(String),
+}
+
+/// Spawn `hippo-summarize` for `lines`.
+///
+/// The helper runs in its own process: llama.cpp and whisper.cpp each vendor
+/// ggml, and one binary linking both is a symbol clash waiting to happen. It
+/// writes the result to a response file; the returned path is where the caller
+/// reads it after `BriefingEvent::Done`.
+pub fn spawn_briefing(
+    lines: Vec<BriefingLine>,
+    model: std::path::PathBuf,
+    events: Arc<Mutex<VecDeque<BriefingEvent>>>,
+    pid: Arc<AtomicU32>,
+) -> Result<PathBuf, String> {
+    let helper = briefing_helper()?;
+    let dir = hippo_transcribe_core::license::config_dir()
+        .ok_or_else(|| "no configuration directory".to_string())?;
+    std::fs::create_dir_all(&dir).map_err(|error| format!("create {}: {error}", dir.display()))?;
+
+    let stamp = std::process::id();
+    let request = dir.join(format!("briefing-request-{stamp}.json"));
+    let response = dir.join(format!("briefing-response-{stamp}.json"));
+    let _ = std::fs::remove_file(&response);
+    let body = serde_json::json!({
+        "lines": lines,
+        "model": model.display().to_string(),
+    });
+    std::fs::write(&request, body.to_string())
+        .map_err(|error| format!("write {}: {error}", request.display()))?;
+
+    let mut command = Command::new(&helper);
+    command
+        .arg("--request")
+        .arg(&request)
+        .arg("--response")
+        .arg(&response)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    hide_console(&mut command);
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("start {}: {error}", helper.display()))?;
+    pid.store(child.id(), Ordering::SeqCst);
+
+    let output_events = events.clone();
+    std::thread::spawn(move || {
+        let stderr = child.stderr.take().map(|stderr| {
+            let sink = Arc::new(Mutex::new(String::new()));
+            let text = sink.clone();
+            std::thread::spawn(move || {
+                for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+                    if let Ok(mut text) = text.lock() {
+                        text.push_str(&line);
+                        text.push('\n');
+                        // Keep only the tail: llama.cpp can be chatty.
+                        if text.len() > 4000 {
+                            let keep = text.len() - 2000;
+                            *text = text[keep..].to_string();
+                        }
+                    }
+                }
+            });
+            sink
+        });
+
+        let mut reported_failure = false;
+        if let Some(stdout) = child.stdout.take() {
+            for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+                let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
+                    continue;
+                };
+                match value.get("event").and_then(|event| event.as_str()) {
+                    Some("stage") => {
+                        let label = value
+                            .get("label")
+                            .and_then(|label| label.as_str())
+                            .unwrap_or_default()
+                            .to_string();
+                        let fraction = value
+                            .get("fraction")
+                            .and_then(|fraction| fraction.as_f64())
+                            .unwrap_or(0.0) as f32;
+                        if let Ok(mut queue) = output_events.lock() {
+                            queue.push_back(BriefingEvent::Stage { label, fraction });
+                        }
+                    }
+                    Some("done") => {}
+                    Some("error") => {
+                        let message = value
+                            .get("message")
+                            .and_then(|message| message.as_str())
+                            .unwrap_or("the briefing failed")
+                            .to_string();
+                        reported_failure = true;
+                        if let Ok(mut queue) = output_events.lock() {
+                            queue.push_back(BriefingEvent::Failed(message));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        let status = child.wait().ok();
+        let _ = std::fs::remove_file(&request);
+        if !reported_failure {
+            let ok = status.as_ref().is_some_and(|status| status.success());
+            if ok {
+                if let Ok(mut queue) = output_events.lock() {
+                    queue.push_back(BriefingEvent::Done);
+                }
+            } else {
+                let detail = stderr
+                    .as_ref()
+                    .and_then(|text| text.lock().ok().map(|text| text.trim().to_string()))
+                    .filter(|text| !text.is_empty())
+                    .unwrap_or_else(|| {
+                        format!("the briefing helper exited with {status:?}")
+                    });
+                if let Ok(mut queue) = output_events.lock() {
+                    queue.push_back(BriefingEvent::Failed(detail));
+                }
+            }
+        }
+    });
+
+    Ok(response)
+}
+
+/// The helper beside this executable.
+fn briefing_helper() -> Result<PathBuf, String> {
+    let exe = std::env::current_exe()
+        .map_err(|error| format!("could not locate the executable: {error}"))?;
+    let dir = exe
+        .parent()
+        .ok_or_else(|| "the executable has no directory".to_string())?;
+    let name = if cfg!(windows) {
+        "hippo-summarize.exe"
+    } else {
+        "hippo-summarize"
+    };
+    let path = dir.join(name);
+    if path.is_file() {
+        Ok(path)
+    } else {
+        Err(format!(
+            "the briefing helper is missing from {}",
+            dir.display()
+        ))
+    }
+}
+
 fn push(events: &Arc<Mutex<VecDeque<Event>>>, event: Event) {
     if let Ok(mut queue) = events.lock() {
         queue.push_back(event);

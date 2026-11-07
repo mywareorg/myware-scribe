@@ -97,6 +97,15 @@ pub fn models_dir() -> PathBuf {
     root_dir().join("models")
 }
 
+/// The briefing model. Not part of any preset's required set: it is fetched
+/// the first time someone asks for a briefing.
+pub fn briefing_model() -> PathBuf {
+    let file = spec("briefing")
+        .map(|model| model.file.as_str())
+        .unwrap_or("qwen2.5-1.5b-instruct-q4_k_m.gguf");
+    resolve(file)
+}
+
 /// Read-only models directory shipped beside the executable, if present.
 pub fn bundled_dir() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
@@ -232,7 +241,7 @@ mod tests {
     fn manifest_parses_and_is_internally_consistent() {
         let manifest = manifest();
         assert!(!manifest.version.is_empty());
-        assert_eq!(manifest.models.len(), 5);
+        assert_eq!(manifest.models.len(), 6);
         for model in &manifest.models {
             assert!(!model.id.is_empty());
             assert!(!model.file.is_empty());

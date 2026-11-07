@@ -49,7 +49,8 @@ counts in mind, they are the limits the form enforces.
 
     The free version handles any number of files, one speaker at a time, with
     the Balanced model. Pro adds the Speed and Accuracy models, speaker labels,
-    batch runs, transcript editing and playback scrubbing; it arrives in 1.1,
+    batch runs, transcript editing, playback scrubbing and a briefing that
+    summarises a finished transcript with cited action items; it arrives in 1.1,
     and until then the 7-day trial inside the app shows what it adds.
 
 ## Feature bullets

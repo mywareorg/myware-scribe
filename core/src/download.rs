@@ -401,6 +401,16 @@ pub fn required_for(preset: &str, diarized: bool) -> Vec<&'static str> {
     ids
 }
 
+/// True when the briefing model is installed at the pinned size.
+pub fn briefing_ready() -> bool {
+    models::spec("briefing").is_some_and(|spec| {
+        let path = models::resolve(&spec.file);
+        std::fs::metadata(&path)
+            .map(|meta| meta.len() == spec.size)
+            .unwrap_or(false)
+    })
+}
+
 /// True when every file needed to run `preset` exists at the expected size.
 pub fn ready_for(preset: &str, diarized: bool) -> bool {
     missing_for(preset, diarized).is_empty()

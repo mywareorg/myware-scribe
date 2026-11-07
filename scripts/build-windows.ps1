@@ -547,7 +547,7 @@ try {
         Write-Step "Building with verbose output (diagnose)"
         $log = Join-Path $root "build-windows.log"
         try {
-            Invoke-Native cargo (@("build", "--release", "--locked", "-vv") + $featureArgs)
+            Invoke-Native cargo (@("build", "--workspace", "--release", "--locked", "-vv") + $featureArgs)
         } catch {
             Select-String -Path $log -Pattern 'LNK2005|LNK2019|LNK1169|LNK2038|LNK1104' -ErrorAction SilentlyContinue |
                 ForEach-Object { Write-Host $_.Line -ForegroundColor Yellow }
@@ -555,7 +555,7 @@ try {
         }
     } else {
         Write-Step "Building release binary"
-        Invoke-Native cargo (@("build", "--release", "--locked") + $featureArgs)
+        Invoke-Native cargo (@("build", "--workspace", "--release", "--locked") + $featureArgs)
     }
 
     $metadata = Get-CargoMetadata
@@ -595,6 +595,11 @@ try {
     New-Item -ItemType Directory -Path $stage -Force | Out-Null
 
     Copy-Item $binary (Join-Path $stage "hippo-transcribe.exe")
+    $summarizer = Join-Path (Split-Path $binary) "hippo-summarize.exe"
+    if (-not (Test-Path $summarizer)) {
+        throw "Briefing helper not found: $summarizer"
+    }
+    Copy-Item $summarizer (Join-Path $stage "hippo-summarize.exe")
     $sherpaLib = Ensure-SherpaDlls
     foreach ($dll in @("sherpa-onnx-c-api.dll", "onnxruntime.dll")) {
         $source = Join-Path $sherpaLib $dll

@@ -14,6 +14,7 @@ gpu = ["hippo-transcribe-core/gpu"]
 coreml = ["hippo-transcribe-core/coreml"]
 
 [dependencies]
+hippo-briefing = { path = "../briefing" }
 hippo-transcribe-core = { path = "../core" }
 iced = { version = "0.13", features = ["tokio", "advanced", "canvas", "image-without-codecs"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
@@ -43,3 +44,4 @@ winresource = "0.1"
 [[bin]]
 name = "hippo-transcribe"
 path = "src/main.rs"
+
