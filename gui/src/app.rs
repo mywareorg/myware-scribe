@@ -24,6 +24,7 @@ use crate::{documents::*, files::*, format::*, options::*};
 use hippo_transcribe_core::asr;
 use hippo_transcribe_core::benchmark::{self, BenchmarkEvent};
 use hippo_transcribe_core::download::{self, DownloadEvent, ModelStatus};
+use hippo_transcribe_core::export::ExportFormat;
 use hippo_transcribe_core::license;
 use hippo_transcribe_core::models;
 use hippo_transcribe_core::playback::AudioStream;
@@ -4536,28 +4537,70 @@ impl App {
                 }
                 Task::perform(
                     async move {
-                        rfd::FileDialog::new()
-                            .add_filter("Text", &["txt"])
-                            .set_file_name(default_name)
-                            .save_file()
+                        let mut dialog = rfd::FileDialog::new();
+                        for format in ExportFormat::ALL {
+                            dialog = dialog.add_filter(format.label(), &[format.extension()]);
+                        }
+                        dialog.set_file_name(default_name).save_file()
                     },
                     Message::SaveTranscriptAsPicked,
                 )
             }
             Message::SaveTranscriptAsPicked(path) => {
                 if let Some(mut path) = path {
+                    let format = path
+                        .extension()
+                        .and_then(|extension| extension.to_str())
+                        .and_then(ExportFormat::from_extension)
+                        .unwrap_or(ExportFormat::Txt);
                     if path.extension().is_none() {
-                        path.set_extension("txt");
+                        path.set_extension(format.extension());
                     }
-                    let text = self.shown_transcript();
-                    if text.trim().is_empty() {
+
+                    let text = self.shown_transcript().to_string();
+                    let source = self.shown_output().map(Path::to_path_buf);
+                    let cues = backend::export_cues(source.as_deref(), self.shown_lines());
+                    let turns = self.shown_turns().to_vec();
+                    let duration = self.shown_duration();
+
+                    // The JSON sidecar is the transcript's metadata, not an
+                    // export target: writing over it would erase speaker ids
+                    // and line bounds.
+                    if source
+                        .as_deref()
+                        .and_then(hippo_transcribe_core::sidecar::locate)
+                        .as_deref()
+                        == Some(path.as_path())
+                    {
+                        self.toast = Some((
+                            "That file holds the transcript's metadata; choose another name"
+                                .to_string(),
+                            Instant::now(),
+                        ));
+                    } else if text.trim().is_empty() {
                         self.toast = Some(("No transcript to save".to_string(), Instant::now()));
-                    } else if write_transcript_file(&path, text).is_ok() {
-                        self.modified = false;
-                        self.toast = Some((format!("Saved {}", path.display()), Instant::now()));
                     } else {
-                        self.toast =
-                            Some((format!("Could not save {}", path.display()), Instant::now()));
+                        // Saving over the transcript itself keeps the backup
+                        // the editor has always taken before rewriting it.
+                        let saving_over_source = source.as_deref() == Some(path.as_path());
+                        let result = if saving_over_source && format == ExportFormat::Txt {
+                            write_transcript_file(&path, &text)
+                        } else {
+                            hippo_transcribe_core::export::write(
+                                &path, format, &text, &cues, &turns, duration,
+                            )
+                        };
+                        match result {
+                            Ok(()) => {
+                                self.modified = false;
+                                self.toast =
+                                    Some((format!("Saved {}", path.display()), Instant::now()));
+                            }
+                            Err(error) => self.toast = Some((
+                                format!("Could not save {}: {error}", path.display()),
+                                Instant::now(),
+                            )),
+                        }
                     }
                 }
                 Task::none()
@@ -17639,6 +17682,90 @@ mod tests {
         let _ = app.update(Message::ToggleJoinLines);
         assert!(!app.join_lines);
         assert_eq!(app.shown_lines().len(), 3);
+
+        let _ = std::fs::remove_dir_all(&media);
+    }
+
+    fn export_fixture(tag: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+        let media = temp_dir(tag);
+        let audio = media.join("talk.mp3");
+        std::fs::write(&audio, b"audio").unwrap();
+        let transcript = media.join("talk.txt");
+        std::fs::write(&transcript, "[00:00] SPEAKER 1: one\n[00:05] SPEAKER 2: two\n").unwrap();
+        std::fs::write(
+            media.join("talk.json"),
+            r#"{
+                "lines": [
+                    {"time": "00:00", "speaker": "SPEAKER 1", "text": "one", "start": 0.0, "confidence": -0.2, "end": 2.0},
+                    {"time": "00:05", "speaker": "SPEAKER 2", "text": "two", "start": 5.0, "confidence": -0.2, "end": 9.0}
+                ],
+                "turns": [],
+                "duration": 10.0
+            }"#,
+        )
+        .unwrap();
+        (media, transcript)
+    }
+
+    #[test]
+    fn save_as_srt_uses_the_sidecar_bounds() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("srt-config");
+        let (media, transcript) = export_fixture("srt-media");
+
+        let mut app = pro_app();
+        let audio = media.join("talk.mp3");
+        app.queue.push(QueueItem {
+            path: audio.clone(),
+            audio: Some(audio),
+            status: ItemStatus::Done,
+            duration: Some(10.0),
+            transcript: Some(transcript),
+            stats: None,
+            turns: Vec::new(),
+            peaks: Arc::new(vec![0.2; 16]),
+        });
+        open_test_item(&mut app, 0);
+
+        let out = media.join("talk.srt");
+        let _ = app.update(Message::SaveTranscriptAsPicked(Some(out.clone())));
+        let saved = std::fs::read_to_string(&out).unwrap();
+        // Not the next line's 5.0: the sidecar knows this cue ends at 2.0.
+        assert!(saved.contains("00:00:00,000 --> 00:00:02,000"), "{saved}");
+        assert!(saved.contains("00:00:05,000 --> 00:00:09,000"), "{saved}");
+
+        let _ = std::fs::remove_dir_all(&media);
+    }
+
+    #[test]
+    fn save_as_refuses_to_overwrite_the_sidecar() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("sidecar-config");
+        let (media, transcript) = export_fixture("sidecar-media");
+
+        let mut app = pro_app();
+        let audio = media.join("talk.mp3");
+        app.queue.push(QueueItem {
+            path: audio.clone(),
+            audio: Some(audio),
+            status: ItemStatus::Done,
+            duration: Some(10.0),
+            transcript: Some(transcript),
+            stats: None,
+            turns: Vec::new(),
+            peaks: Arc::new(vec![0.2; 16]),
+        });
+        open_test_item(&mut app, 0);
+
+        let sidecar = media.join("talk.json");
+        let before = std::fs::read_to_string(&sidecar).unwrap();
+        let _ = app.update(Message::SaveTranscriptAsPicked(Some(sidecar.clone())));
+
+        assert_eq!(std::fs::read_to_string(&sidecar).unwrap(), before);
+        assert!(app
+            .toast
+            .as_ref()
+            .is_some_and(|(message, _)| message.contains("metadata")));
 
         let _ = std::fs::remove_dir_all(&media);
     }

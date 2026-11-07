@@ -279,8 +279,10 @@ are processed in a follow-up pass automatically. The gear button (or `Ctrl+,`)
 opens Settings for transcript text size, preset, speaker count, language,
 playback speed, follow mode, notifications, save location, and model storage.
 
-The Export picker writes the current transcript as plain text, SRT, WebVTT, or
-JSON. Failed queue items can be retried, and pending items can be reordered.
+The Export picker writes the current transcript as plain text, SRT, WebVTT,
+JSON, Markdown, or CSV. Subtitle formats use the exact line bounds stored in the
+transcript's sidecar and refuse a transcript that has no timestamps. Failed
+queue items can be retried, and pending items can be reordered.
 Keyboard: Up/Down moves through the transcript, Alt+Enter edits the active line,
 Space toggles playback, and Left/Right seek ±5 seconds while no text field has
 focus. Editing and playback keys require Pro.

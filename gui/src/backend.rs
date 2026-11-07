@@ -125,6 +125,32 @@ pub fn write_sidecar_renamed(path: &Path, lines: &[DocLine], mapping: &[(String,
     let _ = sidecar::write_at(&json, &sidecar);
 }
 
+/// Build export cues from the shown document.
+///
+/// `source` is the transcript file whose sidecar holds exact line ends. When
+/// the sidecar is missing or no longer matches the document, the ends are left
+/// to the renderer, which falls back to the next line's start.
+pub fn export_cues(
+    source: Option<&Path>,
+    lines: &[DocLine],
+) -> Vec<hippo_transcribe_core::export::Cue> {
+    let ends: Vec<Option<f32>> = source
+        .and_then(|path| sidecar::read(path))
+        .filter(|sidecar| sidecar.lines.len() == lines.len())
+        .map(|sidecar| sidecar.lines.into_iter().map(|line| line.end).collect())
+        .unwrap_or_default();
+    lines
+        .iter()
+        .enumerate()
+        .map(|(index, line)| hippo_transcribe_core::export::Cue {
+            start: line.start,
+            end: ends.get(index).copied().flatten(),
+            speaker: line.speaker.clone(),
+            text: line_text(line),
+        })
+        .collect()
+}
+
 /// One document line as the sidecar stores it.
 ///
 /// `previous` is the stored line at the same index when the document and the
