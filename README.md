@@ -58,8 +58,9 @@ powershell -ExecutionPolicy Bypass -File .\scripts\build-windows.ps1
 It enters the Visual Studio developer environment, runs the release tests,
 builds, then stages the executable together with the sherpa-onnx and Visual C++
 runtime DLLs and the bundled model set from `models.lock.json`, and writes a
-release folder and zip under `dist\`. Use
-`-SkipModels` to stage only the executable and DLLs.
+release folder and zip under `dist\`. Use `-SkipModels` to stage only the
+executable and DLLs. With `-Msix` the package leaves the models out (the Store
+build downloads them on first run); `-BundleModels` packs them in anyway.
 
 The app loads `sherpa-onnx-c-api.dll` and `onnxruntime.dll` from beside
 `hippo-transcribe.exe` at runtime; no native library is linked into the executable. Only
@@ -130,7 +131,7 @@ a model it does not use.
 
 Every preset uses a multilingual model:
 
-- `ggml-tiny-q5_1.bin` (speed) — bundled with release packages
+- `ggml-tiny-q5_1.bin` (speed) — shipped with portable releases; Store installs download it
 - `ggml-small-q5_1.bin` (balanced) — downloaded on demand
 - `ggml-large-v3-turbo-q5_0.bin` (accuracy) — downloaded on demand
 - `sherpa-onnx-pyannote-segmentation-3-0/model.onnx`
@@ -146,8 +147,10 @@ serves `<file>`), the public GitLab package mirror
 (`librewarelive/hippo-transcribe-models`), then the pinned upstream Hugging Face
 / k2-fsa URLs as fallbacks.
 
-Release packages ship a `models/` directory beside the executable. It is
-read-only and used as-is; downloads always go to the writable models directory.
+Portable release packages ship a `models/` directory beside the executable. It
+is read-only and used as-is; downloads always go to the writable models
+directory. Store packages leave the models out and download them on first run,
+so the package and its updates stay small.
 
 Overrides: `HIPPO_TRANSCRIBE_MODELS_DIR` (root),
 `HIPPO_TRANSCRIBE_MODEL_MIRROR` (extra download mirror),

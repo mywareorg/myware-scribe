@@ -19,9 +19,10 @@ counts in mind, they are the limits the form enforces.
 
     Drop in an audio or video file and it produces a transcript labelled by
     speaker, with timestamps you can turn off. Everything runs on your own
-    computer: every transcription model ships inside the app, so it works with
-    the network disconnected from the first launch. There is no account to
-    create and no usage data to opt out of.
+    computer. The transcription models download once on first launch — a few
+    hundred megabytes — and after that the app works with the network
+    disconnected. There is no account to create and no usage data to opt out
+    of.
 
     It is built for the recordings people actually have: interviews, panel
     discussions, lectures, calls recorded on a phone. Speech recognition and
@@ -41,9 +42,10 @@ counts in mind, they are the limits the form enforces.
     - No telemetry and no network use during transcription. (1.1 adds a Store
       licence check when Pro can actually be purchased.)
 
-    The models are included in the package, so the first run needs no internet
-    connection and no additional download. Long recordings take time on a CPU;
-    expect roughly the length of the recording again for an hour of audio.
+    The first run downloads the model files once, with progress in the app;
+    after that transcription needs no internet connection. Long recordings take
+    time on a CPU; expect roughly the length of the recording again for an hour
+    of audio.
 
     The free version handles any number of files, one speaker at a time, with
     the Balanced model. Pro adds the Speed and Accuracy models, speaker labels,
@@ -53,7 +55,7 @@ counts in mind, they are the limits the form enforces.
 ## Feature bullets
 
     - Speaker-labelled transcripts from interviews, meetings and notes
-    - Runs offline out of the box; the models ship inside the app
+    - Works offline once the models have downloaded
     - No account, no sign-in, no telemetry
     - Automatic language detection, or pin a language
     - Timestamps on or off, per export
@@ -132,9 +134,11 @@ preserved). Replace them with full-screen 1920x1080 captures when convenient.
 
 ## Notes on wording
 
-`docs/brand.md` bans absolute offline claims. "Runs offline out of the box" is
-accurate now that the models ship in the package: transcription makes no network
-requests, and the Store licence check happens only when someone buys or restores
-Pro. Do not
-use "never phones home", "100% offline" or "HIPAA compliant" anywhere in the
-listing; the privacy policy says "HIPAA inspired" instead.
+`docs/brand.md` bans absolute offline claims. "Works offline once the models
+have downloaded" is accurate: the first launch fetches the model files, and
+transcription itself makes no network requests. Mention the one-time download
+wherever offline use is described, so the Store listing cannot be read as
+promising an offline install. The Store licence check happens only when someone
+buys or restores Pro. Do not use "never phones home", "100% offline" or
+"HIPAA compliant" anywhere in the listing; the privacy policy says "HIPAA
+inspired" instead.

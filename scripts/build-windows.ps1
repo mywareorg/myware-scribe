@@ -14,7 +14,8 @@ With -Msix the staged binary is also packed into an MSIX: the manifest is
 rendered from packaging/AppxManifest.xml.template and packaging/identity.json,
 and only the executable plus its two runtime DLLs are included. deploy.bat, the
 sample audio and the models stay out; the Store build downloads models on
-first run.
+first run. Pass -BundleModels to pack the models in anyway: that makes the
+package several hundred megabytes larger, and every update re-ships them.
 
 The app loads sherpa-onnx and ONNX Runtime from the shipped DLLs at runtime, so
 only whisper.cpp is compiled locally. Tests run in release mode because the
@@ -54,6 +55,9 @@ param(
     [switch]$Clean,
     [switch]$NoZip,
     [switch]$SkipModels,
+    # Pack the models into the MSIX. Off by default: the Store build fetches
+    # them once on first run, which keeps the package and its updates small.
+    [switch]$BundleModels,
     # Keep the persisted queue from earlier runs. By default the build clears
     # it so the freshly compiled app starts empty.
     [switch]$KeepQueue,
@@ -182,6 +186,9 @@ $gpuExplicit = $PSBoundParameters.ContainsKey("Gpu")
 $cpuExplicit = $PSBoundParameters.ContainsKey("Cpu")
 if ($gpuExplicit -and $cpuExplicit) {
     throw "-Gpu and -Cpu cannot be combined."
+}
+if ($SkipModels -and $BundleModels) {
+    throw "-SkipModels and -BundleModels cannot be combined."
 }
 
 $useGpu = $false
@@ -634,6 +641,9 @@ try {
         Copy-Item $sample (Join-Path $stage "sample-short.mp3")
     }
 
+    # The zip is a portable artifact and carries the models. The MSIX does not,
+    # unless -BundleModels is passed: the Store build downloads them on first
+    # run, which keeps the package and its updates small.
     if (-not $SkipModels) {
         Write-Step "Staging bundled models (models.lock.json)"
         try {
@@ -697,7 +707,7 @@ try {
             "-IdentityPath", $identityFile
         )
         if ($KeepLayout) { $packArgs += "-KeepLayout" }
-        if ($SkipModels) { $packArgs += "-NoModels" }
+        if (-not $BundleModels) { $packArgs += "-NoModels" }
         Invoke-Native powershell $packArgs
         if (-not (Test-Path $msixPath)) {
             throw "Packing returned without producing $msixPath"

@@ -114,13 +114,14 @@ if (-not (Test-Path $sample)) {
 }
 Copy-Item $sample $layout
 
-# Ship the models inside the package. The core looks for <exe>\models before the
-# per-user folder, so a bundled copy needs no download at all: nothing depends
-# on where the packaged process's AppData is redirected to.
+# Optionally ship the models inside the package. The core looks for <exe>\models
+# before the per-user folder, so a bundled copy needs no download at all. The
+# Store build leaves them out and downloads them once on first run, which keeps
+# the package and its updates small.
 if (-not $NoModels) {
     $modelsSource = Join-Path $Stage "models"
     if (-not (Test-Path $modelsSource)) {
-        throw "No models in $Stage. Build without -SkipModels, or pass -NoModels for a slim package."
+        throw "No models in $Stage. Pack with -NoModels for the Store package, or build with -BundleModels."
     }
     $modelsTarget = Join-Path $layout "models"
     New-Item -ItemType Directory -Path $modelsTarget -Force | Out-Null

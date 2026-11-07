@@ -25,8 +25,11 @@ creates a self-signed code-signing certificate, exports the `.pfx`, and trusts
 it for the current user:
 
     .\scripts\make-test-cert.ps1
-    .\scripts\build-windows.ps1 -SkipTests -SkipModels -NoZip -Msix -Sign `
+    .\scripts\build-windows.ps1 -SkipTests -NoZip -Msix -Sign `
         -CertificatePath C:\keys\hippo-test.pfx -CertificatePassword hippo-test
+
+`-Msix` already leaves the models out of the package, so `-SkipModels` is only
+needed when the zip should be slim too.
 
 To sign a package that already exists (for example one a build left unsigned),
 run the same signing step on its own:
@@ -40,11 +43,14 @@ certificate there, and installs the newest package:
 
     .\scripts\install-msix.ps1
 
-The models ship inside the package, so nothing is downloaded on install and a
-reinstall costs no network time. Any models downloaded for a preset the package
-does not carry live in the package's private data, which removing the package
-deletes; `-Fresh` additionally deletes that folder explicitly and fails if
-anything is left behind:
+The Store package does not carry the models. On first run the app shows a
+download card, fetches the set the current preset needs from the pinned
+mirrors, resumes a interrupted download, and verifies each file's SHA-256.
+After that the app works offline; the files live in the package's private data,
+which removing the package deletes. `-Fresh` additionally deletes that folder
+explicitly and fails if anything is left behind. Pass `-BundleModels` to pack
+the models in for an offline install instead: the package grows by several
+hundred megabytes and every update re-ships them.
 
     .\scripts\install-msix.ps1 -Fresh
 
