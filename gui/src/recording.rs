@@ -194,6 +194,10 @@ fn capture(
     let format = chosen.sample_format();
     let channels = chosen.channels() as usize;
     let rate = chosen.sample_rate().0;
+    hippo_transcribe_core::logging::info(format!(
+        "microphone {}: {format:?}, {channels} channel(s), {rate} Hz",
+        device.name().unwrap_or_else(|_| "default".to_string())
+    ));
     let config: cpal::StreamConfig = chosen.into();
 
     let (tx, rx) = sync_channel::<Vec<i16>>(CHANNEL_CHUNKS);
@@ -246,6 +250,13 @@ fn capture(
 /// considered, and the order prefers float then 16-bit.
 fn prefer_rate(device: &cpal::Device, rate: u32) -> Option<cpal::SupportedStreamConfig> {
     let ranges = device.supported_input_configs().ok()?;
+    // Prefer the channel count the platform mixer advertises by default. A
+    // capture device often lists several counts for every rate, and the first
+    // one is not necessarily the one the system is configured for.
+    let default_channels = device
+        .default_input_config()
+        .ok()
+        .map(|config| config.channels());
     let mut candidates: Vec<cpal::SupportedStreamConfigRange> = ranges
         .filter(|range| {
             range.min_sample_rate().0 <= rate
@@ -253,7 +264,15 @@ fn prefer_rate(device: &cpal::Device, rate: u32) -> Option<cpal::SupportedStream
                 && format_rank(range.sample_format()) < u8::MAX
         })
         .collect();
-    candidates.sort_by_key(|range| format_rank(range.sample_format()));
+    candidates.sort_by_key(|range| {
+        (
+            format_rank(range.sample_format()),
+            u8::from(
+                default_channels.is_some_and(|channels| channels != range.channels()),
+            ),
+            range.channels(),
+        )
+    });
     candidates
         .first()
         .map(|range| range.with_sample_rate(cpal::SampleRate(rate)))
@@ -289,6 +308,11 @@ where
     let channels = channels.max(1);
     let rate = rate.max(1);
     let mut engine = LevelEngine::default();
+    // The same window the meter ignores must not be written either: a device
+    // waking from suspend can start with tens of milliseconds of full-scale
+    // samples, which would become the loudness pass's peak and a click in the
+    // transcript. Dropping them costs 150 ms at the top of the take.
+    let mut warmup_frames = (WARMUP_SECONDS * rate as f32).ceil() as usize;
     device
         .build_input_stream(
             config,
@@ -313,12 +337,16 @@ where
                     }
                     let value = (sum / channels as f32).clamp(-1.0, 1.0);
                     peak = peak.max(value.abs());
-                    mono.push((value * i16::MAX as f32) as i16);
+                    if warmup_frames > 0 {
+                        warmup_frames -= 1;
+                    } else {
+                        mono.push((value * i16::MAX as f32) as i16);
+                    }
                 }
+                meter.publish(engine.update(peak, clip_peak, seconds));
                 if mono.is_empty() {
                     return;
                 }
-                meter.publish(engine.update(peak, clip_peak, seconds));
                 let _ = tx.try_send(mono);
             },
             error,
@@ -342,6 +370,11 @@ const RELEASE_SECONDS: f32 = 0.30;
 /// seconds means a room that gets noisier is picked up without a restart.
 const FLOOR_BLOCK_SECONDS: f32 = 0.25;
 const FLOOR_BLOCKS: usize = 32;
+
+/// The stream's own start is not signal: devices can emit a click or a burst of
+/// full-scale samples while the capture path settles. Ignore that window so it
+/// neither latches "clipping" nor seeds the noise floor.
+const WARMUP_SECONDS: f32 = 0.15;
 
 /// The floor before anything has been heard. A single quiet block replaces one
 /// slot, so the guess is corrected within a quarter second of a pause; it only
@@ -367,6 +400,7 @@ const CLIP_HOLD_SECONDS: f32 = 2.0;
 /// lift it, so the scale stays put while the user talks; the room's own noise
 /// does, so moving to a noisy room does not pin the bar at full.
 struct LevelEngine {
+    warmup: f32,
     floor: [f32; FLOOR_BLOCKS],
     slot: usize,
     block_seconds: f32,
@@ -381,6 +415,7 @@ struct LevelEngine {
 impl Default for LevelEngine {
     fn default() -> Self {
         Self {
+            warmup: 0.0,
             floor: [FLOOR_SEED_DB; FLOOR_BLOCKS],
             slot: 0,
             block_seconds: 0.0,
@@ -401,6 +436,12 @@ impl LevelEngine {
     /// duration, which makes the smoothing independent of buffer size.
     fn update(&mut self, peak: f32, clip_peak: f32, seconds: f32) -> MeterReading {
         let seconds = seconds.clamp(0.0, 1.0);
+
+        // The first buffers say more about the driver than about the room.
+        if self.warmup < WARMUP_SECONDS {
+            self.warmup += seconds;
+            return MeterReading::default();
+        }
 
         // The floor is a rolling minimum of block peaks, not a follower: a
         // minimum cannot be dragged upward by the speech it is measuring.
@@ -581,6 +622,23 @@ mod tests {
     }
 
     #[test]
+    fn the_meter_ignores_the_stream_start() {
+        let mut engine = LevelEngine::default();
+        // A full-scale burst for the first tenth of a second is a device
+        // settling, not an overload.
+        for _ in 0..5 {
+            assert_eq!(engine.update(1.0, 1.0, 0.02), MeterReading::default());
+        }
+        assert_eq!(engine.clip_seconds, 0.0);
+        assert_eq!(engine.floor_db, FLOOR_SEED_DB);
+
+        // Speech right afterwards reads normally and does not inherit a latch.
+        let speech = feed(&mut engine, -20.0, 0.3, 0.01);
+        assert!(!speech.clipping, "{speech:?}");
+        assert!(speech.level > 0.5, "{speech:?}");
+    }
+
+    #[test]
     fn the_meter_moves_with_speech_above_the_room() {
         let mut engine = LevelEngine::default();
         let silent = engine.update(0.0, 0.0, 0.01);
@@ -635,9 +693,10 @@ mod tests {
         feed(&mut engine, -30.0, 9.0, 0.01);
         assert!(engine.floor_db > -31.0, "{}", engine.floor_db);
 
-        // One quarter-second of a quiet room is enough to reset the reference
-        // downward; only upward movement waits for the old blocks to age out.
-        feed(&mut engine, -65.0, 0.3, 0.01);
+        // Downward movement needs one block, and a block that straddles the
+        // change still carries the loud part, so allow half a second. Only
+        // upward movement has to wait for the old blocks to age out.
+        feed(&mut engine, -65.0, 0.6, 0.01);
         assert!(engine.floor_db < -60.0, "{}", engine.floor_db);
     }
 
