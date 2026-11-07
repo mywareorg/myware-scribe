@@ -74,6 +74,8 @@ pub struct PipelineOptions {
     /// BCP-47-ish Whisper language code, or `None` for auto-detection.
     pub language: Option<String>,
     pub mode: PipelineMode,
+    /// Lift quiet recordings to a workable level before ASR and diarization.
+    pub normalize: bool,
     pub cancel: Option<Arc<AtomicBool>>,
 }
 
@@ -547,6 +549,7 @@ fn run_asr_pool(
     best_of: i32,
     audio_hash: Option<&String>,
     model_name: &str,
+    preprocess: &str,
     cancelled: &dyn Fn() -> bool,
     counters: &AsrCounters,
     mut on_result: impl FnMut(usize, Result<Vec<Segment>, String>),
@@ -581,6 +584,7 @@ fn run_asr_pool(
                         fast,
                         token_timestamps,
                         transcriber.prompt(),
+                        preprocess,
                     )
                 });
                 let result = match key.as_ref().and_then(|key| cache::read_segments(key)) {
@@ -972,7 +976,10 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
     let whisper = models::whisper_model(&opts.preset);
     // The salt carries the turn geometry as well as the model pair: a cached
     // single pass must not be served to a blockwise run.
-    let diarizer = diarize::cache_salt();
+    let preprocess = audio::preprocess_tag(opts.normalize);
+    // Normalized audio is different audio: the tag keeps its diarization turns
+    // and ASR clips out of the cache of a raw run, and vice versa.
+    let diarizer = format!("{}-{}", diarize::cache_salt(), preprocess);
     let diarized = opts.mode.diarizes();
 
     emit(Event::Stage {
@@ -1139,13 +1146,19 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
                 prefetched = Some(std::thread::spawn(move || audio::decode(&next)));
             }
         }
-        let (samples, rate) = match decoded {
+        let (mut samples, rate) = match decoded {
             Ok(value) => value,
             Err(message) => {
                 fail(emit, message);
                 continue;
             }
         };
+        if opts.normalize {
+            let gain = audio::normalize_loudness(&mut samples, rate);
+            if (gain - 1.0).abs() > 0.01 {
+                crate::logging::info(format!("loudness: gain {gain:.2}x"));
+            }
+        }
         let duration = samples.len() as f64 / rate as f64;
         let checkpoint = checkpoint_path(&input);
         let checkpoint_hours = duration >= 3600.0;
@@ -1392,6 +1405,7 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
                 best_of,
                 audio_hash.as_ref(),
                 &model_name,
+                preprocess,
                 &is_cancelled,
                 &counters,
                 |index, result| {
@@ -1609,6 +1623,7 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
                     best_of,
                     audio_hash.as_ref(),
                     &model_name,
+                    preprocess,
                     &is_cancelled,
                     &counters,
                     |index, result| {

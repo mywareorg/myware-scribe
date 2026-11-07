@@ -30,6 +30,9 @@ pub fn run(args: &[String]) -> i32 {
     // Every preset is multilingual, so default to Whisper's detection;
     // `--language <code>` pins one.
     let mut language: Option<String> = None;
+    // Off by default in scripts: a CLI user asking for exactly what is in the
+    // file should get exactly that. The GUI turns it on.
+    let mut normalize = false;
 
     let mut i = 0;
     while i < args.len() {
@@ -57,6 +60,8 @@ pub fn run(args: &[String]) -> i32 {
             "--asr-only" => mode = PipelineMode::AsrOnly,
             "--diarize-only" => diarize_only = true,
             "--no-cache" => cache = false,
+            "--normalize" => normalize = true,
+            "--no-normalize" => normalize = false,
             "--language" => {
                 i += 1;
                 let value = args.get(i).map(|value| value.trim()).unwrap_or("");
@@ -90,7 +95,7 @@ pub fn run(args: &[String]) -> i32 {
         return 2;
     }
     if inputs.is_empty() {
-        eprintln!("usage: hippo-transcribe --cli <audio>... [--preset speed|balanced|accuracy] [--language <code>] [--asr-only] [--progress-json]");
+        eprintln!("usage: hippo-transcribe --cli <audio>... [--preset speed|balanced|accuracy] [--language <code>] [--asr-only] [--progress-json] [--normalize]");
         return 2;
     }
 
@@ -147,6 +152,7 @@ pub fn run(args: &[String]) -> i32 {
         cache,
         language,
         mode,
+        normalize,
         cancel: None,
     };
 

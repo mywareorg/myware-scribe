@@ -240,9 +240,18 @@ pub type CompletedDetails = (Option<Vec<Turn>>, Option<(f64, Vec<f32>)>);
 /// restored at startup has the file, not the samples. The pipeline writes the
 /// turns under both keys for that reason (see `cache_keys` in
 /// `core/src/pipeline.rs`).
-pub fn load_turns(path: &Path, num_speakers: Option<i32>) -> Option<Vec<Turn>> {
-    // Same salt the pipeline writes with: model pair *and* turn geometry.
-    let diarizer = hippo_transcribe_core::diarize::cache_salt();
+pub fn load_turns(
+    path: &Path,
+    num_speakers: Option<i32>,
+    normalize: bool,
+) -> Option<Vec<Turn>> {
+    // Same salt the pipeline writes with: model pair, turn geometry, and the
+    // preprocessing that produced the audio.
+    let diarizer = format!(
+        "{}-{}",
+        hippo_transcribe_core::diarize::cache_salt(),
+        hippo_transcribe_core::audio::preprocess_tag(normalize)
+    );
     hippo_transcribe_core::cache::key(path, &diarizer, num_speakers)
         .and_then(|key| hippo_transcribe_core::cache::read(&key))
 }
@@ -253,8 +262,9 @@ pub fn load_completed(
     path: PathBuf,
     num_speakers: Option<i32>,
     buckets: usize,
+    normalize: bool,
 ) -> CompletedDetails {
-    let turns = load_turns(&path, num_speakers);
+    let turns = load_turns(&path, num_speakers, normalize);
     let probe = hippo_transcribe_core::audio::waveform(&path, buckets).ok();
     (turns, probe)
 }
@@ -297,6 +307,8 @@ pub fn spawn(
     cache: bool,
     // False runs ASR only: no diarization, no speaker labels.
     diarized: bool,
+    // Lift quiet recordings before ASR and diarization.
+    normalize: bool,
     events: Arc<Mutex<VecDeque<Event>>>,
     pid: Arc<AtomicU32>,
     cancelled: Arc<AtomicBool>,
@@ -338,6 +350,11 @@ pub fn spawn(
         if !diarized {
             command.arg("--asr-only");
         }
+        command.arg(if normalize {
+            "--normalize"
+        } else {
+            "--no-normalize"
+        });
         if let Some(language) = &language {
             command.arg("--language").arg(language);
         }

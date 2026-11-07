@@ -597,6 +597,9 @@ struct Settings {
     /// "Don't show these tips again".
     #[serde(default = "editing_tips_default")]
     editing_tips: bool,
+    /// Lift quiet recordings before ASR and diarization.
+    #[serde(default = "normalize_default")]
+    normalize: bool,
     #[serde(default)]
     gpu_profiles: HashMap<String, GpuProfile>,
     font_scale: Option<f32>,
@@ -631,6 +634,10 @@ fn editing_tips_default() -> bool {
     true
 }
 
+fn normalize_default() -> bool {
+    true
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Self {
@@ -642,6 +649,7 @@ impl Default for Settings {
             show_timestamps: true,
             notifications: true,
             editing_tips: true,
+            normalize: true,
             gpu_profiles: HashMap::new(),
             font_scale: None,
             playback_speed: None,
@@ -900,6 +908,7 @@ pub enum Message {
     StartRecording,
     StopRecording,
     InputDeviceChanged(String),
+    NormalizeToggled(bool),
     OpenBriefing,
     CloseBriefing,
     RetryBriefing,
@@ -1170,6 +1179,8 @@ pub struct App {
     input_device: Option<String>,
     /// Capture in progress, if any.
     recording: Option<crate::recording::Recorder>,
+    /// Lift quiet recordings before transcription.
+    normalize: bool,
     /// The briefing dialog: absent when closed.
     briefing: Option<BriefingState>,
     /// Word times for the line under the playhead, for karaoke highlighting.
@@ -1472,6 +1483,7 @@ impl App {
             player: None,
             output_txt: None,
             input_device: settings.input_device.clone(),
+            normalize: settings.normalize,
             recording: None,
             briefing: None,
             karaoke_line: None,
@@ -1718,6 +1730,7 @@ impl App {
             input_device: self.input_device.clone(),
             notifications: self.notifications,
             editing_tips: self.editing_tips,
+            normalize: self.normalize,
             gpu_profiles: self.gpu_profiles.clone(),
             show_timestamps: self.show_timestamps,
             font_scale: Some(self.font_scale),
@@ -2254,14 +2267,22 @@ impl App {
                 .and_then(|stats| stats.num_speakers);
             if needs_probe {
                 tasks.push(Task::perform(
-                    async move { backend::load_completed(audio, num_speakers, TIMELINE_BUCKETS) },
+                    {
+                        let normalize = self.normalize;
+                        async move {
+                            backend::load_completed(audio, num_speakers, TIMELINE_BUCKETS, normalize)
+                        }
+                    },
                     move |(turns, probe)| {
                         Message::ViewDetailsLoaded(index, source.clone(), turns, probe)
                     },
                 ));
             } else if needs_turns {
                 tasks.push(Task::perform(
-                    async move { backend::load_turns(&audio, num_speakers) },
+                    {
+                        let normalize = self.normalize;
+                        async move { backend::load_turns(&audio, num_speakers, normalize) }
+                    },
                     move |turns| Message::ViewDetailsLoaded(index, source.clone(), turns, None),
                 ));
             }
@@ -3160,6 +3181,11 @@ impl App {
             }
             Message::NotificationsToggled(value) => {
                 self.notifications = value;
+                self.save_settings();
+                Task::none()
+            }
+            Message::NormalizeToggled(value) => {
+                self.normalize = value;
                 self.save_settings();
                 Task::none()
             }
@@ -4471,6 +4497,7 @@ impl App {
             Message::TranscriptsFound(single, hits) => {
                 // Reading the transcript and re-deriving the turns/waveform is
                 // per file, so one slow probe cannot hold up the others.
+                let normalize = self.normalize;
                 Task::batch(hits.into_iter().map(move |hit| {
                     Task::perform(
                         async move {
@@ -4479,7 +4506,12 @@ impl App {
                                 return None;
                             }
                             let (turns, probe) =
-                                backend::load_completed(hit.audio.clone(), None, TIMELINE_BUCKETS);
+                                backend::load_completed(
+                                    hit.audio.clone(),
+                                    None,
+                                    TIMELINE_BUCKETS,
+                                    normalize,
+                                );
                             let (duration, peaks) = match probe {
                                 Some((duration, peaks)) => (Some(duration), peaks),
                                 None => (None, Vec::new()),
@@ -6008,6 +6040,7 @@ impl App {
             use_gpu,
             true, // diarization cache is always on
             self.pipelines_diarize(),
+            self.normalize,
             self.events.clone(),
             self.pid.clone(),
             self.cancelled.clone(),
@@ -11832,6 +11865,12 @@ impl App {
                 Message::TimestampsToggled(!timestamps_on),
             ),
         );
+        let normalize_on = self.normalize;
+        let normalize = settings_control(toggle_button(
+            if normalize_on { "On" } else { "Off" },
+            normalize_on,
+            Message::NormalizeToggled(!normalize_on),
+        ));
         let mut inputs = vec![SYSTEM_DEFAULT_DEVICE.to_string()];
         inputs.extend(crate::recording::input_devices());
         let current_mic = self
@@ -11965,6 +12004,7 @@ impl App {
         body = body.push(settings_row("Speakers", speakers, scheme));
         body = body.push(settings_row("Language", language, scheme));
         body = body.push(settings_row("Show timestamps", timestamps, scheme));
+        body = body.push(settings_row("Normalize loudness", normalize, scheme));
         body = body.push(settings_divider(scheme));
         if self.can(license::Feature::Playback) {
             body = body.push(settings_section_label("Playback", scheme));
@@ -19093,6 +19133,21 @@ mod tests {
             14.0
         )
         .is_none());
+    }
+
+    #[test]
+    fn loudness_normalization_is_remembered() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("normalize-config");
+
+        let mut app = pro_app();
+        assert!(app.normalize, "on by default");
+        let _ = app.update(Message::NormalizeToggled(false));
+        assert!(!app.normalize);
+        assert!(!App::load_settings().normalize);
+
+        let reloaded = App::new();
+        assert!(!reloaded.normalize);
     }
 
     #[test]

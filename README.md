@@ -291,7 +291,8 @@ Dark, System; System follows the desktop and is the default) and the header
 theme button cycles them. Files added while a run is active join the queue and
 are processed in a follow-up pass automatically. The gear button (or `Ctrl+,`)
 opens Settings for transcript text size, preset, speaker count, language,
-playback speed, follow mode, notifications, save location, and model storage.
+loudness normalization, playback speed, follow mode, notifications, save
+location, and model storage.
 
 **File → Briefing** (Pro) reads the finished transcript and writes an overview,
 key points, decisions and action items, each citing the transcript lines it came

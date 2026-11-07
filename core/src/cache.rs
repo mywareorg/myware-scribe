@@ -111,6 +111,7 @@ pub fn clip_key(
     fast: bool,
     token_timestamps: bool,
     prompt: Option<&str>,
+    preprocess: &str,
 ) -> String {
     let mut hasher = Sha256::new();
     hasher.update(audio_hash.as_bytes());
@@ -121,6 +122,7 @@ pub fn clip_key(
     hasher.update(best_of.to_string().as_bytes());
     hasher.update([fast as u8]);
     hasher.update([token_timestamps as u8]);
+    hasher.update(preprocess.as_bytes());
     // Only a non-empty prompt changes the decode, so a run without one keeps
     // hitting the clips cached before the vocabulary existed.
     if let Some(prompt) = prompt.map(str::trim).filter(|prompt| !prompt.is_empty()) {
@@ -185,4 +187,16 @@ mod tests {
         assert_ne!(key, key_from_hash("abd", "model-x", Some(2)));
         assert_ne!(key, key_from_hash("abc", "model-x", None));
     }
+
+    #[test]
+    fn preprocessing_changes_the_clip_key() {
+        let base = |preprocess| {
+            clip_key(
+                "hash", "model", Some("en"), 0, 10, 1, false, false, None, preprocess,
+            )
+        };
+        assert_ne!(base("norm-v1"), base("raw-v1"));
+        assert_eq!(base("norm-v1"), base("norm-v1"));
+    }
+
 }
