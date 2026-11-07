@@ -3041,17 +3041,21 @@ impl App {
     /// The Pro paywall / license dialog.
     fn paywall_dialog<'a>(&'a self, scheme: &Scheme) -> Element<'a, Message> {
         let scheme = *scheme;
-        let price = self
-            .provider
-            .price()
-            .unwrap_or_else(|| license::FALLBACK_PRICE.to_string());
-        let mut body = column![
-            text("Hippo Transcribe Pro").size(20),
-            text(format!("{price} once \u{00b7} lifetime license"))
-                .size(theme::TEXT_SM)
-                .color(scheme.muted),
-        ]
-        .spacing(10);
+        let mut body = column![text("Hippo Transcribe Pro").size(20)];
+        // The preview build has no store client, so it must not advertise a
+        // price or a purchase it cannot complete.
+        if self.provider.name() != "none" {
+            let price = self
+                .provider
+                .price()
+                .unwrap_or_else(|| license::FALLBACK_PRICE.to_string());
+            body = body.push(
+                text(format!("{price} once \u{00b7} lifetime license"))
+                    .size(theme::TEXT_SM)
+                    .color(scheme.muted),
+            );
+        }
+        body = body.spacing(10);
 
         for feature in license::Feature::ALL {
             body = body.push(
