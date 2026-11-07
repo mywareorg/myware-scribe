@@ -9383,48 +9383,39 @@ impl App {
             .into()
         };
 
-        let controls = row![
-            button(
-                container(text(self.transcribe_label()))
-                    .center_x(Length::Fill)
-                    .center_y(Length::Fill),
-            )
-            .width(Length::Fill)
-            .height(Length::Fixed(30.0))
-            // The options live in the dialog this opens; starting is the
-            // dialog's job, so nothing is launched by the first press.
-            .on_press_maybe(can_start.then_some(Message::OpenRunSetup))
-            // Dark mode fills read better with a white label; light mode
-            // keeps the dark ink it has always used.
-            .style(color_button_outlined(
-                scheme.green,
-                if theme::is_dark_scheme(&scheme) {
-                    Color::WHITE
-                } else {
-                    scheme.on_accent
-                },
-                scheme,
-            )),
-            button(
-                container(text("Cancel"))
-                    .center_x(Length::Fill)
-                    .center_y(Length::Fill),
-            )
-            .width(Length::Fill)
-            .height(Length::Fixed(30.0))
-            .on_press_maybe(running.then_some(Message::Cancel))
-            .style(color_button_outlined(
-                scheme.danger,
-                if theme::is_dark_scheme(&scheme) {
-                    Color::WHITE
-                } else {
-                    scheme.on_accent
-                },
-                scheme,
-            )),
-        ]
-        .spacing(8)
-        .align_y(iced::Alignment::Center);
+        // One button for the whole run: start/retry while idle, stop while a
+        // run is in flight.
+        let primary_label = if running {
+            "Cancel"
+        } else {
+            self.transcribe_label()
+        };
+        let primary_message = if running {
+            Some(Message::Cancel)
+        } else {
+            can_start.then_some(Message::OpenRunSetup)
+        };
+        let controls = button(
+            container(text(primary_label))
+                .center_x(Length::Fill)
+                .center_y(Length::Fill),
+        )
+        .width(Length::Fill)
+        .height(Length::Fixed(30.0))
+        // The options live in the dialog this opens; starting is the dialog's
+        // job, so nothing is launched by the first press.
+        .on_press_maybe(primary_message)
+        // Dark mode fills read better with a white label; light mode keeps the
+        // dark ink it has always used.
+        .style(color_button_outlined(
+            if running { scheme.danger } else { scheme.green },
+            if theme::is_dark_scheme(&scheme) {
+                Color::WHITE
+            } else {
+                scheme.on_accent
+            },
+            scheme,
+        ));
 
         let mut content = column![toolbar];
         content = content.push(body);
