@@ -79,7 +79,7 @@ impl AudioStream {
             .map(|(base, frames)| base.calc_time(frames))
             .map(Duration::from);
 
-        let mut decoder = symphonia::default::get_codecs()
+        let mut decoder = crate::codec::registry()
             .make(&params, &DecoderOptions::default())
             .map_err(|e| format!("decoder: {e}"))?;
 

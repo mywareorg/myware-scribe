@@ -57,7 +57,7 @@ pub fn decode_with_progress(
         .ok_or_else(|| "no audio track".to_string())?;
     let track_id = track.id;
 
-    let mut decoder = symphonia::default::get_codecs()
+    let mut decoder = crate::codec::registry()
         .make(&track.codec_params, &DecoderOptions::default())
         .map_err(|e| format!("decoder: {e}"))?;
 
@@ -205,7 +205,7 @@ pub fn waveform(path: &Path, buckets: usize) -> Result<(f64, Vec<f32>), String> 
         .ok_or_else(|| "no audio track".to_string())?;
     let track_id = track.id;
 
-    let mut decoder = symphonia::default::get_codecs()
+    let mut decoder = crate::codec::registry()
         .make(&track.codec_params, &DecoderOptions::default())
         .map_err(|e| format!("decoder: {e}"))?;
 

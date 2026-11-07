@@ -4,6 +4,7 @@ pub mod asr;
 pub mod audio;
 pub mod benchmark;
 pub mod cache;
+pub mod codec;
 pub mod cli;
 pub mod diarize;
 pub mod download;
