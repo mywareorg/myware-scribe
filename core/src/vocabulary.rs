@@ -100,10 +100,16 @@ impl Vocabulary {
     }
 
     /// The decoder prompt, or `None` when there are no terms.
+    pub fn prompt(&self, budget: usize) -> Option<String> {
+        self.prompt_with_dropped(budget).0
+    }
+
+    /// The decoder prompt and how many terms did not fit.
     ///
     /// Terms past `budget` bytes are dropped rather than truncated, so the
-    /// prompt never ends mid-word.
-    pub fn prompt(&self, budget: usize) -> Option<String> {
+    /// prompt never ends mid-word. The count lets the editor say so instead of
+    /// silently ignoring part of the list.
+    pub fn prompt_with_dropped(&self, budget: usize) -> (Option<String>, usize) {
         let mut terms: Vec<&str> = Vec::new();
         for term in &self.terms {
             let term = term.trim();
@@ -115,24 +121,27 @@ impl Vocabulary {
             }
         }
         if terms.is_empty() {
-            return None;
+            return (None, 0);
         }
 
         let mut prompt = String::from("Names and terms that may appear: ");
-        for term in terms {
+        let mut kept = 0usize;
+        for term in &terms {
             let separator = if prompt.ends_with(": ") { 0 } else { 2 };
             if prompt.len() + separator + term.len() > budget {
-                break;
+                continue;
             }
             if separator == 2 {
                 prompt.push_str(", ");
             }
             prompt.push_str(term);
+            kept += 1;
         }
+        let dropped = terms.len() - kept;
         if prompt.ends_with(": ") {
-            None
+            (None, dropped)
         } else {
-            Some(prompt)
+            (Some(prompt), dropped)
         }
     }
 
@@ -159,50 +168,61 @@ impl Vocabulary {
         out
     }
 
-    /// Build from the two dialog fields.
+    /// Build from the two dialog fields, dropping malformed pairs.
     ///
-    /// Terms are separated by commas or newlines. Replacements are `wrong =
-    /// right` pairs, separated the same way.
+    /// Kept for callers that only need the result; the editor uses
+    /// [`Self::parse_fields`] so it can report what was dropped.
     pub fn from_fields(terms: &str, replacements: &str) -> Self {
-        let terms = terms
-            .split([',', '\n'])
-            .map(str::trim)
-            .filter(|term| !term.is_empty())
-            .map(str::to_string)
-            .collect();
-
-        let replacements = replacements
-            .split(['\n', ','])
-            .filter_map(|pair| {
-                let (from, to) = pair.split_once('=')?;
-                let from = from.trim();
-                if from.is_empty() {
-                    return None;
-                }
-                Some(Replacement {
-                    from: from.to_string(),
-                    to: to.trim().to_string(),
-                })
-            })
-            .collect();
-
-        Self {
-            terms,
-            replacements,
-        }
+        Self::parse_fields(terms, replacements).0
     }
 
-    /// The dialog's two fields, in the shape [`Self::from_fields`] reads.
+    /// Build from the two dialog fields, reporting malformed replacements.
+    ///
+    /// A field with newlines is split per line, so a comma inside a replacement
+    /// value survives; a single-line field is split on commas for the one-line
+    /// case. Each replacement must be `heard = shown`.
+    pub fn parse_fields(terms: &str, replacements: &str) -> (Self, Vec<String>) {
+        let terms = split_entries(terms)
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+
+        let mut pairs = Vec::new();
+        let mut bad = Vec::new();
+        for chunk in split_entries(replacements) {
+            match chunk.split_once('=') {
+                Some((from, to)) if !from.trim().is_empty() => pairs.push(Replacement {
+                    from: from.trim().to_string(),
+                    to: to.trim().to_string(),
+                }),
+                _ => bad.push(chunk.to_string()),
+            }
+        }
+
+        (Self { terms, replacements: pairs }, bad)
+    }
+
+    /// The dialog's two fields, one entry per line.
     pub fn to_fields(&self) -> (String, String) {
-        let terms = self.terms.join(", ");
+        let terms = self.terms.join("\n");
         let replacements = self
             .replacements
             .iter()
             .map(|pair| format!("{} = {}", pair.from, pair.to))
             .collect::<Vec<_>>()
-            .join(", ");
+            .join("\n");
         (terms, replacements)
     }
+}
+
+/// Split a field into entries: per line when it has newlines, otherwise on
+/// commas.
+fn split_entries(text: &str) -> impl Iterator<Item = &str> {
+    let parts: Vec<&str> = if text.contains('\n') {
+        text.lines().collect()
+    } else {
+        text.split(',').collect()
+    };
+    parts.into_iter().map(str::trim).filter(|part| !part.is_empty())
 }
 
 /// Replace every whole-word, ASCII-case-insensitive occurrence of `needle`.
@@ -333,14 +353,35 @@ mod tests {
     #[test]
     fn fields_round_trip() {
         let vocab = Vocabulary::from_fields(
-            "Kubernetes, Siobhán\nACME",
-            "pie torch = PyTorch, acme = ACME Corp",
+            "Kubernetes\nSiobhán\nACME",
+            "pie torch = PyTorch\nacme = ACME Corp",
         );
         assert_eq!(vocab.terms, vec!["Kubernetes", "Siobhán", "ACME"]);
         assert_eq!(vocab.replacements.len(), 2);
         assert_eq!(vocab.replacements[1].to, "ACME Corp");
         let (terms, replacements) = vocab.to_fields();
         assert_eq!(Vocabulary::from_fields(&terms, &replacements), vocab);
+    }
+
+    #[test]
+    fn malformed_replacements_are_reported() {
+        let (vocab, bad) = Vocabulary::parse_fields("ACME", "pie torch = PyTorch\nacme corp\n= nope");
+        assert_eq!(vocab.replacements.len(), 1);
+        assert_eq!(bad, vec!["acme corp", "= nope"]);
+    }
+
+    #[test]
+    fn a_newline_keeps_a_comma_inside_a_value() {
+        let (vocab, bad) = Vocabulary::parse_fields("", "hello, world = Hello, world\n");
+        assert!(bad.is_empty());
+        assert_eq!(vocab.apply("hello, world"), "Hello, world");
+    }
+
+    #[test]
+    fn dropped_terms_are_counted() {
+        let vocab = vocabulary(&["Kubernetes", "a-very-long-product-name", "ACME"], &[]);
+        let (_, dropped) = vocab.prompt_with_dropped("Names and terms that may appear: Kubernetes, a-very-long-product-name, ".len());
+        assert_eq!(dropped, 1);
     }
 
     #[test]

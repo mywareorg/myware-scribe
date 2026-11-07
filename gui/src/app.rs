@@ -834,8 +834,8 @@ pub enum Message {
     /// Open the custom-vocabulary editor, from Edit or from Help.
     OpenVocabulary,
     CloseVocabulary,
-    VocabTermsChanged(String),
-    VocabReplacementsChanged(String),
+    VocabTermsAction(text_editor::Action),
+    VocabReplacementsAction(text_editor::Action),
     SaveVocabulary,
     EditLine(usize),
     FlipLineSpeaker(usize),
@@ -1105,8 +1105,8 @@ pub struct App {
     /// The custom-vocabulary editor: the two fields as typed, and whether the
     /// dialog is up.
     vocabulary_open: bool,
-    vocab_terms: String,
-    vocab_replacements: String,
+    vocab_terms: text_editor::Content,
+    vocab_replacements: text_editor::Content,
     rename_focus: usize,
     sms_mode: bool,
     /// The player's waveform, speaker ribbon and legend are hidden. The
@@ -1395,8 +1395,8 @@ impl App {
             rename_open: false,
             rename_fields: Vec::new(),
             vocabulary_open: false,
-            vocab_terms: String::new(),
-            vocab_replacements: String::new(),
+            vocab_terms: text_editor::Content::with_text(""),
+            vocab_replacements: text_editor::Content::with_text(""),
             rename_focus: 0,
             sms_mode: settings.sms_mode.unwrap_or(false),
             player_collapsed: false,
@@ -3718,6 +3718,16 @@ impl App {
                 Task::none()
             }
             Message::RenameMove(forward) => {
+                // Tab in the vocabulary editor walks the dialog's focusables;
+                // text_editor has no id in iced 0.13, so the field order is the
+                // widget order.
+                if self.vocabulary_open {
+                    return if forward {
+                        iced::widget::focus_next::<Message>()
+                    } else {
+                        iced::widget::focus_previous::<Message>()
+                    };
+                }
                 if !self.rename_open || self.rename_fields.is_empty() {
                     return Task::none();
                 }
@@ -4455,28 +4465,41 @@ impl App {
             Message::OpenVocabulary => {
                 self.header_menu = None;
                 self.commit_inline_edit(false);
-                self.open_vocabulary();
-                Task::none()
+                self.open_vocabulary()
             }
             Message::CloseVocabulary => {
                 self.vocabulary_open = false;
                 Task::none()
             }
-            Message::VocabTermsChanged(value) => {
-                self.vocab_terms = value;
+            Message::VocabTermsAction(action) => {
+                self.vocab_terms.perform(action);
                 Task::none()
             }
-            Message::VocabReplacementsChanged(value) => {
-                self.vocab_replacements = value;
+            Message::VocabReplacementsAction(action) => {
+                self.vocab_replacements.perform(action);
                 Task::none()
             }
             Message::SaveVocabulary => {
-                let vocabulary =
-                    Vocabulary::from_fields(&self.vocab_terms, &self.vocab_replacements);
+                let (vocabulary, bad) = Vocabulary::parse_fields(
+                    &self.vocab_terms.text(),
+                    &self.vocab_replacements.text(),
+                );
+                if !bad.is_empty() {
+                    // The dialog shows the same complaint inline; keep it open
+                    // rather than silently dropping what could not be parsed.
+                    self.toast = Some((
+                        format!("Not saved: {} needs heard = shown", bad.join(", ")),
+                        Instant::now(),
+                    ));
+                    return Task::none();
+                }
                 self.vocabulary_open = false;
                 match vocabulary.save() {
                     Ok(()) => {
-                        self.toast = Some(("Vocabulary saved".to_string(), Instant::now()));
+                        self.toast = Some((
+                            "Vocabulary saved for the next run".to_string(),
+                            Instant::now(),
+                        ));
                     }
                     Err(error) => {
                         self.toast = Some((
@@ -4713,7 +4736,12 @@ impl App {
                 Task::none()
             }
             Message::Start => {
-                if !self.settings_open && self.calibration.is_none() {
+                // Cmd/Ctrl+Enter is Save while the vocabulary editor owns the
+                // screen; starting a run behind the scrim would be a surprise.
+                if self.vocabulary_open {
+                    return self.update(Message::SaveVocabulary);
+                }
+                if !self.popup_open() && self.calibration.is_none() {
                     self.run_setup_open = false;
                     self.start();
                 }
@@ -5037,12 +5065,15 @@ impl App {
     ///
     /// Offered from Edit (it changes transcript text) and from Help (it is a
     /// reference control users look for there).
-    fn open_vocabulary(&mut self) {
+    fn open_vocabulary(&mut self) -> Task<Message> {
         let (terms, replacements) = Vocabulary::load().to_fields();
-        self.vocab_terms = terms;
-        self.vocab_replacements = replacements;
+        self.vocab_terms = text_editor::Content::with_text(&terms);
+        self.vocab_replacements = text_editor::Content::with_text(&replacements);
         self.vocabulary_open = true;
         self.toast = None;
+        // The terms field is the first focusable widget once the transcript
+        // editor has been committed, so this lands on it.
+        iced::advanced::widget::operate(focus_first::<Message>())
     }
 
     /// Rewrite the live transcript text and its file from the live lines.
@@ -9346,6 +9377,13 @@ impl App {
                         action: rename_message,
                     },
                     MenuRow {
+                        label: "Vocabulary",
+                        key: None,
+                        checked: false,
+                        enabled: true,
+                        action: Some(Message::OpenVocabulary),
+                    },
+                    MenuRow {
                         label: "Copy",
                         key: None,
                         checked: false,
@@ -9358,13 +9396,6 @@ impl App {
                         checked: false,
                         enabled: reset,
                         action: reset.then_some(Message::RequestResetTranscript),
-                    },
-                    MenuRow {
-                        label: "Vocabulary",
-                        key: None,
-                        checked: false,
-                        enabled: true,
-                        action: Some(Message::OpenVocabulary),
                     },
                 ],
                 footer: None,
@@ -9487,18 +9518,18 @@ impl App {
                 action: Some(Message::HelpChoice(HelpKind::EditingTips)),
             },
             MenuRow {
+                label: "Vocabulary",
+                key: None,
+                checked: false,
+                enabled: true,
+                action: Some(Message::OpenVocabulary),
+            },
+            MenuRow {
                 label: "Console",
                 key: None,
                 checked: self.console_open,
                 enabled: true,
                 action: Some(Message::HelpChoice(HelpKind::Console)),
-            },
-            MenuRow {
-                label: "Custom Vocabulary",
-                key: None,
-                checked: false,
-                enabled: true,
-                action: Some(Message::OpenVocabulary),
             },
             MenuRow {
                 label: "Settings",
@@ -10769,50 +10800,92 @@ impl App {
 
     fn vocabulary_dialog(&self, scheme: &Scheme) -> Element<'_, Message> {
         let scheme = *scheme;
-        let hint = text(
-            "Terms give the decoder a hint about names, jargon and acronyms. \
-             Replacements fix words it gets wrong: write them as wrong = right.",
-        )
-        .size(theme::TEXT_XS)
-        .color(scheme.muted);
-        let fields = column![
-            text("Custom Vocabulary").size(20),
-            hint,
-            text("Terms, comma separated")
+        let (parsed, bad) = Vocabulary::parse_fields(
+            &self.vocab_terms.text(),
+            &self.vocab_replacements.text(),
+        );
+        let (_, dropped) =
+            parsed.prompt_with_dropped(hippo_transcribe_core::vocabulary::PROMPT_BUDGET);
+        let can_save = bad.is_empty();
+
+        let terms = column![
+            text("Terms").size(theme::TEXT_SM).color(scheme.text),
+            text("Names, acronyms and jargon. One per line.")
                 .size(theme::TEXT_XS)
                 .color(scheme.muted),
-            text_input("Kubernetes, Siobhán, ACME Corp", &self.vocab_terms)
-                .on_input(Message::VocabTermsChanged)
-                .on_submit(Message::SaveVocabulary)
-                .style(pill_input)
-                .width(Length::Fill),
-            text("Replacements, comma separated")
-                .size(theme::TEXT_XS)
-                .color(scheme.muted),
-            text_input(
-                "pie torch = PyTorch, acme = ACME Corp",
-                &self.vocab_replacements,
-            )
-            .on_input(Message::VocabReplacementsChanged)
-            .on_submit(Message::SaveVocabulary)
-            .style(pill_input)
-            .width(Length::Fill),
-            container(
-                row![
-                    action_text("Save")
-                        .on_press(Message::SaveVocabulary)
-                        .style(color_button(scheme.blue, scheme.on_accent)),
-                    action_text("Cancel")
-                        .on_press(Message::CloseVocabulary)
-                        .style(pill_button_secondary),
-                ]
-                .spacing(8),
-            )
-            .width(Length::Fill)
-            .align_x(iced::Alignment::End),
+            vocabulary_field(
+                &self.vocab_terms,
+                "Kubernetes\nSiobhán\nACME Corp",
+                Message::VocabTermsAction,
+                scheme,
+            ),
         ]
-        .spacing(8);
-        modal_card(fields, 480.0, scheme)
+        .spacing(theme::SPACE_XS);
+
+        let replacements = column![
+            text("Replacements").size(theme::TEXT_SM).color(scheme.text),
+            text("One per line, as heard = shown. Whole words, any case.")
+                .size(theme::TEXT_XS)
+                .color(scheme.muted),
+            vocabulary_field(
+                &self.vocab_replacements,
+                "pie torch = PyTorch\nacme = ACME Corp",
+                Message::VocabReplacementsAction,
+                scheme,
+            ),
+        ]
+        .spacing(theme::SPACE_XS);
+
+        let mut body = column![
+            text("Custom Vocabulary").size(20),
+            terms,
+            replacements,
+        ]
+        .spacing(theme::SPACE_XL);
+
+        if !bad.is_empty() {
+            body = body.push(
+                text(format!(
+                    "Not saved: {} — needs heard = shown",
+                    bad.join(", ")
+                ))
+                .size(theme::TEXT_XS)
+                .color(scheme.danger),
+            );
+        }
+        if dropped > 0 {
+            body = body.push(
+                text(format!(
+                    "{dropped} term{} skipped — the decoder hint is full.",
+                    if dropped == 1 { "" } else { "s" }
+                ))
+                .size(theme::TEXT_XS)
+                .color(scheme.muted),
+            );
+        }
+        body = body
+            .push(
+                text("Used on the next run. Transcripts already on screen are not changed.")
+                    .size(theme::TEXT_XS)
+                    .color(scheme.muted),
+            )
+            .push(
+                container(
+                    row![
+                        action_text("Save")
+                            .on_press_maybe(can_save.then_some(Message::SaveVocabulary))
+                            .style(color_button(scheme.blue, scheme.on_accent)),
+                        action_text("Cancel")
+                            .on_press(Message::CloseVocabulary)
+                            .style(pill_button_secondary),
+                    ]
+                    .spacing(theme::SPACE_MD),
+                )
+                .width(Length::Fill)
+                .align_x(iced::Alignment::End),
+            );
+
+        modal_card(body, 460.0, scheme)
     }
 
     fn settings_dialog(&self, scheme: &Scheme) -> Element<'_, Message> {
@@ -13630,6 +13703,58 @@ fn empty_line_element(
 /// fill and border, while the text stays the transcript's ink at the
 /// transcript's size.
 fn line_editor_style(
+    scheme: Scheme,
+) -> impl Fn(&iced::Theme, text_editor::Status) -> text_editor::Style {
+    move |_theme, _status| text_editor::Style {
+        background: Color::TRANSPARENT.into(),
+        border: iced::border::Border {
+            color: Color::TRANSPARENT,
+            width: 0.0,
+            radius: 0.0.into(),
+        },
+        icon: scheme.muted,
+        placeholder: scheme.muted,
+        value: scheme.ink,
+        selection: Color {
+            a: 0.35,
+            ..scheme.blue
+        },
+    }
+}
+
+/// A multi-line vocabulary field: one entry per line, in a well like the
+/// transcript's line editor so it reads as an input rather than a paragraph.
+fn vocabulary_field<'a>(
+    content: &'a text_editor::Content,
+    placeholder: &'a str,
+    on_action: impl Fn(text_editor::Action) -> Message + 'a,
+    scheme: Scheme,
+) -> Element<'a, Message> {
+    let field = text_editor(content)
+        .on_action(on_action)
+        .placeholder(placeholder)
+        .size(theme::TEXT_MD)
+        .line_height(iced::advanced::text::LineHeight::Relative(LINE_HEIGHT_FACTOR))
+        .wrapping(iced::widget::text::Wrapping::Word)
+        .padding(6)
+        .height(Length::Fixed(96.0))
+        .style(vocabulary_editor_style(scheme));
+    container(field)
+        .width(Length::Fill)
+        .style(move |_theme| container::Style {
+            background: Some(scheme.field_bg.into()),
+            border: iced::border::Border {
+                color: scheme.border,
+                width: 1.0,
+                radius: 6.0.into(),
+            },
+            ..container::Style::default()
+        })
+        .into()
+}
+
+/// The vocabulary field's inner editor: the well is drawn by its container.
+fn vocabulary_editor_style(
     scheme: Scheme,
 ) -> impl Fn(&iced::Theme, text_editor::Status) -> text_editor::Style {
     move |_theme, _status| text_editor::Style {
@@ -17404,7 +17529,9 @@ mod tests {
             Modal::Help => app.help_open = Some(HelpKind::About),
             Modal::RunSetup => app.run_setup_open = true,
             Modal::Rename => app.rename_open = true,
-            Modal::Vocabulary => app.open_vocabulary(),
+            Modal::Vocabulary => {
+                let _ = app.open_vocabulary();
+            }
         }
     }
 
@@ -17916,12 +18043,10 @@ mod tests {
         // Both the Edit and the Help menu send this message.
         let _ = app.update(Message::OpenVocabulary);
         assert_eq!(app.open_modal(), Some(Modal::Vocabulary));
-        assert!(app.vocab_terms.is_empty());
+        assert!(app.vocab_terms.text().trim().is_empty());
 
-        let _ = app.update(Message::VocabTermsChanged("Kubernetes, ACME".to_string()));
-        let _ = app.update(Message::VocabReplacementsChanged(
-            "pie torch = PyTorch".to_string(),
-        ));
+        app.vocab_terms = text_editor::Content::with_text("Kubernetes\nACME");
+        app.vocab_replacements = text_editor::Content::with_text("pie torch = PyTorch");
         let _ = app.update(Message::SaveVocabulary);
         assert_eq!(app.open_modal(), None);
 
@@ -17932,10 +18057,48 @@ mod tests {
 
         // Reopening shows what was saved.
         let _ = app.update(Message::OpenVocabulary);
-        assert_eq!(app.vocab_terms, "Kubernetes, ACME");
-        assert_eq!(app.vocab_replacements, "pie torch = PyTorch");
+        assert_eq!(app.vocab_terms.text().trim_end(), "Kubernetes\nACME");
+        assert_eq!(
+            app.vocab_replacements.text().trim_end(),
+            "pie torch = PyTorch"
+        );
         let _ = app.update(Message::CloseVocabulary);
         assert_eq!(app.open_modal(), None);
+    }
+
+    #[test]
+    fn command_enter_saves_the_vocabulary_instead_of_starting() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("vocab-enter");
+
+        let mut app = pro_app();
+        let _ = app.update(Message::OpenVocabulary);
+        app.vocab_terms = text_editor::Content::with_text("Kubernetes");
+        app.vocab_replacements = text_editor::Content::with_text("");
+
+        // Cmd/Ctrl+Enter is `Message::Start`; with the editor up it must save,
+        // not start a run behind the dialog.
+        let _ = app.update(Message::Start);
+
+        assert!(!app.vocabulary_open);
+        assert_eq!(Vocabulary::load().terms, vec!["Kubernetes"]);
+    }
+
+    #[test]
+    fn a_malformed_replacement_keeps_the_dialog_open() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("vocab-bad");
+
+        let mut app = pro_app();
+        let _ = app.update(Message::OpenVocabulary);
+        app.vocab_replacements = text_editor::Content::with_text("acme corp");
+        let _ = app.update(Message::SaveVocabulary);
+
+        assert!(app.vocabulary_open);
+        assert!(app
+            .toast
+            .as_ref()
+            .is_some_and(|(message, _)| message.contains("heard = shown")));
     }
 
     #[test]
