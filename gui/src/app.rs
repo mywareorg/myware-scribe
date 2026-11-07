@@ -819,6 +819,9 @@ pub enum Message {
     LineTextPressed(usize, Point),
     /// Cycle the edited line through the transcript's speakers.
     CycleLineSpeaker,
+    /// Give the edited line the next free numbered speaker, for a voice
+    /// diarization missed.
+    AddLineSpeaker,
     LineHover(Option<usize>),
     LineUnhover(usize),
     SelectRelative(i32),
@@ -3809,6 +3812,26 @@ impl App {
                 }
                 Task::none()
             }
+            Message::AddLineSpeaker => {
+                if self.line_edit.is_none() {
+                    return Task::none();
+                }
+                let name = next_speaker_name(&self.speaker_order());
+                if let Some(edit) = self.line_edit.as_mut() {
+                    let position = edit.current_position();
+                    if let Some(row) = edit.rows.get_mut(position) {
+                        row.speaker = name.clone();
+                        self.toast = Some((format!("Speaker: {name}"), Instant::now()));
+                    }
+                }
+                // The new name lives in the row, not the document, so the order
+                // the chip draws from has to learn it before the next frame or
+                // the colour and the cycle would both miss it.
+                self.invalidate_derived();
+                // Like the chip: the press landed outside the field, so hand
+                // the keyboard back and typing can continue.
+                Self::focus_line_editor()
+            }
             Message::LineHover(index) => {
                 // As with the transcript chrome: no per-line affordances while
                 // a dialog or a menu owns the pointer.
@@ -6239,6 +6262,8 @@ impl App {
             return Task::none();
         };
         self.line_edit = Some(edit);
+        // The row's speaker joins the order the chips are drawn from.
+        self.invalidate_derived();
         self.line_edit_caret = caret;
         self.line_edit_document = self.edit_document();
         // Editing while audio plays makes the caret fight the playhead; pause,
@@ -6364,6 +6389,9 @@ impl App {
         let Some(edit) = self.line_edit.take() else {
             return;
         };
+        // The edited row is gone, so any speaker it alone carried must leave
+        // the order too.
+        self.invalidate_derived();
         self.line_edit_caret = None;
         // Whether the user asked to save this line, as opposed to the editor
         // being committed as a side effect of moving elsewhere.
@@ -6460,6 +6488,9 @@ impl App {
     fn cancel_inline_edit(&mut self) {
         self.line_edit_caret = None;
         if self.line_edit.take().is_some() {
+            // A speaker added to the discarded row must not linger in the
+            // legend or the chip colours.
+            self.invalidate_derived();
             self.line_edit_resume = false;
             self.line_edit_document = None;
             // The delete confirmation belongs to the line being edited. Without
@@ -6597,6 +6628,9 @@ impl App {
             return;
         }
         self.line_edit = LineEdit::inline_at(index, self.edit_lines(), caret);
+        // The row was rebuilt from the document, so its speaker may have
+        // changed with it (a merge takes the neighbour's name).
+        self.invalidate_derived();
         // The window's line count changed: the spacers need fresh heights.
         self.reset_pane_geometry();
     }
@@ -7613,12 +7647,26 @@ impl App {
             .collect()
     }
 
-    /// Distinct speakers in transcript order (matches the SMS bubble ordering).
+    /// Distinct speakers in the transcript, plus whatever the open line editor
+    /// is showing, sorted into the rename dialog's natural order.
+    ///
+    /// The edited row is not in the document yet, so a speaker assigned to it
+    /// would otherwise have no palette colour and no place in the chip's cycle.
     fn speaker_order(&self) -> Vec<String> {
         if let Some(order) = self.speaker_order_cache.borrow().as_ref() {
             return order.clone();
         }
-        let order = distinct_speaker_order(self.shown_lines());
+        let mut order = distinct_speaker_order(self.shown_lines());
+        if let Some(edit) = self.line_edit.as_ref() {
+            for row in &edit.rows {
+                if !row.speaker.is_empty() && !order.contains(&row.speaker) {
+                    order.push(row.speaker.clone());
+                }
+            }
+        }
+        // Sorted, so a colour belongs to a name rather than to the order the
+        // speakers happened to first appear in.
+        sort_speaker_names(&mut order);
         *self.speaker_order_cache.borrow_mut() = Some(order.clone());
         order
     }
@@ -9669,6 +9717,11 @@ impl App {
             self.tip(
                 button(ICON_SPEAKERS, allowed, false, Message::OpenRename),
                 "Rename speakers across the transcript",
+                &scheme,
+            ),
+            self.tip(
+                button(ICON_PERSON_PLUS, allowed, false, Message::AddLineSpeaker),
+                "Give this line a new speaker",
                 &scheme,
             ),
             self.tip(
@@ -13081,17 +13134,33 @@ fn sort_speaker_names(names: &mut [String]) {
 }
 
 fn speaker_sort_key(name: &str) -> (u32, String) {
-    let number = name
-        .rsplit(|character: char| !character.is_ascii_digit())
-        .next()
-        .filter(|digits| !digits.is_empty())
-        .and_then(|digits| digits.parse::<u32>().ok());
     let named = name.to_ascii_lowercase();
     // Numbered labels sort before hand-renamed ones, which fall back to A-Z.
-    match number {
+    match trailing_number(name) {
         Some(index) => (index, named),
         None => (u32::MAX, named),
     }
+}
+
+/// The number a name ends in, if any: `SPEAKER 2` ends in 2, `SPEAKER two` and
+/// `2 speakers` do not.
+fn trailing_number(name: &str) -> Option<u32> {
+    name.rsplit(|character: char| !character.is_ascii_digit())
+        .next()
+        .filter(|digits| !digits.is_empty())
+        .and_then(|digits| digits.parse::<u32>().ok())
+}
+
+/// The next speaker label to hand out for a transcript that already has
+/// `names`: one past the highest number any name ends in, so gaps are not
+/// reused (`SPEAKER 1`, `SPEAKER 3` gives `SPEAKER 4`), and one past the count
+/// when no name is numbered (`Alice`, `Bob` gives `SPEAKER 3`).
+fn next_speaker_name(names: &[String]) -> String {
+    let next = match names.iter().filter_map(|name| trailing_number(name)).max() {
+        Some(highest) => highest.saturating_add(1),
+        None => (names.len() as u32).saturating_add(1),
+    };
+    format!("SPEAKER {next}")
 }
 
 fn speaker_palette(index: usize, scheme: &Scheme) -> Color {
@@ -14043,6 +14112,9 @@ const ICON_TRASH: char = '\u{f5de}';
 /// A group of people: the speakers, not the line. The strip's other glyphs are
 /// about this one line; this one opens the transcript-wide rename.
 const ICON_SPEAKERS: char = '\u{f4d0}';
+/// A person with a plus: a new voice on this line, which the transcript-wide
+/// `ICON_SPEAKERS` group cannot say.
+const ICON_PERSON_PLUS: char = '\u{f4dd}';
 /// A repeat arrow for retrying a failed item. Distinct from the editor's redo
 /// glyph, which used to share this codepoint.
 const ICON_RETRY: char = '\u{f130}';
@@ -18799,6 +18871,88 @@ mod tests {
     }
 
     #[test]
+    fn next_speaker_name_counts_from_the_highest_number() {
+        fn names(list: &[&str]) -> Vec<String> {
+            list.iter().map(|name| name.to_string()).collect()
+        }
+
+        // The usual case: two detected voices, so the next is the third.
+        assert_eq!(
+            next_speaker_name(&names(&["SPEAKER 1", "SPEAKER 2"])),
+            "SPEAKER 3"
+        );
+        // Gaps are not reused: a removed voice's number stays retired.
+        assert_eq!(
+            next_speaker_name(&names(&["SPEAKER 1", "SPEAKER 3"])),
+            "SPEAKER 4"
+        );
+        // A hand-renamed voice keeps its slot in the count.
+        assert_eq!(
+            next_speaker_name(&names(&["Alice", "SPEAKER 2"])),
+            "SPEAKER 3"
+        );
+        assert_eq!(
+            next_speaker_name(&names(&["SPEAKER 10", "Bob"])),
+            "SPEAKER 11"
+        );
+        // Nothing is numbered: one past the count.
+        assert_eq!(
+            next_speaker_name(&names(&["Alice", "Bob"])),
+            "SPEAKER 3"
+        );
+        assert_eq!(next_speaker_name(&[]), "SPEAKER 1");
+    }
+
+    #[test]
+    fn the_editor_strip_adds_a_speaker_to_the_line() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("strip-add-speaker");
+        let original = "[00:00] SPEAKER 1: one\n[00:05] SPEAKER 2: two\n";
+        let (mut app, transcript, media) = line_edit_fixture("strip-add-speaker", original);
+
+        open_line_edit(&mut app, 1);
+        let _ = app.update(Message::AddLineSpeaker);
+        assert_eq!(current_row_mut(&mut app).speaker, "SPEAKER 3");
+        assert_eq!(
+            app.toast.as_ref().map(|(message, _)| message.as_str()),
+            Some("Speaker: SPEAKER 3")
+        );
+        // The new voice is in the order straight away, so the chip has a colour
+        // and the cycle has somewhere to go.
+        assert_eq!(
+            app.speaker_order(),
+            vec![
+                "SPEAKER 1".to_string(),
+                "SPEAKER 2".to_string(),
+                "SPEAKER 3".to_string()
+            ]
+        );
+        let _ = app.update(Message::CycleLineSpeaker);
+        assert_eq!(current_row_mut(&mut app).speaker, "SPEAKER 1");
+
+        // A second press hands out the next number, not the same one again.
+        let _ = app.update(Message::AddLineSpeaker);
+        assert_eq!(current_row_mut(&mut app).speaker, "SPEAKER 4");
+
+        // Saving writes it into the transcript, which is also the sidecar's
+        // input, so it exports with the rest.
+        let _ = app.update(Message::DoneLineEdit);
+        assert!(app.line_edit.is_none());
+        let saved = std::fs::read_to_string(&transcript).unwrap();
+        assert!(saved.contains("SPEAKER 4: two"), "{saved}");
+        assert_eq!(app.shown_lines()[1].speaker, "SPEAKER 4");
+
+        // Cancelling drops the name it added with the rest of the edit.
+        open_line_edit(&mut app, 0);
+        let _ = app.update(Message::AddLineSpeaker);
+        assert!(app.speaker_order().iter().any(|name| name == "SPEAKER 5"));
+        let _ = app.update(Message::CancelLineEdit);
+        assert!(!app.speaker_order().iter().any(|name| name == "SPEAKER 5"));
+
+        let _ = std::fs::remove_dir_all(&media);
+    }
+
+    #[test]
     fn a_dialog_keeps_the_pointer_off_the_queue() {
         let _guard = env_lock();
         let _config = ConfigEnv::new("queue-behind-dialog");
@@ -20634,16 +20788,18 @@ mod tests {
         let _ = app.update(Message::DoneLineEdit);
 
         assert_eq!(app.display_order(), sorted_display_order(app.shown_lines()));
-        assert_eq!(
-            app.speaker_order(),
-            distinct_speaker_order(app.shown_lines())
-        );
+        // The order is the document's distinct names, sorted into the rename
+        // dialog's natural order, so a name keeps its palette colour wherever
+        // its line sits in the transcript.
+        let mut expected = distinct_speaker_order(app.shown_lines());
+        sort_speaker_names(&mut expected);
+        assert_eq!(app.speaker_order(), expected);
         assert_eq!(
             app.speaker_order(),
             vec![
-                "ZED".to_string(),
+                "SPEAKER 1".to_string(),
                 "SPEAKER 2".to_string(),
-                "SPEAKER 1".to_string()
+                "ZED".to_string()
             ]
         );
 
