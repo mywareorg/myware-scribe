@@ -307,7 +307,11 @@ plain copy, looked up beside the audio first and then in the save location.
 
 The queue (statuses, output paths and per-file statistics) is restored on
 restart; timeline and waveform data is re-derived on demand from the
-diarization cache.
+diarization cache. A file whose run was interrupted comes back as
+**Interrupted** with Resume and per-file Skip in its row. Resuming reuses the
+cached ASR clips for that file but recomputes its diarization, so the speaker
+timeline is rebuilt from scratch; the button reads Resume until nothing is
+left to continue.
 
 ## Deploy (Windows)
 

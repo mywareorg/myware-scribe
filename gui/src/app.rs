@@ -311,6 +311,9 @@ const FEATURE_DECK: [FeatureSlide; 5] = [
 #[derive(Debug, Clone, PartialEq)]
 enum ItemStatus {
     Pending,
+    /// Started, then the process died before the file finished. Kept apart
+    /// from Pending so the row can say what happened and offer a resume.
+    Interrupted,
     Running,
     Done,
     Failed(String),
@@ -362,9 +365,26 @@ pub(crate) struct AdoptedTranscript {
 struct QueueState {
     #[serde(default)]
     items: Vec<QueueRecord>,
+    /// Options of the batch that was last started.
+    #[serde(default)]
+    last_run: Option<RunRecord>,
     /// Paths included in the most recent transcription batch.
     #[serde(default)]
     last_batch: Vec<String>,
+}
+
+/// The options a batch was started with, kept so an interrupted run can say
+/// what it was doing after a restart changed the settings.
+#[derive(Serialize, Deserialize, Clone, Default)]
+struct RunRecord {
+    #[serde(default)]
+    preset: String,
+    #[serde(default)]
+    language: Option<String>,
+    #[serde(default)]
+    num_speakers: Option<i32>,
+    #[serde(default)]
+    output_dir: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -837,6 +857,8 @@ pub enum Message {
     VocabTermsAction(text_editor::Action),
     VocabReplacementsAction(text_editor::Action),
     SaveVocabulary,
+    /// Leave an interrupted file out of the next run without deleting its row.
+    SkipItem(usize),
     EditLine(usize),
     FlipLineSpeaker(usize),
     /// The line editor's speaker picker opened or closed its menu.
@@ -1102,6 +1124,9 @@ pub struct App {
     completion_pending: bool,
     rename_open: bool,
     rename_fields: Vec<(String, String)>,
+    /// Options of the most recent batch, so a resumed run can report what it
+    /// was doing even if the settings were changed since.
+    last_run: Option<RunRecord>,
     /// The custom-vocabulary editor: the two fields as typed, and whether the
     /// dialog is up.
     vocabulary_open: bool,
@@ -1394,6 +1419,7 @@ impl App {
             completion_pending: false,
             rename_open: false,
             rename_fields: Vec::new(),
+            last_run: Self::load_last_run(),
             vocabulary_open: false,
             vocab_terms: text_editor::Content::with_text(""),
             vocab_replacements: text_editor::Content::with_text(""),
@@ -1701,15 +1727,17 @@ impl App {
                 let transcript = record.transcript.map(PathBuf::from);
                 let path = audio.clone().or_else(|| transcript.clone())?;
                 let mut status = match record.status.as_str() {
-                    // A run interrupted by a restart is simply pending again.
-                    "running" => ItemStatus::Pending,
+                    // A run interrupted by a restart is resumable, and says so.
+                    "running" | "interrupted" => ItemStatus::Interrupted,
                     "failed" => {
                         ItemStatus::Failed(record.message.unwrap_or_else(|| "failed".to_string()))
                     }
                     "done" => ItemStatus::Done,
                     _ => ItemStatus::Pending,
                 };
-                if matches!(status, ItemStatus::Pending) && !path.is_file() {
+                if matches!(status, ItemStatus::Pending | ItemStatus::Interrupted)
+                    && !path.is_file()
+                {
                     status = ItemStatus::Failed("file not found".to_string());
                 }
                 Some(QueueItem {
@@ -1727,6 +1755,14 @@ impl App {
         (items, batch_paths)
     }
 
+    /// The options recorded for the last batch, read back independently of the
+    /// queue rows so a restored queue keeps its resume context.
+    fn load_last_run() -> Option<RunRecord> {
+        let path = Self::queue_path()?;
+        let text = std::fs::read_to_string(path).ok()?;
+        serde_json::from_str::<QueueState>(&text).ok()?.last_run
+    }
+
     fn save_queue(&self) {
         let Some(path) = Self::queue_path() else {
             return;
@@ -1735,6 +1771,7 @@ impl App {
             let _ = std::fs::create_dir_all(parent);
         }
         let state = QueueState {
+            last_run: self.last_run.clone(),
             items: self
                 .queue
                 .iter()
@@ -1747,6 +1784,7 @@ impl App {
                     duration: item.duration,
                     status: match &item.status {
                         ItemStatus::Pending => "pending",
+                        ItemStatus::Interrupted => "interrupted",
                         ItemStatus::Running => "running",
                         ItemStatus::Done => "done",
                         ItemStatus::Failed(_) => "failed",
@@ -3437,7 +3475,7 @@ impl App {
                     return Task::none();
                 }
                 let retried = self.queue.get_mut(index).is_some_and(|item| {
-                    if matches!(item.status, ItemStatus::Failed(_)) {
+                    if matches!(item.status, ItemStatus::Failed(_) | ItemStatus::Interrupted) {
                         item.status = ItemStatus::Pending;
                         true
                     } else {
@@ -4330,11 +4368,32 @@ impl App {
                 self.save_queue();
                 Task::none()
             }
+            Message::SkipItem(index) => {
+                if !matches!(self.status, Status::Running) {
+                    if let Some(item) = self.queue.get_mut(index) {
+                        if matches!(item.status, ItemStatus::Interrupted) {
+                            item.status = ItemStatus::Failed("skipped".to_string());
+                            if let Some(audio) = &item.audio {
+                                let _ = std::fs::remove_file(
+                                    hippo_transcribe_core::pipeline::checkpoint_path(audio),
+                                );
+                            }
+                            self.save_queue();
+                        }
+                    }
+                }
+                Task::none()
+            }
             Message::RemoveItem(index) => {
                 if !matches!(self.status, Status::Running) && index < self.queue.len() {
                     // The edited document may be the row about to be removed.
                     self.commit_inline_edit(false);
                     let was_viewing = self.selected_view.is_some();
+                    if let Some(audio) = self.queue[index].audio.clone() {
+                        let _ = std::fs::remove_file(
+                            hippo_transcribe_core::pipeline::checkpoint_path(&audio),
+                        );
+                    }
                     self.queue.remove(index);
                     if let Some(current) = self.current.as_mut() {
                         if *current == index {
@@ -5377,11 +5436,17 @@ impl App {
             .queue
             .iter()
             .any(|item| matches!(item.status, ItemStatus::Pending));
+        let interrupted = self
+            .queue
+            .iter()
+            .any(|item| matches!(item.status, ItemStatus::Interrupted));
         let finished = self
             .selected
             .and_then(|index| self.queue.get(index))
             .is_some_and(|item| matches!(item.status, ItemStatus::Done));
-        if !pending && finished {
+        if !pending && interrupted {
+            "Resume"
+        } else if !pending && finished {
             "Retranscribe"
         } else {
             "Transcribe"
@@ -5396,7 +5461,7 @@ impl App {
         let has_pending = self
             .queue
             .iter()
-            .any(|item| matches!(item.status, ItemStatus::Pending));
+            .any(|item| matches!(item.status, ItemStatus::Pending | ItemStatus::Interrupted));
         if !has_pending {
             // Nothing is waiting: transcribe again only the finished file the
             // user has selected. The queue itself is never re-run wholesale.
@@ -5475,7 +5540,7 @@ impl App {
             .queue
             .iter()
             .enumerate()
-            .filter(|(_, item)| matches!(item.status, ItemStatus::Pending))
+            .filter(|(_, item)| matches!(item.status, ItemStatus::Pending | ItemStatus::Interrupted))
             .map(|(index, _)| index)
             .collect();
         // Free runs exactly one file per press: the selected pending item, or
@@ -5509,6 +5574,15 @@ impl App {
         } else {
             self.batch_paths = inputs.clone();
         }
+        self.last_run = Some(RunRecord {
+            preset: self.preset.arg().to_string(),
+            language: self.language.clone(),
+            num_speakers: self.num_speakers,
+            output_dir: self
+                .output_dir
+                .as_ref()
+                .map(|dir| dir.display().to_string()),
+        });
         self.save_queue();
 
         self.batch = true;
@@ -6413,6 +6487,9 @@ impl App {
                     self.current_index = self.current;
                     if let Some(index) = self.current {
                         self.queue[index].status = ItemStatus::Running;
+                        // Persist at once: a crash before the file finishes must
+                        // restore as Interrupted, not as still-queued.
+                        self.save_queue();
                     }
                     if !keep_view {
                         // The edited document is about to leave the screen.
@@ -8480,7 +8557,8 @@ impl App {
             && self.current_index != Some(index);
         let selectable = !locked_previous
             && (matches!(item.status, ItemStatus::Running)
-                || (!running && matches!(item.status, ItemStatus::Pending))
+                || (!running
+                    && matches!(item.status, ItemStatus::Pending | ItemStatus::Interrupted))
                 || (matches!(item.status, ItemStatus::Done) && item.transcript.is_some()));
 
         let full_name = item
@@ -8501,6 +8579,9 @@ impl App {
 
         let (meta, meta_color) = match &item.status {
             ItemStatus::Pending => (format!("{duration} \u{00b7} Queued"), scheme.muted),
+            ItemStatus::Interrupted => {
+                (format!("{duration} \u{00b7} Interrupted"), scheme.muted)
+            }
             ItemStatus::Running => (
                 format!(
                     "{duration} \u{00b7} Transcribing {:.0}%",
@@ -8519,6 +8600,9 @@ impl App {
             // Queued, nothing has happened yet: an unfilled ring at the lowest
             // emphasis in the ladder (queued < running < done).
             ItemStatus::Pending => queue_status_icon(ICON_CIRCLE, 15.0, scheme.muted),
+            ItemStatus::Interrupted => {
+                queue_status_badge(ICON_CLOCK, 14.0, scheme.track, scheme.text)
+            }
             ItemStatus::Running => {
                 queue_status_badge(ICON_HOURGLASS, 14.0, scheme.track, scheme.text)
             }
@@ -8590,13 +8674,35 @@ impl App {
             );
         }
 
-        if matches!(item.status, ItemStatus::Failed(_)) {
+        if matches!(item.status, ItemStatus::Interrupted) {
+            content = content.push(
+                self.tip(
+                    action(icon(ICON_ARROW_DOWN, 12.0))
+                        .on_press_maybe((!running).then_some(Message::SkipItem(index)))
+                        .style(subtle_icon_button),
+                    "Skip this file",
+                    &scheme,
+                ),
+            );
+        }
+        if matches!(item.status, ItemStatus::Failed(_) | ItemStatus::Interrupted) {
             content = content.push(
                 self.tip(
                     action(icon(ICON_RETRY, 12.0))
                         .on_press_maybe((!running).then_some(Message::RetryItem(index)))
                         .style(subtle_icon_button),
-                    "Retry",
+                    if matches!(item.status, ItemStatus::Interrupted) {
+                        match self
+                            .last_run
+                            .as_ref()
+                            .and_then(|run| Preset::from_arg(&run.preset))
+                        {
+                            Some(preset) => format!("Resume the {} run", preset.label()),
+                            None => "Resume".to_string(),
+                        }
+                    } else {
+                        "Retry".to_string()
+                    },
                     &scheme,
                 ),
             );
@@ -15586,6 +15692,7 @@ mod tests {
         let audio = dir.join("stale.mp3");
         std::fs::write(&audio, b"audio").unwrap();
         let state = QueueState {
+            last_run: None,
             items: vec![QueueRecord {
                 audio: Some(audio.display().to_string()),
                 transcript: None,
@@ -18099,6 +18206,60 @@ mod tests {
             .toast
             .as_ref()
             .is_some_and(|(message, _)| message.contains("heard = shown")));
+    }
+
+    fn interrupted_item(audio: PathBuf) -> QueueItem {
+        QueueItem {
+            path: audio.clone(),
+            audio: Some(audio),
+            status: ItemStatus::Interrupted,
+            duration: Some(10.0),
+            transcript: None,
+            stats: None,
+            turns: Vec::new(),
+            peaks: Arc::new(Vec::new()),
+        }
+    }
+
+    #[test]
+    fn an_interrupted_row_restores_as_interrupted() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("interrupt-config");
+        let media = temp_dir("interrupt-media");
+        let audio = media.join("talk.mp3");
+        std::fs::write(&audio, b"audio").unwrap();
+
+        let mut app = pro_app();
+        app.queue.push(QueueItem {
+            status: ItemStatus::Running,
+            ..interrupted_item(audio.clone())
+        });
+        app.save_queue();
+
+        let (loaded, _) = App::load_queue_and_batch();
+        assert!(matches!(loaded[0].status, ItemStatus::Interrupted));
+    }
+
+    #[test]
+    fn an_interrupted_row_offers_resume_and_skip() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("resume-config");
+        let media = temp_dir("resume-media");
+        let audio = media.join("talk.mp3");
+        std::fs::write(&audio, b"audio").unwrap();
+
+        let mut app = pro_app();
+        app.queue.push(interrupted_item(audio.clone()));
+        assert_eq!(app.transcribe_label(), "Resume");
+
+        let parked = hippo_transcribe_core::pipeline::checkpoint_path(&audio);
+        std::fs::write(&parked, "[00:00] SPEAKER 1: hi\n").unwrap();
+
+        let _ = app.update(Message::SkipItem(0));
+
+        assert!(matches!(app.queue[0].status, ItemStatus::Failed(_)));
+        assert!(!parked.exists());
+        assert_eq!(app.transcribe_label(), "Transcribe");
     }
 
     #[test]

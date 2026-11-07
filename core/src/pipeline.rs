@@ -85,6 +85,45 @@ struct Line {
     confidence: f32,
 }
 
+/// How often the in-progress transcript is parked beside the audio.
+const CHECKPOINT_INTERVAL: Duration = Duration::from_secs(2);
+
+/// The parked transcript for a file whose run is still going.
+///
+/// Public so the viewer can clean it up when a row is removed or skipped, and
+/// so a resume can report that text was recovered.
+///
+/// Hidden, beside the audio, so a crash leaves the text where the next run
+/// knows to look and the user never sees it in the output folder.
+pub fn checkpoint_path(input: &Path) -> PathBuf {
+    let name = input
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "transcript".to_string());
+    input.with_file_name(format!(".{name}.hippo-transcribe.partial"))
+}
+
+/// Write the lines produced so far through a temporary file, so a kill during
+/// the write cannot leave half a line behind.
+fn write_checkpoint(path: &Path, lines: &[Line], use_hours: bool) {
+    let text = lines
+        .iter()
+        .map(|line| {
+            let stamp = format_timestamp(line.start, use_hours);
+            if line.speaker.is_empty() {
+                format!("[{stamp}] {}", line.text)
+            } else {
+                format!("[{stamp}] {}: {}", line.speaker, line.text)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let temporary = path.with_extension("partial.tmp");
+    if std::fs::write(&temporary, text).is_ok() {
+        let _ = std::fs::rename(&temporary, path);
+    }
+}
+
 /// Merge near-adjacent same-speaker turns and drop ultra-short fragments.
 /// Returns the turns plus how many were merged and how many were dropped, so
 /// the log can tell model granularity apart from our own filtering.
@@ -1052,6 +1091,8 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
             }
         };
         let duration = samples.len() as f64 / rate as f64;
+        let checkpoint = checkpoint_path(&input);
+        let checkpoint_hours = duration >= 3600.0;
         let decoded_at = Instant::now();
         let samples = Arc::new(samples);
         emit(Event::Meta {
@@ -1498,6 +1539,7 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
                 let mut pending: BTreeMap<usize, Result<Vec<Segment>, String>> = BTreeMap::new();
                 let mut buffer: Vec<Line> = Vec::new();
                 let mut next_emit = 0usize;
+                let mut last_checkpoint: Option<Instant> = None;
 
                 run_asr_pool(
                     &spans,
@@ -1558,6 +1600,12 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
                                     confidence: line.confidence,
                                 });
                                 lines.push(line);
+                            }
+                            if last_checkpoint
+                                .is_none_or(|at: Instant| at.elapsed() >= CHECKPOINT_INTERVAL)
+                            {
+                                write_checkpoint(&checkpoint, &lines, checkpoint_hours);
+                                last_checkpoint = Some(Instant::now());
                             }
                         }
 
@@ -1689,6 +1737,8 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
                 message: format!("could not write {}: {error}", json_path.display()),
             });
         }
+        // The real transcript exists now; the parked copy is no longer needed.
+        let _ = std::fs::remove_file(&checkpoint);
 
         let mut speaker_stats: HashMap<String, SpeakerStat> = HashMap::new();
         for line in &lines {
@@ -1976,6 +2026,16 @@ mod tests {
 
         assert_eq!(lines.len(), 1);
         assert_eq!(lines[0].text, "we use PyTorch");
+    }
+
+    #[test]
+    fn the_parked_transcript_sits_beside_the_audio() {
+        let path = checkpoint_path(Path::new("/tmp/interview.mp3"));
+        assert_eq!(
+            path.file_name().and_then(|name| name.to_str()),
+            Some(".interview.mp3.hippo-transcribe.partial")
+        );
+        assert_eq!(path.parent(), Some(Path::new("/tmp")));
     }
 
     #[test]
