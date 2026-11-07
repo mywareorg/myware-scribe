@@ -309,7 +309,8 @@ exported at zero. Failed queue items can be retried, and pending items can be
 reordered.
 
 Word times are stored in the sidecar. While audio plays, the words already
-spoken on the active line are tinted (Pro). The Speed preset decodes without
+spoken on the active line are banded and the current word underlined
+(View → Karaoke, key `k`; Pro). The Speed preset decodes without
 token timestamps, so those transcripts — and any produced before this change —
 export line-level cues instead.
 Keyboard: Up/Down moves through the transcript, Alt+Enter edits the active line,

@@ -125,10 +125,10 @@ pub fn write_sidecar_renamed(path: &Path, lines: &[DocLine], mapping: &[(String,
     let _ = sidecar::write_at(&json, &sidecar);
 }
 
-/// Word times for one transcript line, from its sidecar.
-pub fn read_line_words(path: &Path, index: usize) -> Vec<hippo_transcribe_core::sidecar::Word> {
+/// Word times for every line of a transcript, from its sidecar.
+pub fn read_all_line_words(path: &Path) -> Vec<Vec<hippo_transcribe_core::sidecar::Word>> {
     sidecar::read(path)
-        .and_then(|sidecar| sidecar.lines.get(index).map(|line| line.words.clone()))
+        .map(|sidecar| sidecar.lines.into_iter().map(|line| line.words).collect())
         .unwrap_or_default()
 }
 
