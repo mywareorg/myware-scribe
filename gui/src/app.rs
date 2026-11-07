@@ -13216,7 +13216,8 @@ impl PitchSource {
                 let mut chunk = Vec::with_capacity(block);
                 while chunk.len() < block {
                     match self.decoder.next() {
-                        Some(sample) => chunk.push(sample as f32 / 32768.0),
+                        // `AudioStream` already yields normalised floats.
+                        Some(sample) => chunk.push(sample),
                         None => break,
                     }
                 }
@@ -19471,6 +19472,52 @@ mod tests {
         let mut app = pro_app();
         let _ = app.update(Message::StopRecording);
         assert!(app.recording.is_none());
+    }
+
+    #[test]
+    fn the_player_source_is_not_silent() {
+        // `AudioStream` yields floats in -1..=1. Treating them as 16-bit
+        // samples divided the signal down to around -90 dBFS: the sink ran,
+        // the playhead moved, and nothing could be heard.
+        let path = std::env::temp_dir().join(format!(
+            "hippo-playback-source-{}.wav",
+            std::process::id()
+        ));
+        let frames = 9_600u32; // 0.2 s, stereo, 48 kHz
+        let mut wav = Vec::with_capacity(44 + frames as usize * 4);
+        let data_len = frames * 4;
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&(36 + data_len).to_le_bytes());
+        wav.extend_from_slice(b"WAVEfmt ");
+        wav.extend_from_slice(&16u32.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes()); // PCM
+        wav.extend_from_slice(&2u16.to_le_bytes()); // stereo
+        wav.extend_from_slice(&48_000u32.to_le_bytes());
+        wav.extend_from_slice(&(48_000u32 * 4).to_le_bytes());
+        wav.extend_from_slice(&4u16.to_le_bytes());
+        wav.extend_from_slice(&16u16.to_le_bytes());
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&data_len.to_le_bytes());
+        for index in 0..frames {
+            let value = (0.5 * f32::sin(std::f32::consts::TAU * 440.0 * index as f32 / 48_000.0)
+                * i16::MAX as f32) as i16;
+            wav.extend_from_slice(&value.to_le_bytes());
+            wav.extend_from_slice(&value.to_le_bytes());
+        }
+        std::fs::write(&path, &wav).unwrap();
+
+        let speed = Arc::new(AtomicU32::new(1.0f32.to_bits()));
+        let mut source = PitchSource::new(&path, speed).expect("open the test tone");
+        let mut peak = 0.0f32;
+        for _ in 0..8_000 {
+            if let Some(sample) = source.next() {
+                peak = peak.max(sample.abs());
+            } else {
+                break;
+            }
+        }
+        let _ = std::fs::remove_file(&path);
+        assert!(peak > 0.2, "the source is silent: peak {peak}");
     }
 
     #[test]
