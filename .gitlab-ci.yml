@@ -38,8 +38,13 @@ publish-models:
     - scripts/fetch-models.sh --all
     - |
       project_id="${MODELS_PROJECT_ID:-$CI_PROJECT_ID}"
+      files=$(find vendor/models -type f ! -name '*.part')
+      if [ -z "$files" ]; then
+        echo "no model files staged under vendor/models" >&2
+        exit 1
+      fi
       status=0
-      for file in $(find vendor/models -type f ! -name '*.part'); do
+      for file in $files; do
         name=$(basename "$file")
         url="$CI_API_V4_URL/projects/$project_id/packages/generic/hippo-models/$MODELS_PACKAGE_VERSION/$name"
         code=$(curl -s -o /dev/null -w '%{http_code}' \
