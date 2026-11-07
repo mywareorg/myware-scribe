@@ -15,7 +15,7 @@ use iced::{
     font, mouse, Color, Element, Font, Length, Pixels, Point, Rectangle, Renderer, Shadow, Size,
     Subscription, Task, Theme, Vector,
 };
-use rodio::{Decoder, OutputStream, Sink, Source};
+use rodio::{OutputStream, OutputStreamBuilder, Sink, Source};
 use serde::{Deserialize, Serialize};
 
 use crate::backend::{self, Event};
@@ -26,6 +26,7 @@ use hippo_transcribe_core::benchmark::{self, BenchmarkEvent};
 use hippo_transcribe_core::download::{self, DownloadEvent, ModelStatus};
 use hippo_transcribe_core::license;
 use hippo_transcribe_core::models;
+use hippo_transcribe_core::playback::AudioStream;
 
 const AUDIO_EXTS: &[&str] = &[
     "mp3", "wav", "m4a", "aac", "flac", "ogg", "opus", "wma", "mp4", "mkv", "mov", "webm", "avi",
@@ -11908,7 +11909,7 @@ fn speaker_palette(index: usize, scheme: &Scheme) -> Color {
 /// A decoder wrapped in pitch-preserving WSOLA time stretch. The sink always
 /// plays at 1x; speed changes only alter the stretcher's tempo.
 struct PitchSource {
-    decoder: Decoder<std::io::BufReader<std::fs::File>>,
+    decoder: AudioStream,
     stretch: wsola::TimeStretch,
     speed: Arc<AtomicU32>,
     pending: VecDeque<f32>,
@@ -11921,8 +11922,9 @@ struct PitchSource {
 
 impl PitchSource {
     fn new(path: &Path, speed: Arc<AtomicU32>) -> Option<Self> {
-        let file = std::fs::File::open(path).ok()?;
-        let decoder = Decoder::new(std::io::BufReader::new(file)).ok()?;
+        // `AudioStream` selects the audio track itself, so the video packets of
+        // an MP4 never reach the decoder.
+        let decoder = AudioStream::open(path).ok()?;
         let channels = decoder.channels();
         let sample_rate = decoder.sample_rate();
         let stretch = wsola::TimeStretch::new(
@@ -12009,7 +12011,7 @@ impl Iterator for PitchSource {
 }
 
 impl Source for PitchSource {
-    fn current_frame_len(&self) -> Option<usize> {
+    fn current_span_len(&self) -> Option<usize> {
         None
     }
 
@@ -12022,11 +12024,13 @@ impl Source for PitchSource {
     }
 
     fn total_duration(&self) -> Option<Duration> {
-        self.decoder.total_duration()
+        self.decoder.duration()
     }
 
     fn try_seek(&mut self, pos: Duration) -> Result<(), rodio::source::SeekError> {
-        self.decoder.try_seek(pos)?;
+        self.decoder
+            .seek(pos.as_secs_f64())
+            .map_err(|e| rodio::source::SeekError::Other(Box::new(std::io::Error::other(e))))?;
         self.stretch.reset();
         self.pending.clear();
         self.draining = false;
@@ -12045,8 +12049,11 @@ struct Player {
 
 impl Player {
     fn new(path: &Path, speed: f32) -> Option<Player> {
-        let (stream, handle) = OutputStream::try_default().ok()?;
-        let sink = Sink::try_new(&handle).ok()?;
+        let mut stream = OutputStreamBuilder::open_default_stream().ok()?;
+        // Rodio logs on drop; the GUI already owns teardown and does not want
+        // a stray line on stderr when the player is replaced or the app exits.
+        stream.log_on_drop(false);
+        let sink = Sink::connect_new(stream.mixer());
         let speed = Arc::new(AtomicU32::new(speed.max(0.1).to_bits()));
         let source = PitchSource::new(path, speed.clone())?;
         sink.append(source);
