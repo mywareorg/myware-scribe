@@ -12065,7 +12065,9 @@ impl App {
                         text("Copyright (C) 2026 Sean Wu.")
                             .size(theme::TEXT_SM)
                             .color(scheme.muted),
-                        // TODO: add "Source: <repository URL>" once published.
+                        text("Source: https://gitlab.com/librewarelive/hippo-transcribe")
+                            .size(theme::TEXT_SM)
+                            .color(scheme.muted),
                         text("Provided without warranty; see the license for details.")
                             .size(theme::TEXT_SM)
                             .color(scheme.muted),
