@@ -3029,6 +3029,7 @@ impl App {
     /// something is actually animating or draining a background queue.
     fn needs_ticks(&self) -> bool {
         matches!(self.status, Status::Running)
+            || self.recording.is_some()
             || self.player.as_ref().is_some_and(Player::is_playing)
             || self.toast.is_some()
             || self.model_download.is_some()
