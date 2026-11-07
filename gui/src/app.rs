@@ -1374,10 +1374,21 @@ pub struct App {
     /// Queue paths belonging to the current (or most recent) transcription
     /// batch, including follow-up passes for files added during a run.
     batch_paths: Vec<PathBuf>,
+    /// Stats for the files this batch finished, captured before their queue
+    /// rows are reaped into the history. The summary reads this, not the queue.
+    batch_summary: Vec<(String, backend::Stats)>,
+    /// Audio seconds the batch started with and has finished so far. Captured
+    /// here so the progress bar does not shrink when finished rows leave the
+    /// queue.
+    batch_total: f32,
+    batch_done: f32,
     current: Option<usize>,
     current_index: Option<usize>,
     /// Index of the completed queue item currently shown, if any.
     selected: Option<usize>,
+    /// Index of the history entry currently shown, if any. Retranscribe reads
+    /// this when the queue has no waiting item.
+    selected_recent: Option<usize>,
     selected_view: Option<ItemView>,
     /// Error shown in the transcript pane when a completed item cannot load.
     view_error: Option<String>,
@@ -1629,9 +1640,13 @@ impl App {
             queue_pointer: None,
             batch: false,
             batch_paths,
+            batch_summary: Vec::new(),
+            batch_total: 0.0,
+            batch_done: 0.0,
             current: None,
             current_index: None,
             selected: None,
+            selected_recent: None,
             selected_view: None,
             view_error: None,
             join_lines: false,
@@ -1847,50 +1862,75 @@ impl App {
             return (Vec::new(), Vec::new(), Vec::new());
         };
         let batch_paths = state.last_batch.into_iter().map(PathBuf::from).collect();
-        let recent = state
-            .recent
-            .into_iter()
-            .map(|record| RecentEntry {
-                audio: record.audio.map(PathBuf::from),
-                transcript: record.transcript.map(PathBuf::from),
-                finished_at: record.finished_at,
-                duration: record.duration,
-                speakers: record.speakers,
-            })
-            .collect();
-        let items = state
-            .items
-            .into_iter()
-            .filter_map(|record| {
-                let audio = record.audio.map(PathBuf::from);
-                let transcript = record.transcript.map(PathBuf::from);
-                let path = audio.clone().or_else(|| transcript.clone())?;
-                let mut status = match record.status.as_str() {
-                    // A run interrupted by a restart is resumable, and says so.
-                    "running" | "interrupted" => ItemStatus::Interrupted,
-                    "failed" => {
-                        ItemStatus::Failed(record.message.unwrap_or_else(|| "failed".to_string()))
-                    }
-                    "done" => ItemStatus::Done,
-                    _ => ItemStatus::Pending,
-                };
-                if matches!(status, ItemStatus::Pending | ItemStatus::Interrupted)
-                    && !path.is_file()
-                {
-                    status = ItemStatus::Failed("file not found".to_string());
-                }
-                Some(QueueItem {
-                    path,
-                    audio,
-                    status,
+        let mut recent = Vec::new();
+        for record in state.recent {
+            merge_recent_entry(
+                &mut recent,
+                RecentEntry {
+                    audio: record.audio.map(PathBuf::from),
+                    transcript: record.transcript.map(PathBuf::from),
+                    finished_at: record.finished_at,
                     duration: record.duration,
-                    transcript,
-                    stats: record.stats,
-                    turns: record.turns,
-                    peaks: Arc::new(record.peaks),
-                })
-            })
-            .collect();
+                    speakers: record.speakers,
+                },
+            );
+        }
+        let mut items = Vec::new();
+        for record in state.items {
+            let audio = record.audio.map(PathBuf::from);
+            let transcript = record.transcript.map(PathBuf::from);
+            let Some(path) = audio.clone().or_else(|| transcript.clone()) else {
+                continue;
+            };
+            // A finished item from an older build is history now, not queue
+            // work. Its timestamp comes from the transcript when that still
+            // exists, else the audio.
+            if record.status == "done" {
+                let finished_at = transcript
+                    .as_deref()
+                    .and_then(file_unix_secs)
+                    .or_else(|| audio.as_deref().and_then(file_unix_secs))
+                    .unwrap_or(0);
+                let speakers = record
+                    .stats
+                    .as_ref()
+                    .and_then(|stats| stats.num_speakers)
+                    .and_then(|count| u8::try_from(count).ok())
+                    .filter(|count| *count > 0);
+                merge_recent_entry(
+                    &mut recent,
+                    RecentEntry {
+                        audio,
+                        transcript,
+                        finished_at,
+                        duration: record.duration,
+                        speakers,
+                    },
+                );
+                continue;
+            }
+            let mut status = match record.status.as_str() {
+                // A run interrupted by a restart is resumable, and says so.
+                "running" | "interrupted" => ItemStatus::Interrupted,
+                "failed" => {
+                    ItemStatus::Failed(record.message.unwrap_or_else(|| "failed".to_string()))
+                }
+                _ => ItemStatus::Pending,
+            };
+            if matches!(status, ItemStatus::Pending | ItemStatus::Interrupted) && !path.is_file() {
+                status = ItemStatus::Failed("file not found".to_string());
+            }
+            items.push(QueueItem {
+                path,
+                audio,
+                status,
+                duration: record.duration,
+                transcript,
+                stats: record.stats,
+                turns: record.turns,
+                peaks: Arc::new(record.peaks),
+            });
+        }
         (items, batch_paths, recent)
     }
 
@@ -1963,46 +2003,21 @@ impl App {
         }
     }
 
-    /// Record a finished transcript in the history. Identity is the audio path
-    /// when there is one, otherwise the transcript path, so re-running the same
-    /// source replaces its entry instead of adding a second row.
-    #[allow(dead_code)] // No production caller until the history UI lands.
+    /// Record a finished transcript in the history and persist it.
+    #[allow(dead_code)] // Adoption and the history tab land in phase C.
     fn upsert_recent(&mut self, entry: RecentEntry) {
-        let existing = entry
-            .audio
-            .as_deref()
-            .and_then(|audio| self.recent_for_audio(audio))
-            .or_else(|| {
-                if entry.audio.is_none() {
-                    entry
-                        .transcript
-                        .as_ref()
-                        .and_then(|transcript| {
-                            self.recent.iter().position(|other| {
-                                other.audio.is_none()
-                                    && other.transcript.as_ref() == Some(transcript)
-                            })
-                        })
-                } else {
-                    None
-                }
-            });
-        if let Some(index) = existing {
-            self.recent[index] = entry;
-        } else {
-            self.recent.push(entry);
-        }
-        // Newest first; ties fall back to the path so the order is stable.
-        self.recent.sort_by(|a, b| {
-            b.finished_at.cmp(&a.finished_at).then_with(|| {
-                (a.transcript.as_deref(), a.audio.as_deref())
-                    .cmp(&(b.transcript.as_deref(), b.audio.as_deref()))
-            })
-        });
+        self.merge_recent(entry);
         self.save_queue();
     }
 
+    /// Record a finished transcript in the history without writing the queue
+    /// file. Callers that add several at once save once at the end.
+    fn merge_recent(&mut self, entry: RecentEntry) -> usize {
+        merge_recent_entry(&mut self.recent, entry)
+    }
+
     /// Index of the recent entry backed by this audio file, if any.
+    #[allow(dead_code)] // Used by the history tab in phase C.
     fn recent_for_audio(&self, path: &Path) -> Option<usize> {
         self.recent
             .iter()
@@ -2017,6 +2032,13 @@ impl App {
             return;
         };
         self.recent.remove(index);
+        if let Some(selected) = self.selected_recent.as_mut() {
+            match (*selected).cmp(&index) {
+                std::cmp::Ordering::Equal => self.selected_recent = None,
+                std::cmp::Ordering::Greater => *selected -= 1,
+                std::cmp::Ordering::Less => {}
+            }
+        }
         self.save_queue();
         let source = entry.transcript.or(entry.audio);
         let showing_removed = self
@@ -2026,6 +2048,61 @@ impl App {
         if showing_removed {
             self.return_to_live();
         }
+    }
+
+    /// Move every finished queue row into the history and persist once. The
+    /// transcript pane is deliberately untouched: the live buffer still holds
+    /// the text the last `Done` streamed in.
+    fn reap_finished(&mut self) {
+        let done: Vec<usize> = self
+            .queue
+            .iter()
+            .enumerate()
+            .filter(|(_, item)| matches!(item.status, ItemStatus::Done))
+            .map(|(index, _)| index)
+            .collect();
+        if !done.is_empty() {
+            let finished_at = unix_secs();
+            for &index in done.iter().rev() {
+                let item = &self.queue[index];
+                let Some(transcript) = item.transcript.clone() else {
+                    continue;
+                };
+                self.merge_recent(RecentEntry {
+                    audio: item.audio.clone(),
+                    transcript: Some(transcript),
+                    finished_at,
+                    duration: item.duration,
+                    speakers: item
+                        .stats
+                        .as_ref()
+                        .and_then(|stats| stats.num_speakers)
+                        .and_then(|count| u8::try_from(count).ok())
+                        .filter(|count| *count > 0),
+                });
+            }
+        }
+        // Keep every stored queue index pointing at the same row once the
+        // finished ones are gone, and drop it when its row was reaped.
+        let remap = |stored: &mut Option<usize>| {
+            if let Some(index) = *stored {
+                *stored = if done.contains(&index) {
+                    None
+                } else {
+                    Some(index - done.iter().filter(|removed| **removed < index).count())
+                };
+            }
+        };
+        remap(&mut self.current);
+        remap(&mut self.current_index);
+        remap(&mut self.selected);
+        for &index in done.iter().rev() {
+            self.queue.remove(index);
+        }
+        if !done.is_empty() {
+            self.invalidate_derived();
+        }
+        self.save_queue();
     }
 
     // ---- displayed view (live run vs. a selected completed item) ----
@@ -2134,11 +2211,9 @@ impl App {
         self.speaker_order_cache.replace(None);
     }
 
-    /// True when the queue holds at least one completed transcript.
+    /// True when this batch finished at least one transcript.
     fn has_results(&self) -> bool {
-        self.queue
-            .iter()
-            .any(|item| matches!(item.status, ItemStatus::Done) && item.transcript.is_some())
+        !self.batch_summary.is_empty()
     }
 
     /// Audio file name of the item currently being transcribed.
@@ -2193,10 +2268,7 @@ impl App {
     }
 
     fn completed_count(&self) -> usize {
-        self.queue
-            .iter()
-            .filter(|item| matches!(item.status, ItemStatus::Done))
-            .count()
+        self.batch_summary.len()
     }
 
     /// A press on the line itself: the first click seeks, the second opens the
@@ -2432,6 +2504,7 @@ impl App {
         self.header_menu = None;
         self.close_find();
         self.commit_inline_edit(false);
+        self.selected_recent = None;
         let Some(item) = self.queue.get(index) else {
             return Task::none();
         };
@@ -2564,6 +2637,7 @@ impl App {
         let Some(entry) = self.recent.get(index).cloned() else {
             return Task::none();
         };
+        self.selected_recent = Some(index);
         let Some(source) = entry.transcript.clone().or_else(|| entry.audio.clone()) else {
             return Task::none();
         };
@@ -2646,6 +2720,7 @@ impl App {
         self.commit_inline_edit(false);
         self.invalidate_derived();
         self.selected = None;
+        self.selected_recent = None;
         self.selected_view = None;
         self.line_history = LineHistory::default();
         self.view_error = None;
@@ -3577,7 +3652,9 @@ impl App {
                 Task::none()
             }
             Message::OpenRunSetup => {
-                if !matches!(self.status, Status::Running) && !self.queue.is_empty() {
+                if !matches!(self.status, Status::Running)
+                    && (!self.queue.is_empty() || self.retranscribe_target().is_some())
+                {
                     self.header_menu = None;
                     self.run_setup_open = true;
                 }
@@ -4911,6 +4988,9 @@ impl App {
                     self.commit_inline_edit(false);
                     self.queue.clear();
                     self.batch_paths.clear();
+                    self.batch_summary.clear();
+                    self.batch_total = 0.0;
+                    self.batch_done = 0.0;
                     self.gpu_retry_pending = false;
                     self.current = None;
                     self.current_index = None;
@@ -4947,6 +5027,7 @@ impl App {
                     self.console_lines.clear();
                     self.toast = None;
                     self.selected = None;
+                    self.selected_recent = None;
                     self.selected_view = None;
                     self.view_error = None;
                     self.run_start = None;
@@ -5927,11 +6008,7 @@ impl App {
         if !self.has_results() {
             return false;
         }
-        let generated = self
-            .queue
-            .iter()
-            .filter(|item| matches!(item.status, ItemStatus::Done) && item.stats.is_some())
-            .count();
+        let generated = self.batch_summary.len();
         // Free finishes on the summary; roughly one run in five also opens the
         // upgrade prompt, so it stays a nudge instead of a nag.
         if self.shows(license::Audience::FreeOnly) && upsell_roll() {
@@ -6014,10 +6091,11 @@ impl App {
             .queue
             .iter()
             .any(|item| matches!(item.status, ItemStatus::Interrupted));
-        let finished = self
-            .selected
-            .and_then(|index| self.queue.get(index))
-            .is_some_and(|item| matches!(item.status, ItemStatus::Done));
+        let finished = self.retranscribe_target().is_some()
+            || self
+                .selected
+                .and_then(|index| self.queue.get(index))
+                .is_some_and(|item| matches!(item.status, ItemStatus::Done));
         if !pending && interrupted {
             "Resume"
         } else if !pending && finished {
@@ -6027,38 +6105,128 @@ impl App {
         }
     }
 
-    fn start(&mut self) {
-        if self.queue.is_empty() {
-            self.status = Status::Error("add at least one file".to_string());
-            return;
+    /// The history entry Start would transcribe again: the one opened from the
+    /// history, or the entry backing a finished view opened from the queue.
+    fn retranscribe_target(&self) -> Option<usize> {
+        if let Some(index) = self.selected_recent {
+            if index < self.recent.len() {
+                return Some(index);
+            }
         }
+        let view = self
+            .selected_view
+            .as_ref()
+            .filter(|view| view.finished)?;
+        self.recent.iter().position(|entry| {
+            entry.transcript.as_deref() == Some(view.source.as_path())
+                || entry.audio.as_deref() == Some(view.source.as_path())
+                || (view.audio.is_some() && entry.audio == view.audio)
+        })
+    }
+
+    /// Queue a history entry for a new run. Returns false when it has no audio
+    /// left to transcribe, with a toast saying why.
+    fn enqueue_recent(&mut self, index: usize) -> bool {
+        let Some(entry) = self.recent.get(index).cloned() else {
+            return false;
+        };
+        let Some(audio) = entry.audio else {
+            self.toast = Some((
+                "This history entry has no audio file to transcribe".to_string(),
+                Instant::now(),
+            ));
+            return false;
+        };
+        if !audio.is_file() {
+            let name = audio
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| audio.display().to_string());
+            self.toast = Some((
+                format!("Audio file is missing: {name}"),
+                Instant::now(),
+            ));
+            return false;
+        }
+        // A row for this audio is the same work; reuse it rather than adding a
+        // duplicate. Done here means an adopted transcript, which a rerun
+        // replaces.
+        if let Some(row) = self
+            .queue
+            .iter_mut()
+            .find(|item| item.audio.as_deref() == Some(audio.as_path()))
+        {
+            if !matches!(row.status, ItemStatus::Pending) {
+                row.status = ItemStatus::Pending;
+                row.transcript = None;
+                row.stats = None;
+                row.turns.clear();
+                row.peaks = Arc::new(Vec::new());
+            }
+            if row.duration.is_none() {
+                row.duration = entry.duration;
+            }
+        } else {
+            self.queue.push(QueueItem {
+                path: audio.clone(),
+                audio: Some(audio.clone()),
+                status: ItemStatus::Pending,
+                duration: entry.duration,
+                transcript: None,
+                stats: None,
+                turns: Vec::new(),
+                peaks: Arc::new(Vec::new()),
+            });
+        }
+        let row_index = self
+            .queue
+            .iter()
+            .position(|item| item.audio.as_deref() == Some(audio.as_path()));
+        self.selected = row_index;
+        self.selected_recent = Some(index);
+        self.invalidate_derived();
+        self.save_queue();
+        true
+    }
+
+    fn start(&mut self) {
         let has_pending = self
             .queue
             .iter()
             .any(|item| matches!(item.status, ItemStatus::Pending | ItemStatus::Interrupted));
         if !has_pending {
-            // Nothing is waiting: transcribe again only the finished file the
-            // user has selected. The queue itself is never re-run wholesale.
-            let target = self.selected.filter(|index| {
-                self.queue.get(*index).is_some_and(|item| {
-                    matches!(item.status, ItemStatus::Done | ItemStatus::Failed(_))
-                })
-            });
-            let Some(index) = target else {
-                self.toast = Some((
-                    "Select a finished file to transcribe it again".to_string(),
-                    Instant::now(),
-                ));
+            // Nothing is waiting. A history entry is transcribed again, or the
+            // selected finished row when the queue still holds one. The queue
+            // itself is never re-run wholesale.
+            if let Some(index) = self.retranscribe_target() {
+                if !self.enqueue_recent(index) {
+                    return;
+                }
+            } else if self.queue.is_empty() {
+                self.status = Status::Error("add at least one file".to_string());
                 return;
-            };
-            let item = &mut self.queue[index];
-            item.status = ItemStatus::Pending;
-            item.transcript = None;
-            item.stats = None;
-            item.turns.clear();
-            item.peaks = Arc::new(Vec::new());
-            self.invalidate_derived();
-            self.save_queue();
+            } else {
+                let target = self.selected.filter(|index| {
+                    self.queue.get(*index).is_some_and(|item| {
+                        matches!(item.status, ItemStatus::Done | ItemStatus::Failed(_))
+                    })
+                });
+                let Some(index) = target else {
+                    self.toast = Some((
+                        "Select a finished file to transcribe it again".to_string(),
+                        Instant::now(),
+                    ));
+                    return;
+                };
+                let item = &mut self.queue[index];
+                item.status = ItemStatus::Pending;
+                item.transcript = None;
+                item.stats = None;
+                item.turns.clear();
+                item.peaks = Arc::new(Vec::new());
+                self.invalidate_derived();
+                self.save_queue();
+            }
         }
         if self.calibration_needed() || (self.gpu_selected() && self.gpu_test_needed()) {
             self.open_calibration(true);
@@ -6138,15 +6306,35 @@ impl App {
             return;
         }
 
+        let mut weighted: Vec<PathBuf> = Vec::new();
         if preserve_view {
             // A follow-up pass is part of the same user-visible batch.
             for path in &inputs {
                 if !self.batch_paths.contains(path) {
                     self.batch_paths.push(path.clone());
+                    weighted.push(path.clone());
                 }
             }
         } else {
             self.batch_paths = inputs.clone();
+            self.batch_summary.clear();
+            self.batch_total = 0.0;
+            self.batch_done = 0.0;
+            weighted = inputs.clone();
+        }
+        // Weight the bar by the audio each input is known to hold; an
+        // unprobed file counts as a second. Captured once so removing a
+        // finished row cannot shrink the denominator.
+        for path in &weighted {
+            let weight = self
+                .queue
+                .iter()
+                .find(|item| &item.path == path)
+                .and_then(|item| item.duration)
+                .map(|duration| duration as f32)
+                .filter(|duration| *duration > 0.0)
+                .unwrap_or(1.0);
+            self.batch_total += weight;
         }
         self.last_run = Some(RunRecord {
             preset: self.preset.arg().to_string(),
@@ -6298,7 +6486,8 @@ impl App {
         if let Some(index) = self.current.take() {
             self.queue[index].status = ItemStatus::Failed("cancelled".to_string());
         }
-        self.save_queue();
+        // Anything that already finished this batch belongs in the history.
+        self.reap_finished();
     }
 
     fn rename_lines(lines: &mut [DocLine], mapping: &[(String, String)]) {
@@ -7195,14 +7384,30 @@ impl App {
                     let duration = self.timeline_duration.map(|seconds| seconds as f64);
                     if let Some(index) = self.current.take() {
                         let item = &mut self.queue[index];
+                        let label = item
+                            .audio
+                            .as_ref()
+                            .or(item.transcript.as_ref())
+                            .or(Some(&item.path))
+                            .and_then(|path| path.file_name())
+                            .and_then(|name| name.to_str())
+                            .unwrap_or("file")
+                            .to_string();
                         item.status = ItemStatus::Done;
                         item.transcript = Some(transcript);
                         item.stats = Some(stats);
                         item.turns = turns;
                         item.peaks = peaks;
                         item.duration = duration.or(item.duration);
+                        // Capture what the summary and progress bar need before
+                        // the row leaves the queue.
+                        self.batch_done += item.duration.unwrap_or(1.0) as f32;
+                        if let Some(stats) = item.stats.clone() {
+                            self.batch_summary.push((label, stats));
+                        }
                     }
-                    self.save_queue();
+                    self.current_index = None;
+                    self.reap_finished();
                 }
                 Event::Error { message } => {
                     let was_gpu = self.gpu_selected();
@@ -7214,6 +7419,7 @@ impl App {
                     if let Some(index) = self.current.take() {
                         self.queue[index].status = ItemStatus::Failed(message.clone());
                     }
+                    self.current_index = None;
                     if self.batch {
                         // A process-level failure mid-file leaves the rest
                         // unprocessed; mark them failed. A preflight failure
@@ -7230,7 +7436,9 @@ impl App {
                         self.batch = false;
                     }
                     self.status = Status::Error(message);
-                    self.save_queue();
+                    // Rows that finished before the failure are still history,
+                    // not queue work.
+                    self.reap_finished();
                 }
                 Event::AllDone => {
                     Self::clear_gpu_guard();
@@ -7302,34 +7510,15 @@ impl App {
         Task::batch(tasks)
     }
 
-    /// Completed items from this run, in queue order, with their display name.
-    fn batch_runs(&self) -> Vec<(String, &backend::Stats)> {
-        self.queue
-            .iter()
-            .filter(|item| matches!(item.status, ItemStatus::Done))
-            // Restrict the automatic summary to the files this run processed,
-            // not every completed item left in the queue from earlier runs.
-            .filter(|item| self.batch_paths.is_empty() || self.batch_paths.contains(&item.path))
-            .filter_map(|item| {
-                let stats = item.stats.as_ref()?;
-                let name = item
-                    .audio
-                    .as_ref()
-                    .or(item.transcript.as_ref())
-                    .or(Some(&item.path))
-                    .and_then(|path| path.file_name())
-                    .and_then(|name| name.to_str())
-                    .unwrap_or("file")
-                    .to_string();
-                Some((name, stats))
-            })
-            .collect()
+    /// Completed runs from this batch, captured as their rows were reaped.
+    fn batch_runs(&self) -> &[(String, backend::Stats)] {
+        &self.batch_summary
     }
 
     /// Cross-run tabulation shown ahead of the per-file blocks when a queue
     /// processed more than one file. Speaker labels are per file, so speaker
     /// counts are listed per row rather than summed into a meaningless total.
-    fn aggregate_table(runs: &[(String, &backend::Stats)]) -> (Vec<String>, Vec<Vec<String>>) {
+    fn aggregate_table(runs: &[(String, backend::Stats)]) -> (Vec<String>, Vec<Vec<String>>) {
         let headers = ["File", "Length", "Run", "Speed", "Spk", "Words"]
             .iter()
             .map(|cell| cell.to_string())
@@ -7381,37 +7570,19 @@ impl App {
         let mut lines: Vec<SummaryLine> = Vec::new();
         let runs = self.batch_runs();
         if runs.len() > 1 {
-            let (headers, rows) = Self::aggregate_table(&runs);
+            let (headers, rows) = Self::aggregate_table(runs);
             lines.push(SummaryLine::Table(headers, rows));
         }
-        for item in &self.queue {
-            if !matches!(item.status, ItemStatus::Done) {
-                continue;
-            }
-            if !self.batch_paths.is_empty() && !self.batch_paths.contains(&item.path) {
-                continue;
-            }
-            let name = item
-                .audio
-                .as_ref()
-                .or(item.transcript.as_ref())
-                .or(Some(&item.path))
-                .and_then(|path| path.file_name())
-                .and_then(|name| name.to_str())
-                .unwrap_or("file")
-                .to_string();
+        for (name, stats) in runs {
             if !lines.is_empty() && !matches!(lines.last(), Some(SummaryLine::Table(..))) {
                 lines.push(SummaryLine::Body(String::new()));
             }
-            lines.push(SummaryLine::File(name));
-            match &item.stats {
-                Some(stats) => lines.extend(
-                    Self::single_stats_lines(stats)
-                        .into_iter()
-                        .map(SummaryLine::Body),
-                ),
-                None => lines.push(SummaryLine::Body("Imported transcript".to_string())),
-            }
+            lines.push(SummaryLine::File(name.clone()));
+            lines.extend(
+                Self::single_stats_lines(stats)
+                    .into_iter()
+                    .map(SummaryLine::Body),
+            );
         }
         if lines.is_empty() {
             vec![SummaryLine::Body("No completed run yet.".to_string())]
@@ -7483,52 +7654,32 @@ impl App {
         if !matches!(self.status, Status::Running) && !self.completion_pending {
             return self.overall_shown;
         }
-        if self.batch_paths.is_empty() {
+        if self.batch_total <= 0.0 {
             return 0.0;
         }
 
-        let batch: Vec<&QueueItem> = self
-            .queue
-            .iter()
-            .filter(|item| self.batch_paths.contains(&item.path))
-            .collect();
-        if batch.is_empty() {
-            return 0.0;
-        }
-        let known: Vec<f32> = batch
-            .iter()
-            .filter_map(|item| item.duration.map(|duration| duration as f32))
-            .filter(|duration| *duration > 0.0)
-            .collect();
-        let fallback = if known.is_empty() {
-            1.0
-        } else {
-            known.iter().sum::<f32>() / known.len() as f32
-        };
-        let total: f32 = batch.iter().map(|item| queue_weight(item, fallback)).sum();
-        if total <= 0.0 {
-            return 0.0;
-        }
-
-        let mut completed = 0.0;
-        for item in &batch {
-            let finished = matches!(item.status, ItemStatus::Done | ItemStatus::Failed(_));
-            let current = self
-                .current_index
-                .and_then(|index| self.queue.get(index))
-                .is_some_and(|current| current.path == item.path);
-            if finished && !current {
-                completed += queue_weight(item, fallback);
-            } else if current {
-                let fraction = if finished || self.stage.eq_ignore_ascii_case("done") {
+        // Finished files leave the queue, so their weight is banked in
+        // `batch_done`. Only the file in flight uses the live fraction.
+        let mut completed = self.batch_done;
+        if let Some(index) = self.current_index {
+            if let Some(item) = self.queue.get(index) {
+                let weight = item
+                    .duration
+                    .map(|duration| duration as f32)
+                    .filter(|duration| *duration > 0.0)
+                    .unwrap_or(1.0);
+                let fraction = if self.stage.eq_ignore_ascii_case("done") {
                     1.0
                 } else {
                     self.progress.clamp(0.0, 1.0)
                 };
-                completed += queue_weight(item, fallback) * fraction;
+                // `batch_done` already counted it if it was reaped.
+                if !matches!(item.status, ItemStatus::Done) {
+                    completed += weight * fraction;
+                }
             }
         }
-        (completed / total).clamp(0.0, 1.0)
+        (completed / self.batch_total).clamp(0.0, 1.0)
     }
 
     /// Fold a finished file's timings into the priors the readout prices with.
@@ -7626,13 +7777,11 @@ impl App {
             EtaPhase::Writing => tail,
         };
 
-        // Files queued after the current one. Unknown durations use the same
-        // average as `queue_weight`, and the same diarize rate as above.
-        let start = self.current_index.map_or(0, |index| index + 1);
+        // Files still waiting. The running row is excluded by status, so this
+        // stays correct when `current_index` has been cleared by a reap.
         let pending: Vec<&QueueItem> = self
             .queue
             .iter()
-            .skip(start)
             .filter(|item| matches!(item.status, ItemStatus::Pending))
             .collect();
         let known: Vec<f32> = pending
@@ -8958,7 +9107,9 @@ impl App {
         let scheme = *scheme;
         let running = matches!(self.status, Status::Running);
         let has_queue = !self.queue.is_empty();
-        let can_start = !running && has_queue && self.models_ready();
+        let can_start = !running
+            && (has_queue || self.retranscribe_target().is_some())
+            && self.models_ready();
 
         let header = row![
             text("Queue")
@@ -9472,7 +9623,14 @@ impl App {
         if self.feature_deck_visible() {
             return self.tagged(license::Audience::FreeOnly, self.feature_deck(&scheme));
         }
-        if self.queue.is_empty() {
+        // The queue can be empty while a history entry or the live buffer from
+        // the last run is still on screen: only a genuinely blank pane takes
+        // the empty state.
+        if self.queue.is_empty()
+            && self.selected_view.is_none()
+            && self.lines.is_empty()
+            && self.transcript.trim().is_empty()
+        {
             return self.empty_transcript_state(&scheme);
         }
         if let Some(error) = &self.view_error {
@@ -14548,6 +14706,73 @@ fn modal_overlay<'a>(
     stack![base, backdrop, centered].into()
 }
 
+/// Unix seconds from a file's modification time, if it can be read.
+fn file_unix_secs(path: &Path) -> Option<u64> {
+    std::fs::metadata(path)
+        .ok()?
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .map(|duration| duration.as_secs())
+}
+
+fn unix_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
+}
+
+/// Insert or replace a history entry, newest first. Identity is the audio path
+/// when there is one, otherwise the transcript path, so re-running the same
+/// source replaces its entry instead of adding a second row. Returns its index.
+fn merge_recent_entry(recent: &mut Vec<RecentEntry>, entry: RecentEntry) -> usize {
+    let existing = entry
+        .audio
+        .as_deref()
+        .and_then(|audio| {
+            recent
+                .iter()
+                .position(|other| other.audio.as_deref() == Some(audio))
+        })
+        .or_else(|| {
+            if entry.audio.is_none() {
+                entry.transcript.as_ref().and_then(|transcript| {
+                    recent.iter().position(|other| {
+                        other.audio.is_none() && other.transcript.as_ref() == Some(transcript)
+                    })
+                })
+            } else {
+                None
+            }
+        });
+    let index = match existing {
+        Some(index) => {
+            recent[index] = entry;
+            index
+        }
+        None => {
+            recent.push(entry);
+            recent.len() - 1
+        }
+    };
+    // Newest first; ties fall back to the path so the order is stable.
+    recent.sort_by(|a, b| {
+        b.finished_at.cmp(&a.finished_at).then_with(|| {
+            (a.transcript.as_deref(), a.audio.as_deref())
+                .cmp(&(b.transcript.as_deref(), b.audio.as_deref()))
+        })
+    });
+    let merged = recent[index].clone();
+    recent.iter().position(|other| {
+        other.audio == merged.audio
+            && other.transcript == merged.transcript
+            && other.finished_at == merged.finished_at
+    })
+    .unwrap_or(index)
+}
+
 fn queue_weight(item: &QueueItem, fallback: f32) -> f32 {
     item.duration
         .map(|duration| duration as f32)
@@ -16831,6 +17056,32 @@ mod tests {
         content
     }
 
+    /// Seed a finished transcript as history and return its index. The peaks
+    /// are not stored: a recent entry reloads them from the audio.
+    fn push_recent(
+        app: &mut App,
+        audio: Option<PathBuf>,
+        transcript: PathBuf,
+        duration: Option<f64>,
+        peaks: Vec<f32>,
+    ) -> usize {
+        let _ = peaks;
+        let finished_at = app
+            .recent
+            .iter()
+            .map(|entry| entry.finished_at)
+            .max()
+            .unwrap_or(0)
+            + 1;
+        app.merge_recent(RecentEntry {
+            audio,
+            transcript: Some(transcript),
+            finished_at,
+            duration,
+            speakers: None,
+        })
+    }
+
     /// A Pro app with one finished transcription item on disk, opened for
     /// editing. Returns the app, the transcript path and the media directory.
     fn line_edit_fixture(tag: &str, transcript_text: &str) -> (App, PathBuf, PathBuf) {
@@ -16841,45 +17092,14 @@ mod tests {
         std::fs::write(&transcript, transcript_text).unwrap();
 
         let mut app = pro_app();
-        app.queue.push(QueueItem {
-            path: audio.clone(),
-            audio: Some(audio),
-            status: ItemStatus::Done,
-            duration: Some(12.0),
-            transcript: Some(transcript.clone()),
-            stats: None,
-            turns: Vec::new(),
-            peaks: Arc::new(vec![0.2; 16]),
-        });
+        push_recent(&mut app, Some(audio), transcript.clone(), Some(12.0), vec![0.2; 16]);
         open_test_item(&mut app, 0);
         (app, transcript, media)
     }
 
+    /// Open a finished history entry through the real message path.
     fn open_test_item(app: &mut App, index: usize) {
-        let source = app.queue[index].transcript.clone().unwrap();
-        let Some(text) = backend::read_transcript(&source) else {
-            app.selected = Some(index);
-            app.selected_view = Some(ItemView {
-                source: source.clone(),
-                finished: true,
-                transcript: String::new(),
-                lines: Vec::new(),
-                turns: Vec::new(),
-                peaks: Arc::new(Vec::new()),
-                duration: app.queue[index].duration.map(|seconds| seconds as f32),
-                audio: app.queue[index].audio.clone(),
-                output: None,
-            });
-            app.view_error = Some(format!("Could not read {}", source.display()));
-            return;
-        };
-        let output = source
-            .extension()
-            .and_then(|ext| ext.to_str())
-            .map(|ext| ext.eq_ignore_ascii_case("txt"))
-            .unwrap_or(false)
-            .then(|| source.clone());
-        let _ = app.open_item_view(index, Some((text, output)));
+        let _ = app.update(Message::OpenRecent(index));
     }
 
     #[test]
@@ -16895,10 +17115,11 @@ mod tests {
 
         let mut app = pro_app();
         assert!(app.queue.is_empty());
+        // An interrupted run is resumable, and keeps its turns and waveform.
         app.queue.push(QueueItem {
             path: audio.clone(),
             audio: Some(audio.clone()),
-            status: ItemStatus::Done,
+            status: ItemStatus::Interrupted,
             duration: Some(1.5),
             transcript: Some(transcript.clone()),
             stats: None,
@@ -16918,7 +17139,7 @@ mod tests {
         assert_eq!(batch, vec![audio.clone()]);
         assert_eq!(loaded[0].audio.as_deref(), Some(audio.as_path()));
         assert_eq!(loaded[0].transcript.as_deref(), Some(transcript.as_path()));
-        assert!(matches!(loaded[0].status, ItemStatus::Done));
+        assert!(matches!(loaded[0].status, ItemStatus::Interrupted));
         assert_eq!(loaded[0].duration, Some(1.5));
         assert_eq!(loaded[0].turns.len(), 1);
         assert_eq!(loaded[0].turns[0].speaker, "SPEAKER 1");
@@ -17195,6 +17416,7 @@ mod tests {
 
         let app = App::new();
         assert!(app.queue.is_empty());
+        assert!(app.recent.is_empty());
         assert!(app.batch_paths.is_empty());
         assert!(!App::queue_path().unwrap().exists());
         assert!(App::settings_path().unwrap().exists());
@@ -17281,16 +17503,7 @@ mod tests {
         .unwrap();
 
         let mut app = pro_app();
-        app.queue.push(QueueItem {
-            path: audio.clone(),
-            audio: Some(audio),
-            status: ItemStatus::Done,
-            duration: Some(10.0),
-            transcript: Some(transcript),
-            stats: None,
-            turns: Vec::new(),
-            peaks: Arc::new(vec![0.2; 16]),
-        });
+        push_recent(&mut app, Some(audio), transcript, Some(10.0), vec![0.2; 16]);
         open_test_item(&mut app, 0);
         assert!(is_low_confidence(&app.selected_view.as_ref().unwrap().lines[0]));
 
@@ -17335,16 +17548,7 @@ mod tests {
         .unwrap();
 
         let mut app = pro_app();
-        app.queue.push(QueueItem {
-            path: audio.clone(),
-            audio: Some(audio),
-            status: ItemStatus::Done,
-            duration: Some(10.0),
-            transcript: Some(transcript),
-            stats: None,
-            turns: Vec::new(),
-            peaks: Arc::new(vec![0.2; 16]),
-        });
+        push_recent(&mut app, Some(audio), transcript, Some(10.0), vec![0.2; 16]);
         open_test_item(&mut app, 0);
         assert!(is_low_confidence(&app.selected_view.as_ref().unwrap().lines[0]));
 
@@ -17387,16 +17591,7 @@ mod tests {
         .unwrap();
 
         let mut app = pro_app();
-        app.queue.push(QueueItem {
-            path: audio.clone(),
-            audio: Some(audio),
-            status: ItemStatus::Done,
-            duration: Some(10.0),
-            transcript: Some(transcript.clone()),
-            stats: None,
-            turns: Vec::new(),
-            peaks: Arc::new(vec![0.2; 16]),
-        });
+        push_recent(&mut app, Some(audio), transcript.clone(), Some(10.0), vec![0.2; 16]);
         open_test_item(&mut app, 0);
 
         let _ = app.update(Message::EditLine(0));
@@ -17434,16 +17629,7 @@ mod tests {
         .unwrap();
 
         let mut app = pro_app();
-        app.queue.push(QueueItem {
-            path: audio.clone(),
-            audio: Some(audio),
-            status: ItemStatus::Done,
-            duration: Some(10.0),
-            transcript: Some(transcript),
-            stats: None,
-            turns: Vec::new(),
-            peaks: Arc::new(vec![0.2; 16]),
-        });
+        push_recent(&mut app, Some(audio), transcript, Some(10.0), vec![0.2; 16]);
         open_test_item(&mut app, 0);
         assert!(app.transcript_header(&app.scheme()).is_some());
 
@@ -17486,16 +17672,7 @@ mod tests {
         .unwrap();
 
         let mut app = pro_app();
-        app.queue.push(QueueItem {
-            path: audio.clone(),
-            audio: Some(audio),
-            status: ItemStatus::Done,
-            duration: Some(10.0),
-            transcript: Some(transcript),
-            stats: None,
-            turns: Vec::new(),
-            peaks: Arc::new(vec![0.2; 16]),
-        });
+        push_recent(&mut app, Some(audio), transcript, Some(10.0), vec![0.2; 16]);
         open_test_item(&mut app, 0);
         open_line_edit(&mut app, 0);
         let _ = app.update(Message::MergeNextLine);
@@ -17542,16 +17719,7 @@ mod tests {
         .unwrap();
 
         let mut app = pro_app();
-        app.queue.push(QueueItem {
-            path: audio.clone(),
-            audio: Some(audio),
-            status: ItemStatus::Done,
-            duration: Some(10.0),
-            transcript: Some(transcript),
-            stats: None,
-            turns: Vec::new(),
-            peaks: Arc::new(vec![0.2; 16]),
-        });
+        push_recent(&mut app, Some(audio), transcript, Some(10.0), vec![0.2; 16]);
         open_test_item(&mut app, 0);
         open_line_edit(&mut app, 1);
         let _ = app.update(Message::MergePrevLine);
@@ -17588,16 +17756,7 @@ mod tests {
         .unwrap();
 
         let mut app = pro_app();
-        app.queue.push(QueueItem {
-            path: audio.clone(),
-            audio: Some(audio),
-            status: ItemStatus::Done,
-            duration: Some(10.0),
-            transcript: Some(transcript),
-            stats: None,
-            turns: Vec::new(),
-            peaks: Arc::new(vec![0.2; 16]),
-        });
+        push_recent(&mut app, Some(audio), transcript, Some(10.0), vec![0.2; 16]);
         open_test_item(&mut app, 0);
 
         let scheme = app.scheme();
@@ -17637,16 +17796,7 @@ mod tests {
         std::fs::write(&transcript, original).unwrap();
 
         let mut app = pro_app();
-        app.queue.push(QueueItem {
-            path: audio.clone(),
-            audio: Some(audio),
-            status: ItemStatus::Done,
-            duration: Some(10.0),
-            transcript: Some(transcript.clone()),
-            stats: None,
-            turns: Vec::new(),
-            peaks: Arc::new(vec![0.2; 16]),
-        });
+        push_recent(&mut app, Some(audio), transcript.clone(), Some(10.0), vec![0.2; 16]);
         open_test_item(&mut app, 0);
 
         open_line_edit(&mut app, 0);
@@ -17698,16 +17848,7 @@ mod tests {
         std::fs::write(&transcript, original).unwrap();
 
         let mut app = pro_app();
-        app.queue.push(QueueItem {
-            path: audio.clone(),
-            audio: Some(audio),
-            status: ItemStatus::Done,
-            duration: Some(12.0),
-            transcript: Some(transcript.clone()),
-            stats: None,
-            turns: Vec::new(),
-            peaks: Arc::new(vec![0.2; 16]),
-        });
+        push_recent(&mut app, Some(audio), transcript.clone(), Some(12.0), vec![0.2; 16]);
         open_test_item(&mut app, 0);
 
         let _ = app.update(Message::EditLine(1));
@@ -17750,16 +17891,7 @@ mod tests {
         std::fs::write(&transcript, original).unwrap();
 
         let mut app = pro_app();
-        app.queue.push(QueueItem {
-            path: audio.clone(),
-            audio: Some(audio),
-            status: ItemStatus::Done,
-            duration: Some(12.0),
-            transcript: Some(transcript.clone()),
-            stats: None,
-            turns: Vec::new(),
-            peaks: Arc::new(vec![0.2; 16]),
-        });
+        push_recent(&mut app, Some(audio), transcript.clone(), Some(12.0), vec![0.2; 16]);
         open_test_item(&mut app, 0);
 
         let _ = app.update(Message::EditLine(1));
@@ -18200,16 +18332,7 @@ mod tests {
         .unwrap();
 
         let mut app = pro_app();
-        app.queue.push(QueueItem {
-            path: audio.clone(),
-            audio: Some(audio),
-            status: ItemStatus::Done,
-            duration: Some(12.0),
-            transcript: Some(transcript.clone()),
-            stats: None,
-            turns: Vec::new(),
-            peaks: Arc::new(vec![0.2; 16]),
-        });
+        push_recent(&mut app, Some(audio), transcript.clone(), Some(12.0), vec![0.2; 16]);
         open_test_item(&mut app, 0);
 
         let _ = app.update(Message::EditLine(1));
@@ -18254,16 +18377,7 @@ mod tests {
         .unwrap();
 
         let mut app = pro_app();
-        app.queue.push(QueueItem {
-            path: audio.clone(),
-            audio: Some(audio),
-            status: ItemStatus::Done,
-            duration: Some(12.0),
-            transcript: Some(transcript),
-            stats: None,
-            turns: Vec::new(),
-            peaks: Arc::new(vec![0.2; 16]),
-        });
+        push_recent(&mut app, Some(audio), transcript, Some(12.0), vec![0.2; 16]);
         open_test_item(&mut app, 0);
 
         let scheme = app.scheme();
@@ -18366,16 +18480,7 @@ mod tests {
         .unwrap();
 
         let mut app = pro_app();
-        app.queue.push(QueueItem {
-            path: audio.clone(),
-            audio: Some(audio),
-            status: ItemStatus::Done,
-            duration: Some(20.0),
-            transcript: Some(transcript),
-            stats: None,
-            turns: Vec::new(),
-            peaks: Arc::new(vec![0.2; 16]),
-        });
+        push_recent(&mut app, Some(audio), transcript, Some(20.0), vec![0.2; 16]);
         open_test_item(&mut app, 0);
         // A measured viewport is what makes scroll targets computable.
         app.transcript_content = 1200.0;
@@ -18504,16 +18609,7 @@ mod tests {
         .unwrap();
 
         let mut app = pro_app();
-        app.queue.push(QueueItem {
-            path: audio.clone(),
-            audio: Some(audio),
-            status: ItemStatus::Done,
-            duration: Some(10.0),
-            transcript: Some(transcript),
-            stats: None,
-            turns: Vec::new(),
-            peaks: Arc::new(vec![0.2; 16]),
-        });
+        push_recent(&mut app, Some(audio), transcript, Some(10.0), vec![0.2; 16]);
         open_test_item(&mut app, 0);
         app.speaker_filter = Some("SPEAKER 1".to_string());
         app.invalidate_derived();
@@ -18593,16 +18689,13 @@ mod tests {
         .unwrap();
 
         let mut app = pro_app();
-        app.queue.push(QueueItem {
-            path: audio.clone(),
-            audio: Some(audio),
-            status: ItemStatus::Done,
-            duration: Some(2.0),
-            transcript: Some(transcript),
-            stats: None,
-            turns: Vec::new(),
-            peaks: Arc::new(Vec::new()),
-        });
+        push_recent(
+            &mut app,
+            Some(audio),
+            transcript,
+            Some(2.0),
+            Vec::new(),
+        );
 
         open_test_item(&mut app, 0);
         assert!(app.shown_transcript().contains("[00:01] SPEAKER 1: hello"));
@@ -18616,28 +18709,13 @@ mod tests {
     fn summary_is_limited_to_the_current_batch() {
         let _guard = env_lock();
         let _config = ConfigEnv::new("batch-summary-config");
-        let media = temp_dir("batch-summary-media");
-
-        let make_item = |name: &str| {
-            let path = media.join(name);
-            std::fs::write(&path, b"audio").unwrap();
-            QueueItem {
-                path: path.clone(),
-                audio: Some(path),
-                status: ItemStatus::Done,
-                duration: Some(6.0),
-                transcript: None,
-                stats: None,
-                turns: Vec::new(),
-                peaks: Arc::new(Vec::new()),
-            }
-        };
 
         let mut app = pro_app();
-        app.queue.push(make_item("old.mp3"));
-        app.queue.push(make_item("first.mp3"));
-        app.queue.push(make_item("second.mp3"));
-        app.batch_paths = vec![media.join("first.mp3"), media.join("second.mp3")];
+        // Only the runs this batch captured are summarised.
+        app.batch_summary = vec![
+            ("first.mp3".to_string(), backend::Stats::default()),
+            ("second.mp3".to_string(), backend::Stats::default()),
+        ];
 
         let files: Vec<String> = app
             .stats_lines()
@@ -18648,19 +18726,14 @@ mod tests {
             })
             .collect();
         assert_eq!(files, vec!["first.mp3", "second.mp3"]);
-
-        let _ = std::fs::remove_dir_all(&media);
     }
 
     #[test]
     fn summary_tabulates_every_run_when_the_queue_held_more_than_one() {
         let _guard = env_lock();
         let _config = ConfigEnv::new("batch-summary-table-config");
-        let media = temp_dir("batch-summary-table-media");
 
-        let make_item = |name: &str, audio: f64, run: f64, words: usize| {
-            let path = media.join(name);
-            std::fs::write(&path, b"audio").unwrap();
+        let make_run = |name: &str, audio: f64, run: f64, words: usize| {
             let mut stats = backend::Stats {
                 audio_seconds: audio,
                 run_seconds: run,
@@ -18670,22 +18743,14 @@ mod tests {
             stats
                 .speaker_stats
                 .insert("A".to_string(), backend::SpeakerStat { seconds: audio as f32, segments: 3, words });
-            QueueItem {
-                path: path.clone(),
-                audio: Some(path),
-                status: ItemStatus::Done,
-                duration: Some(audio),
-                transcript: None,
-                stats: Some(stats),
-                turns: Vec::new(),
-                peaks: Arc::new(Vec::new()),
-            }
+            (name.to_string(), stats)
         };
 
         let mut app = pro_app();
-        app.queue.push(make_item("first.mp3", 60.0, 30.0, 100));
-        app.queue.push(make_item("second.mp3", 120.0, 40.0, 250));
-        app.batch_paths = vec![media.join("first.mp3"), media.join("second.mp3")];
+        app.batch_summary = vec![
+            make_run("first.mp3", 60.0, 30.0, 100),
+            make_run("second.mp3", 120.0, 40.0, 250),
+        ];
 
         let lines = app.stats_lines();
         let Some(SummaryLine::Table(headers, rows)) = lines.first() else {
@@ -18701,14 +18766,11 @@ mod tests {
         assert_eq!(rows[2][5], "350");
 
         // A single file keeps the plain per-file block, with no table.
-        app.queue.remove(1);
-        app.batch_paths = vec![media.join("first.mp3")];
+        app.batch_summary.truncate(1);
         assert!(!app
             .stats_lines()
             .iter()
             .any(|line| matches!(line, SummaryLine::Table(..))));
-
-        let _ = std::fs::remove_dir_all(&media);
     }
 
     #[test]
@@ -18727,20 +18789,18 @@ mod tests {
         .unwrap();
 
         let mut app = pro_app();
-        app.queue.push(QueueItem {
-            path: audio.clone(),
-            audio: Some(audio.clone()),
-            status: ItemStatus::Done,
-            duration: Some(6.0),
-            transcript: Some(transcript.clone()),
-            stats: None,
-            turns: Vec::new(),
-            peaks: Arc::new(Vec::new()),
-        });
+        push_recent(
+            &mut app,
+            Some(audio.clone()),
+            transcript.clone(),
+            Some(6.0),
+            Vec::new(),
+        );
 
-        // Clicking the completed row opens its transcript.
+        // Opening the history entry shows its transcript; it has no queue row.
         open_test_item(&mut app, 0);
-        assert_eq!(app.selected, Some(0));
+        assert_eq!(app.selected, None);
+        assert_eq!(app.selected_recent, Some(0));
         assert_eq!(app.shown_lines().len(), 2);
         assert!(app.shown_transcript().contains("SPEAKER 1: hello"));
 
@@ -18932,16 +18992,7 @@ mod tests {
         .unwrap();
 
         let mut app = pro_app();
-        app.queue.push(QueueItem {
-            path: audio.clone(),
-            audio: Some(audio),
-            status: ItemStatus::Done,
-            duration: Some(10.0),
-            transcript: Some(transcript.clone()),
-            stats: None,
-            turns: Vec::new(),
-            peaks: Arc::new(vec![0.2; 16]),
-        });
+        push_recent(&mut app, Some(audio), transcript.clone(), Some(10.0), vec![0.2; 16]);
         open_test_item(&mut app, 0);
 
         let _ = app.update(Message::FlipLineSpeaker(1));
@@ -19201,6 +19252,7 @@ mod tests {
         // The next completion does not queue the card at all.
         app.rename_open = false;
         app.pending_rename = false;
+        app.batch_summary = vec![("talk.mp3".to_string(), backend::Stats::default())];
         assert!(app.present_completion());
         assert!(!app.pending_tips);
 
@@ -19523,16 +19575,7 @@ mod tests {
         .unwrap();
 
         let mut app = pro_app();
-        app.queue.push(QueueItem {
-            path: audio.clone(),
-            audio: Some(audio),
-            status: ItemStatus::Done,
-            duration: Some(10.0),
-            transcript: Some(transcript),
-            stats: None,
-            turns: Vec::new(),
-            peaks: Arc::new(vec![0.2; 16]),
-        });
+        push_recent(&mut app, Some(audio), transcript, Some(10.0), vec![0.2; 16]);
         open_test_item(&mut app, 0);
 
         // No run filled the live buffer: the screen is showing the item, and
@@ -19588,16 +19631,7 @@ mod tests {
         .unwrap();
 
         let mut app = pro_app();
-        app.queue.push(QueueItem {
-            path: audio.clone(),
-            audio: Some(audio),
-            status: ItemStatus::Done,
-            duration: Some(10.0),
-            transcript: Some(transcript),
-            stats: None,
-            turns: Vec::new(),
-            peaks: Arc::new(vec![0.2; 16]),
-        });
+        push_recent(&mut app, Some(audio), transcript, Some(10.0), vec![0.2; 16]);
         open_test_item(&mut app, 0);
         assert_eq!(app.shown_lines().len(), 3);
 
@@ -19651,16 +19685,7 @@ mod tests {
 
         let mut app = pro_app();
         let audio = media.join("talk.mp3");
-        app.queue.push(QueueItem {
-            path: audio.clone(),
-            audio: Some(audio),
-            status: ItemStatus::Done,
-            duration: Some(10.0),
-            transcript: Some(transcript),
-            stats: None,
-            turns: Vec::new(),
-            peaks: Arc::new(vec![0.2; 16]),
-        });
+        push_recent(&mut app, Some(audio), transcript, Some(10.0), vec![0.2; 16]);
         open_test_item(&mut app, 0);
 
         let out = media.join("talk.srt");
@@ -19681,16 +19706,7 @@ mod tests {
 
         let mut app = pro_app();
         let audio = media.join("talk.mp3");
-        app.queue.push(QueueItem {
-            path: audio.clone(),
-            audio: Some(audio),
-            status: ItemStatus::Done,
-            duration: Some(10.0),
-            transcript: Some(transcript),
-            stats: None,
-            turns: Vec::new(),
-            peaks: Arc::new(vec![0.2; 16]),
-        });
+        push_recent(&mut app, Some(audio), transcript, Some(10.0), vec![0.2; 16]);
         open_test_item(&mut app, 0);
 
         let sidecar = media.join("talk.json");
@@ -20063,16 +20079,7 @@ mod tests {
 
         let mut app = pro_app();
         let audio = media.join("talk.mp3");
-        app.queue.push(QueueItem {
-            path: audio.clone(),
-            audio: Some(audio),
-            status: ItemStatus::Done,
-            duration: Some(10.0),
-            transcript: Some(transcript),
-            stats: None,
-            turns: Vec::new(),
-            peaks: Arc::new(vec![0.2; 16]),
-        });
+        push_recent(&mut app, Some(audio), transcript, Some(10.0), vec![0.2; 16]);
         open_test_item(&mut app, 0);
 
         let _ = app.update(Message::OpenBriefing);
@@ -20117,16 +20124,7 @@ mod tests {
         .unwrap();
 
         let mut app = pro_app();
-        app.queue.push(QueueItem {
-            path: audio.clone(),
-            audio: Some(audio),
-            status: ItemStatus::Done,
-            duration: Some(6.0),
-            transcript: Some(transcript.clone()),
-            stats: None,
-            turns: Vec::new(),
-            peaks: Arc::new(Vec::new()),
-        });
+        push_recent(&mut app, Some(audio), transcript.clone(), Some(6.0), Vec::new());
         open_test_item(&mut app, 0);
 
         let _ = app.update(Message::EditLine(0));
@@ -20194,16 +20192,7 @@ mod tests {
         std::fs::write(&transcript, "[00:00] SPEAKER 1: hello\n").unwrap();
 
         let mut app = pro_app();
-        app.queue.push(QueueItem {
-            path: audio.clone(),
-            audio: Some(audio.clone()),
-            status: ItemStatus::Done,
-            duration: Some(6.0),
-            transcript: Some(transcript),
-            stats: None,
-            turns: Vec::new(),
-            peaks: Arc::new(vec![0.1; 16]),
-        });
+        push_recent(&mut app, Some(audio.clone()), transcript, Some(6.0), vec![0.1; 16]);
 
         // The live file is not playable while it is being transcribed.
         app.status = Status::Running;
@@ -20573,26 +20562,14 @@ mod tests {
     #[test]
     fn all_done_snaps_the_bars_and_clears_the_current_item() {
         let _guard = env_lock();
-        let config = ConfigEnv::new("all-done-bars");
+        let _config = ConfigEnv::new("all-done-bars");
         let mut app = pro_app();
 
-        let audio = config.dir.join("done.mp3");
-        std::fs::write(&audio, b"audio").unwrap();
-        let transcript = config.dir.join("done.txt");
-        std::fs::write(&transcript, b"transcript").unwrap();
-        app.queue.push(QueueItem {
-            path: audio.clone(),
-            audio: Some(audio.clone()),
-            status: ItemStatus::Done,
-            duration: Some(10.0),
-            transcript: Some(transcript),
-            stats: None,
-            turns: Vec::new(),
-            peaks: Arc::new(Vec::new()),
-        });
-        app.batch_paths = vec![audio];
-        app.current = Some(0);
-        app.current_index = Some(0);
+        // A batch that already finished one file, while its row has been
+        // reaped into the history.
+        app.batch_summary = vec![("done.mp3".to_string(), backend::Stats::default())];
+        app.batch_total = 10.0;
+        app.batch_done = 10.0;
         app.status = Status::Running;
         app.progress = 0.26;
         app.progress_shown = 0.26;
@@ -20605,6 +20582,219 @@ mod tests {
         assert_eq!(app.progress_shown, 1.0);
         assert_eq!(app.overall_shown, 1.0);
         assert!(app.current_index.is_none());
+    }
+
+    /// A queue row that is about to be transcribed, with its audio and
+    /// transcript on disk.
+    fn pending_item(media: &Path, name: &str) -> (PathBuf, PathBuf) {
+        let audio = media.join(name);
+        std::fs::write(&audio, b"audio").unwrap();
+        let transcript = media.join(format!("{name}.txt"));
+        (audio, transcript)
+    }
+
+    #[test]
+    fn done_reaps_into_recent_and_keeps_summary() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("done-reaps");
+        let media = temp_dir("done-reaps-media");
+        let mut app = pro_app();
+
+        let mut files = Vec::new();
+        for name in ["one.mp3", "two.mp3"] {
+            let (audio, txt) = pending_item(&media, name);
+            std::fs::write(&txt, format!("[00:00] SPEAKER 1: {name}\n")).unwrap();
+            app.queue.push(QueueItem {
+                path: audio.clone(),
+                audio: Some(audio.clone()),
+                status: ItemStatus::Pending,
+                duration: Some(1.0),
+                transcript: None,
+                stats: None,
+                turns: Vec::new(),
+                peaks: Arc::new(Vec::new()),
+            });
+            files.push((audio, txt));
+        }
+        app.batch_paths = files.iter().map(|(audio, _)| audio.clone()).collect();
+        app.batch_total = 2.0;
+        app.status = Status::Running;
+        app.batch = true;
+
+        for (audio, txt) in &files {
+            let event = Event::File {
+                audio: audio.display().to_string(),
+            };
+            app.events.lock().unwrap().push_back(event);
+            app.events.lock().unwrap().push_back(Event::Done {
+                txt: txt.display().to_string(),
+                stats: backend::Stats {
+                    audio_seconds: 1.0,
+                    ..Default::default()
+                },
+            });
+            let _ = app.update(Message::Tick);
+            assert!(
+                !app.queue
+                    .iter()
+                    .any(|item| matches!(item.status, ItemStatus::Done)),
+                "a finished row stayed in the queue"
+            );
+        }
+        app.events.lock().unwrap().push_back(Event::AllDone);
+        let _ = app.update(Message::Tick);
+
+        assert!(app.queue.is_empty());
+        assert_eq!(app.recent.len(), 2);
+        assert_eq!(
+            app.stats_lines()
+                .iter()
+                .filter(|line| matches!(line, SummaryLine::File(_)))
+                .count(),
+            2
+        );
+        assert_eq!(app.overall_shown, 1.0);
+        assert!(matches!(app.status, Status::Done));
+        // The live transcript the run streamed in stays on screen.
+        assert!(!app.lines.is_empty());
+        assert!(app.output_txt.is_some());
+
+        let _ = std::fs::remove_dir_all(&media);
+    }
+
+    #[test]
+    fn reaping_clears_current_index() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("reap-current");
+        let media = temp_dir("reap-current-media");
+        let mut app = pro_app();
+
+        let (audio, txt) = pending_item(&media, "one.mp3");
+        std::fs::write(&txt, "[00:00] SPEAKER 1: one\n").unwrap();
+        app.queue.push(QueueItem {
+            path: audio.clone(),
+            audio: Some(audio.clone()),
+            status: ItemStatus::Pending,
+            duration: Some(1.0),
+            transcript: None,
+            stats: None,
+            turns: Vec::new(),
+            peaks: Arc::new(Vec::new()),
+        });
+        app.batch_paths = vec![audio.clone()];
+        app.batch_total = 1.0;
+        app.status = Status::Running;
+
+        app.events.lock().unwrap().push_back(Event::File {
+            audio: audio.display().to_string(),
+        });
+        app.events.lock().unwrap().push_back(Event::Done {
+            txt: txt.display().to_string(),
+            stats: backend::Stats::default(),
+        });
+        let _ = app.update(Message::Tick);
+
+        assert!(app.current_index.is_none());
+        assert!(app.queue.is_empty());
+        assert_eq!(app.recent.len(), 1);
+
+        let _ = std::fs::remove_dir_all(&media);
+    }
+
+    #[test]
+    fn legacy_done_records_migrate_to_recent() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("legacy-done");
+        let media = temp_dir("legacy-done-media");
+        let audio = media.join("talk.mp3");
+        std::fs::write(&audio, b"audio").unwrap();
+        let transcript = media.join("talk.txt");
+        std::fs::write(&transcript, "[00:00] SPEAKER 1: hi\n").unwrap();
+
+        // An old build wrote finished work as a queue row with its peaks and
+        // turns. Building the app first keeps the first-run cleanup from
+        // deleting the file this test writes.
+        let mut app = pro_app();
+        let state = QueueState {
+            last_run: None,
+            items: vec![QueueRecord {
+                audio: Some(audio.display().to_string()),
+                transcript: Some(transcript.display().to_string()),
+                duration: Some(12.0),
+                status: "done".to_string(),
+                message: None,
+                stats: Some(backend::Stats {
+                    audio_seconds: 12.0,
+                    num_speakers: Some(2),
+                    ..Default::default()
+                }),
+                turns: vec![backend::Turn {
+                    start: 0.0,
+                    end: 1.0,
+                    speaker: "SPEAKER 1".to_string(),
+                }],
+                peaks: vec![0.1, 0.2],
+            }],
+            last_batch: vec![audio.display().to_string()],
+            recent: Vec::new(),
+        };
+        let path = App::queue_path().unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, serde_json::to_string(&state).unwrap()).unwrap();
+
+        let (queue, _, recent) = App::load_queue_and_batch();
+        assert!(queue.is_empty(), "a legacy done row stayed in the queue");
+        assert_eq!(recent.len(), 1);
+        assert_eq!(recent[0].audio.as_deref(), Some(audio.as_path()));
+        assert_eq!(recent[0].transcript.as_deref(), Some(transcript.as_path()));
+        assert!(recent[0].finished_at > 0, "no mtime became the timestamp");
+        assert_eq!(recent[0].duration, Some(12.0));
+        assert_eq!(recent[0].speakers, Some(2));
+
+        // Saving and reloading keeps one entry, not a second copy.
+        app.recent = recent;
+        app.save_queue();
+        let (queue, _, recent) = App::load_queue_and_batch();
+        assert!(queue.is_empty());
+        assert_eq!(recent.len(), 1);
+
+        let _ = std::fs::remove_dir_all(&media);
+    }
+
+    #[test]
+    fn retranscribe_from_history_enqueues_pending() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("retranscribe-history");
+        let media = temp_dir("retranscribe-history-media");
+        let audio = media.join("gone.mp3");
+        let transcript = media.join("gone.txt");
+        std::fs::write(&transcript, "[00:00] SPEAKER 1: hi\n").unwrap();
+
+        let mut app = pro_app();
+        let index = push_recent(&mut app, Some(audio.clone()), transcript, Some(4.0), Vec::new());
+        let _ = app.update(Message::OpenRecent(index));
+        assert_eq!(app.selected_recent, Some(index));
+
+        // The audio is gone: start refuses and says why.
+        app.start();
+        assert!(app.queue.is_empty());
+        assert!(
+            app.toast
+                .as_ref()
+                .is_some_and(|(text, _)| text.contains("missing")),
+            "no missing-audio toast: {:?}",
+            app.toast
+        );
+
+        // Once it exists, the history entry becomes a pending queue row.
+        std::fs::write(&audio, b"audio").unwrap();
+        app.start();
+        assert_eq!(app.queue.len(), 1);
+        assert!(matches!(app.queue[0].status, ItemStatus::Pending));
+        assert_eq!(app.queue[0].audio.as_deref(), Some(audio.as_path()));
+        assert_eq!(app.selected, Some(0));
+
+        let _ = std::fs::remove_dir_all(&media);
     }
 
     #[test]
@@ -20691,16 +20881,7 @@ mod tests {
         .unwrap();
 
         let mut app = pro_app();
-        app.queue.push(QueueItem {
-            path: audio.clone(),
-            audio: Some(audio),
-            status: ItemStatus::Done,
-            duration: Some(10.0),
-            transcript: Some(transcript.clone()),
-            stats: None,
-            turns: Vec::new(),
-            peaks: Arc::new(vec![0.2; 16]),
-        });
+        push_recent(&mut app, Some(audio), transcript.clone(), Some(10.0), vec![0.2; 16]);
         open_test_item(&mut app, 0);
 
         open_line_edit(&mut app, 0);
@@ -20736,16 +20917,7 @@ mod tests {
         .unwrap();
 
         let mut app = pro_app();
-        app.queue.push(QueueItem {
-            path: audio,
-            audio: None,
-            status: ItemStatus::Done,
-            duration: Some(10.0),
-            transcript: Some(transcript),
-            stats: None,
-            turns: Vec::new(),
-            peaks: Arc::new(vec![0.2; 16]),
-        });
+        push_recent(&mut app, None, transcript, Some(10.0), vec![0.2; 16]);
         open_test_item(&mut app, 0);
 
         open_line_edit(&mut app, 1);
@@ -20782,16 +20954,7 @@ mod tests {
         std::fs::write(&transcript, text).unwrap();
 
         let mut app = pro_app();
-        app.queue.push(QueueItem {
-            path: audio,
-            audio: None,
-            status: ItemStatus::Done,
-            duration: Some(400.0),
-            transcript: Some(transcript),
-            stats: None,
-            turns: Vec::new(),
-            peaks: Arc::new(vec![0.2; 16]),
-        });
+        push_recent(&mut app, None, transcript, Some(400.0), vec![0.2; 16]);
         open_test_item(&mut app, 0);
         app.transcript_viewport = 600.0;
 
@@ -21104,7 +21267,8 @@ mod tests {
         let pending_audio = dir.join("next.mp3");
         std::fs::write(&pending_audio, b"audio").unwrap();
 
-        // A live run with one finished row and one waiting row.
+        // A live run with one adopted (not yet reaped) finished row and one
+        // waiting row.
         let seed = |app: &mut App| {
             app.queue.push(QueueItem {
                 path: done_audio.clone(),
@@ -21194,16 +21358,7 @@ mod tests {
         .unwrap();
 
         let mut app = pro_app();
-        app.queue.push(QueueItem {
-            path: audio.clone(),
-            audio: Some(audio),
-            status: ItemStatus::Done,
-            duration: Some(6.0),
-            transcript: Some(transcript),
-            stats: None,
-            turns: Vec::new(),
-            peaks: Arc::new(Vec::new()),
-        });
+        push_recent(&mut app, Some(audio), transcript, Some(6.0), Vec::new());
         open_test_item(&mut app, 0);
 
         // Populate both caches before mutating a line.
@@ -21253,16 +21408,7 @@ mod tests {
         )
         .unwrap();
         let mut app = pro_app();
-        app.queue.push(QueueItem {
-            path: audio.clone(),
-            audio: Some(audio),
-            status: ItemStatus::Done,
-            duration: Some(8.0),
-            transcript: Some(transcript),
-            stats: None,
-            turns: Vec::new(),
-            peaks: Arc::new(vec![0.1; 16]),
-        });
+        push_recent(&mut app, Some(audio), transcript, Some(8.0), vec![0.1; 16]);
         open_test_item(&mut app, 0);
         app.transcript_viewport = 400.0;
         app.transcript_content = 1600.0;
@@ -21350,16 +21496,7 @@ mod tests {
         )
         .unwrap();
         let mut app = pro_app();
-        app.queue.push(QueueItem {
-            path: audio.clone(),
-            audio: Some(audio),
-            status: ItemStatus::Done,
-            duration: Some(40.0),
-            transcript: Some(transcript),
-            stats: None,
-            turns: Vec::new(),
-            peaks: Arc::new(vec![0.1; 16]),
-        });
+        push_recent(&mut app, Some(audio), transcript, Some(40.0), vec![0.1; 16]);
         open_test_item(&mut app, 0);
         app.transcript_viewport = 400.0;
         app.transcript_content = 2000.0;
