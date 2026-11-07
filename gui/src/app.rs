@@ -187,6 +187,11 @@ const TOGGLE_WIDTH: f32 = 64.0;
 /// they line up with the text buttons around them.
 const PANEL_ICON_DIAMETER: f32 = CONTROL_HEIGHT;
 
+/// Width held for a history row's hover actions: two 11 px glyphs with 4 px of
+/// horizontal padding each, plus their 2 px gap. Reserved in both states so a
+/// name never reflows when the icons fade in.
+const RECENT_ACTIONS_WIDTH: f32 = 42.0;
+
 /// Glyph size for an icon-only control. Matches the queue's clear button, which
 /// is the reference the panel was asked to follow.
 const ICON_ONLY_SIZE: f32 = 15.0;
@@ -349,6 +354,15 @@ struct RecentEntry {
     finished_at: u64,
     duration: Option<f64>,
     speakers: Option<u8>,
+}
+
+/// Which list the left pane is showing. In-flight work and finished
+/// transcripts no longer share a list, so the pane has a two-tab switch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PaneTab {
+    #[default]
+    Queue,
+    Transcripts,
 }
 
 /// A transcript found beside one of the audio files just added.
@@ -978,11 +992,15 @@ pub enum Message {
     TranscriptAdopted(bool, AdoptedTranscript),
     RemoveItem(usize),
     /// Open a finished transcript from the history list.
-    #[allow(dead_code)] // The history tab that sends this lands in the next phase.
     OpenRecent(usize),
     /// Delete a history entry; the pane clears if it is showing that entry.
-    #[allow(dead_code)] // The history tab that sends this lands in the next phase.
     RemoveRecent(usize),
+    /// Show a history row's output in the file manager.
+    RevealRecent(usize),
+    /// The pointer moved onto a history row, or off every row.
+    RecentHover(Option<usize>),
+    /// Switch the left pane between the queue and the transcript history.
+    SelectTab(PaneTab),
     ClearQueue,
     ItemDurationProbed(PathBuf, Option<f64>),
     ViewDetailsLoaded(PathBuf, Option<Vec<backend::Turn>>, Option<(f64, Vec<f32>)>),
@@ -1349,6 +1367,15 @@ pub struct App {
     queue: Vec<QueueItem>,
     /// Finished transcripts kept as history, newest first.
     recent: Vec<RecentEntry>,
+    /// Parallel to `recent`: whether each entry's transcript file still
+    /// exists. The list build reads this cache instead of the filesystem; see
+    /// [`Self::refresh_recent_presence`].
+    recent_presence: Vec<bool>,
+    /// Which list the left pane shows. Not persisted: the queue is the
+    /// default every launch.
+    pane_tab: PaneTab,
+    /// History row under the pointer, so its Reveal/Remove actions can show.
+    recent_hover: Option<usize>,
     /// Queue index currently being dragged, if any.
     queue_drag: Option<usize>,
     /// Queue index under the pointer, used for hover styling.
@@ -1620,6 +1647,9 @@ impl App {
             cancelled: Arc::new(AtomicBool::new(false)),
             queue,
             recent,
+            recent_presence: Vec::new(),
+            pane_tab: PaneTab::Queue,
+            recent_hover: None,
             queue_drag: None,
             queue_hover: None,
             queue_pointer: None,
@@ -1654,6 +1684,9 @@ impl App {
             last_model_check: Some(Instant::now()),
             drag_hover: false,
         };
+        // One filesystem pass over the restored history. From here the
+        // Transcripts list reads the cache and never stats while building.
+        app.refresh_recent_presence();
         if first_run {
             // Establish the settings marker so the next launch restores the
             // queue instead of treating every launch as a first run.
@@ -1983,7 +2016,7 @@ impl App {
     }
 
     /// Record a finished transcript in the history and persist it.
-    #[allow(dead_code)] // Used by tests; the history tab will call merge_recent.
+    #[allow(dead_code)] // Tests seed history through this path.
     fn upsert_recent(&mut self, entry: RecentEntry) {
         self.merge_recent(entry);
         self.save_queue();
@@ -1992,7 +2025,30 @@ impl App {
     /// Record a finished transcript in the history without writing the queue
     /// file. Callers that add several at once save once at the end.
     fn merge_recent(&mut self, entry: RecentEntry) -> usize {
-        merge_recent_entry(&mut self.recent, entry)
+        let index = merge_recent_entry(&mut self.recent, entry);
+        // A merge reorders the list, so realign the whole cache. This is a
+        // per-finished-file event, not a per-frame one.
+        self.refresh_recent_presence();
+        index
+    }
+
+    /// Re-probe which history transcripts still exist. Called at load, on
+    /// entering the Transcripts tab, and after the history changes; the list
+    /// build itself reads only [`Self::recent`]'s parallel cache.
+    fn refresh_recent_presence(&mut self) {
+        self.recent_presence = recent_presence_of(&self.recent);
+    }
+
+    /// Whether a history entry's transcript still exists, from the cache. An
+    /// entry that arrived without a refresh counts as present: entries are
+    /// added once their transcript was written, and the next refresh corrects
+    /// it if the file moved.
+    fn recent_transcript_present(&self, index: usize) -> bool {
+        self.recent_presence.get(index).copied().unwrap_or_else(|| {
+            self.recent
+                .get(index)
+                .is_some_and(|entry| entry.transcript.is_some())
+        })
     }
 
     /// Index of the recent entry backed by this audio file, if any.
@@ -2010,6 +2066,11 @@ impl App {
             return;
         };
         self.recent.remove(index);
+        self.recent_hover = None;
+        // Keep the presence cache parallel without another probe.
+        if index < self.recent_presence.len() {
+            self.recent_presence.remove(index);
+        }
         if let Some(selected) = self.selected_recent.as_mut() {
             match (*selected).cmp(&index) {
                 std::cmp::Ordering::Equal => self.selected_recent = None,
@@ -2509,6 +2570,9 @@ impl App {
             return Task::none();
         };
         self.selected_recent = Some(index);
+        // The list the entry came from is the one to leave open, even when the
+        // request arrives from an add that adopted a transcript.
+        self.pane_tab = PaneTab::Transcripts;
         let Some(source) = entry.transcript.clone().or_else(|| entry.audio.clone()) else {
             return Task::none();
         };
@@ -3713,24 +3777,74 @@ impl App {
             }
             Message::ViewDetailsLoaded(source, turns, probe) => {
                 let mut changed = false;
+                // A finished view's history row follows the details it just
+                // loaded: a row that never got a speaker count or duration
+                // fills in the first time the transcript is opened.
+                let mut history: Option<(PathBuf, Option<PathBuf>, Option<f64>, Option<u8>)> =
+                    None;
                 if let Some(view) = self.selected_view.as_mut() {
                     if view.source == source {
+                        let loaded_turns = turns.is_some();
                         if let Some(turns) = turns {
                             view.turns = turns;
                         }
+                        let mut loaded_duration = None;
                         if let Some((duration, peaks)) = probe {
                             if duration > 0.0 {
                                 view.duration = Some(duration as f32);
+                                loaded_duration = Some(duration);
                             }
                             if !peaks.is_empty() {
                                 view.peaks = Arc::new(peaks);
                             }
+                        }
+                        if view.finished {
+                            history = Some((
+                                view.source.clone(),
+                                view.audio.clone(),
+                                loaded_duration,
+                                if loaded_turns {
+                                    distinct_speaker_count(&view.turns)
+                                } else {
+                                    None
+                                },
+                            ));
                         }
                         changed = true;
                     }
                 }
                 if changed {
                     self.invalidate_derived();
+                }
+                if let Some((source, audio, duration, speakers)) = history {
+                    let mut history_changed = false;
+                    // Identity is the transcript path, or the audio when the
+                    // entry has no transcript path.
+                    if let Some(entry) = self.recent.iter_mut().find(|entry| {
+                        entry.transcript.as_deref() == Some(source.as_path())
+                            || match (&audio, &entry.audio) {
+                                (Some(view_audio), Some(entry_audio)) => view_audio == entry_audio,
+                                _ => false,
+                            }
+                    }) {
+                        if let Some(duration) = duration {
+                            if entry.duration != Some(duration) {
+                                entry.duration = Some(duration);
+                                history_changed = true;
+                            }
+                        }
+                        if let Some(speakers) = speakers {
+                            if entry.speakers != Some(speakers) {
+                                entry.speakers = Some(speakers);
+                                history_changed = true;
+                            }
+                        }
+                    }
+                    // One write for this load, and only when a row changed:
+                    // details can arrive again for the same view.
+                    if history_changed {
+                        self.save_queue();
+                    }
                 }
                 Task::none()
             }
@@ -4847,10 +4961,65 @@ impl App {
                 self.remove_recent(index);
                 Task::none()
             }
+            Message::RevealRecent(index) => {
+                self.reveal_recent(index);
+                Task::none()
+            }
+            Message::RecentHover(index) => {
+                self.recent_hover = index;
+                Task::none()
+            }
+            Message::SelectTab(tab) => {
+                self.pane_tab = tab;
+                self.recent_hover = None;
+                // Entering the list is where presence is re-probed: a file
+                // deleted while the app was open shows as missing from here.
+                if tab == PaneTab::Transcripts {
+                    self.refresh_recent_presence();
+                }
+                Task::none()
+            }
             Message::ClearQueue => {
                 if !matches!(self.status, Status::Running) {
-                    // "Clear" is a full reset: queue, transcript and run state,
-                    // including the document an open editor was writing to.
+                    // A finished transcript from Transcripts is not queue
+                    // state: clearing the queue must not blank the document
+                    // the user is reading.
+                    if self
+                        .selected_view
+                        .as_ref()
+                        .is_some_and(|view| view.finished)
+                    {
+                        // An open editor still writes to the document that
+                        // stays on screen, so commit it before dropping queue
+                        // rows.
+                        self.commit_inline_edit(false);
+                        self.queue.clear();
+                        self.batch_paths.clear();
+                        self.batch_summary.clear();
+                        self.batch_total = 0.0;
+                        self.batch_done = 0.0;
+                        self.gpu_retry_pending = false;
+                        self.current = None;
+                        self.current_index = None;
+                        self.completion_pending = false;
+                        self.summary_open = false;
+                        self.pending_rename = false;
+                        self.pending_tips = false;
+                        self.run_start = None;
+                        self.elapsed_final = None;
+                        self.eta_shown = None;
+                        self.progress = 0.0;
+                        self.progress_shown = 0.0;
+                        self.overall_shown = 0.0;
+                        self.stage = "idle".to_string();
+                        self.stage_id = "idle".to_string();
+                        self.status = Status::Idle;
+                        self.save_queue();
+                        return Task::none();
+                    }
+                    // Otherwise "Clear" is a full reset: queue, transcript and
+                    // run state, including the document an open editor was
+                    // writing to.
                     self.commit_inline_edit(false);
                     self.queue.clear();
                     self.batch_paths.clear();
@@ -5754,6 +5923,18 @@ impl App {
         open_path(&dir);
     }
 
+    /// Show a history row's output in the file manager, whether or not that
+    /// entry is the one on screen.
+    fn reveal_recent(&self, index: usize) {
+        let Some(entry) = self.recent.get(index) else {
+            return;
+        };
+        let Some(dir) = recent_reveal_dir(entry) else {
+            return;
+        };
+        open_path(&dir);
+    }
+
     /// Swap one queue entry with another, keeping selection indices in sync.
     fn move_queue_item(&mut self, from: usize, to: usize) {
         if from == to || to >= self.queue.len() || from >= self.queue.len() {
@@ -5802,6 +5983,10 @@ impl App {
             added.push(path);
         }
         if !added.is_empty() {
+            // An add is queue work: show the queue even when it came from the
+            // Transcripts tab's footer.
+            self.pane_tab = PaneTab::Queue;
+            self.recent_hover = None;
             if was_empty {
                 self.feature_slide = 0;
                 self.feature_slide_at = Instant::now();
@@ -6031,6 +6216,9 @@ impl App {
     }
 
     fn start(&mut self) {
+        // Transcribing is queue work, including a history entry re-run.
+        self.pane_tab = PaneTab::Queue;
+        self.recent_hover = None;
         let has_pending = self
             .queue
             .iter()
@@ -8506,6 +8694,13 @@ impl App {
                 "Empty transcript",
                 "This transcript has no lines to display.".to_string(),
             )
+        } else if !has_queue && has_done {
+            (
+                ICON_FILE_TEXT,
+                scheme.track,
+                "Choose a transcript",
+                "Open a finished file in Transcripts to read it here.".to_string(),
+            )
         } else if !has_queue {
             (
                 ICON_MIC,
@@ -8519,7 +8714,7 @@ impl App {
                 ICON_FILE_TEXT,
                 scheme.track,
                 "Choose a transcript",
-                "Select a completed file in the queue to read it here.".to_string(),
+                "Open a finished file in Transcripts, or run the queue.".to_string(),
             )
         } else if pending {
             (
@@ -8569,7 +8764,8 @@ impl App {
             .into()
     }
 
-    /// Short summary shown beside the queue title, e.g. "3 files · 12:34".
+    /// Short summary shown on the Queue tab's tooltip, e.g. "3 files · 12:34".
+    /// The tab label itself carries only the count.
     fn queue_summary_text(&self) -> String {
         let count = self.queue.len();
         if count == 0 {
@@ -8938,29 +9134,115 @@ impl App {
         modal_card(body, 460.0, scheme)
     }
 
+    /// The left pane: a two-tab switch over the queue and the transcript
+    /// history. The tabs share the pane's width and scroll region, so the
+    /// queue keeps full-width rows for drag reordering.
     fn queue_panel(&self, scheme: &Scheme, width: f32) -> Element<'_, Message> {
+        let scheme = *scheme;
+        let body: Element<Message> = match self.pane_tab {
+            PaneTab::Queue => self.queue_tab(&scheme),
+            PaneTab::Transcripts => self.transcripts_tab(&scheme),
+        };
+        let mut content = column![self.pane_tabs(&scheme)].spacing(12);
+        // Recording is global state, not queue content: it keeps its strip on
+        // both tabs so leaving the queue cannot hide a live recording.
+        if let Some(strip) = self.recording_strip(&scheme) {
+            content = content.push(strip);
+        }
+        content = content.push(body).height(Length::Fill);
+        container(content)
+            .padding(12)
+            .width(Length::Fixed(width))
+            .height(Length::Fill)
+            .style(move |_theme| container::Style {
+                background: Some(scheme.panel_bg.into()),
+                border: island_border(&scheme),
+                shadow: soft_shadow(),
+                ..container::Style::default()
+            })
+            .into()
+    }
+
+    /// The Queue / Transcripts switch. It sits above the toolbar rather than
+    /// beside it, so neither list loses width to a second column.
+    fn pane_tabs(&self, scheme: &Scheme) -> Element<'_, Message> {
+        let scheme = *scheme;
+        let tab = |label: String, selected: bool, message: Message, hint: Option<String>| {
+            let label = text(label)
+                .size(theme::TEXT_XS)
+                .wrapping(NO_WRAP)
+                .font(Font {
+                    weight: if selected {
+                        font::Weight::Bold
+                    } else {
+                        font::Weight::Normal
+                    },
+                    ..Font::DEFAULT
+                });
+            let content: Element<Message> = match hint {
+                Some(hint) => self.tip(label, hint, &scheme),
+                None => label.into(),
+            };
+            button(
+                container(content)
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .center_x(Length::Fill)
+                    .center_y(Length::Fill),
+            )
+            .padding(0)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .on_press(message)
+            .style(segment_button(scheme, selected, false))
+        };
+        let queue_tab = tab(
+            tab_label("Queue", self.queue.len()),
+            self.pane_tab == PaneTab::Queue,
+            Message::SelectTab(PaneTab::Queue),
+            // The duration summary the old header carried keeps a home here
+            // instead of eating a row of the list.
+            Some(self.queue_summary_text()),
+        );
+        let transcripts_tab = tab(
+            tab_label("Transcripts", self.recent.len()),
+            self.pane_tab == PaneTab::Transcripts,
+            Message::SelectTab(PaneTab::Transcripts),
+            None,
+        );
+
+        // The same inset well the Settings segmented controls use, so the
+        // switch reads as one more piece of the app rather than a new idiom.
+        container(
+            row![queue_tab, transcripts_tab]
+                .spacing(2)
+                .width(Length::Fill)
+                .height(Length::Fill),
+        )
+        .padding(2)
+        .width(Length::Fill)
+        .height(Length::Fixed(CONTROL_HEIGHT))
+        .style(move |_theme| container::Style {
+            background: Some(theme::darken(scheme.panel_bg, 0.14).into()),
+            border: iced::border::Border {
+                color: theme::mix(scheme.border, scheme.text, 0.12),
+                width: 1.0,
+                radius: PILL.into(),
+            },
+            ..container::Style::default()
+        })
+        .into()
+    }
+
+    /// Work still in flight: the add/record toolbar, the rows and the run
+    /// controls.
+    fn queue_tab(&self, scheme: &Scheme) -> Element<'_, Message> {
         let scheme = *scheme;
         let running = matches!(self.status, Status::Running);
         let has_queue = !self.queue.is_empty();
         let can_start = !running
             && (has_queue || self.retranscribe_target().is_some())
             && self.models_ready();
-
-        let header = row![
-            text("Queue")
-                .size(theme::TEXT_MD)
-                .wrapping(NO_WRAP)
-                .font(Font {
-                    weight: font::Weight::Bold,
-                    ..Font::DEFAULT
-                }),
-            text(ellipsize(&self.queue_summary_text(), 26))
-                .size(theme::TEXT_XS)
-                .wrapping(NO_WRAP)
-                .color(scheme.muted),
-        ]
-        .spacing(8)
-        .align_y(iced::Alignment::Center);
 
         // All three take a 16 px line box, the app's normal control size, so the
         // toolbar is the same height as every other button row: 20.8 + 10 of
@@ -9050,59 +9332,6 @@ impl App {
         .spacing(theme::SPACE_SM)
         .align_y(iced::Alignment::Center);
 
-        let strip: Option<Element<'_, Message>> = self.recording.as_ref().map(|recorder| {
-            let reading = recorder.meter();
-            // Normalizing against the room hides overload, so the strip says
-            // so in words as well as changing the fill.
-            let clipping = reading.clipping;
-            let meter = canvas(RecordingMeter {
-                level: reading.level,
-                peak: reading.peak,
-                // In the dark palette `bar_track` is the same grey as the well
-                // behind it, which would make the unlit segments disappear;
-                // nudging it toward the text colour keeps the whole scale
-                // visible without introducing a new token.
-                track: theme::mix(scheme.bar_track, scheme.text, 0.08),
-                fill: if clipping {
-                    theme::lighten(scheme.danger, 0.35)
-                } else {
-                    scheme.danger
-                },
-                hold: Color {
-                    a: 0.65,
-                    ..scheme.text
-                },
-            })
-            .width(Length::Fill)
-            .height(Length::Fixed(8.0));
-            container(
-                row![
-                    icon_colored(ICON_MIC, 14.0, scheme.danger),
-                    text(if clipping { "Clipping" } else { "Recording" })
-                        .size(theme::TEXT_SM)
-                        .color(if clipping { scheme.danger } else { scheme.text }),
-                    text(format_secs(recorder.elapsed() as f64))
-                        .size(theme::TEXT_XS)
-                        .color(scheme.muted),
-                    meter,
-                ]
-                .spacing(theme::SPACE_SM)
-                .align_y(iced::Alignment::Center),
-            )
-            .width(Length::Fill)
-            .padding([4, 8])
-            .style(move |_theme| container::Style {
-                background: Some(scheme.field_bg.into()),
-                border: iced::border::Border {
-                    color: scheme.border,
-                    width: 1.0,
-                    radius: 6.0.into(),
-                },
-                ..container::Style::default()
-            })
-            .into()
-        });
-
         let body: Element<Message> = if has_queue {
             let mut rows = column![].spacing(4).width(Length::Fill);
             for index in 0..self.queue.len() {
@@ -9136,15 +9365,16 @@ impl App {
                 None => list.into(),
             }
         } else {
+            let (title, line) = self.queue_empty_copy();
             container(
                 column![
                     icon_colored(ICON_MIC, 20.0, scheme.muted),
-                    text("No audio queued")
-                        .size(theme::TEXT_SM)
-                        .color(scheme.text),
-                    text("Add files or drop them here")
+                    text(title).size(theme::TEXT_SM).color(scheme.text),
+                    text(line)
                         .size(theme::TEXT_XS)
-                        .color(scheme.muted),
+                        .color(scheme.muted)
+                        .width(Length::Fill)
+                        .align_x(iced::Alignment::Center),
                 ]
                 .spacing(6)
                 .align_x(iced::Alignment::Center),
@@ -9196,28 +9426,324 @@ impl App {
         .spacing(8)
         .align_y(iced::Alignment::Center);
 
-        let mut content = column![header, toolbar];
-        if let Some(strip) = strip {
-            content = content.push(strip);
-        }
-        let content = content
-            .push(body)
+        let mut content = column![toolbar];
+        content = content.push(body);
+        content
             .push(horizontal_rule(1))
             .push(controls)
             .spacing(12)
-            .height(Length::Fill);
-
-        container(content)
-            .padding(12)
-            .width(Length::Fixed(width))
             .height(Length::Fill)
+            .into()
+    }
+
+    /// The live recording meter. It sits above both tabs' content so a
+    /// recording is never hidden by switching to Transcripts.
+    fn recording_strip(&self, scheme: &Scheme) -> Option<Element<'_, Message>> {
+        let scheme = *scheme;
+        let recorder = self.recording.as_ref()?;
+        let reading = recorder.meter();
+        // Normalizing against the room hides overload, so the strip says so in
+        // words as well as changing the fill.
+        let clipping = reading.clipping;
+        let meter = canvas(RecordingMeter {
+            level: reading.level,
+            peak: reading.peak,
+            // In the dark palette `bar_track` is the same grey as the well
+            // behind it, which would make the unlit segments disappear;
+            // nudging it toward the text colour keeps the whole scale visible
+            // without introducing a new token.
+            track: theme::mix(scheme.bar_track, scheme.text, 0.08),
+            fill: if clipping {
+                theme::lighten(scheme.danger, 0.35)
+            } else {
+                scheme.danger
+            },
+            hold: Color {
+                a: 0.65,
+                ..scheme.text
+            },
+        })
+        .width(Length::Fill)
+        .height(Length::Fixed(8.0));
+        Some(
+            container(
+                row![
+                    icon_colored(ICON_MIC, 14.0, scheme.danger),
+                    text(if clipping { "Clipping" } else { "Recording" })
+                        .size(theme::TEXT_SM)
+                        .color(if clipping { scheme.danger } else { scheme.text }),
+                    text(format_secs(recorder.elapsed() as f64))
+                        .size(theme::TEXT_XS)
+                        .color(scheme.muted),
+                    meter,
+                ]
+                .spacing(theme::SPACE_SM)
+                .align_y(iced::Alignment::Center),
+            )
+            .width(Length::Fill)
+            .padding([4, 8])
             .style(move |_theme| container::Style {
-                background: Some(scheme.panel_bg.into()),
-                border: island_border(&scheme),
-                shadow: soft_shadow(),
+                background: Some(scheme.field_bg.into()),
+                border: iced::border::Border {
+                    color: scheme.border,
+                    width: 1.0,
+                    radius: 6.0.into(),
+                },
                 ..container::Style::default()
             })
+            .into(),
+        )
+    }
+
+    /// Copy for the queue tab's empty list. A transcript still on screen must
+    /// not be denied: the pane says nothing is in flight and points at
+    /// Transcripts instead of pitching an add.
+    fn queue_empty_copy(&self) -> (&'static str, String) {
+        let showing = self.selected_view.is_some()
+            || !self.lines.is_empty()
+            || !self.transcript.trim().is_empty();
+        let has_history = !self.recent.is_empty();
+        if showing {
+            (
+                "Nothing in flight",
+                (if has_history {
+                    "The file on screen is in Transcripts. Add audio to transcribe something new."
+                } else {
+                    "Add audio to transcribe something new."
+                })
+                .to_string(),
+            )
+        } else {
+            (
+                "No audio queued",
+                (if has_history {
+                    "Add files or drop them here. Finished files are in Transcripts."
+                } else {
+                    "Add files or drop them here"
+                })
+                .to_string(),
+            )
+        }
+    }
+
+    /// Finished transcripts, newest first, grouped under day headings.
+    fn transcripts_tab(&self, scheme: &Scheme) -> Element<'_, Message> {
+        let scheme = *scheme;
+        let now = unix_secs();
+        // Free sees only the live transcript during a run: the rows stay
+        // visible but dimmed, and the click says why (see `OpenRecent`).
+        let locked = matches!(self.status, Status::Running)
+            && self.shows(license::Audience::FreeOnly);
+
+        let body: Element<Message> = if self.recent.is_empty() {
+            self.transcripts_empty_state(&scheme)
+        } else {
+            let mut rows = column![].spacing(2).width(Length::Fill);
+            let mut heading = String::new();
+            for index in 0..self.recent.len() {
+                let day = day_heading(self.recent[index].finished_at, now);
+                if day != heading {
+                    heading = day.clone();
+                    rows = rows.push(day_header(&day, &scheme));
+                }
+                rows = rows.push(self.recent_row(index, &scheme, locked));
+            }
+            scrollable(rows)
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .style(visible_scrollbar_style)
+                .into()
+        };
+
+        let add = self.tip(
+            action(
+                row![
+                    icon_colored(ICON_PLUS, 14.0, scheme.text),
+                    text("Add files").wrapping(NO_WRAP),
+                ]
+                .spacing(4)
+                .align_y(iced::Alignment::Center),
+            )
+            .on_press(Message::AddFiles)
+            .style(pill_button_secondary),
+            "Add audio files",
+            &scheme,
+        );
+        let count = self.recent.len();
+        let count_text = format!(
+            "{count} {}",
+            if count == 1 {
+                "transcript"
+            } else {
+                "transcripts"
+            }
+        );
+        let footer = row![
+            add,
+            horizontal_space(),
+            text(count_text)
+                .size(theme::TEXT_XS)
+                .wrapping(NO_WRAP)
+                .color(scheme.muted),
+        ]
+        .align_y(iced::Alignment::Center);
+
+        column![body, horizontal_rule(1), footer]
+            .spacing(12)
+            .height(Length::Fill)
             .into()
+    }
+
+    fn transcripts_empty_state(&self, scheme: &Scheme) -> Element<'_, Message> {
+        let scheme = *scheme;
+        let add = action(
+            row![
+                icon_colored(ICON_PLUS, 14.0, scheme.on_accent),
+                text("Add files").wrapping(NO_WRAP),
+            ]
+            .spacing(4)
+            .align_y(iced::Alignment::Center),
+        )
+        .on_press(Message::AddFiles)
+        .style(color_button(scheme.blue, scheme.on_accent));
+        container(
+            column![
+                icon_colored(ICON_FILE_TEXT, 20.0, scheme.muted),
+                text("No transcripts yet")
+                    .size(theme::TEXT_SM)
+                    .color(scheme.text),
+                text("Finished files land here.")
+                    .size(theme::TEXT_XS)
+                    .color(scheme.muted),
+                add,
+            ]
+            .spacing(6)
+            .align_x(iced::Alignment::Center),
+        )
+        .center(Length::Fill)
+        .into()
+    }
+
+    /// One history row: the file name and its meta line, with Reveal and
+    /// Remove on hover. Its output path is the tooltip, not a row line.
+    fn recent_row(
+        &self,
+        index: usize,
+        scheme: &Scheme,
+        locked: bool,
+    ) -> Element<'static, Message> {
+        let entry = &self.recent[index];
+        let scheme = *scheme;
+        let transcript_present = self.recent_transcript_present(index);
+        // Only a row with its transcript on disk opens; audio-only rows are a
+        // danger meta and nothing else.
+        let openable = transcript_present;
+        let name = ellipsize_middle(&recent_title(entry), 24);
+        let meta = recent_meta(entry, transcript_present);
+        let meta_color = if transcript_present {
+            scheme.muted
+        } else {
+            scheme.danger
+        };
+        let name_color = if locked {
+            Color { a: 0.55, ..scheme.text }
+        } else {
+            scheme.text
+        };
+        let selected = self.selected_recent == Some(index);
+        let hovered = self.recent_hover == Some(index);
+
+        let label = column![
+            text(name)
+                .size(theme::TEXT_SM)
+                .wrapping(NO_WRAP)
+                .color(name_color),
+            text(meta).size(11).wrapping(NO_WRAP).color(meta_color),
+        ]
+        .spacing(1)
+        .width(Length::Fill);
+        // The output path lives here rather than in the row: at this width it
+        // would crowd out the file name. The actions carry their own tips, so
+        // the path tip stops short of them.
+        let label = self.tip(label, recent_tooltip(entry, transcript_present), &scheme);
+
+        // Quiet until hovered, but the slot is reserved either way so the name
+        // does not reflow when the icons appear.
+        let actions: Element<'static, Message> = if hovered {
+            let mut actions = row![].spacing(2).align_y(iced::Alignment::Center);
+            if transcript_present {
+                actions = actions.push(self.tip(
+                    action(icon(ICON_FOLDER_OPEN, 11.0))
+                        .padding([2, 4])
+                        .on_press(Message::RevealRecent(index))
+                        .style(subtle_icon_button),
+                    "Show in file manager",
+                    &scheme,
+                ));
+            }
+            actions = actions.push(self.tip(
+                action(icon(ICON_X, 11.0))
+                    .padding([2, 4])
+                    .on_press(Message::RemoveRecent(index))
+                    .style(subtle_icon_button),
+                "Remove from Transcripts",
+                &scheme,
+            ));
+            actions.into()
+        } else {
+            horizontal_space().into()
+        };
+        let actions = container(actions)
+            .width(Length::Fixed(RECENT_ACTIONS_WIDTH))
+            .align_x(iced::Alignment::End);
+
+        let row_tint = Color {
+            a: 0.12,
+            ..scheme.blue
+        };
+        let background = if selected {
+            row_tint
+        } else if hovered {
+            scheme.bar_track
+        } else {
+            Color::TRANSPARENT
+        };
+        let border_color = if selected {
+            scheme.blue
+        } else {
+            Color::TRANSPARENT
+        };
+        let row = container(
+            row![label, actions]
+                .spacing(6)
+                .align_y(iced::Alignment::Center),
+        )
+        .padding([6, 8])
+        .width(Length::Fill)
+        .style(move |_theme| container::Style {
+            background: Some(background.into()),
+            text_color: Some(scheme.text),
+            border: iced::border::Border {
+                color: border_color,
+                width: 1.0,
+                radius: 10.0.into(),
+            },
+            ..container::Style::default()
+        });
+        let area = mouse_area(row)
+            .interaction(if openable {
+                mouse::Interaction::Pointer
+            } else {
+                mouse::Interaction::Idle
+            })
+            .on_enter(Message::RecentHover(Some(index)))
+            .on_exit(Message::RecentHover(None));
+        let area = if openable {
+            area.on_press(Message::OpenRecent(index))
+        } else {
+            area
+        };
+        area.into()
     }
 
     /// One queue row: status, two-line label, optional progress and remove.
@@ -14530,6 +15056,177 @@ fn unix_secs() -> u64 {
         .unwrap_or(0)
 }
 
+/// One filesystem pass over the history: which transcripts still exist. The
+/// result is cached on [`App`] so a list build never touches the disk.
+fn recent_presence_of(recent: &[RecentEntry]) -> Vec<bool> {
+    recent
+        .iter()
+        .map(|entry| {
+            entry
+                .transcript
+                .as_deref()
+                .is_some_and(|path| path.is_file())
+        })
+        .collect()
+}
+
+/// The file a history row is named for: its audio, or the transcript when the
+/// audio is gone.
+fn recent_title(entry: &RecentEntry) -> String {
+    entry
+        .audio
+        .as_deref()
+        .or(entry.transcript.as_deref())
+        .and_then(|path| path.file_name())
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "Untitled".to_string())
+}
+
+/// Folder that holds a history row's output, for Reveal.
+fn recent_reveal_dir(entry: &RecentEntry) -> Option<PathBuf> {
+    entry
+        .transcript
+        .as_deref()
+        .or(entry.audio.as_deref())
+        .and_then(|path| path.parent())
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .map(Path::to_path_buf)
+}
+
+/// The full path a history row stands for, shown on hover because the row
+/// itself is too narrow for it.
+fn recent_tooltip(entry: &RecentEntry, transcript_present: bool) -> String {
+    if transcript_present {
+        return entry
+            .transcript
+            .as_deref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_default();
+    }
+    if let Some(transcript) = &entry.transcript {
+        return format!("Transcript missing: {}", transcript.display());
+    }
+    entry
+        .audio
+        .as_deref()
+        .map(|path| format!("No transcript: {}", path.display()))
+        .unwrap_or_else(|| "No output file".to_string())
+}
+
+/// A tab label with its count; a zero count is dropped rather than printed as
+/// "0", which reads as an error at this width.
+fn tab_label(label: &str, count: usize) -> String {
+    if count == 0 {
+        label.to_string()
+    } else {
+        format!("{label} {count}")
+    }
+}
+
+/// A day heading above a run of history rows.
+fn day_header(day: &str, scheme: &Scheme) -> Element<'static, Message> {
+    let scheme = *scheme;
+    container(
+        text(day.to_string())
+            .size(11)
+            .color(scheme.muted),
+    )
+    .padding(iced::Padding {
+        top: 8.0,
+        right: 2.0,
+        bottom: 2.0,
+        left: 2.0,
+    })
+    .width(Length::Fill)
+    .into()
+}
+
+/// Distinct speaker names in a turn list, clamped to the `u8` the history
+/// stores. `None` when there are no turns to count.
+fn distinct_speaker_count(turns: &[backend::Turn]) -> Option<u8> {
+    if turns.is_empty() {
+        return None;
+    }
+    let mut names: Vec<&str> = Vec::new();
+    for turn in turns {
+        let name = turn.speaker.as_str();
+        if !names.contains(&name) {
+            names.push(name);
+        }
+    }
+    Some(names.len().clamp(1, u8::MAX as usize) as u8)
+}
+
+/// One line for a history row: duration, speaker count and the finish time.
+/// A row whose transcript is gone says so instead, in the danger colour.
+fn recent_meta(entry: &RecentEntry, transcript_present: bool) -> String {
+    if !transcript_present {
+        return "Transcript missing".to_string();
+    }
+    let mut parts = Vec::new();
+    if let Some(duration) = entry.duration {
+        parts.push(format_secs(duration));
+    }
+    if let Some(speakers) = entry.speakers {
+        parts.push(format!(
+            "{speakers} {}",
+            if speakers == 1 { "speaker" } else { "speakers" }
+        ));
+    }
+    parts.push(clock_time(entry.finished_at));
+    parts.join(" \u{00b7} ")
+}
+
+/// A day heading for the history list: "Today", "Yesterday" or "Nov 3".
+fn day_heading(finished_at: u64, now: u64) -> String {
+    let Some(when) = local_datetime(finished_at) else {
+        return "Earlier".to_string();
+    };
+    let Some(current) = local_datetime(now) else {
+        return "Earlier".to_string();
+    };
+    match current.date().to_julian_day() - when.date().to_julian_day() {
+        0 => "Today".to_string(),
+        1 => "Yesterday".to_string(),
+        _ => format!("{} {}", month_short(when.month()), when.day()),
+    }
+}
+
+/// Wall-clock time in the local zone, e.g. "14:05".
+fn clock_time(unix: u64) -> String {
+    match local_datetime(unix) {
+        Some(when) => format!("{:02}:{:02}", when.hour(), when.minute()),
+        None => "--:--".to_string(),
+    }
+}
+
+fn local_datetime(unix: u64) -> Option<time::OffsetDateTime> {
+    let utc = time::OffsetDateTime::from_unix_timestamp(unix as i64).ok()?;
+    Some(utc.to_offset(local_offset()))
+}
+
+fn local_offset() -> time::UtcOffset {
+    time::UtcOffset::current_local_offset().unwrap_or(time::UtcOffset::UTC)
+}
+
+fn month_short(month: time::Month) -> &'static str {
+    use time::Month::*;
+    match month {
+        January => "Jan",
+        February => "Feb",
+        March => "Mar",
+        April => "Apr",
+        May => "May",
+        June => "Jun",
+        July => "Jul",
+        August => "Aug",
+        September => "Sep",
+        October => "Oct",
+        November => "Nov",
+        December => "Dec",
+    }
+}
+
 /// Insert or replace a history entry, newest first. Identity is the audio path
 /// when there is one, otherwise the transcript path, so re-running the same
 /// source replaces its entry instead of adding a second row. Returns its index.
@@ -17096,6 +17793,327 @@ mod tests {
     }
 
     #[test]
+    fn pane_starts_on_the_queue_tab() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("pane-default");
+        let app = pro_app();
+        assert_eq!(app.pane_tab, PaneTab::Queue);
+    }
+
+    #[test]
+    fn select_tab_switches_the_pane() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("pane-switch");
+        let mut app = pro_app();
+        app.recent.push(RecentEntry {
+            audio: Some(PathBuf::from("talk.mp3")),
+            transcript: Some(PathBuf::from("talk.txt")),
+            finished_at: 5,
+            duration: Some(1.0),
+            speakers: Some(1),
+        });
+        app.recent_hover = Some(0);
+
+        let _ = app.update(Message::SelectTab(PaneTab::Transcripts));
+        assert_eq!(app.pane_tab, PaneTab::Transcripts);
+        // The hover belongs to the list being left.
+        assert_eq!(app.recent_hover, None);
+
+        let _ = app.update(Message::SelectTab(PaneTab::Queue));
+        assert_eq!(app.pane_tab, PaneTab::Queue);
+    }
+
+    #[test]
+    fn opening_a_history_entry_selects_transcripts() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("pane-open-recent");
+        let media = temp_dir("pane-open-recent-media");
+        let audio = media.join("talk.mp3");
+        std::fs::write(&audio, b"audio").unwrap();
+        let transcript = media.join("talk.txt");
+        std::fs::write(&transcript, "[00:00] SPEAKER 1: hello\n").unwrap();
+
+        let mut app = pro_app();
+        app.recent.push(RecentEntry {
+            audio: Some(audio),
+            transcript: Some(transcript),
+            finished_at: 5,
+            duration: Some(8.0),
+            speakers: Some(1),
+        });
+        app.pane_tab = PaneTab::Queue;
+
+        let _ = app.update(Message::OpenRecent(0));
+        assert_eq!(app.pane_tab, PaneTab::Transcripts);
+        assert!(app.selected_view.is_some());
+
+        let _ = std::fs::remove_dir_all(&media);
+    }
+
+    #[test]
+    fn adding_files_selects_the_queue_tab() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("pane-add-files");
+        let mut app = pro_app();
+        app.pane_tab = PaneTab::Transcripts;
+        let added = app.add_paths(vec![PathBuf::from("talk.mp3")]);
+        assert_eq!(added.len(), 1);
+        assert_eq!(app.pane_tab, PaneTab::Queue);
+    }
+
+    #[test]
+    fn queue_empty_state_points_at_transcripts() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("pane-empty-copy");
+        let mut app = pro_app();
+        assert_eq!(
+            app.queue_empty_copy(),
+            ("No audio queued", "Add files or drop them here".to_string())
+        );
+
+        // Nothing in flight, but a transcript is still on screen.
+        app.transcript = "hello\n".to_string();
+        assert_eq!(app.queue_empty_copy().0, "Nothing in flight");
+        assert!(!app.queue_empty_copy().1.contains("Transcripts"));
+
+        // With history the copy points at the other tab.
+        app.recent.push(RecentEntry {
+            audio: None,
+            transcript: Some(PathBuf::from("talk.txt")),
+            finished_at: 5,
+            duration: None,
+            speakers: None,
+        });
+        let (title, line) = app.queue_empty_copy();
+        assert_eq!(title, "Nothing in flight");
+        assert!(line.contains("Transcripts"), "{line}");
+
+        // A queue with no transcript on screen keeps the add pitch.
+        app.transcript.clear();
+        let (title, line) = app.queue_empty_copy();
+        assert_eq!(title, "No audio queued");
+        assert!(line.contains("Transcripts"), "{line}");
+    }
+
+    #[test]
+    fn recent_meta_names_duration_speakers_and_time() {
+        let entry = RecentEntry {
+            audio: Some(PathBuf::from("/media/talk.mp3")),
+            transcript: Some(PathBuf::from("/media/talk.txt")),
+            finished_at: 1_600_000_000,
+            duration: Some(95.0),
+            speakers: Some(2),
+        };
+        let meta = recent_meta(&entry, true);
+        assert!(
+            meta.starts_with("1:35 \u{00b7} 2 speakers \u{00b7} "),
+            "{meta}"
+        );
+        assert!(meta.ends_with(&clock_time(entry.finished_at)), "{meta}");
+
+        let one = RecentEntry {
+            duration: None,
+            speakers: Some(1),
+            ..entry.clone()
+        };
+        assert!(recent_meta(&one, true).contains("1 speaker"));
+        assert_eq!(recent_meta(&entry, false), "Transcript missing");
+    }
+
+    #[test]
+    fn day_headings_label_today_and_dates() {
+        // A fixed afternoon in September: no time zone shifts the date, and
+        // no DST change happens in the day before it.
+        let now = 1_600_000_000;
+        assert_eq!(day_heading(now, now), "Today");
+        assert_eq!(day_heading(now - 86_400, now), "Yesterday");
+        let older = day_heading(now - 3 * 86_400, now);
+        assert!(older.starts_with("Sep "), "{older}");
+        assert!(!older.contains("Today"), "{older}");
+    }
+
+    #[test]
+    fn reveal_targets_the_history_row_folder() {
+        let entry = RecentEntry {
+            audio: Some(PathBuf::from("/audio/talk.mp3")),
+            transcript: Some(PathBuf::from("/out/talk.txt")),
+            finished_at: 5,
+            duration: None,
+            speakers: None,
+        };
+        assert_eq!(
+            recent_reveal_dir(&entry),
+            Some(PathBuf::from("/out"))
+        );
+        let audio_only = RecentEntry {
+            transcript: None,
+            ..entry.clone()
+        };
+        assert_eq!(
+            recent_reveal_dir(&audio_only),
+            Some(PathBuf::from("/audio"))
+        );
+        let no_paths = RecentEntry {
+            audio: None,
+            transcript: None,
+            ..entry
+        };
+        assert_eq!(recent_reveal_dir(&no_paths), None);
+    }
+
+    #[test]
+    fn reveal_recent_without_a_target_spawns_nothing() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("pane-reveal-noop");
+        let mut app = pro_app();
+        app.recent.push(RecentEntry {
+            audio: None,
+            transcript: None,
+            finished_at: 5,
+            duration: None,
+            speakers: None,
+        });
+        // Neither the row with no paths nor an out-of-range index may reach
+        // the file manager.
+        let _ = app.update(Message::RevealRecent(0));
+        let _ = app.update(Message::RevealRecent(9));
+    }
+
+    #[test]
+    fn tooltip_names_the_history_output_path() {
+        let entry = RecentEntry {
+            audio: Some(PathBuf::from("/audio/talk.mp3")),
+            transcript: Some(PathBuf::from("/out/talk.txt")),
+            finished_at: 5,
+            duration: None,
+            speakers: None,
+        };
+        assert_eq!(recent_tooltip(&entry, true), "/out/talk.txt");
+        assert!(recent_tooltip(&entry, false).starts_with("Transcript missing"));
+
+        let audio_only = RecentEntry {
+            transcript: None,
+            ..entry
+        };
+        assert!(recent_tooltip(&audio_only, false).contains("/audio/talk.mp3"));
+    }
+
+    #[test]
+    fn transcripts_pane_builds_every_row_state() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("pane-render");
+        let media = temp_dir("pane-render-media");
+        let audio = media.join("talk.mp3");
+        std::fs::write(&audio, b"audio").unwrap();
+        let transcript = media.join("talk.txt");
+        std::fs::write(&transcript, "[00:00] SPEAKER 1: hello\n").unwrap();
+
+        let mut app = pro_app();
+        app.recent = vec![
+            // Opens: audio and transcript on disk.
+            RecentEntry {
+                audio: Some(audio.clone()),
+                transcript: Some(transcript.clone()),
+                finished_at: unix_secs(),
+                duration: Some(8.0),
+                speakers: Some(2),
+            },
+            // Transcript gone: danger meta, Remove only.
+            RecentEntry {
+                audio: Some(audio.clone()),
+                transcript: Some(media.join("gone.txt")),
+                finished_at: 1,
+                duration: None,
+                speakers: None,
+            },
+            // No audio left: opens read-only.
+            RecentEntry {
+                audio: None,
+                transcript: Some(transcript),
+                finished_at: 1,
+                duration: None,
+                speakers: None,
+            },
+        ];
+        app.pane_tab = PaneTab::Transcripts;
+        app.recent_hover = Some(0);
+        // A row build must never need the files on disk: the presence cache is
+        // read, and the "Transcript missing" row still renders.
+        let _ = app.view();
+
+        app.recent.clear();
+        let _ = app.view();
+
+        let _ = std::fs::remove_dir_all(&media);
+    }
+
+    #[test]
+    fn transcript_presence_refreshes_on_tab_entry() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("pane-presence");
+        let media = temp_dir("pane-presence-media");
+        let transcript = media.join("talk.txt");
+        std::fs::write(&transcript, "[00:00] SPEAKER 1: hello\n").unwrap();
+
+        let mut app = pro_app();
+        app.merge_recent(RecentEntry {
+            audio: None,
+            transcript: Some(transcript.clone()),
+            finished_at: 5,
+            duration: Some(1.0),
+            speakers: Some(1),
+        });
+        // The merge left the cache aligned and probed once.
+        assert_eq!(app.recent_presence, vec![true]);
+        assert!(app.recent_transcript_present(0));
+
+        // The file disappears after the cache was filled: nothing notices
+        // until the tab is entered again.
+        std::fs::remove_file(&transcript).unwrap();
+        assert_eq!(app.recent_presence, vec![true]);
+        let _ = app.update(Message::SelectTab(PaneTab::Transcripts));
+        assert_eq!(app.recent_presence, vec![false]);
+        assert!(!app.recent_transcript_present(0));
+
+        // Building the tab with a missing transcript still works; it reads the
+        // cache rather than the disk.
+        let _ = app.view();
+
+        // An entry added without a refresh assumes its transcript is there
+        // rather than reading as missing.
+        app.recent.push(RecentEntry {
+            audio: None,
+            transcript: Some(media.join("never-probed.txt")),
+            finished_at: 6,
+            duration: None,
+            speakers: None,
+        });
+        assert!(app.recent_transcript_present(app.recent.len() - 1));
+
+        let _ = std::fs::remove_dir_all(&media);
+    }
+
+    #[test]
+    fn removing_a_history_row_clears_its_hover() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("pane-remove-hover");
+        let mut app = pro_app();
+        app.recent.push(RecentEntry {
+            audio: None,
+            transcript: Some(PathBuf::from("talk.txt")),
+            finished_at: 5,
+            duration: None,
+            speakers: Some(1),
+        });
+        app.refresh_recent_presence();
+        app.recent_hover = Some(0);
+        let _ = app.update(Message::RemoveRecent(0));
+        assert!(app.recent.is_empty());
+        assert!(app.recent_presence.is_empty());
+        assert_eq!(app.recent_hover, None);
+    }
+
+    #[test]
     fn view_details_for_another_source_is_ignored() {
         let _guard = env_lock();
         let _config = ConfigEnv::new("view-details-other-source");
@@ -17137,6 +18155,128 @@ mod tests {
         assert_eq!(view.turns.len(), turns_before);
 
         let _ = std::fs::remove_dir_all(&media);
+    }
+
+    #[test]
+    fn view_details_fill_the_history_speaker_count() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("details-fill-history");
+        let media = temp_dir("details-fill-history-media");
+        let transcript = media.join("talk.txt");
+        std::fs::write(
+            &transcript,
+            "[00:00] SPEAKER 1: hello\n[00:05] SPEAKER 2: hi\n",
+        )
+        .unwrap();
+
+        let mut app = pro_app();
+        // An adopted transcript: it was added without a speaker count or a
+        // measured duration.
+        app.recent.push(RecentEntry {
+            audio: None,
+            transcript: Some(transcript.clone()),
+            finished_at: 5,
+            duration: None,
+            speakers: None,
+        });
+        let _ = app.update(Message::OpenRecent(0));
+
+        let _ = app.update(Message::ViewDetailsLoaded(
+            transcript.clone(),
+            Some(vec![
+                backend::Turn {
+                    start: 0.0,
+                    end: 2.0,
+                    speaker: "SPEAKER 1".to_string(),
+                },
+                backend::Turn {
+                    start: 2.0,
+                    end: 5.0,
+                    speaker: "SPEAKER 2".to_string(),
+                },
+                // A repeat of an existing voice is not a third speaker.
+                backend::Turn {
+                    start: 5.0,
+                    end: 6.0,
+                    speaker: "SPEAKER 1".to_string(),
+                },
+            ]),
+            Some((42.0, Vec::new())),
+        ));
+
+        assert_eq!(app.recent[0].speakers, Some(2));
+        assert_eq!(app.recent[0].duration, Some(42.0));
+
+        let _ = std::fs::remove_dir_all(&media);
+    }
+
+    #[test]
+    fn clearing_the_queue_keeps_a_history_view_on_screen() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("clear-keeps-history");
+        let media = temp_dir("clear-keeps-history-media");
+        let audio = media.join("talk.mp3");
+        std::fs::write(&audio, b"audio").unwrap();
+        let transcript = media.join("talk.txt");
+        std::fs::write(&transcript, "[00:00] SPEAKER 1: hello\n").unwrap();
+
+        let mut app = pro_app();
+        app.recent.push(RecentEntry {
+            audio: Some(audio),
+            transcript: Some(transcript.clone()),
+            finished_at: 5,
+            duration: Some(8.0),
+            speakers: Some(1),
+        });
+        let _ = app.update(Message::OpenRecent(0));
+        assert!(app.selected_view.is_some());
+        // Other work is waiting in the queue.
+        app.add_paths(vec![media.join("next.mp3")]);
+        assert_eq!(app.queue.len(), 1);
+        app.search_query = "hello".to_string();
+
+        let _ = app.update(Message::ClearQueue);
+
+        assert!(app.queue.is_empty());
+        let view = app
+            .selected_view
+            .as_ref()
+            .expect("clearing the queue blanked the history view");
+        assert!(view.finished);
+        assert_eq!(view.source, transcript);
+        assert_eq!(app.selected_recent, Some(0));
+        assert_eq!(app.search_query, "hello");
+        assert!(matches!(app.status, Status::Idle));
+
+        // The history entry itself survives too.
+        assert_eq!(app.recent.len(), 1);
+
+        let _ = std::fs::remove_dir_all(&media);
+    }
+
+    #[test]
+    fn clearing_the_queue_still_resets_the_live_buffer() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("clear-live-buffer");
+        let mut app = pro_app();
+        app.add_paths(vec![PathBuf::from("one.mp3"), PathBuf::from("two.mp3")]);
+        app.transcript = "[00:00] SPEAKER 1: hello\n".to_string();
+        app.lines = vec![DocLine {
+            raw: "[00:00] SPEAKER 1: hello".to_string(),
+            speaker: "SPEAKER 1".to_string(),
+            start: Some(0.0),
+            confidence: None,
+        }];
+        app.playhead = 3.0;
+
+        let _ = app.update(Message::ClearQueue);
+
+        assert!(app.queue.is_empty());
+        assert!(app.selected_view.is_none());
+        assert!(app.transcript.is_empty());
+        assert!(app.lines.is_empty());
+        assert_eq!(app.playhead, 0.0);
+        assert!(matches!(app.status, Status::Idle));
     }
 
     #[test]

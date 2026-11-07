@@ -328,20 +328,25 @@ merge it with the next line, or split it at the playhead. Line deletion asks for
 confirmation. Saves are written atomically and keep a
 `<transcript>.hippo-transcribe.bak` backup beside the source file.
 
-Completed rows stay in the queue: click one to revisit that file's transcript,
-speaker timeline, waveform and playback. Renaming speakers or saving writes back
-to that file's `.txt`. Adding an audio file that already has a transcript loads
-it straight away instead of queueing a run: `<name>.txt` beside the audio, or
-the newest `<name>-<preset>-transcription-<N>speakers.txt` when there is no
-plain copy, looked up beside the audio first and then in the save location.
+Finished files move to the **Transcripts** tab of the left pane; the **Queue** tab
+keeps only work that is still pending, running, failed or interrupted. History
+rows are grouped by day (Today, Yesterday, then the date) and show the file's
+duration, speaker count and finish time. Hover a row to reveal its output in the
+file manager or remove it from the list. Click one to revisit that file's
+transcript, speaker timeline, waveform and playback. Renaming speakers or saving
+writes back to that file's `.txt`. Adding an audio file that already has a
+transcript loads it straight away instead of queueing a run: `<name>.txt` beside
+the audio, or the newest `<name>-<preset>-transcription-<N>speakers.txt` when
+there is no plain copy, looked up beside the audio first and then in the save
+location.
 
-The queue (statuses, output paths and per-file statistics) is restored on
-restart; timeline and waveform data is re-derived on demand from the
-diarization cache. A file whose run was interrupted comes back as
-**Interrupted** with Resume and per-file Skip in its row. Resuming reuses the
-cached ASR clips for that file but recomputes its diarization, so the speaker
-timeline is rebuilt from scratch; the button reads Resume until nothing is
-left to continue.
+The queue (statuses and output paths) and the transcript history (finish time,
+duration and speaker count) are restored on restart; timeline and waveform data
+is re-derived on demand from the diarization cache. A file whose run was
+interrupted comes back as **Interrupted** with Resume and per-file Skip in its
+row. Resuming reuses the cached ASR clips for that file but recomputes its
+diarization, so the speaker timeline is rebuilt from scratch; the button reads
+Resume until nothing is left to continue.
 
 ## Deploy (Windows)
 
