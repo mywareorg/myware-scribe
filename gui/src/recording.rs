@@ -13,7 +13,7 @@
 use std::fs::File;
 use std::io::{BufWriter, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver, Sender, SyncSender};
 use std::sync::Arc;
 use std::thread::JoinHandle;
@@ -32,10 +32,55 @@ const CHANNEL_CHUNKS: usize = 256;
 /// A recording in progress.
 pub struct Recorder {
     stop: Sender<()>,
-    level: Arc<AtomicU32>,
+    meter: Arc<MeterShared>,
     started: Instant,
     path: PathBuf,
     worker: Option<JoinHandle<Result<(), String>>>,
+}
+
+/// A snapshot of the microphone meter for one view build.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct MeterReading {
+    /// Smoothed level above the room's noise floor, 0.0..=1.0.
+    pub level: f32,
+    /// The loudest level recently seen, held briefly so a transient is visible.
+    pub peak: f32,
+    /// True while the input has recently reached full scale.
+    pub clipping: bool,
+}
+
+/// The callback's output, read by the view.
+///
+/// The smoothing itself lives in the audio callback, next to the samples it
+/// measures: the view is built on whatever events happen to arrive, so a
+/// snapshot is published continuously and reading it never consumes it.
+#[derive(Default)]
+struct MeterShared {
+    level: AtomicU32,
+    peak: AtomicU32,
+    clipping: AtomicBool,
+}
+
+impl MeterShared {
+    fn publish(&self, reading: MeterReading) {
+        self.level.store(reading.level.to_bits(), Ordering::Relaxed);
+        self.peak.store(reading.peak.to_bits(), Ordering::Relaxed);
+        self.clipping.store(reading.clipping, Ordering::Relaxed);
+    }
+
+    fn silence(&self) {
+        self.level.store(0, Ordering::Relaxed);
+        self.peak.store(0, Ordering::Relaxed);
+        self.clipping.store(false, Ordering::Relaxed);
+    }
+
+    fn reading(&self) -> MeterReading {
+        MeterReading {
+            level: f32::from_bits(self.level.load(Ordering::Relaxed)),
+            peak: f32::from_bits(self.peak.load(Ordering::Relaxed)),
+            clipping: self.clipping.load(Ordering::Relaxed),
+        }
+    }
 }
 
 impl Recorder {
@@ -46,18 +91,18 @@ impl Recorder {
     pub fn start(device_name: Option<String>, path: PathBuf) -> Result<Self, String> {
         let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<(), String>>();
         let (stop_tx, stop_rx) = std::sync::mpsc::channel::<()>();
-        let level = Arc::new(AtomicU32::new(0));
+        let meter = Arc::new(MeterShared::default());
 
-        let worker_level = level.clone();
+        let worker_meter = meter.clone();
         let worker_path = path.clone();
         let worker = std::thread::spawn(move || {
-            capture(device_name, worker_path, stop_rx, worker_level, ready_tx)
+            capture(device_name, worker_path, stop_rx, worker_meter, ready_tx)
         });
 
         match ready_rx.recv_timeout(Duration::from_secs(10)) {
             Ok(Ok(())) => Ok(Self {
                 stop: stop_tx,
-                level,
+                meter,
                 started: Instant::now(),
                 path,
                 worker: Some(worker),
@@ -78,9 +123,10 @@ impl Recorder {
         self.started.elapsed().as_secs_f32()
     }
 
-    /// Peak level since the last call, 0.0..=1.0, on a decibel scale.
-    pub fn take_level(&self) -> f32 {
-        level_from_peak(f32::from_bits(self.level.swap(0, Ordering::Relaxed)))
+    /// The latest meter snapshot. Reading it does not reset the meter: the
+    /// callback keeps moving while the view is idle or rebuilt.
+    pub fn meter(&self) -> MeterReading {
+        self.meter.reading()
     }
 
     /// Stop capture, finalize the WAV, and return its path and duration.
@@ -118,7 +164,7 @@ fn capture(
     device_name: Option<String>,
     path: PathBuf,
     stop: Receiver<()>,
-    level: Arc<AtomicU32>,
+    meter: Arc<MeterShared>,
     ready: Sender<Result<(), String>>,
 ) -> Result<(), String> {
     let host = cpal::default_host();
@@ -153,20 +199,19 @@ fn capture(
     let (tx, rx) = sync_channel::<Vec<i16>>(CHANNEL_CHUNKS);
     let writer = std::thread::spawn(move || write_wav(path, rate, rx));
 
-    let level_cb = level.clone();
-    let error_level = level.clone();
+    let error_meter = meter.clone();
     let error_cb = move |error: cpal::StreamError| {
-        error_level.store(0, Ordering::Relaxed);
+        error_meter.silence();
         hippo_transcribe_core::logging::error(format!("microphone stream error: {error}"));
     };
 
     let stream = match format {
-        SampleFormat::F32 => build::<f32>(&device, &config, channels, tx, level_cb, error_cb),
-        SampleFormat::I16 => build::<i16>(&device, &config, channels, tx, level_cb, error_cb),
-        SampleFormat::U16 => build::<u16>(&device, &config, channels, tx, level_cb, error_cb),
-        SampleFormat::I32 => build::<i32>(&device, &config, channels, tx, level_cb, error_cb),
-        SampleFormat::U8 => build::<u8>(&device, &config, channels, tx, level_cb, error_cb),
-        SampleFormat::I8 => build::<i8>(&device, &config, channels, tx, level_cb, error_cb),
+        SampleFormat::F32 => build::<f32>(&device, &config, channels, rate, tx, meter, error_cb),
+        SampleFormat::I16 => build::<i16>(&device, &config, channels, rate, tx, meter, error_cb),
+        SampleFormat::U16 => build::<u16>(&device, &config, channels, rate, tx, meter, error_cb),
+        SampleFormat::I32 => build::<i32>(&device, &config, channels, rate, tx, meter, error_cb),
+        SampleFormat::U8 => build::<u8>(&device, &config, channels, rate, tx, meter, error_cb),
+        SampleFormat::I8 => build::<i8>(&device, &config, channels, rate, tx, meter, error_cb),
         other => Err(format!("unsupported microphone sample format: {other:?}")),
     };
 
@@ -232,8 +277,9 @@ fn build<T>(
     device: &cpal::Device,
     config: &cpal::StreamConfig,
     channels: usize,
+    rate: u32,
     tx: SyncSender<Vec<i16>>,
-    level: Arc<AtomicU32>,
+    meter: Arc<MeterShared>,
     error: impl FnMut(cpal::StreamError) + Send + 'static,
 ) -> Result<cpal::Stream, String>
 where
@@ -241,16 +287,29 @@ where
     f32: FromSample<T>,
 {
     let channels = channels.max(1);
+    let rate = rate.max(1);
+    let mut engine = LevelEngine::default();
     device
         .build_input_stream(
             config,
             move |data: &[T], _: &cpal::InputCallbackInfo| {
-                let mut mono = Vec::with_capacity(data.len() / channels);
+                let frames = data.len() / channels;
+                if frames == 0 {
+                    return;
+                }
+                let seconds = frames as f32 / rate as f32;
+                let mut mono = Vec::with_capacity(frames);
                 let mut peak = 0.0f32;
+                // Clipping is judged before the channels are mixed down: a
+                // single overloaded channel is still an overload, even if the
+                // mono sum lands below full scale.
+                let mut clip_peak = 0.0f32;
                 for frame in data.chunks(channels) {
                     let mut sum = 0.0f32;
                     for sample in frame {
-                        sum += f32::from_sample(*sample);
+                        let sample = f32::from_sample(*sample);
+                        clip_peak = clip_peak.max(sample.abs());
+                        sum += sample;
                     }
                     let value = (sum / channels as f32).clamp(-1.0, 1.0);
                     peak = peak.max(value.abs());
@@ -259,7 +318,7 @@ where
                 if mono.is_empty() {
                     return;
                 }
-                level.fetch_max(peak.to_bits(), Ordering::Relaxed);
+                meter.publish(engine.update(peak, clip_peak, seconds));
                 let _ = tx.try_send(mono);
             },
             error,
@@ -268,17 +327,135 @@ where
         .map_err(|error| format!("could not open the microphone: {error}"))
 }
 
-/// Map a linear peak amplitude onto a 0..=1 meter scale.
+/// The meter's reference span: decibels above the room's noise floor that fill
+/// the bar. Ordinary speech peaks 25–35 dB above a quiet room, so the top of
+/// the bar is a loud voice, not an impossible one.
+const METER_SPAN_DB: f32 = 40.0;
+
+/// Rise and fall of the displayed envelope. Speech attacks quickly; the long
+/// release keeps the bar alive between syllables instead of flickering.
+const ATTACK_SECONDS: f32 = 0.02;
+const RELEASE_SECONDS: f32 = 0.30;
+
+/// One block of the noise-floor estimate, and how many blocks it remembers.
+/// A quarter second is long enough to contain a pause between words, and eight
+/// seconds means a room that gets noisier is picked up without a restart.
+const FLOOR_BLOCK_SECONDS: f32 = 0.25;
+const FLOOR_BLOCKS: usize = 32;
+
+/// The floor before anything has been heard. A single quiet block replaces one
+/// slot, so the guess is corrected within a quarter second of a pause; it only
+/// matters if recording starts mid-sentence.
+const FLOOR_SEED_DB: f32 = -55.0;
+
+/// Digital silence has no meaningful floor; keep the reference out of `-inf`.
+const FLOOR_MIN_DB: f32 = -80.0;
+
+/// How long a peak is held before the tick starts falling, and how fast it
+/// falls afterwards.
+const PEAK_HOLD_SECONDS: f32 = 1.5;
+const PEAK_FALL_PER_SECOND: f32 = 0.6;
+
+/// What counts as full scale, and how long the overload warning stays up.
+const CLIP_PEAK: f32 = 0.98;
+const CLIP_HOLD_SECONDS: f32 = 2.0;
+
+/// The stateful meter: a noise-floor reference, a smoothed envelope, a held
+/// peak, and a clip latch.
 ///
-/// Linear amplitude puts ordinary speech (around -25 dBFS) at a quarter of the
-/// bar and leaves everything quieter than that looking dead. A decibel scale
-/// from -60 dBFS to full scale spends the bar where voices actually are.
-fn level_from_peak(peak: f32) -> f32 {
-    if !(peak > 0.0) {
-        return 0.0;
+/// The floor is the quietest block of the last eight seconds. Speech cannot
+/// lift it, so the scale stays put while the user talks; the room's own noise
+/// does, so moving to a noisy room does not pin the bar at full.
+struct LevelEngine {
+    floor: [f32; FLOOR_BLOCKS],
+    slot: usize,
+    block_seconds: f32,
+    block_peak: f32,
+    floor_db: f32,
+    level: f32,
+    hold: f32,
+    hold_age: f32,
+    clip_seconds: f32,
+}
+
+impl Default for LevelEngine {
+    fn default() -> Self {
+        Self {
+            floor: [FLOOR_SEED_DB; FLOOR_BLOCKS],
+            slot: 0,
+            block_seconds: 0.0,
+            block_peak: 0.0,
+            floor_db: FLOOR_SEED_DB,
+            level: 0.0,
+            hold: 0.0,
+            hold_age: 0.0,
+            clip_seconds: 0.0,
+        }
     }
-    let db = 20.0 * peak.log10();
-    ((db + 60.0) / 60.0).clamp(0.0, 1.0)
+}
+
+impl LevelEngine {
+    /// Fold one callback's peak into the meter. `peak` is the mono peak that is
+    /// being recorded; `clip_peak` is the raw per-channel peak used to catch an
+    /// overload that the mixdown would hide. `seconds` is the callback's
+    /// duration, which makes the smoothing independent of buffer size.
+    fn update(&mut self, peak: f32, clip_peak: f32, seconds: f32) -> MeterReading {
+        let seconds = seconds.clamp(0.0, 1.0);
+
+        // The floor is a rolling minimum of block peaks, not a follower: a
+        // minimum cannot be dragged upward by the speech it is measuring.
+        self.block_peak = self.block_peak.max(peak.max(0.0));
+        self.block_seconds += seconds;
+        if self.block_seconds >= FLOOR_BLOCK_SECONDS {
+            let block_db = decibels(self.block_peak).clamp(FLOOR_MIN_DB, 0.0);
+            self.floor[self.slot] = block_db;
+            self.slot = (self.slot + 1) % FLOOR_BLOCKS;
+            self.floor_db = self.floor.iter().copied().fold(f32::INFINITY, f32::min);
+            self.block_seconds = 0.0;
+            self.block_peak = 0.0;
+        }
+
+        let target = ((decibels(peak) - self.floor_db) / METER_SPAN_DB).clamp(0.0, 1.0);
+        let tau = if target > self.level {
+            ATTACK_SECONDS
+        } else {
+            RELEASE_SECONDS
+        };
+        let smoothing = 1.0 - (-seconds / tau).exp();
+        self.level = (self.level + (target - self.level) * smoothing).clamp(0.0, 1.0);
+
+        if self.level >= self.hold {
+            self.hold = self.level;
+            self.hold_age = 0.0;
+        } else {
+            self.hold_age += seconds;
+            if self.hold_age > PEAK_HOLD_SECONDS {
+                self.hold = (self.hold - PEAK_FALL_PER_SECOND * seconds).max(self.level);
+            }
+        }
+
+        if clip_peak >= CLIP_PEAK {
+            self.clip_seconds = CLIP_HOLD_SECONDS;
+        } else {
+            self.clip_seconds = (self.clip_seconds - seconds).max(0.0);
+        }
+
+        MeterReading {
+            level: self.level,
+            peak: self.hold,
+            clipping: self.clip_seconds > 0.0,
+        }
+    }
+}
+
+/// Peak amplitude as decibels relative to full scale. Zero is `-inf`, which the
+/// caller clamps or lets fall to an empty bar.
+fn decibels(peak: f32) -> f32 {
+    if peak > 0.0 {
+        20.0 * peak.log10()
+    } else {
+        f32::NEG_INFINITY
+    }
 }
 
 /// The recording thread's writer: a WAV whose sizes are patched on finish.
@@ -387,19 +564,131 @@ mod tests {
         dir
     }
 
+    fn db_to_peak(db: f32) -> f32 {
+        10.0f32.powf(db / 20.0)
+    }
+
+    /// Feed `seconds` of a steady tone at `db` dBFS in 10 ms steps. Returns the
+    /// last reading, which is what the view would have seen.
+    fn feed(engine: &mut LevelEngine, db: f32, seconds: f32, dt: f32) -> MeterReading {
+        let peak = db_to_peak(db);
+        let steps = (seconds / dt).round() as usize;
+        let mut last = MeterReading::default();
+        for _ in 0..steps {
+            last = engine.update(peak, peak, dt);
+        }
+        last
+    }
+
     #[test]
-    fn the_level_meter_follows_speech_on_a_decibel_scale() {
-        assert_eq!(level_from_peak(0.0), 0.0);
-        assert_eq!(level_from_peak(-0.2), 0.0);
-        assert_eq!(level_from_peak(1.0), 1.0);
-        // -25 dBFS speech sits just under two thirds of the bar, not a quarter.
-        let speech = level_from_peak(0.056_234_13);
-        assert!((0.57..0.60).contains(&speech), "{speech}");
-        // A whisper at -45 dBFS is still visible.
-        let whisper = level_from_peak(0.005_623_413);
-        assert!((0.24..0.26).contains(&whisper), "{whisper}");
-        // Louder always reads higher.
-        assert!(level_from_peak(0.5) > level_from_peak(0.05));
+    fn the_meter_moves_with_speech_above_the_room() {
+        let mut engine = LevelEngine::default();
+        let silent = engine.update(0.0, 0.0, 0.01);
+        assert_eq!(silent.level, 0.0);
+
+        let room = feed(&mut engine, -55.0, 1.0, 0.01);
+        assert!(room.level < 0.05, "{room:?}");
+
+        let speech = feed(&mut engine, -20.0, 0.3, 0.01);
+        assert!(speech.level > 0.7, "{speech:?}");
+        assert!(speech.level > room.level + 0.5);
+    }
+
+    #[test]
+    fn the_meter_releases_slowly_and_keeps_a_peak_tick() {
+        let mut engine = LevelEngine::default();
+        let loud = feed(&mut engine, -20.0, 0.5, 0.01);
+
+        // A tenth of a second of silence barely moves the bar: syllable gaps
+        // must not make it flicker.
+        let early = feed(&mut engine, -90.0, 0.10, 0.01);
+        assert!(early.level > loud.level * 0.55, "{early:?} vs {loud:?}");
+        assert!(early.peak > early.level + 0.1, "{early:?}");
+
+        // It does fall away once the phrase is over, and so does the tick.
+        let late = feed(&mut engine, -90.0, 3.0, 0.01);
+        assert!(late.level < 0.05, "{late:?}");
+        assert!(late.peak < 0.2, "{late:?}");
+    }
+
+    #[test]
+    fn the_floor_rises_when_the_room_gets_noisier() {
+        let mut engine = LevelEngine::default();
+        feed(&mut engine, -65.0, 1.0, 0.01);
+        assert!(engine.floor_db < -60.0, "{}", engine.floor_db);
+
+        // Ten seconds of a persistent hum at -30 dBFS. The reference climbs to
+        // meet it, so the room itself reads quiet instead of pinning the bar.
+        let hum = feed(&mut engine, -30.0, 10.0, 0.01);
+        assert!(engine.floor_db > -31.0, "{}", engine.floor_db);
+        assert!(hum.level < 0.1, "{hum:?}");
+
+        // Speech twenty decibels above the new room reads mid-scale, not off
+        // the top, because the reference moved with the room.
+        let speech = feed(&mut engine, -10.0, 0.3, 0.01);
+        assert!((0.45..0.55).contains(&speech.level), "{speech:?}");
+    }
+
+    #[test]
+    fn the_floor_drops_with_the_room() {
+        let mut engine = LevelEngine::default();
+        feed(&mut engine, -30.0, 9.0, 0.01);
+        assert!(engine.floor_db > -31.0, "{}", engine.floor_db);
+
+        // One quarter-second of a quiet room is enough to reset the reference
+        // downward; only upward movement waits for the old blocks to age out.
+        feed(&mut engine, -65.0, 0.3, 0.01);
+        assert!(engine.floor_db < -60.0, "{}", engine.floor_db);
+    }
+
+    #[test]
+    fn speech_alone_does_not_lift_the_floor() {
+        let mut engine = LevelEngine::default();
+        feed(&mut engine, -65.0, 1.0, 0.01);
+        let settled = engine.floor_db;
+
+        // Ten seconds of loud speech with the pauses an ordinary speaker takes.
+        // The old fixed-offset meter would have climbed with the voice; a
+        // rolling minimum stays on the room.
+        for _ in 0..10 {
+            feed(&mut engine, -20.0, 0.6, 0.01);
+            feed(&mut engine, -65.0, 0.4, 0.01);
+        }
+        assert!(
+            engine.floor_db < settled + 1.0,
+            "{settled} -> {}",
+            engine.floor_db
+        );
+
+        // The scale has not compressed: the next phrase still reaches the top.
+        let speech = feed(&mut engine, -20.0, 0.3, 0.01);
+        assert!(speech.level > 0.8, "{speech:?}");
+    }
+
+    #[test]
+    fn clipping_is_flagged_even_when_the_bar_is_not_full() {
+        let mut engine = LevelEngine::default();
+        feed(&mut engine, -25.0, 9.0, 0.01);
+        assert!(engine.floor_db > -26.0, "{}", engine.floor_db);
+
+        // Full scale in a room that is already loud: only 25 dB above the
+        // floor, so the normalized bar sits mid-scale while the input clips.
+        let hot = engine.update(1.0, 1.0, 0.02);
+        assert!(hot.clipping, "{hot:?}");
+        assert!(hot.level < 0.5, "{hot:?}");
+
+        // The warning is a latch, not a single-frame blip, and then it clears.
+        let cooling = feed(&mut engine, -25.0, 1.0, 0.01);
+        assert!(cooling.clipping, "{cooling:?}");
+        let cool = feed(&mut engine, -25.0, 1.5, 0.01);
+        assert!(!cool.clipping, "{cool:?}");
+    }
+
+    #[test]
+    fn a_peak_below_full_scale_is_not_clipping() {
+        let mut engine = LevelEngine::default();
+        let reading = feed(&mut engine, -20.0, 1.0, 0.01);
+        assert!(!reading.clipping, "{reading:?}");
     }
 
     #[test]

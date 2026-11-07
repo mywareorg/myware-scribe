@@ -8876,22 +8876,40 @@ impl App {
         .align_y(iced::Alignment::Center);
 
         let strip: Option<Element<'_, Message>> = self.recording.as_ref().map(|recorder| {
-            let level = recorder.take_level();
+            let reading = recorder.meter();
+            // Normalizing against the room hides overload, so the strip says
+            // so in words as well as changing the fill.
+            let clipping = reading.clipping;
+            let meter = canvas(RecordingMeter {
+                level: reading.level,
+                peak: reading.peak,
+                // In the dark palette `bar_track` is the same grey as the well
+                // behind it, which would make the unlit segments disappear;
+                // nudging it toward the text colour keeps the whole scale
+                // visible without introducing a new token.
+                track: theme::mix(scheme.bar_track, scheme.text, 0.08),
+                fill: if clipping {
+                    theme::lighten(scheme.danger, 0.35)
+                } else {
+                    scheme.danger
+                },
+                hold: Color {
+                    a: 0.65,
+                    ..scheme.text
+                },
+            })
+            .width(Length::Fill)
+            .height(Length::Fixed(8.0));
             container(
                 row![
                     icon_colored(ICON_MIC, 14.0, scheme.danger),
-                    text("Recording").size(theme::TEXT_SM).color(scheme.text),
+                    text(if clipping { "Clipping" } else { "Recording" })
+                        .size(theme::TEXT_SM)
+                        .color(if clipping { scheme.danger } else { scheme.text }),
                     text(format_secs(recorder.elapsed() as f64))
                         .size(theme::TEXT_XS)
                         .color(scheme.muted),
-                    progress_bar(0.0..=1.0, level)
-                        .width(Length::Fill)
-                        .height(Length::Fixed(6.0))
-                        .style(move |_theme| progress_bar::Style {
-                            background: scheme.bar_track.into(),
-                            bar: scheme.danger.into(),
-                            border: iced::border::rounded(3.0),
-                        }),
+                    meter,
                 ]
                 .spacing(theme::SPACE_SM)
                 .align_y(iced::Alignment::Center),
@@ -13808,6 +13826,87 @@ impl canvas::Program<Message> for ProgressTrack {
             );
             frame.fill(&path, self.fill);
         }
+        vec![frame.into_geometry()]
+    }
+}
+
+/// The live microphone meter in the recording strip.
+///
+/// A row of segments, not a `progress_bar`: recording has no completion
+/// fraction, and segments read as a level at a glance. The fill follows the
+/// recorder's smoothed envelope, the thin tick holds the recent peak, and the
+/// fill lightens while the input is clipping.
+struct RecordingMeter {
+    level: f32,
+    peak: f32,
+    track: Color,
+    fill: Color,
+    hold: Color,
+}
+
+impl canvas::Program<Message> for RecordingMeter {
+    type State = ();
+
+    fn update(
+        &self,
+        _state: &mut Self::State,
+        _event: canvas::Event,
+        _bounds: Rectangle,
+        _cursor: mouse::Cursor,
+    ) -> (canvas::event::Status, Option<Message>) {
+        (canvas::event::Status::Ignored, None)
+    }
+
+    fn draw(
+        &self,
+        _state: &(),
+        renderer: &iced::Renderer,
+        _theme: &Theme,
+        bounds: Rectangle,
+        _cursor: mouse::Cursor,
+    ) -> Vec<canvas::Geometry> {
+        let mut frame = canvas::Frame::new(renderer, bounds.size());
+        let width = bounds.width;
+        let height = bounds.height;
+        if width <= 0.0 || height <= 0.0 {
+            return vec![frame.into_geometry()];
+        }
+
+        // Five-pixel segments with two-pixel gaps. The count follows the
+        // available width, so the meter keeps its rhythm in a narrow sidebar.
+        let segment = 5.0f32;
+        let gap = 2.0f32;
+        let count = (((width + gap) / (segment + gap)).floor() as usize).max(1);
+        let spanned = count as f32 * segment + (count as f32 - 1.0) * gap;
+        let start = ((width - spanned) / 2.0).max(0.0);
+        let lit = ((self.level.clamp(0.0, 1.0) * count as f32).ceil() as usize).min(count);
+        let radius = (segment.min(height) / 2.0).min(2.5);
+        for index in 0..count {
+            let color = if index < lit { self.fill } else { self.track };
+            let x = start + index as f32 * (segment + gap);
+            let path = canvas::Path::rounded_rectangle(
+                Point::new(x, 0.0),
+                Size::new(segment, height),
+                radius.into(),
+            );
+            frame.fill(&path, color);
+        }
+
+        // The hold tick only needs drawing when it is ahead of the fill; while
+        // the level is still rising the leading edge already marks the peak.
+        // It is positioned on the drawn span, not the widget width, so it lines
+        // up with the segment the peak belongs to.
+        if self.peak > self.level + 0.02 && self.peak > 0.02 && spanned >= 2.0 {
+            let x = (start + self.peak.clamp(0.0, 1.0) * spanned - 1.0)
+                .clamp(start, start + spanned - 2.0);
+            let path = canvas::Path::rounded_rectangle(
+                Point::new(x, 0.0),
+                Size::new(2.0, height),
+                1.0.into(),
+            );
+            frame.fill(&path, self.hold);
+        }
+
         vec![frame.into_geometry()]
     }
 }
