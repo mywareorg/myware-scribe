@@ -1,6 +1,6 @@
 [package]
 name = "ui-kit"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2021"
 description = "Iced UI primitives: palette, styles, buttons, menus and dialogs."
 repository = "https://gitlab.com/librewarelive/hippo-transcribe"
