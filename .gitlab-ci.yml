@@ -16,10 +16,10 @@ windows-build:
       - dist/*.sha256
       - build-windows.log
 
-# Publish the on-demand accuracy model to the Generic Package Registry.
+# Publish every pinned model to the Generic Package Registry.
 #
 # GitLab does not count the package registry against the repository/LFS quota,
-# so the 574 MB file never enters git history. The resulting URL is:
+# so the large files never enter git history. The resulting URL is:
 #   $CI_API_V4_URL/projects/$MODELS_PROJECT_ID/packages/generic/hippo-models/<version>/<file>
 #
 # Set MODELS_PROJECT_ID (defaults to this project) and MODELS_UPLOAD_TOKEN (a
@@ -38,12 +38,28 @@ publish-models:
     - scripts/fetch-models.sh --all
     - |
       project_id="${MODELS_PROJECT_ID:-$CI_PROJECT_ID}"
-      for file in vendor/models/*/ggml-large-v3-turbo-q5_0.bin; do
-        echo "uploading $(basename "$file") ($(wc -c < "$file") bytes)"
+      status=0
+      for file in $(find vendor/models -type f ! -name '*.part'); do
+        name=$(basename "$file")
+        url="$CI_API_V4_URL/projects/$project_id/packages/generic/hippo-models/$MODELS_PACKAGE_VERSION/$name"
+        code=$(curl -s -o /dev/null -w '%{http_code}' \
+          --header "PRIVATE-TOKEN: $MODELS_UPLOAD_TOKEN" "$url")
+        if [ "$code" = "200" ]; then
+          echo "exists: $name"
+          continue
+        fi
+        echo "uploading $name ($(wc -c < "$file") bytes)"
         curl --fail --show-error --upload-file "$file" \
-          --header "PRIVATE-TOKEN: $MODELS_UPLOAD_TOKEN" \
-          "$CI_API_V4_URL/projects/$project_id/packages/generic/hippo-models/$MODELS_PACKAGE_VERSION/$(basename "$file")"
+          --header "PRIVATE-TOKEN: $MODELS_UPLOAD_TOKEN" "$url"
+        code=$(curl -sIL -o /dev/null -w '%{http_code}' "$url")
+        if [ "$code" != "200" ]; then
+          echo "verify failed for $name: HTTP $code" >&2
+          status=1
+        else
+          echo "verified: $name"
+        fi
       done
+      exit $status
 
 # The briefing model is 1.1 GB and the interactive upload path rejects bodies
 # that size before GitLab stores them; the accuracy model (547 MiB) only ever
@@ -64,18 +80,33 @@ publish-briefing-model:
     BRIEFING_URL: "https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/91cad51170dc346986eccefdc2dd33a9da36ead9/qwen2.5-1.5b-instruct-q4_k_m.gguf"
   script:
     - test -n "$MODELS_UPLOAD_TOKEN" || { echo "MODELS_UPLOAD_TOKEN is not set"; exit 1; }
-    - curl -L --fail --show-error -o "$BRIEFING_MODEL" "$BRIEFING_URL"
+    - |
+      project_id="${MODELS_PROJECT_ID:-$CI_PROJECT_ID}"
+      url="$CI_API_V4_URL/projects/$project_id/packages/generic/hippo-models/$MODELS_PACKAGE_VERSION/$BRIEFING_MODEL"
+      code=$(curl -s -o /dev/null -w '%{http_code}' \
+        --header "PRIVATE-TOKEN: $MODELS_UPLOAD_TOKEN" "$url")
+      if [ "$code" = "200" ]; then
+        echo "already published: $BRIEFING_MODEL"
+        exit 0
+      fi
+    - curl -L --fail --show-error --retry 3 -o "$BRIEFING_MODEL" "$BRIEFING_URL"
     - echo "$BRIEFING_SHA256  $BRIEFING_MODEL" | sha256sum -c -
     - |
       project_id="${MODELS_PROJECT_ID:-$CI_PROJECT_ID}"
+      url="$CI_API_V4_URL/projects/$project_id/packages/generic/hippo-models/$MODELS_PACKAGE_VERSION/$BRIEFING_MODEL"
       echo "uploading $BRIEFING_MODEL ($(wc -c < "$BRIEFING_MODEL") bytes)"
       curl --fail --show-error --upload-file "$BRIEFING_MODEL" \
-        --header "PRIVATE-TOKEN: $MODELS_UPLOAD_TOKEN" \
-        "$CI_API_V4_URL/projects/$project_id/packages/generic/hippo-models/$MODELS_PACKAGE_VERSION/$BRIEFING_MODEL"
+        --header "PRIVATE-TOKEN: $MODELS_UPLOAD_TOKEN" "$url"
     - |
       project_id="${MODELS_PROJECT_ID:-$CI_PROJECT_ID}"
+      url="$CI_API_V4_URL/projects/$project_id/packages/generic/hippo-models/$MODELS_PACKAGE_VERSION/$BRIEFING_MODEL"
       echo "verify without credentials:"
-      curl -sIL "$CI_API_V4_URL/projects/$project_id/packages/generic/hippo-models/$MODELS_PACKAGE_VERSION/$BRIEFING_MODEL" | head -5
+      code=$(curl -sIL -o /dev/null -w '%{http_code}' "$url")
+      if [ "$code" != "200" ]; then
+        echo "verify failed: HTTP $code $url" >&2
+        exit 1
+      fi
+      echo "verified: $BRIEFING_MODEL"
 
 # Serve PRIVACY.md as the Store listing's privacy policy URL.
 #
