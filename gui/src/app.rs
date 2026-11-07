@@ -345,6 +345,18 @@ struct QueueItem {
     peaks: Arc<Vec<f32>>,
 }
 
+/// A finished transcript, kept outside the queue. The queue only holds work
+/// that is still in flight; this is the durable history the UI browses.
+#[derive(Debug, Clone)]
+struct RecentEntry {
+    audio: Option<PathBuf>,
+    transcript: Option<PathBuf>,
+    /// Unix seconds when the item finished; the history sorts newest first.
+    finished_at: u64,
+    duration: Option<f64>,
+    speakers: Option<u8>,
+}
+
 /// A transcript found beside one of the audio files just added.
 #[derive(Debug, Clone)]
 pub(crate) struct TranscriptHit {
@@ -379,6 +391,9 @@ struct QueueState {
     /// Paths included in the most recent transcription batch.
     #[serde(default)]
     last_batch: Vec<String>,
+    /// Finished transcripts kept as history; independent of the live queue.
+    #[serde(default)]
+    recent: Vec<RecentRecord>,
 }
 
 /// The options a batch was started with, kept so an interrupted run can say
@@ -414,11 +429,28 @@ struct QueueRecord {
     peaks: Vec<f32>,
 }
 
+/// Persisted recent entry. Paths are stored as strings like the queue's.
+#[derive(Serialize, Deserialize)]
+struct RecentRecord {
+    #[serde(default)]
+    audio: Option<String>,
+    #[serde(default)]
+    transcript: Option<String>,
+    #[serde(default)]
+    finished_at: u64,
+    #[serde(default)]
+    duration: Option<f64>,
+    #[serde(default)]
+    speakers: Option<u8>,
+}
+
 /// A completed item's content while it is being viewed.
 struct ItemView {
-    index: usize,
     /// The file the transcript was loaded from (txt or json).
     source: PathBuf,
+    /// True when this shows a completed transcript; false for a Pending
+    /// preview, which has audio and row data but no text yet.
+    finished: bool,
     transcript: String,
     lines: Vec<DocLine>,
     turns: Vec<backend::Turn>,
@@ -435,9 +467,9 @@ struct ItemView {
 /// speaker label, so restoring the lines restores the speaker map with it.
 #[derive(Default)]
 struct LineHistory {
-    /// The document the stacks belong to: the selected view's queue index, or
+    /// The document the stacks belong to: the selected view's source path, or
     /// `None` for the live transcript.
-    document: Option<usize>,
+    document: Option<PathBuf>,
     undo: Vec<Vec<DocLine>>,
     redo: Vec<Vec<DocLine>>,
 }
@@ -962,12 +994,7 @@ pub enum Message {
     RemoveItem(usize),
     ClearQueue,
     ItemDurationProbed(PathBuf, Option<f64>),
-    ViewDetailsLoaded(
-        usize,
-        PathBuf,
-        Option<Vec<backend::Turn>>,
-        Option<(f64, Vec<f32>)>,
-    ),
+    ViewDetailsLoaded(PathBuf, Option<Vec<backend::Turn>>, Option<(f64, Vec<f32>)>),
     QueueWaveformLoaded(PathBuf, Option<(f64, Vec<f32>)>),
     RetryItem(usize),
     QueueDragStart(usize),
@@ -1330,6 +1357,8 @@ pub struct App {
     pid: Arc<AtomicU32>,
     cancelled: Arc<AtomicBool>,
     queue: Vec<QueueItem>,
+    /// Finished transcripts kept as history, newest first.
+    recent: Vec<RecentEntry>,
     /// Queue index currently being dragged, if any.
     queue_drag: Option<usize>,
     /// Queue index under the pointer, used for hover styling.
@@ -1371,7 +1400,7 @@ pub struct App {
     delete_confirm: bool,
     /// Document the open editor writes to, so a view change cannot commit its
     /// text into a different transcript.
-    line_edit_document: Option<usize>,
+    line_edit_document: Option<PathBuf>,
     /// Undo/redo for transcript edits made through the inline editor.
     line_history: LineHistory,
     /// Background waveform backfill for completed items without cached peaks.
@@ -1432,11 +1461,11 @@ impl App {
     pub fn new() -> Self {
         let settings = Self::load_settings();
         let first_run = Self::is_first_run();
-        let (queue, batch_paths) = if first_run {
+        let (queue, batch_paths, recent) = if first_run {
             // Never restore a queue left behind by an older install or a
             // previous build. The first launch of the app starts clean.
             Self::clear_queue_files();
-            (Vec::new(), Vec::new())
+            (Vec::new(), Vec::new(), Vec::new())
         } else {
             Self::load_queue_and_batch()
         };
@@ -1592,6 +1621,7 @@ impl App {
             pid: Arc::new(AtomicU32::new(0)),
             cancelled: Arc::new(AtomicBool::new(false)),
             queue,
+            recent,
             queue_drag: None,
             queue_hover: None,
             queue_pointer: None,
@@ -1802,20 +1832,32 @@ impl App {
         }
     }
 
-    /// Load the queue plus the paths from the most recent batch.
-    fn load_queue_and_batch() -> (Vec<QueueItem>, Vec<PathBuf>) {
+    /// Load the queue, the paths from the most recent batch, and the finished
+    /// transcript history.
+    fn load_queue_and_batch() -> (Vec<QueueItem>, Vec<PathBuf>, Vec<RecentEntry>) {
         let text = Self::queue_path()
             .and_then(|path| std::fs::read_to_string(path).ok())
             .or_else(|| {
                 Self::legacy_queue_path().and_then(|path| std::fs::read_to_string(path).ok())
             });
         let Some(text) = text else {
-            return (Vec::new(), Vec::new());
+            return (Vec::new(), Vec::new(), Vec::new());
         };
         let Ok(state) = serde_json::from_str::<QueueState>(&text) else {
-            return (Vec::new(), Vec::new());
+            return (Vec::new(), Vec::new(), Vec::new());
         };
         let batch_paths = state.last_batch.into_iter().map(PathBuf::from).collect();
+        let recent = state
+            .recent
+            .into_iter()
+            .map(|record| RecentEntry {
+                audio: record.audio.map(PathBuf::from),
+                transcript: record.transcript.map(PathBuf::from),
+                finished_at: record.finished_at,
+                duration: record.duration,
+                speakers: record.speakers,
+            })
+            .collect();
         let items = state
             .items
             .into_iter()
@@ -1849,7 +1891,7 @@ impl App {
                 })
             })
             .collect();
-        (items, batch_paths)
+        (items, batch_paths, recent)
     }
 
     /// The options recorded for the last batch, read back independently of the
@@ -1901,9 +1943,65 @@ impl App {
                 .iter()
                 .map(|path| path.display().to_string())
                 .collect(),
+            recent: self
+                .recent
+                .iter()
+                .map(|entry| RecentRecord {
+                    audio: entry.audio.as_ref().map(|path| path.display().to_string()),
+                    transcript: entry
+                        .transcript
+                        .as_ref()
+                        .map(|path| path.display().to_string()),
+                    finished_at: entry.finished_at,
+                    duration: entry.duration,
+                    speakers: entry.speakers,
+                })
+                .collect(),
         };
         if let Ok(text) = serde_json::to_string_pretty(&state) {
             let _ = std::fs::write(path, text);
+        }
+    }
+
+    /// Record a finished transcript in the history. Identity is the audio path
+    /// when there is one, otherwise the transcript path, so re-running the same
+    /// source replaces its entry instead of adding a second row.
+    #[allow(dead_code)] // No production caller until the history UI lands.
+    fn upsert_recent(&mut self, entry: RecentEntry) {
+        let same_source = |other: &RecentEntry| match (&entry.audio, &other.audio) {
+            (Some(audio), Some(other_audio)) => audio == other_audio,
+            (None, None) => entry.transcript.is_some() && entry.transcript == other.transcript,
+            _ => false,
+        };
+        if let Some(index) = self.recent.iter().position(same_source) {
+            self.recent[index] = entry;
+        } else {
+            self.recent.push(entry);
+        }
+        // Newest first; ties fall back to the path so the order is stable.
+        self.recent.sort_by(|a, b| {
+            b.finished_at.cmp(&a.finished_at).then_with(|| {
+                (a.transcript.as_deref(), a.audio.as_deref())
+                    .cmp(&(b.transcript.as_deref(), b.audio.as_deref()))
+            })
+        });
+        self.save_queue();
+    }
+
+    /// Index of the recent entry backed by this audio file, if any.
+    #[allow(dead_code)] // No caller until the history UI lands.
+    fn recent_for_audio(&self, path: &Path) -> Option<usize> {
+        self.recent
+            .iter()
+            .position(|entry| entry.audio.as_deref() == Some(path))
+    }
+
+    /// Drop a recent entry and persist the shortened history.
+    #[allow(dead_code)] // No caller until the history UI lands.
+    fn remove_recent(&mut self, index: usize) {
+        if index < self.recent.len() {
+            self.recent.remove(index);
+            self.save_queue();
         }
     }
 
@@ -2061,11 +2159,9 @@ impl App {
     /// True while a completed transcript is on screen. Pro builds keep that view
     /// instead of snapping to the file that is being transcribed.
     fn viewing_completed_item(&self) -> bool {
-        self.selected_view.is_some()
-            && self
-                .selected
-                .and_then(|index| self.queue.get(index))
-                .is_some_and(|item| matches!(item.status, ItemStatus::Done))
+        self.selected_view
+            .as_ref()
+            .is_some_and(|view| view.finished)
     }
 
     /// Pro builds keep a finished transcript on screen during a new run.
@@ -2210,6 +2306,7 @@ impl App {
         text: String,
         lines: Vec<DocLine>,
         output: Option<PathBuf>,
+        num_speakers: Option<i32>,
     ) -> Task<Message> {
         let Some(item) = self.queue.get(index) else {
             return Task::none();
@@ -2250,10 +2347,9 @@ impl App {
         self.joined_lines.clear();
         self.joined_transcript.clear();
         self.modified = false;
-        self.selected = Some(index);
         self.selected_view = Some(ItemView {
-            index,
             source: source.clone(),
+            finished: true,
             transcript: text,
             lines,
             turns,
@@ -2281,10 +2377,6 @@ impl App {
             .as_ref()
             .is_some_and(|view| view.turns.is_empty());
         if let Some(audio) = audio {
-            let num_speakers = self.queue[index]
-                .stats
-                .as_ref()
-                .and_then(|stats| stats.num_speakers);
             if needs_probe {
                 tasks.push(Task::perform(
                     {
@@ -2294,7 +2386,7 @@ impl App {
                         }
                     },
                     move |(turns, probe)| {
-                        Message::ViewDetailsLoaded(index, source.clone(), turns, probe)
+                        Message::ViewDetailsLoaded(source.clone(), turns, probe)
                     },
                 ));
             } else if needs_turns {
@@ -2303,7 +2395,7 @@ impl App {
                         let normalize = self.normalize;
                         async move { backend::load_turns(&audio, num_speakers, normalize) }
                     },
-                    move |turns| Message::ViewDetailsLoaded(index, source.clone(), turns, None),
+                    move |turns| Message::ViewDetailsLoaded(source.clone(), turns, None),
                 ));
             }
         }
@@ -2341,8 +2433,8 @@ impl App {
             self.modified = false;
             self.selected = Some(index);
             self.selected_view = Some(ItemView {
-                index,
                 source: item.path.clone(),
+                finished: false,
                 transcript: String::new(),
                 lines: Vec::new(),
                 turns: item.turns.clone(),
@@ -2365,7 +2457,9 @@ impl App {
         let duration = item.duration.map(|seconds| seconds as f32);
         let turns = item.turns.clone();
         let peaks = item.peaks.clone();
+        let num_speakers = item.stats.as_ref().and_then(|stats| stats.num_speakers);
 
+        self.selected = Some(index);
         self.invalidate_derived();
         self.player = None;
         self.playhead = 0.0;
@@ -2398,13 +2492,14 @@ impl App {
                 text.clone(),
                 attach_confidences(parse_lines(&text), &confidences),
                 output,
+                num_speakers,
             );
         }
         let Some(text) = backend::read_transcript(&source) else {
             self.selected = Some(index);
             self.selected_view = Some(ItemView {
-                index,
                 source: source.clone(),
+                finished: true,
                 transcript: String::new(),
                 lines: Vec::new(),
                 turns,
@@ -2423,6 +2518,7 @@ impl App {
             text.clone(),
             attach_confidences(parse_lines(&text), &confidences),
             output,
+            num_speakers,
         )
     }
 
@@ -3551,10 +3647,10 @@ impl App {
                 }
                 Task::none()
             }
-            Message::ViewDetailsLoaded(index, source, turns, probe) => {
+            Message::ViewDetailsLoaded(source, turns, probe) => {
                 let mut changed = false;
                 if let Some(view) = self.selected_view.as_mut() {
-                    if view.index == index && view.source == source {
+                    if view.source == source {
                         if let Some(turns) = turns {
                             view.turns = turns;
                         }
@@ -3570,15 +3666,7 @@ impl App {
                     }
                 }
                 if changed {
-                    if let Some(view) = &self.selected_view {
-                        if let Some(item) = self.queue.get_mut(index) {
-                            item.turns = view.turns.clone();
-                            item.peaks = view.peaks.clone();
-                            item.duration = view.duration.map(|seconds| seconds as f64);
-                        }
-                    }
                     self.invalidate_derived();
-                    self.save_queue();
                 }
                 Task::none()
             }
@@ -4711,10 +4799,6 @@ impl App {
                             self.playhead = 0.0;
                             self.last_tick = None;
                         }
-                    } else if let Some(view) = self.selected_view.as_mut() {
-                        if view.index > index {
-                            view.index -= 1;
-                        }
                     }
                     self.invalidate_derived();
                     self.save_queue();
@@ -5639,13 +5723,6 @@ impl App {
         remap(&mut self.current);
         remap(&mut self.current_index);
         remap(&mut self.selected);
-        if let Some(view) = self.selected_view.as_mut() {
-            if view.index == from {
-                view.index = to;
-            } else if view.index == to {
-                view.index = from;
-            }
-        }
         self.invalidate_derived();
         self.save_queue();
     }
@@ -6199,11 +6276,6 @@ impl App {
                 let _ = write_transcript_file(path, &view.transcript);
                 backend::write_sidecar_renamed(path, &view.lines, &mapping);
             }
-            let index = view.index;
-            let turns = view.turns.clone();
-            if let Some(item) = self.queue.get_mut(index) {
-                item.turns = turns;
-            }
         } else {
             Self::rename_lines(&mut self.lines, &mapping);
             Self::rename_turns(&mut self.turns, &mapping);
@@ -6539,9 +6611,9 @@ impl App {
     // ---- line editor history ----
 
     /// Key identifying the document the line editor writes to: the selected
-    /// view's queue index, or `None` for the live transcript.
-    fn edit_document(&self) -> Option<usize> {
-        self.selected_view.as_ref().map(|view| view.index)
+    /// view's source path, or `None` for the live transcript.
+    fn edit_document(&self) -> Option<PathBuf> {
+        self.selected_view.as_ref().map(|view| view.source.clone())
     }
 
     /// The lines of the document the line editor writes to.
@@ -16716,8 +16788,8 @@ mod tests {
         let Some(text) = backend::read_transcript(&source) else {
             app.selected = Some(index);
             app.selected_view = Some(ItemView {
-                index,
                 source: source.clone(),
+                finished: true,
                 transcript: String::new(),
                 lines: Vec::new(),
                 turns: Vec::new(),
@@ -16768,7 +16840,8 @@ mod tests {
         app.batch_paths = vec![audio.clone()];
         app.save_queue();
 
-        let (loaded, batch) = App::load_queue_and_batch();
+        let (loaded, batch, recent) = App::load_queue_and_batch();
+        assert!(recent.is_empty());
         assert_eq!(loaded.len(), 1);
         assert_eq!(batch, vec![audio.clone()]);
         assert_eq!(loaded[0].audio.as_deref(), Some(audio.as_path()));
@@ -16778,6 +16851,88 @@ mod tests {
         assert_eq!(loaded[0].turns.len(), 1);
         assert_eq!(loaded[0].turns[0].speaker, "SPEAKER 1");
         assert_eq!(loaded[0].peaks.as_ref(), &vec![0.1, 0.2, 0.3]);
+    }
+
+    #[test]
+    fn recent_upserts_by_audio_path() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("recent-upsert");
+        let mut app = pro_app();
+
+        let audio_a = PathBuf::from("a.mp3");
+        let audio_b = PathBuf::from("b.mp3");
+        app.upsert_recent(RecentEntry {
+            audio: Some(audio_a.clone()),
+            transcript: Some(PathBuf::from("a.txt")),
+            finished_at: 10,
+            duration: Some(1.0),
+            speakers: Some(1),
+        });
+        app.upsert_recent(RecentEntry {
+            audio: Some(audio_b),
+            transcript: Some(PathBuf::from("b.txt")),
+            finished_at: 20,
+            duration: Some(2.0),
+            speakers: None,
+        });
+        // The same audio again replaces its entry and moves to the front.
+        app.upsert_recent(RecentEntry {
+            audio: Some(audio_a.clone()),
+            transcript: Some(PathBuf::from("a-again.txt")),
+            finished_at: 30,
+            duration: Some(3.0),
+            speakers: Some(2),
+        });
+
+        assert_eq!(app.recent.len(), 2);
+        assert_eq!(app.recent[0].audio.as_deref(), Some(audio_a.as_path()));
+        assert_eq!(app.recent[0].finished_at, 30);
+        assert_eq!(
+            app.recent[0].transcript.as_deref(),
+            Some(Path::new("a-again.txt"))
+        );
+        assert_eq!(app.recent_for_audio(&audio_a), Some(0));
+    }
+
+    #[test]
+    fn queue_state_round_trips_recent() {
+        let _guard = env_lock();
+        let config = ConfigEnv::new("recent-round-trip");
+        let dir = config.dir.clone();
+
+        let audio = dir.join("talk.mp3");
+        let transcript = dir.join("talk.txt");
+        let mut app = pro_app();
+        app.recent = vec![RecentEntry {
+            audio: Some(audio.clone()),
+            transcript: Some(transcript.clone()),
+            finished_at: 42,
+            duration: Some(1.5),
+            speakers: Some(2),
+        }];
+        app.save_queue();
+
+        let (_, _, loaded) = App::load_queue_and_batch();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].audio.as_deref(), Some(audio.as_path()));
+        assert_eq!(loaded[0].transcript.as_deref(), Some(transcript.as_path()));
+        assert_eq!(loaded[0].finished_at, 42);
+        assert_eq!(loaded[0].duration, Some(1.5));
+        assert_eq!(loaded[0].speakers, Some(2));
+
+        // Older files without the newer fields load with defaults.
+        std::fs::write(
+            App::queue_path().unwrap(),
+            r#"{"recent":[{"transcript":"old.txt"}]}"#,
+        )
+        .unwrap();
+        let (_, _, loaded) = App::load_queue_and_batch();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].audio, None);
+        assert_eq!(loaded[0].transcript.as_deref(), Some(Path::new("old.txt")));
+        assert_eq!(loaded[0].finished_at, 0);
+        assert_eq!(loaded[0].duration, None);
+        assert_eq!(loaded[0].speakers, None);
     }
 
     #[test]
@@ -16803,6 +16958,7 @@ mod tests {
                 peaks: Vec::new(),
             }],
             last_batch: vec![audio.display().to_string()],
+            recent: Vec::new(),
         };
         std::fs::write(
             config_dir.join("queue.json"),
@@ -18176,8 +18332,8 @@ mod tests {
         let _config = ConfigEnv::new("focus-config");
         let mut app = pro_app();
         app.selected_view = Some(ItemView {
-            index: 0,
             source: PathBuf::from("talk.txt"),
+            finished: true,
             transcript: String::new(),
             lines: Vec::new(),
             turns: Vec::new(),
@@ -19418,7 +19574,7 @@ mod tests {
         });
         app.save_queue();
 
-        let (loaded, _) = App::load_queue_and_batch();
+        let (loaded, _, _) = App::load_queue_and_batch();
         assert!(matches!(loaded[0].status, ItemStatus::Interrupted));
     }
 
@@ -20622,7 +20778,7 @@ mod tests {
         assert!(matches!(app.queue[0].status, ItemStatus::Pending));
 
         // The pending state is persisted.
-        let (loaded, _) = App::load_queue_and_batch();
+        let (loaded, _, _) = App::load_queue_and_batch();
         assert!(matches!(loaded[0].status, ItemStatus::Pending));
     }
 
@@ -20649,8 +20805,8 @@ mod tests {
         }
         app.selected = Some(0);
         app.selected_view = Some(ItemView {
-            index: 0,
             source: dir.join("a.txt"),
+            finished: true,
             transcript: String::new(),
             lines: Vec::new(),
             turns: Vec::new(),
@@ -20676,9 +20832,13 @@ mod tests {
         let _ = app.update(Message::QueueDragStart(1));
         let _ = app.update(Message::QueueDrop(0));
         assert_eq!(names(&app), vec!["b.mp3", "a.mp3", "c.mp3"]);
-        // The dropped entry becomes the focused/selected item.
+        // The dropped entry becomes the focused item and its pending preview;
+        // the view is keyed by source, so no index remap is needed.
         assert_eq!(app.selected, Some(0));
-        assert_eq!(app.selected_view.as_ref().unwrap().index, 0);
+        assert_eq!(
+            app.selected_view.as_ref().unwrap().source,
+            dir.join("b.mp3")
+        );
 
         let _ = app.update(Message::QueueDragStart(0));
         let _ = app.update(Message::QueueDrop(1));
@@ -20691,7 +20851,7 @@ mod tests {
         assert_eq!(names(&app), vec!["a.mp3", "b.mp3", "c.mp3"]);
 
         // The order is persisted.
-        let (loaded, _) = App::load_queue_and_batch();
+        let (loaded, _, _) = App::load_queue_and_batch();
         let loaded_names: Vec<String> = loaded
             .iter()
             .map(|item| {
