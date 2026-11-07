@@ -133,8 +133,18 @@ fn capture(
     .ok_or_else(|| "no microphone was found".to_string())?;
 
     let chosen = prefer_rate(&device, TARGET_RATE)
-        .or_else(|| device.default_input_config().ok())
-        .ok_or_else(|| "the microphone has no usable input configuration".to_string())?;
+        .or_else(|| {
+            device
+                .default_input_config()
+                .ok()
+                .filter(|config| format_rank(config.sample_format()) < u8::MAX)
+        })
+        .ok_or_else(|| {
+            format!(
+                "the microphone ({}) has no usable input configuration",
+                device.name().unwrap_or_else(|_| "unknown".to_string())
+            )
+        })?;
     let format = chosen.sample_format();
     let channels = chosen.channels() as usize;
     let rate = chosen.sample_rate().0;
@@ -155,6 +165,8 @@ fn capture(
         SampleFormat::I16 => build::<i16>(&device, &config, channels, tx, level_cb, error_cb),
         SampleFormat::U16 => build::<u16>(&device, &config, channels, tx, level_cb, error_cb),
         SampleFormat::I32 => build::<i32>(&device, &config, channels, tx, level_cb, error_cb),
+        SampleFormat::U8 => build::<u8>(&device, &config, channels, tx, level_cb, error_cb),
+        SampleFormat::I8 => build::<i8>(&device, &config, channels, tx, level_cb, error_cb),
         other => Err(format!("unsupported microphone sample format: {other:?}")),
     };
 
@@ -181,14 +193,39 @@ fn capture(
     Ok(())
 }
 
+/// Pick a 48 kHz configuration in a format the converter understands.
+///
+/// Range order is whatever ALSA reports, and the first 48 kHz range can be
+/// `U8` (the analog HDA device does exactly that). Taking it blindly rejected a
+/// perfectly usable microphone, so only formats [`build`] can convert are
+/// considered, and the order prefers float then 16-bit.
 fn prefer_rate(device: &cpal::Device, rate: u32) -> Option<cpal::SupportedStreamConfig> {
     let ranges = device.supported_input_configs().ok()?;
-    for range in ranges {
-        if range.min_sample_rate().0 <= rate && range.max_sample_rate().0 >= rate {
-            return Some(range.with_sample_rate(cpal::SampleRate(rate)));
-        }
+    let mut candidates: Vec<cpal::SupportedStreamConfigRange> = ranges
+        .filter(|range| {
+            range.min_sample_rate().0 <= rate
+                && range.max_sample_rate().0 >= rate
+                && format_rank(range.sample_format()) < u8::MAX
+        })
+        .collect();
+    candidates.sort_by_key(|range| format_rank(range.sample_format()));
+    candidates
+        .first()
+        .map(|range| range.with_sample_rate(cpal::SampleRate(rate)))
+}
+
+/// Preference order for input formats: float, then 16-bit, then the rest the
+/// converter handles.
+fn format_rank(format: SampleFormat) -> u8 {
+    match format {
+        SampleFormat::F32 => 0,
+        SampleFormat::I16 => 1,
+        SampleFormat::U16 => 2,
+        SampleFormat::I32 => 3,
+        SampleFormat::U8 => 4,
+        SampleFormat::I8 => 5,
+        _ => u8::MAX,
     }
-    None
 }
 
 fn build<T>(
@@ -335,6 +372,27 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn format_rank_prefers_float_then_16_bit() {
+        assert!(format_rank(SampleFormat::F32) < format_rank(SampleFormat::I16));
+        assert!(format_rank(SampleFormat::I16) < format_rank(SampleFormat::U8));
+        assert_eq!(format_rank(SampleFormat::I64), u8::MAX);
+    }
+
+    #[test]
+    #[ignore = "needs a microphone"]
+    fn records_a_second_from_the_default_device() {
+        let dir = scratch("capture");
+        let path = dir.join("take.wav");
+        let recorder = Recorder::start(None, path.clone()).expect("start the microphone");
+        std::thread::sleep(std::time::Duration::from_millis(700));
+        let (path, seconds) = recorder.stop().expect("stop");
+        assert!(seconds > 0.4);
+        let bytes = std::fs::metadata(&path).unwrap().len();
+        assert!(bytes > 44, "only the header was written: {bytes}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
