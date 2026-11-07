@@ -302,7 +302,7 @@ cancelled while it works. It is a derived document, not a record: the transcript
 stays the source of truth.
 
 The Export picker writes the current transcript as plain text, SRT, WebVTT,
-JSON, Markdown, or CSV. Subtitle formats use the exact line bounds stored in the
+JSON, Markdown, CSV, or a Word document. Subtitle formats use the exact line bounds stored in the
 transcript's sidecar; long lines are split at word boundaries when the decoder
 produced word times, and a transcript without timestamps is refused rather than
 exported at zero. Failed queue items can be retried, and pending items can be

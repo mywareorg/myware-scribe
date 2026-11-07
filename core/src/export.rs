@@ -24,16 +24,18 @@ pub enum ExportFormat {
     Json,
     Markdown,
     Csv,
+    Docx,
 }
 
 impl ExportFormat {
-    pub const ALL: [ExportFormat; 6] = [
+    pub const ALL: [ExportFormat; 7] = [
         ExportFormat::Txt,
         ExportFormat::Srt,
         ExportFormat::Vtt,
         ExportFormat::Json,
         ExportFormat::Markdown,
         ExportFormat::Csv,
+        ExportFormat::Docx,
     ];
 
     pub fn label(self) -> &'static str {
@@ -44,6 +46,7 @@ impl ExportFormat {
             ExportFormat::Json => "JSON",
             ExportFormat::Markdown => "Markdown",
             ExportFormat::Csv => "CSV",
+            ExportFormat::Docx => "Word document",
         }
     }
 
@@ -55,6 +58,7 @@ impl ExportFormat {
             ExportFormat::Json => "json",
             ExportFormat::Markdown => "md",
             ExportFormat::Csv => "csv",
+            ExportFormat::Docx => "docx",
         }
     }
 
@@ -67,6 +71,7 @@ impl ExportFormat {
             "json" => Some(ExportFormat::Json),
             "md" | "markdown" => Some(ExportFormat::Markdown),
             "csv" => Some(ExportFormat::Csv),
+            "docx" => Some(ExportFormat::Docx),
             _ => None,
         }
     }
@@ -160,6 +165,7 @@ pub fn write(
         }
         ExportFormat::Markdown => fs::write(path, render_markdown(cues, duration).as_bytes()),
         ExportFormat::Csv => fs::write(path, render_csv(cues, duration).as_bytes()),
+        ExportFormat::Docx => crate::docx::write(path, cues, duration),
     }
 }
 
@@ -505,6 +511,10 @@ mod tests {
         assert_eq!(
             ExportFormat::from_extension(".SRT"),
             Some(ExportFormat::Srt)
+        );
+        assert_eq!(
+            ExportFormat::from_extension(".DOCX"),
+            Some(ExportFormat::Docx)
         );
         let _ = fs::remove_dir_all(&dir);
     }

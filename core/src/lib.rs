@@ -7,6 +7,7 @@ pub mod cache;
 pub mod codec;
 pub mod cli;
 pub mod diarize;
+pub mod docx;
 pub mod download;
 pub mod event;
 pub mod export;
