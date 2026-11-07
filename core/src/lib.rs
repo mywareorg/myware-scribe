@@ -16,6 +16,7 @@ pub mod models;
 pub mod paths;
 pub mod pipeline;
 pub mod playback;
+pub mod sidecar;
 
 #[cfg(windows)]
 mod sherpa_dynamic;

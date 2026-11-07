@@ -1642,37 +1642,34 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
             });
         }
 
-        // Sidecar with per-line confidence, so the viewer can still mark
-        // uncertain utterances after a restart. Line order matches `txt_ts`.
+        // Sidecar with per-line confidence and bounds, so the viewer, exports
+        // and summaries all read the same record. Line order matches `txt_ts`.
         let json_path = ts_path.with_extension("json");
-        let json_lines: Vec<serde_json::Value> = lines
-            .iter()
-            .map(|line| {
-                serde_json::json!({
-                    "time": format_timestamp(line.start, use_hours),
-                    "speaker": line.speaker,
-                    "text": line.text,
-                    "start": line.start,
-                    "confidence": line.confidence,
+        let sidecar = crate::sidecar::Sidecar::new(
+            lines
+                .iter()
+                .map(|line| crate::sidecar::Line {
+                    time: format_timestamp(line.start, use_hours),
+                    speaker: line.speaker.clone(),
+                    text: line.text.clone(),
+                    start: Some(line.start),
+                    confidence: Some(line.confidence),
+                    ..crate::sidecar::Line::default()
                 })
-            })
-            .collect();
-        let json_root = serde_json::json!({
-            "lines": json_lines,
-            "turns": turns,
-            "duration": duration,
-        });
-        match serde_json::to_string_pretty(&json_root) {
-            Ok(text) => {
-                if let Err(error) = std::fs::write(&json_path, text) {
-                    emit(Event::Log {
-                        message: format!("could not write {}: {error}", json_path.display()),
-                    });
-                }
-            }
-            Err(error) => emit(Event::Log {
-                message: format!("could not encode {}: {error}", json_path.display()),
-            }),
+                .collect(),
+            turns.clone(),
+            crate::sidecar::Meta {
+                audio: Some(input.display().to_string()),
+                duration: Some(duration as f32),
+                preset: Some(opts.preset.clone()),
+                language: opts.language.clone(),
+                model: None,
+            },
+        );
+        if let Err(error) = crate::sidecar::write_at(&json_path, &sidecar) {
+            emit(Event::Log {
+                message: format!("could not write {}: {error}", json_path.display()),
+            });
         }
 
         let mut speaker_stats: HashMap<String, SpeakerStat> = HashMap::new();

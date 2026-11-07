@@ -5550,6 +5550,7 @@ impl App {
             }
             if let Some(path) = &view.output {
                 let _ = write_transcript_file(path, &view.transcript);
+                backend::write_sidecar_renamed(path, &view.lines, &mapping);
             }
             let index = view.index;
             let turns = view.turns.clone();
@@ -5560,6 +5561,9 @@ impl App {
             Self::rename_lines(&mut self.lines, &mapping);
             Self::rename_turns(&mut self.turns, &mapping);
             self.refresh_transcript();
+            if let Some(path) = &self.output_txt {
+                backend::write_sidecar_renamed(path, &self.lines, &mapping);
+            }
         }
         self.invalidate_derived();
         self.rename_open = false;
@@ -5926,13 +5930,13 @@ impl App {
             view.transcript = lines_text(&view.lines);
             if let Some(path) = &view.output {
                 let _ = write_transcript_file(path, &view.transcript);
-                backend::write_confidences(path, &view.lines);
+                backend::write_sidecar(path, &view.lines);
             }
         } else {
             self.lines = lines;
             self.refresh_transcript();
             if let Some(path) = &self.output_txt {
-                backend::write_confidences(path, &self.lines);
+                backend::write_sidecar(path, &self.lines);
             }
         }
         self.invalidate_derived();

@@ -8,6 +8,8 @@ use std::time::{Duration, Instant};
 
 use crate::documents::{line_prefix, line_text, DocLine};
 
+use hippo_transcribe_core::sidecar;
+
 pub use hippo_transcribe_core::event::{Event, SpeakerStat, Stats, Turn};
 
 /// Stop Windows from giving a console-subsystem helper its own console window.
@@ -57,79 +59,106 @@ pub fn read_transcript(path: &Path) -> Option<String> {
 
 /// Per-line confidences from the JSON sidecar of a transcript, if present.
 ///
-/// The pipeline writes `<name>-ts.json` beside `<name>-ts.txt`, carrying the
-/// same lines in the same order plus each line's ASR confidence. Empty when
-/// the sidecar is missing or its line count no longer matches.
+/// Empty when there is no sidecar. The caller drops the values when the line
+/// count no longer matches the document.
 pub fn read_confidences(path: &Path) -> Vec<Option<f32>> {
-    let json = path.with_extension("json");
-    let Ok(contents) = std::fs::read_to_string(&json) else {
-        return Vec::new();
-    };
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(&contents) else {
-        return Vec::new();
-    };
-    let Some(lines) = value.get("lines").and_then(|lines| lines.as_array()) else {
-        return Vec::new();
-    };
-    lines
-        .iter()
-        .map(|line| {
-            line.get("confidence")
-                .and_then(|value| value.as_f64())
-                .map(|value| value as f32)
+    sidecar::read(path)
+        .map(|sidecar| {
+            sidecar
+                .lines
+                .into_iter()
+                .map(|line| line.confidence)
+                .collect()
         })
-        .collect()
+        .unwrap_or_default()
 }
 
-/// Best-effort rewrite of a transcript sidecar's per-line confidences.
+/// Rewrite a transcript's sidecar from the edited document.
 ///
-/// The sidecar is `<stem>.json` beside the transcript, the same file
-/// [`read_confidences`] reads. When its line count still matches the edited
-/// document, only each line's `confidence` is updated; a merge, split or
-/// delete changes the count, so the whole `lines` array is rebuilt from the
-/// document instead. `turns` and `duration` are always left untouched, and a
-/// missing or unreadable sidecar is a no-op.
-pub fn write_confidences(path: &Path, lines: &[DocLine]) {
-    let json = path.with_extension("json");
-    let Ok(contents) = std::fs::read_to_string(&json) else {
+/// The sidecar is the metadata companion to the rendered text: this is the only
+/// writer, and it replaces `lines` wholesale so a merge, split, delete or undo
+/// cannot leave stale bounds behind. `turns` are diarization output and are
+/// preserved untouched; a missing sidecar is a no-op, so hand-written
+/// transcripts never gain one.
+pub fn write_sidecar(path: &Path, lines: &[DocLine]) {
+    write_sidecar_renamed(path, lines, &[]);
+}
+
+/// As [`write_sidecar`], also renaming the stored speaker identities.
+///
+/// A rename moves [`sidecar::Speaker::name`] rather than minting a new speaker,
+/// so the ids that turns reference survive it.
+pub fn write_sidecar_renamed(path: &Path, lines: &[DocLine], mapping: &[(String, String)]) {
+    let Some(json) = sidecar::locate(path) else {
         return;
     };
-    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&contents) else {
+    let Some(mut sidecar) = sidecar::read(path) else {
         return;
     };
-    let Some(entries) = value
-        .get_mut("lines")
-        .and_then(|lines| lines.as_array_mut())
-    else {
-        return;
-    };
-    if entries.len() == lines.len() {
-        // Same shape: touch only the confidences, leaving every other key.
-        for (entry, line) in entries.iter_mut().zip(lines) {
-            let Some(confidence) = line.confidence else {
-                continue;
-            };
-            if let Some(object) = entry.as_object_mut() {
-                object.insert("confidence".to_string(), serde_json::json!(confidence));
-            }
+    for speaker in &mut sidecar.speakers {
+        if let Some((_, new)) = mapping.iter().find(|(old, _)| *old == speaker.name) {
+            speaker.name = new.clone();
         }
-    } else {
-        let rebuilt: Vec<serde_json::Value> = lines
-            .iter()
-            .map(|line| {
-                serde_json::json!({
-                    "time": sidecar_time(line),
-                    "speaker": line.speaker,
-                    "text": line_text(line),
-                    "start": line.start,
-                    "confidence": line.confidence,
-                })
-            })
-            .collect();
-        value["lines"] = serde_json::Value::Array(rebuilt);
     }
-    if let Ok(text) = serde_json::to_string_pretty(&value) {
-        let _ = std::fs::write(&json, text);
+    // Diarization segments keep their geometry but follow the rename, so the
+    // timeline and the stored ids agree with what is on screen.
+    for turn in &mut sidecar.turns {
+        if let Some((_, new)) = mapping.iter().find(|(old, _)| *old == turn.speaker) {
+            turn.speaker = new.clone();
+        }
+    }
+    // A document loaded from a plain transcript has no timings of its own.
+    // While the line counts still agree, the old sidecar's timing is the only
+    // honest source, so an edit to such a document does not erase it.
+    let previous: Vec<sidecar::Line> = if sidecar.lines.len() == lines.len() {
+        sidecar.lines.clone()
+    } else {
+        Vec::new()
+    };
+    sidecar.rebuild(
+        lines
+            .iter()
+            .enumerate()
+            .map(|(index, line)| sidecar_line(line, previous.get(index)))
+            .collect(),
+    );
+    let _ = sidecar::write_at(&json, &sidecar);
+}
+
+/// One document line as the sidecar stores it.
+///
+/// `previous` is the stored line at the same index when the document and the
+/// sidecar still line up; it supplies timing the document cannot (a plain
+/// transcript has none) and keeps the pipeline's timestamp shape.
+fn sidecar_line(line: &DocLine, previous: Option<&sidecar::Line>) -> sidecar::Line {
+    // Reuse the stored line when the document still points at the same place:
+    // the same start, the same spoken text (a transcript parsed from rendered
+    // text only has whole seconds, so its start will not equal the stored
+    // one), or a document with no timestamps at all, where the index is all
+    // there is.
+    let text = line_text(line);
+    let reuse = previous.is_some_and(|previous| {
+        line.start.is_none() || previous.start == line.start || previous.text == text
+    });
+    let (start, time) = match (line.start, previous) {
+        (_, Some(previous)) if reuse => (line.start.or(previous.start), previous.time.clone()),
+        (Some(_), _) => (line.start, sidecar_time(line)),
+        (None, _) => (None, String::new()),
+    };
+    sidecar::Line {
+        time,
+        speaker: line.speaker.clone(),
+        text,
+        start,
+        // An untouched line keeps the ASR confidence it was stored with; an
+        // edited one carries its own (the editor stamps human confidence).
+        confidence: line.confidence.or_else(|| {
+            previous
+                .filter(|_| reuse)
+                .and_then(|previous| previous.confidence)
+        }),
+        speaker_id: String::new(),
+        end: None,
     }
 }
 
@@ -457,5 +486,149 @@ fn read_stderr(stderr: Option<ChildStderr>) -> Vec<String> {
 fn push(events: &Arc<Mutex<VecDeque<Event>>>, event: Event) {
     if let Ok(mut queue) = events.lock() {
         queue.push_back(event);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn scratch(tag: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("hippo-backend-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn doc_line(raw: &str, speaker: &str, start: f32) -> DocLine {
+        DocLine {
+            raw: raw.to_string(),
+            speaker: speaker.to_string(),
+            start: Some(start),
+            confidence: None,
+        }
+    }
+
+    fn seed(dir: &PathBuf) -> PathBuf {
+        let transcript = dir.join("talk.txt");
+        let sidecar = dir.join("talk-ts.json");
+        std::fs::write(&transcript, "[00:01] ALICE: hello\n[00:04] BOB: hi\n").unwrap();
+        std::fs::write(
+            &sidecar,
+            r#"{
+                "lines": [
+                    {"time": "00:01", "speaker": "ALICE", "text": "hello", "start": 1.0, "confidence": -0.2},
+                    {"time": "00:04", "speaker": "BOB", "text": "hi", "start": 4.0, "confidence": null}
+                ],
+                "turns": [
+                    {"start": 0.5, "end": 3.0, "speaker": "ALICE"},
+                    {"start": 3.0, "end": 8.0, "speaker": "BOB"}
+                ],
+                "duration": 10.0
+            }"#,
+        )
+        .unwrap();
+        transcript
+    }
+
+    #[test]
+    fn saving_an_edit_rewrites_the_lines_and_keeps_the_turns() {
+        let dir = scratch("edit");
+        let transcript = seed(&dir);
+        let lines = vec![
+            doc_line("[00:01] ALICE: hello there", "ALICE", 1.0),
+            doc_line("[00:04] BOB: hi", "BOB", 4.0),
+        ];
+        write_sidecar(&transcript, &lines);
+
+        let saved = sidecar::read(&transcript).expect("sidecar");
+        assert_eq!(saved.version, 2);
+        assert_eq!(saved.lines[0].text, "hello there");
+        // Clamped to the turn each line starts in.
+        assert_eq!(saved.lines[0].end, Some(3.0));
+        assert_eq!(saved.lines[1].end, Some(8.0));
+        assert_eq!(saved.turns.len(), 2);
+        assert_eq!(saved.speakers.len(), 2);
+        // Confidences the edit did not touch survive.
+        assert_eq!(saved.lines[0].confidence, Some(-0.2));
+    }
+
+    #[test]
+    fn a_rename_moves_the_name_and_keeps_the_id() {
+        let dir = scratch("rename");
+        let transcript = seed(&dir);
+        let before = sidecar::read(&transcript).unwrap();
+        let alice_id = before.speakers[0].id.clone();
+
+        let lines = vec![
+            doc_line("[00:01] ALICE SMITH: hello", "ALICE SMITH", 1.0),
+            doc_line("[00:04] BOB: hi", "BOB", 4.0),
+        ];
+        let mapping = vec![("ALICE".to_string(), "ALICE SMITH".to_string())];
+
+        write_sidecar_renamed(&transcript, &lines, &mapping);
+
+        let saved = sidecar::read(&transcript).unwrap();
+        assert_eq!(saved.speakers[0].name, "ALICE SMITH");
+        assert_eq!(saved.speakers[0].id, alice_id);
+        assert_eq!(saved.turns[0].speaker, "ALICE SMITH");
+        assert_eq!(saved.turns[0].speaker_id, alice_id);
+        assert_eq!(saved.lines[0].speaker_id, alice_id);
+    }
+
+    #[test]
+    fn editing_a_plain_transcript_keeps_the_stored_timing() {
+        let dir = scratch("plain");
+        let transcript = dir.join("notes.txt");
+        std::fs::write(&transcript, "hello\nworld\n").unwrap();
+        std::fs::write(
+            dir.join("notes-ts.json"),
+            r#"{
+                "lines": [
+                    {"time": "00:03", "speaker": "A", "text": "hello", "start": 3.0, "confidence": -0.1},
+                    {"time": "00:07", "speaker": "A", "text": "world", "start": 7.0, "confidence": null}
+                ],
+                "turns": [],
+                "duration": 20.0
+            }"#,
+        )
+        .unwrap();
+
+        // A document parsed from the plain text has no starts of its own.
+        let lines = vec![
+            DocLine {
+                raw: "hello there".to_string(),
+                speaker: "A".to_string(),
+                start: None,
+                confidence: None,
+            },
+            DocLine {
+                raw: "world".to_string(),
+                speaker: "A".to_string(),
+                start: None,
+                confidence: None,
+            },
+        ];
+
+        write_sidecar(&transcript, &lines);
+
+        let saved = sidecar::read(&transcript).unwrap();
+        assert_eq!(saved.lines[0].start, Some(3.0));
+        assert_eq!(saved.lines[0].time, "00:03");
+        assert_eq!(saved.lines[0].end, Some(7.0));
+    }
+
+    #[test]
+    fn saving_without_a_sidecar_writes_nothing() {
+        let dir = scratch("none");
+        let transcript = dir.join("hand-written.txt");
+        std::fs::write(&transcript, "hello\n").unwrap();
+
+        write_sidecar(&transcript, &[doc_line("hello", "", 0.0)]);
+
+        assert!(!dir.join("hand-written.json").exists());
+        assert!(!dir.join("hand-written-ts.json").exists());
     }
 }
