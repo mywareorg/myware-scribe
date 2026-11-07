@@ -117,6 +117,14 @@ if (-not (Test-Path $sample)) {
 }
 Copy-Item $sample $layout
 
+# Third-party notices: model weights and runtimes are redistributed here, and
+# the Store package has no README for a user to find.
+$notices = Join-Path $Stage "LICENSES.md"
+if (-not (Test-Path $notices)) {
+    $notices = Join-Path $root "LICENSES.md"
+}
+Copy-Item $notices $layout
+
 # Optionally ship the models inside the package. The core looks for <exe>\models
 # before the per-user folder, so a bundled copy needs no download at all. The
 # Store build leaves them out and downloads them once on first run, which keeps
@@ -213,7 +221,7 @@ $required = @(
     "hippo-transcribe.exe", "hippo-summarize.exe", "AppxManifest.xml", "resources.pri",
     "sherpa-onnx-c-api.dll", "onnxruntime.dll",
     "vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll",
-    "sample-short.mp3", "Assets\StoreLogo.png"
+    "sample-short.mp3", "LICENSES.md", "Assets\StoreLogo.png"
 )
 foreach ($file in $required) {
     if ($packed -notcontains $file) {

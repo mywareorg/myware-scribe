@@ -635,7 +635,7 @@ try {
         }
     }
 
-    foreach ($file in @("deploy.bat", "undeploy.bat", "README.md", "PRIVACY.md", "LICENSE")) {
+    foreach ($file in @("deploy.bat", "undeploy.bat", "README.md", "PRIVACY.md", "LICENSE", "LICENSES.md")) {
         $source = Join-Path $root $file
         if (Test-Path $source) {
             Copy-Item $source (Join-Path $stage $file)

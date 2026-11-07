@@ -34,6 +34,9 @@ use hippo_transcribe_core::vocabulary::Vocabulary;
 /// The Settings label that means "whatever Windows has as default".
 const SYSTEM_DEFAULT_DEVICE: &str = "System default";
 
+/// Third-party notices, shipped in the package and shown in Help → Licenses.
+const LICENSES_TEXT: &str = include_str!("../../LICENSES.md");
+
 const AUDIO_EXTS: &[&str] = &[
     "mp3", "mp2", "wav", "aif", "aiff", "m4a", "m4b", "m4r", "m4v", "aac", "flac", "ogg", "oga",
     "opus", "caf", "mp4", "mkv", "mov", "webm", "3gp", "3g2",
@@ -10025,6 +10028,13 @@ impl App {
                 action: Some(Message::HelpChoice(HelpKind::About)),
             },
             MenuRow {
+                label: "Licenses",
+                key: None,
+                checked: false,
+                enabled: true,
+                action: Some(Message::HelpChoice(HelpKind::Licenses)),
+            },
+            MenuRow {
                 label: "Shortcuts",
                 key: None,
                 checked: false,
@@ -11229,11 +11239,51 @@ impl App {
                             .size(theme::TEXT_SM)
                             .color(scheme.muted),
                         settings_section_label("Models", scheme),
-                        text("pyannote (MIT), wespeaker (CC BY 4.0), Whisper (MIT).")
+                        text("pyannote (MIT), wespeaker (CC BY 4.0), Whisper (MIT), Qwen2.5 (Apache-2.0).")
+                            .size(theme::TEXT_SM)
+                            .color(scheme.muted),
+                        text("Help → Licenses has the full notices.")
                             .size(theme::TEXT_SM)
                             .color(scheme.muted),
                     ]
                     .spacing(4),
+                );
+            }
+            HelpKind::Licenses => {
+                let mut notices = column![].spacing(4).width(Length::Fill);
+                for line in LICENSES_TEXT.lines() {
+                    let line = line.trim_end();
+                    if line.is_empty() {
+                        notices = notices.push(container(horizontal_space()).height(Length::Fixed(6.0)));
+                    } else if let Some(heading) = line.strip_prefix("## ") {
+                        notices = notices.push(
+                            text(heading.to_string())
+                                .size(theme::TEXT_SM)
+                                .font(Font {
+                                    weight: font::Weight::Bold,
+                                    ..Font::DEFAULT
+                                }),
+                        );
+                    } else if let Some(heading) = line.strip_prefix("# ") {
+                        notices = notices.push(
+                            text(heading.to_string()).size(theme::TEXT_MD).font(Font {
+                                weight: font::Weight::Bold,
+                                ..Font::DEFAULT
+                            }),
+                        );
+                    } else {
+                        notices = notices.push(
+                            text(line.to_string())
+                                .size(theme::TEXT_XS)
+                                .color(scheme.muted),
+                        );
+                    }
+                }
+                col = col.push(
+                    scrollable(notices)
+                        .height(Length::Fixed(340.0))
+                        .width(Length::Fill)
+                        .style(visible_scrollbar_style),
                 );
             }
             HelpKind::EditingTips => {
@@ -18921,6 +18971,16 @@ mod tests {
         let mut app = pro_app();
         let _ = app.update(Message::StopRecording);
         assert!(app.recording.is_none());
+    }
+
+    #[test]
+    fn the_licence_notices_are_embedded() {
+        // The store package has no README; Help → Licenses is the only place a
+        // user can read the attribution.
+        assert!(LICENSES_TEXT.contains("CC BY 4.0"));
+        assert!(LICENSES_TEXT.contains("Qwen2.5"));
+        assert!(LICENSES_TEXT.contains("Apache-2.0"));
+        assert_eq!(HelpKind::Licenses.label(), "Licenses");
     }
 
     #[test]

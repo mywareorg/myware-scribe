@@ -379,3 +379,7 @@ see LICENSE for details.
 - The Windows bundle redistributes **sherpa-onnx** (Apache-2.0) and **ONNX Runtime** (MIT) DLLs, plus the **Microsoft Visual C++ runtime** (`vcruntime140.dll`, `vcruntime140_1.dll`, `msvcp140.dll`), which ship beside the executable so the app runs without the redistributable installed.
 - The GUI bundles **Bootstrap Icons** (`gui/assets/bootstrap-icons.ttf`), MIT.
 - Other components retain their own licenses (MIT/Apache/etc.).
+
+The full third-party notices are in `LICENSES.md`, shown in **Help → Licenses**
+and shipped inside the Store package (the package has no README to fall back
+on).
