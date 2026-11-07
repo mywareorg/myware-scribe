@@ -8891,9 +8891,6 @@ impl App {
                             bar: scheme.danger.into(),
                             border: iced::border::rounded(3.0),
                         }),
-                    action_text("Stop")
-                        .on_press(Message::StopRecording)
-                        .style(color_button(scheme.danger, scheme.on_accent)),
                 ]
                 .spacing(theme::SPACE_SM)
                 .align_y(iced::Alignment::Center),

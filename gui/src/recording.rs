@@ -78,9 +78,9 @@ impl Recorder {
         self.started.elapsed().as_secs_f32()
     }
 
-    /// Peak level since the last call, 0.0..=1.0.
+    /// Peak level since the last call, 0.0..=1.0, on a decibel scale.
     pub fn take_level(&self) -> f32 {
-        f32::from_bits(self.level.swap(0, Ordering::Relaxed))
+        level_from_peak(f32::from_bits(self.level.swap(0, Ordering::Relaxed)))
     }
 
     /// Stop capture, finalize the WAV, and return its path and duration.
@@ -268,6 +268,19 @@ where
         .map_err(|error| format!("could not open the microphone: {error}"))
 }
 
+/// Map a linear peak amplitude onto a 0..=1 meter scale.
+///
+/// Linear amplitude puts ordinary speech (around -25 dBFS) at a quarter of the
+/// bar and leaves everything quieter than that looking dead. A decibel scale
+/// from -60 dBFS to full scale spends the bar where voices actually are.
+fn level_from_peak(peak: f32) -> f32 {
+    if !(peak > 0.0) {
+        return 0.0;
+    }
+    let db = 20.0 * peak.log10();
+    ((db + 60.0) / 60.0).clamp(0.0, 1.0)
+}
+
 /// The recording thread's writer: a WAV whose sizes are patched on finish.
 fn write_wav(path: PathBuf, rate: u32, rx: Receiver<Vec<i16>>) {
     let Ok(mut wav) = WavWriter::create(&path, rate) else {
@@ -372,6 +385,21 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn the_level_meter_follows_speech_on_a_decibel_scale() {
+        assert_eq!(level_from_peak(0.0), 0.0);
+        assert_eq!(level_from_peak(-0.2), 0.0);
+        assert_eq!(level_from_peak(1.0), 1.0);
+        // -25 dBFS speech sits just under two thirds of the bar, not a quarter.
+        let speech = level_from_peak(0.056_234_13);
+        assert!((0.57..0.60).contains(&speech), "{speech}");
+        // A whisper at -45 dBFS is still visible.
+        let whisper = level_from_peak(0.005_623_413);
+        assert!((0.24..0.26).contains(&whisper), "{whisper}");
+        // Louder always reads higher.
+        assert!(level_from_peak(0.5) > level_from_peak(0.05));
     }
 
     #[test]
