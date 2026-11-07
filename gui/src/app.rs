@@ -323,7 +323,6 @@ enum ItemStatus {
     /// from Pending so the row can say what happened and offer a resume.
     Interrupted,
     Running,
-    Done,
     Failed(String),
 }
 
@@ -338,11 +337,6 @@ struct QueueItem {
     duration: Option<f64>,
     /// Output transcript (None while pending, or for a missing file).
     transcript: Option<PathBuf>,
-    /// Run statistics for transcripts produced by the pipeline.
-    stats: Option<backend::Stats>,
-    /// Diarization turns, persisted with the queue for timeline colours.
-    turns: Vec<backend::Turn>,
-    peaks: Arc<Vec<f32>>,
 }
 
 /// A finished transcript, kept outside the queue. The queue only holds work
@@ -360,9 +354,7 @@ struct RecentEntry {
 /// A transcript found beside one of the audio files just added.
 #[derive(Debug, Clone)]
 pub(crate) struct TranscriptHit {
-    /// The queue row the audio was added as, and the audio itself. Adoption is
-    /// dropped if the row has moved or started running by the time it lands.
-    index: usize,
+    /// The audio file the add created a row for, and its transcript.
     audio: PathBuf,
     transcript: PathBuf,
 }
@@ -370,17 +362,14 @@ pub(crate) struct TranscriptHit {
 /// A found transcript, read and measured off the UI thread.
 #[derive(Debug, Clone)]
 pub(crate) struct AdoptedTranscript {
-    index: usize,
     audio: PathBuf,
     transcript: PathBuf,
     text: String,
     duration: Option<f64>,
-    peaks: Vec<f32>,
-    turns: Vec<backend::Turn>,
 }
 
-/// Persisted queue entry. Speaker turns are stored so the timeline keeps its
-/// speaker colours after a restart even if the diarization cache is gone.
+/// Persisted queue entry. Only work still in flight is written now; finished
+/// transcripts live in `RecentRecord`.
 #[derive(Serialize, Deserialize)]
 struct QueueState {
     #[serde(default)]
@@ -419,14 +408,10 @@ struct QueueRecord {
     #[serde(default)]
     status: String,
     message: Option<String>,
+    /// Retained only so an old `"done"` record can migrate its speaker count
+    /// into the history. New queue records never write it.
+    #[serde(default)]
     stats: Option<backend::Stats>,
-    /// Diarization turns, so speaker bands survive a restart.
-    #[serde(default)]
-    turns: Vec<backend::Turn>,
-    /// Downsampled RMS waveform, so completed items render their timeline
-    /// immediately after a restart.
-    #[serde(default)]
-    peaks: Vec<f32>,
 }
 
 /// Persisted recent entry. Paths are stored as strings like the queue's.
@@ -1926,9 +1911,6 @@ impl App {
                 status,
                 duration: record.duration,
                 transcript,
-                stats: record.stats,
-                turns: record.turns,
-                peaks: Arc::new(record.peaks),
             });
         }
         (items, batch_paths, recent)
@@ -1965,7 +1947,6 @@ impl App {
                         ItemStatus::Pending => "pending",
                         ItemStatus::Interrupted => "interrupted",
                         ItemStatus::Running => "running",
-                        ItemStatus::Done => "done",
                         ItemStatus::Failed(_) => "failed",
                     }
                     .to_string(),
@@ -1973,9 +1954,7 @@ impl App {
                         ItemStatus::Failed(message) => Some(message.clone()),
                         _ => None,
                     },
-                    stats: item.stats.clone(),
-                    turns: item.turns.clone(),
-                    peaks: item.peaks.as_ref().clone(),
+                    stats: None,
                 })
                 .collect(),
             last_batch: self
@@ -2004,7 +1983,7 @@ impl App {
     }
 
     /// Record a finished transcript in the history and persist it.
-    #[allow(dead_code)] // Adoption and the history tab land in phase C.
+    #[allow(dead_code)] // Used by tests; the history tab will call merge_recent.
     fn upsert_recent(&mut self, entry: RecentEntry) {
         self.merge_recent(entry);
         self.save_queue();
@@ -2017,7 +1996,6 @@ impl App {
     }
 
     /// Index of the recent entry backed by this audio file, if any.
-    #[allow(dead_code)] // Used by the history tab in phase C.
     fn recent_for_audio(&self, path: &Path) -> Option<usize> {
         self.recent
             .iter()
@@ -2050,59 +2028,35 @@ impl App {
         }
     }
 
-    /// Move every finished queue row into the history and persist once. The
-    /// transcript pane is deliberately untouched: the live buffer still holds
-    /// the text the last `Done` streamed in.
-    fn reap_finished(&mut self) {
-        let done: Vec<usize> = self
-            .queue
-            .iter()
-            .enumerate()
-            .filter(|(_, item)| matches!(item.status, ItemStatus::Done))
-            .map(|(index, _)| index)
-            .collect();
-        if !done.is_empty() {
-            let finished_at = unix_secs();
-            for &index in done.iter().rev() {
-                let item = &self.queue[index];
-                let Some(transcript) = item.transcript.clone() else {
-                    continue;
-                };
-                self.merge_recent(RecentEntry {
-                    audio: item.audio.clone(),
-                    transcript: Some(transcript),
-                    finished_at,
-                    duration: item.duration,
-                    speakers: item
-                        .stats
-                        .as_ref()
-                        .and_then(|stats| stats.num_speakers)
-                        .and_then(|count| u8::try_from(count).ok())
-                        .filter(|count| *count > 0),
-                });
-            }
+    /// Remove a queue row while keeping every stored index pointing at the
+    /// same item. A preview pinned to the removed row is dropped, because its
+    /// source is gone from the queue.
+    fn remove_queue_row(&mut self, index: usize) {
+        if index >= self.queue.len() {
+            return;
         }
-        // Keep every stored queue index pointing at the same row once the
-        // finished ones are gone, and drop it when its row was reaped.
+        let preview = self.selected == Some(index) && self.selected_view.is_some();
+        self.queue.remove(index);
         let remap = |stored: &mut Option<usize>| {
-            if let Some(index) = *stored {
-                *stored = if done.contains(&index) {
-                    None
-                } else {
-                    Some(index - done.iter().filter(|removed| **removed < index).count())
+            if let Some(value) = *stored {
+                *stored = match value.cmp(&index) {
+                    std::cmp::Ordering::Equal => None,
+                    std::cmp::Ordering::Greater => Some(value - 1),
+                    std::cmp::Ordering::Less => Some(value),
                 };
             }
         };
         remap(&mut self.current);
         remap(&mut self.current_index);
         remap(&mut self.selected);
-        for &index in done.iter().rev() {
-            self.queue.remove(index);
+        if preview {
+            self.selected_view = None;
+            self.view_error = None;
+            self.player = None;
+            self.playhead = 0.0;
+            self.last_tick = None;
         }
-        if !done.is_empty() {
-            self.invalidate_derived();
-        }
-        self.save_queue();
+        self.invalidate_derived();
     }
 
     // ---- displayed view (live run vs. a selected completed item) ----
@@ -2391,7 +2345,7 @@ impl App {
         if self.selected == Some(index) && self.selected_view.is_some() {
             return Task::none();
         }
-        self.open_item_view(index, None)
+        self.open_item_view(index)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2494,11 +2448,9 @@ impl App {
         Task::batch(tasks)
     }
 
-    fn open_item_view(
-        &mut self,
-        index: usize,
-        preloaded: Option<(String, Option<PathBuf>)>,
-    ) -> Task<Message> {
+    /// Open a Pending queue row's preview. Finished transcripts are history
+    /// now and open through [`Self::open_recent`].
+    fn open_item_view(&mut self, index: usize) -> Task<Message> {
         // Changing what is on screen commits the open inline edit first: its
         // row belongs to the document being left.
         self.header_menu = None;
@@ -2530,8 +2482,8 @@ impl App {
                 finished: false,
                 transcript: String::new(),
                 lines: Vec::new(),
-                turns: item.turns.clone(),
-                peaks: item.peaks.clone(),
+                turns: Vec::new(),
+                peaks: Arc::new(Vec::new()),
                 duration: item.duration.map(|seconds| seconds as f32),
                 audio: item.audio.clone(),
                 output: None,
@@ -2539,88 +2491,7 @@ impl App {
             self.invalidate_derived();
             return Task::none();
         }
-        if !matches!(item.status, ItemStatus::Done) {
-            return Task::none();
-        }
-        let Some(source) = item.transcript.clone() else {
-            return Task::none();
-        };
-        self.speaker_filter = None;
-        let audio = item.audio.clone();
-        let duration = item.duration.map(|seconds| seconds as f32);
-        let turns = item.turns.clone();
-        let peaks = item.peaks.clone();
-        let num_speakers = item.stats.as_ref().and_then(|stats| stats.num_speakers);
-
-        self.selected = Some(index);
-        self.invalidate_derived();
-        self.player = None;
-        self.playhead = 0.0;
-        self.last_tick = None;
-        self.search_query.clear();
-        self.search_index = 0;
-        self.follow_offset = None;
-        self.scroll_anim = None;
-        self.follow_issue = None;
-        *self.follow_row_height.borrow_mut() = None;
-        self.reset_pane_geometry();
-        self.scroll_seek = false;
-        self.transcript_viewport = 0.0;
-        self.transcript_content = 0.0;
-        self.transcript_offset = 0.0;
-        self.transcript_at_bottom = true;
-
-        let output = source
-            .extension()
-            .and_then(|ext| ext.to_str())
-            .map(|ext| ext.eq_ignore_ascii_case("txt"))
-            .unwrap_or(false)
-            .then(|| source.clone());
-
-        if let Some((text, output)) = preloaded {
-            let confidences = backend::read_confidences(&source);
-            return self.install_transcript_view(
-                source,
-                text.clone(),
-                attach_confidences(parse_lines(&text), &confidences),
-                turns,
-                peaks,
-                duration,
-                audio,
-                num_speakers,
-                output,
-                true,
-            );
-        }
-        let Some(text) = backend::read_transcript(&source) else {
-            self.selected = Some(index);
-            self.selected_view = Some(ItemView {
-                source: source.clone(),
-                finished: true,
-                transcript: String::new(),
-                lines: Vec::new(),
-                turns,
-                peaks,
-                duration,
-                audio,
-                output,
-            });
-            self.view_error = Some(format!("Could not read {}", source.display()));
-            return Task::none();
-        };
-        let confidences = backend::read_confidences(&source);
-        self.install_transcript_view(
-            source,
-            text.clone(),
-            attach_confidences(parse_lines(&text), &confidences),
-            turns,
-            peaks,
-            duration,
-            audio,
-            num_speakers,
-            output,
-            true,
-        )
+        Task::none()
     }
 
     /// Open a finished transcript from the history, with the same pane reset as
@@ -3889,27 +3760,15 @@ impl App {
                     self.queue_drag = Some(index);
                     return Task::none();
                 }
-                // Reordering stays locked during a run, but a click on a
-                // finished row opens it again in Pro.
+                // Reordering stays locked during a run; the row being
+                // transcribed still returns to the live view.
                 let Some(item) = self.queue.get(index) else {
                     return Task::none();
                 };
-                let done = matches!(item.status, ItemStatus::Done);
-                let has_transcript = item.transcript.is_some();
                 let running_row = matches!(item.status, ItemStatus::Running);
-                let locked_previous =
-                    self.shows(license::Audience::FreeOnly) && self.current_index != Some(index);
                 if running_row {
                     // From a pinned transcript, clicking the row that is being
                     // transcribed returns to the live view.
-                    return self.view_item(index);
-                }
-                if done && locked_previous {
-                    self.toast = Some((
-                        "Reviewing during active transcription is a Pro feature".to_string(),
-                        Instant::now(),
-                    ));
-                } else if done && has_transcript && !self.shows(license::Audience::FreeOnly) {
                     return self.view_item(index);
                 }
                 Task::none()
@@ -3932,20 +3791,10 @@ impl App {
                     return Task::none();
                 };
                 let running = matches!(self.status, Status::Running);
-                let locked_previous = self.shows(license::Audience::FreeOnly)
-                    && running
-                    && matches!(item.status, ItemStatus::Done)
-                    && self.current_index != Some(index);
-                let selectable = !locked_previous
-                    && (matches!(item.status, ItemStatus::Running)
-                        || (!running && matches!(item.status, ItemStatus::Pending))
-                        || (matches!(item.status, ItemStatus::Done) && item.transcript.is_some()));
-                if locked_previous {
-                    self.toast = Some((
-                        "Reviewing during active transcription is a Pro feature".to_string(),
-                        Instant::now(),
-                    ));
-                } else if selectable {
+                let selectable = matches!(item.status, ItemStatus::Running)
+                    || (!running
+                        && matches!(item.status, ItemStatus::Pending | ItemStatus::Interrupted));
+                if selectable {
                     return self.view_item(index);
                 }
                 Task::none()
@@ -4815,9 +4664,8 @@ impl App {
                 Task::none()
             }
             Message::TranscriptsFound(single, hits) => {
-                // Reading the transcript and re-deriving the turns/waveform is
-                // per file, so one slow probe cannot hold up the others.
-                let normalize = self.normalize;
+                // Reading the transcript and probing its length is per file, so
+                // one slow probe cannot hold up the others.
                 Task::batch(hits.into_iter().map(move |hit| {
                     Task::perform(
                         async move {
@@ -4825,25 +4673,12 @@ impl App {
                             if text.trim().is_empty() {
                                 return None;
                             }
-                            let (turns, probe) =
-                                backend::load_completed(
-                                    hit.audio.clone(),
-                                    None,
-                                    TIMELINE_BUCKETS,
-                                    normalize,
-                                );
-                            let (duration, peaks) = match probe {
-                                Some((duration, peaks)) => (Some(duration), peaks),
-                                None => (None, Vec::new()),
-                            };
+                            let duration = backend::probe_duration(&hit.audio);
                             Some(AdoptedTranscript {
-                                index: hit.index,
                                 audio: hit.audio,
                                 transcript: hit.transcript,
                                 text,
                                 duration,
-                                peaks,
-                                turns: turns.unwrap_or_default(),
                             })
                         },
                         move |adopted| match adopted {
@@ -4854,35 +4689,40 @@ impl App {
                 }))
             }
             Message::TranscriptAdopted(single, adopted) => {
-                // Only adopt onto the row this audio was added as, and only
-                // while it is still waiting: a run may have started on it while
-                // the lookup and probe were running.
-                let still_waiting = self.queue.get(adopted.index).is_some_and(|item| {
-                    matches!(item.status, ItemStatus::Pending)
-                        && item.audio.as_deref() == Some(adopted.audio.as_path())
-                });
-                if !still_waiting {
+                // A run already owns this path: the backend has it in its input
+                // list, so leave the queue alone and drop the hit.
+                if matches!(self.status, Status::Running) {
                     return Task::none();
                 }
-                let editable = adopted
-                    .transcript
-                    .extension()
-                    .and_then(|ext| ext.to_str())
-                    .is_some_and(|ext| ext.eq_ignore_ascii_case("txt"));
-                let output = editable.then(|| adopted.transcript.clone());
-                {
-                    let item = &mut self.queue[adopted.index];
-                    item.status = ItemStatus::Done;
-                    item.transcript = Some(adopted.transcript.clone());
-                    item.duration = adopted.duration;
-                    item.peaks = Arc::new(adopted.peaks);
-                    item.turns = adopted.turns;
+                // The pending row exists only because the add created it.
+                let pending_row = self.queue.iter().position(|item| {
+                    item.audio.as_deref() == Some(adopted.audio.as_path())
+                });
+                // Already history: keep the original date and entry, and just
+                // drop the duplicate queue row.
+                let already = self.recent_for_audio(&adopted.audio);
+                if let Some(index) = pending_row {
+                    self.remove_queue_row(index);
                 }
-                self.invalidate_derived();
+                if already.is_some() {
+                    self.toast =
+                        Some(("Already in Transcripts".to_string(), Instant::now()));
+                    self.save_queue();
+                    return Task::none();
+                }
+                let finished_at = file_unix_secs(&adopted.transcript)
+                    .or_else(|| file_unix_secs(&adopted.audio))
+                    .unwrap_or_else(unix_secs);
+                let index = self.merge_recent(RecentEntry {
+                    audio: Some(adopted.audio.clone()),
+                    transcript: Some(adopted.transcript.clone()),
+                    finished_at,
+                    duration: adopted.duration,
+                    speakers: None,
+                });
                 self.save_queue();
                 // A single file is the case where the user is waiting to see
-                // the text, so it opens; a folder add leaves the queue on
-                // screen and the adopted rows simply read as Done.
+                // the text, so it opens; a folder add adopts silently.
                 if !single {
                     return Task::none();
                 }
@@ -4891,11 +4731,17 @@ impl App {
                     .file_name()
                     .map(|name| name.to_string_lossy().into_owned())
                     .unwrap_or_else(|| adopted.audio.display().to_string());
+                let editable = adopted
+                    .transcript
+                    .extension()
+                    .and_then(|ext| ext.to_str())
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("txt"));
+                let output = editable.then(|| adopted.transcript.clone());
                 self.toast = Some((
                     format!("Added {name} with its transcript"),
                     Instant::now(),
                 ));
-                self.open_item_view(adopted.index, Some((adopted.text, output)))
+                self.open_recent(index, Some((adopted.text, output)))
             }
             Message::ItemDurationProbed(path, seconds) => {
                 if let Some(item) = self
@@ -4904,6 +4750,13 @@ impl App {
                     .find(|item| item.path == path || item.audio.as_deref() == Some(path.as_path()))
                 {
                     item.duration = seconds;
+                }
+                // An adopted transcript left the queue before its probe landed;
+                // its history row still needs the measured duration.
+                if let Some(seconds) = seconds {
+                    if let Some(index) = self.recent_for_audio(&path) {
+                        self.recent[index].duration = Some(seconds);
+                    }
                 }
                 if let Some(view) = self.selected_view.as_mut() {
                     if view.audio.as_deref() == Some(path.as_path()) {
@@ -4976,7 +4829,20 @@ impl App {
                 }
                 Task::none()
             }
-            Message::OpenRecent(index) => self.open_recent(index, None),
+            Message::OpenRecent(index) => {
+                // Free sees only the live transcript during a run; reviewing
+                // history while transcribing is a Pro feature.
+                if self.shows(license::Audience::FreeOnly)
+                    && matches!(self.status, Status::Running)
+                {
+                    self.toast = Some((
+                        "Reviewing during active transcription is a Pro feature".to_string(),
+                        Instant::now(),
+                    ));
+                    return Task::none();
+                }
+                self.open_recent(index, None)
+            }
             Message::RemoveRecent(index) => {
                 self.remove_recent(index);
                 Task::none()
@@ -5932,9 +5798,6 @@ impl App {
                 status: ItemStatus::Pending,
                 duration: None,
                 transcript: None,
-                stats: None,
-                turns: Vec::new(),
-                peaks: Arc::new(Vec::new()),
             });
             added.push(path);
         }
@@ -5956,23 +5819,15 @@ impl App {
     /// UI thread with the probe, and reads each directory once for the whole
     /// add.
     fn added_tasks(&self, added: Vec<PathBuf>) -> Task<Message> {
-        let rows: Vec<(usize, PathBuf)> = added
-            .iter()
-            .filter_map(|path| {
-                self.queue
-                    .iter()
-                    .position(|item| item.audio.as_deref() == Some(path.as_path()))
-                    .map(|index| (index, path.clone()))
-            })
-            .collect();
         // A single file is opened when its transcript is found; a batch is not,
         // because the view would jump away from the queue the user just filled.
         let single = added.len() == 1;
         let output_dir = self.output_dir.clone();
+        let lookup_paths = added.clone();
         Task::batch([
             Self::probe_items(added),
             Task::perform(
-                async move { crate::files::find_transcripts(&rows, output_dir.as_deref()) },
+                async move { crate::files::find_transcripts(&lookup_paths, output_dir.as_deref()) },
                 move |hits| {
                     if hits.is_empty() {
                         return Message::Noop;
@@ -5980,11 +5835,7 @@ impl App {
                     Message::TranscriptsFound(
                         single,
                         hits.into_iter()
-                            .map(|(index, audio, transcript)| TranscriptHit {
-                                index,
-                                audio,
-                                transcript,
-                            })
+                            .map(|(audio, transcript)| TranscriptHit { audio, transcript })
                             .collect(),
                     )
                 },
@@ -6091,11 +5942,7 @@ impl App {
             .queue
             .iter()
             .any(|item| matches!(item.status, ItemStatus::Interrupted));
-        let finished = self.retranscribe_target().is_some()
-            || self
-                .selected
-                .and_then(|index| self.queue.get(index))
-                .is_some_and(|item| matches!(item.status, ItemStatus::Done));
+        let finished = self.retranscribe_target().is_some();
         if !pending && interrupted {
             "Resume"
         } else if !pending && finished {
@@ -6159,9 +6006,6 @@ impl App {
             if !matches!(row.status, ItemStatus::Pending) {
                 row.status = ItemStatus::Pending;
                 row.transcript = None;
-                row.stats = None;
-                row.turns.clear();
-                row.peaks = Arc::new(Vec::new());
             }
             if row.duration.is_none() {
                 row.duration = entry.duration;
@@ -6173,9 +6017,6 @@ impl App {
                 status: ItemStatus::Pending,
                 duration: entry.duration,
                 transcript: None,
-                stats: None,
-                turns: Vec::new(),
-                peaks: Arc::new(Vec::new()),
             });
         }
         let row_index = self
@@ -6195,9 +6036,8 @@ impl App {
             .iter()
             .any(|item| matches!(item.status, ItemStatus::Pending | ItemStatus::Interrupted));
         if !has_pending {
-            // Nothing is waiting. A history entry is transcribed again, or the
-            // selected finished row when the queue still holds one. The queue
-            // itself is never re-run wholesale.
+            // Nothing is waiting. A history entry is transcribed again; the
+            // queue itself is never re-run wholesale.
             if let Some(index) = self.retranscribe_target() {
                 if !self.enqueue_recent(index) {
                     return;
@@ -6207,9 +6047,9 @@ impl App {
                 return;
             } else {
                 let target = self.selected.filter(|index| {
-                    self.queue.get(*index).is_some_and(|item| {
-                        matches!(item.status, ItemStatus::Done | ItemStatus::Failed(_))
-                    })
+                    self.queue
+                        .get(*index)
+                        .is_some_and(|item| matches!(item.status, ItemStatus::Failed(_)))
                 });
                 let Some(index) = target else {
                     self.toast = Some((
@@ -6221,9 +6061,6 @@ impl App {
                 let item = &mut self.queue[index];
                 item.status = ItemStatus::Pending;
                 item.transcript = None;
-                item.stats = None;
-                item.turns.clear();
-                item.peaks = Arc::new(Vec::new());
                 self.invalidate_derived();
                 self.save_queue();
             }
@@ -6486,8 +6323,6 @@ impl App {
         if let Some(index) = self.current.take() {
             self.queue[index].status = ItemStatus::Failed("cancelled".to_string());
         }
-        // Anything that already finished this batch belongs in the history.
-        self.reap_finished();
     }
 
     fn rename_lines(lines: &mut [DocLine], mapping: &[(String, String)]) {
@@ -7379,35 +7214,44 @@ impl App {
                     self.invalidate_derived();
                     self.output_txt = Some(PathBuf::from(&txt));
                     let transcript = PathBuf::from(&txt);
-                    let turns = self.turns.clone();
-                    let peaks = self.peaks.clone();
                     let duration = self.timeline_duration.map(|seconds| seconds as f64);
+                    let speakers = stats
+                        .num_speakers
+                        .and_then(|count| u8::try_from(count).ok())
+                        .filter(|count| *count > 0);
                     if let Some(index) = self.current.take() {
-                        let item = &mut self.queue[index];
-                        let label = item
-                            .audio
-                            .as_ref()
-                            .or(item.transcript.as_ref())
-                            .or(Some(&item.path))
-                            .and_then(|path| path.file_name())
-                            .and_then(|name| name.to_str())
-                            .unwrap_or("file")
-                            .to_string();
-                        item.status = ItemStatus::Done;
-                        item.transcript = Some(transcript);
-                        item.stats = Some(stats);
-                        item.turns = turns;
-                        item.peaks = peaks;
-                        item.duration = duration.or(item.duration);
+                        let (label, measured, audio) = match self.queue.get(index) {
+                            Some(item) => (
+                                item.audio
+                                    .as_ref()
+                                    .or(item.transcript.as_ref())
+                                    .or(Some(&item.path))
+                                    .and_then(|path| path.file_name())
+                                    .and_then(|name| name.to_str())
+                                    .unwrap_or("file")
+                                    .to_string(),
+                                duration.or(item.duration),
+                                item.audio.clone(),
+                            ),
+                            None => ("file".to_string(), duration, None),
+                        };
                         // Capture what the summary and progress bar need before
                         // the row leaves the queue.
-                        self.batch_done += item.duration.unwrap_or(1.0) as f32;
-                        if let Some(stats) = item.stats.clone() {
-                            self.batch_summary.push((label, stats));
-                        }
+                        self.batch_done += measured.unwrap_or(1.0) as f32;
+                        self.batch_summary.push((label, stats));
+                        // The row never reads as Done: it goes straight into
+                        // the history. The live buffer already holds the text.
+                        self.remove_queue_row(index);
+                        self.merge_recent(RecentEntry {
+                            audio,
+                            transcript: Some(transcript),
+                            finished_at: unix_secs(),
+                            duration: measured,
+                            speakers,
+                        });
                     }
                     self.current_index = None;
-                    self.reap_finished();
+                    self.save_queue();
                 }
                 Event::Error { message } => {
                     let was_gpu = self.gpu_selected();
@@ -7436,9 +7280,6 @@ impl App {
                         self.batch = false;
                     }
                     self.status = Status::Error(message);
-                    // Rows that finished before the failure are still history,
-                    // not queue work.
-                    self.reap_finished();
                 }
                 Event::AllDone => {
                     Self::clear_gpu_guard();
@@ -7453,9 +7294,6 @@ impl App {
                             if matches!(item.status, ItemStatus::Failed(_)) {
                                 item.status = ItemStatus::Pending;
                                 item.transcript = None;
-                                item.stats = None;
-                                item.turns.clear();
-                                item.peaks = Arc::new(Vec::new());
                             }
                         }
                         self.invalidate_derived();
@@ -7673,10 +7511,7 @@ impl App {
                 } else {
                     self.progress.clamp(0.0, 1.0)
                 };
-                // `batch_done` already counted it if it was reaped.
-                if !matches!(item.status, ItemStatus::Done) {
-                    completed += weight * fraction;
-                }
+                completed += weight * fraction;
             }
         }
         (completed / self.batch_total).clamp(0.0, 1.0)
@@ -9392,17 +9227,11 @@ impl App {
         let running = matches!(self.status, Status::Running);
         let can_remove = !running;
         let viewing = self.selected == Some(index) && self.selected_view.is_some();
-        // Free locks the view to the file being transcribed: older transcripts
-        // cannot be opened while a run is in progress.
-        let locked_previous = self.shows(license::Audience::FreeOnly)
-            && running
-            && matches!(item.status, ItemStatus::Done)
-            && self.current_index != Some(index);
-        let selectable = !locked_previous
-            && (matches!(item.status, ItemStatus::Running)
-                || (!running
-                    && matches!(item.status, ItemStatus::Pending | ItemStatus::Interrupted))
-                || (matches!(item.status, ItemStatus::Done) && item.transcript.is_some()));
+        // Free locks the view to the file being transcribed: older work
+        // cannot be opened while a run is in progress, and finished
+        // transcripts are history now, not queue rows.
+        let selectable = matches!(item.status, ItemStatus::Running)
+            || (!running && matches!(item.status, ItemStatus::Pending | ItemStatus::Interrupted));
 
         let full_name = item
             .path
@@ -9432,7 +9261,6 @@ impl App {
                 ),
                 scheme.muted,
             ),
-            ItemStatus::Done => (format!("{duration} \u{00b7} Done"), scheme.muted),
             ItemStatus::Failed(message) => (
                 format!("{duration} \u{00b7} {}", ellipsize(message, 22)),
                 scheme.danger,
@@ -9449,27 +9277,12 @@ impl App {
             ItemStatus::Running => {
                 queue_status_badge(ICON_HOURGLASS, 14.0, scheme.track, scheme.text)
             }
-            // A check while the run is still going; once the whole queue has
-            // finished, the row marks itself as a finished transcript instead.
-            ItemStatus::Done if running => {
-                queue_status_badge(ICON_CHECK, 18.0, scheme.green, scheme.on_accent)
-            }
-            ItemStatus::Done => {
-                // Styled like the transcript pane's "choose transcript" chip:
-                // a light disc with the page drawn in the accent blue, rather
-                // than a solid fill.
-                queue_status_badge(ICON_FILE_TEXT, 15.0, scheme.track, scheme.blue)
-            }
             ItemStatus::Failed(_) => {
                 queue_status_badge(ICON_X, 15.0, scheme.danger, scheme.on_accent)
             }
         };
 
-        let name_color = if locked_previous {
-            scheme.muted
-        } else {
-            scheme.text
-        };
+        let name_color = scheme.text;
         let label = column![
             text(name)
                 .size(theme::TEXT_SM)
@@ -9566,11 +9379,7 @@ impl App {
             ..scheme.blue
         };
         let hover_tint = scheme.bar_track;
-        let row_text = if locked_previous {
-            scheme.muted
-        } else {
-            scheme.text
-        };
+        let row_text = scheme.text;
         let dragging = self.queue_drag == Some(index);
         let hovered = self.queue_hover == Some(index);
         let background = if dragging {
@@ -10117,10 +9926,7 @@ impl App {
             }
             if view.output.is_none()
                 && self.view_error.is_none()
-                && self
-                    .selected
-                    .and_then(|index| self.queue.get(index))
-                    .is_some_and(|item| matches!(item.status, ItemStatus::Done))
+                && view.finished
             {
                 meta.push("read-only".to_string());
             }
@@ -17115,20 +16921,14 @@ mod tests {
 
         let mut app = pro_app();
         assert!(app.queue.is_empty());
-        // An interrupted run is resumable, and keeps its turns and waveform.
+        // An interrupted run is resumable: its path, status and measured
+        // duration survive a restart.
         app.queue.push(QueueItem {
             path: audio.clone(),
             audio: Some(audio.clone()),
             status: ItemStatus::Interrupted,
             duration: Some(1.5),
             transcript: Some(transcript.clone()),
-            stats: None,
-            turns: vec![backend::Turn {
-                start: 0.0,
-                end: 1.5,
-                speaker: "SPEAKER 1".to_string(),
-            }],
-            peaks: Arc::new(vec![0.1, 0.2, 0.3]),
         });
         app.batch_paths = vec![audio.clone()];
         app.save_queue();
@@ -17141,9 +16941,6 @@ mod tests {
         assert_eq!(loaded[0].transcript.as_deref(), Some(transcript.as_path()));
         assert!(matches!(loaded[0].status, ItemStatus::Interrupted));
         assert_eq!(loaded[0].duration, Some(1.5));
-        assert_eq!(loaded[0].turns.len(), 1);
-        assert_eq!(loaded[0].turns[0].speaker, "SPEAKER 1");
-        assert_eq!(loaded[0].peaks.as_ref(), &vec![0.1, 0.2, 0.3]);
     }
 
     #[test]
@@ -17402,8 +17199,6 @@ mod tests {
                 status: "done".to_string(),
                 message: None,
                 stats: None,
-                turns: Vec::new(),
-                peaks: Vec::new(),
             }],
             last_batch: vec![audio.display().to_string()],
             recent: Vec::new(),
@@ -18434,33 +18229,20 @@ mod tests {
             std::fs::write(&path, b"audio").unwrap();
             let transcript = dir.join(format!("{name}.txt"));
             std::fs::write(&transcript, "[00:00] SPEAKER 1: hi\n").unwrap();
-            app.queue.push(QueueItem {
-                path: path.clone(),
-                audio: Some(path),
-                status: ItemStatus::Done,
-                duration: Some(4.0),
-                transcript: Some(transcript),
-                stats: None,
-                turns: Vec::new(),
-                peaks: Arc::new(vec![0.1]),
-            });
+            push_recent(&mut app, Some(path), transcript, Some(4.0), Vec::new());
         }
 
-        // Nothing selected, nothing queued: the queue is not re-run.
+        // Nothing selected: the history is never re-run wholesale.
         app.selected = None;
         app.start();
-        assert_eq!(app.queue[0].status, ItemStatus::Done);
-        assert_eq!(app.queue[1].status, ItemStatus::Done);
-        assert_eq!(
-            app.toast.as_ref().map(|(text, _)| text.as_str()),
-            Some("Select a finished file to transcribe it again")
-        );
+        assert!(app.queue.is_empty());
+        assert!(matches!(app.status, Status::Error(_)));
 
-        // A selected finished file is the only one queued again.
-        app.selected = Some(1);
+        // Selecting a history entry queues exactly that file again.
+        let _ = app.update(Message::OpenRecent(1));
         app.start();
-        assert_eq!(app.queue[0].status, ItemStatus::Done);
-        assert!(matches!(app.queue[1].status, ItemStatus::Pending));
+        assert_eq!(app.queue.len(), 1);
+        assert!(matches!(app.queue[0].status, ItemStatus::Pending));
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -19096,9 +18878,6 @@ mod tests {
             status: ItemStatus::Pending,
             duration: Some(1.0),
             transcript: None,
-            stats: None,
-            turns: Vec::new(),
-            peaks: Arc::new(vec![0.1; 8]),
         });
         assert_eq!(
             app.transcribe_label(),
@@ -19796,9 +19575,6 @@ mod tests {
             status: ItemStatus::Interrupted,
             duration: Some(10.0),
             transcript: None,
-            stats: None,
-            turns: Vec::new(),
-            peaks: Arc::new(Vec::new()),
         }
     }
 
@@ -20610,9 +20386,6 @@ mod tests {
                 status: ItemStatus::Pending,
                 duration: Some(1.0),
                 transcript: None,
-                stats: None,
-                turns: Vec::new(),
-                peaks: Arc::new(Vec::new()),
             });
             files.push((audio, txt));
         }
@@ -20637,7 +20410,7 @@ mod tests {
             assert!(
                 !app.queue
                     .iter()
-                    .any(|item| matches!(item.status, ItemStatus::Done)),
+                    .any(|item| item.audio.as_deref() == Some(audio.as_path())),
                 "a finished row stayed in the queue"
             );
         }
@@ -20663,7 +20436,7 @@ mod tests {
     }
 
     #[test]
-    fn reaping_clears_current_index() {
+    fn done_into_history_clears_current_index() {
         let _guard = env_lock();
         let _config = ConfigEnv::new("reap-current");
         let media = temp_dir("reap-current-media");
@@ -20677,9 +20450,6 @@ mod tests {
             status: ItemStatus::Pending,
             duration: Some(1.0),
             transcript: None,
-            stats: None,
-            turns: Vec::new(),
-            peaks: Arc::new(Vec::new()),
         });
         app.batch_paths = vec![audio.clone()];
         app.batch_total = 1.0;
@@ -20697,6 +20467,51 @@ mod tests {
         assert!(app.current_index.is_none());
         assert!(app.queue.is_empty());
         assert_eq!(app.recent.len(), 1);
+
+        let _ = std::fs::remove_dir_all(&media);
+    }
+
+    #[test]
+    fn no_done_rows_remain_after_done() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("no-done-rows");
+        let media = temp_dir("no-done-rows-media");
+        let (audio, txt) = pending_item(&media, "one.mp3");
+        std::fs::write(&txt, "[00:00] SPEAKER 1: one\n").unwrap();
+
+        let mut app = pro_app();
+        app.queue.push(QueueItem {
+            path: audio.clone(),
+            audio: Some(audio.clone()),
+            status: ItemStatus::Pending,
+            duration: Some(1.0),
+            transcript: None,
+        });
+        app.batch_total = 1.0;
+        app.status = Status::Running;
+
+        app.events.lock().unwrap().push_back(Event::File {
+            audio: audio.display().to_string(),
+        });
+        app.events.lock().unwrap().push_back(Event::Done {
+            txt: txt.display().to_string(),
+            stats: backend::Stats::default(),
+        });
+        let _ = app.update(Message::Tick);
+
+        // The finished item is history: no queue row is left behind at all.
+        assert!(
+            app.queue
+                .iter()
+                .all(|item| item.audio.as_deref() != Some(audio.as_path())),
+            "a finished row stayed in the queue"
+        );
+        assert_eq!(app.recent.len(), 1);
+        assert_eq!(app.recent[0].audio.as_deref(), Some(audio.as_path()));
+        assert_eq!(
+            app.recent[0].transcript.as_deref(),
+            Some(txt.as_path())
+        );
 
         let _ = std::fs::remove_dir_all(&media);
     }
@@ -20728,12 +20543,6 @@ mod tests {
                     num_speakers: Some(2),
                     ..Default::default()
                 }),
-                turns: vec![backend::Turn {
-                    start: 0.0,
-                    end: 1.0,
-                    speaker: "SPEAKER 1".to_string(),
-                }],
-                peaks: vec![0.1, 0.2],
             }],
             last_batch: vec![audio.display().to_string()],
             recent: Vec::new(),
@@ -20993,9 +20802,6 @@ mod tests {
                 status: ItemStatus::Pending,
                 duration,
                 transcript: None,
-                stats: None,
-                turns: Vec::new(),
-                peaks: Arc::new(Vec::new()),
             });
         }
         assert_eq!(app.queue_summary_text(), "2 files \u{00b7} 1:30");
@@ -21004,7 +20810,7 @@ mod tests {
     }
 
     #[test]
-    fn adding_audio_with_a_transcript_makes_it_done() {
+    fn adding_audio_with_a_transcript_goes_to_history() {
         let _guard = env_lock();
         let _config = ConfigEnv::new("adopt-config");
         let media = temp_dir("adopt-media");
@@ -21020,46 +20826,106 @@ mod tests {
 
         // What the add starts: the lookup finds the transcript, and the read
         // and probe come back with it.
-        let hits = find_transcripts(&[(0, audio.clone())], None);
+        let hits = find_transcripts(&[audio.clone()], None);
         assert_eq!(hits.len(), 1);
-        let text = backend::read_transcript(&hits[0].2).unwrap();
+        assert_eq!(hits[0].0, audio);
+        let text = backend::read_transcript(&hits[0].1).unwrap();
         let _ = app.update(Message::TranscriptAdopted(
             true,
             AdoptedTranscript {
-                index: 0,
                 audio: audio.clone(),
                 transcript: transcript.clone(),
                 text,
                 duration: Some(12.0),
-                peaks: vec![0.3; 8],
-                turns: Vec::new(),
             },
         ));
 
-        assert!(matches!(app.queue[0].status, ItemStatus::Done));
-        assert_eq!(app.queue[0].transcript.as_deref(), Some(transcript.as_path()));
-        assert_eq!(app.queue[0].duration, Some(12.0));
-        assert_eq!(app.queue[0].peaks.len(), 8);
+        // The pending row is replaced by a history entry, never a Done row.
+        assert!(app.queue.is_empty(), "the pending row survived adoption");
+        assert_eq!(app.recent.len(), 1);
+        assert_eq!(app.recent[0].audio.as_deref(), Some(audio.as_path()));
+        assert_eq!(app.recent[0].transcript.as_deref(), Some(transcript.as_path()));
+        assert_eq!(app.recent[0].duration, Some(12.0));
         // A single adopted add opens, so the text is on screen immediately.
-        assert_eq!(app.selected, Some(0));
+        assert_eq!(app.selected_recent, Some(0));
         assert!(app.shown_transcript().contains("adopted line"));
 
-        // A run that started while the lookup was in flight keeps the row: the
-        // adoption is dropped rather than overwriting it.
-        app.queue[0].status = ItemStatus::Running;
+        let _ = std::fs::remove_dir_all(&media);
+    }
+
+    #[test]
+    fn adopted_transcript_already_in_recent_is_a_noop() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("adopt-existing-config");
+        let media = temp_dir("adopt-existing-media");
+        let audio = media.join("talk.mp3");
+        std::fs::write(&audio, b"audio").unwrap();
+        let old_transcript = media.join("old.txt");
+        std::fs::write(&old_transcript, "[00:00] SPEAKER 1: old\n").unwrap();
+
+        let mut app = pro_app();
+        let added = app.add_paths(vec![audio.clone()]);
+        assert_eq!(added.len(), 1);
+        let existing =
+            push_recent(&mut app, Some(audio.clone()), old_transcript.clone(), Some(5.0), Vec::new());
+        let finished_at = app.recent[existing].finished_at;
+
         let _ = app.update(Message::TranscriptAdopted(
             true,
             AdoptedTranscript {
-                index: 0,
                 audio: audio.clone(),
-                transcript: media.join("other.txt"),
-                text: "other\n".to_string(),
-                duration: None,
-                peaks: Vec::new(),
-                turns: Vec::new(),
+                transcript: media.join("new.txt"),
+                text: "[00:00] SPEAKER 1: new\n".to_string(),
+                duration: Some(12.0),
             },
         ));
-        assert_eq!(app.queue[0].transcript.as_deref(), Some(transcript.as_path()));
+
+        // The queue row goes, but the history entry keeps its date and data.
+        assert!(app.queue.is_empty());
+        assert_eq!(app.recent.len(), 1);
+        assert_eq!(app.recent[existing].finished_at, finished_at);
+        assert_eq!(app.recent[existing].duration, Some(5.0));
+        assert_eq!(
+            app.recent[existing].transcript.as_deref(),
+            Some(old_transcript.as_path())
+        );
+        assert_eq!(
+            app.toast.as_ref().map(|(text, _)| text.as_str()),
+            Some("Already in Transcripts")
+        );
+
+        let _ = std::fs::remove_dir_all(&media);
+    }
+
+    #[test]
+    fn adoption_is_ignored_while_running() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("adopt-running-config");
+        let media = temp_dir("adopt-running-media");
+        let audio = media.join("talk.mp3");
+        std::fs::write(&audio, b"audio").unwrap();
+        let transcript = media.join("talk.txt");
+        std::fs::write(&transcript, "[00:00] SPEAKER 1: adopted line\n").unwrap();
+
+        let mut app = pro_app();
+        let added = app.add_paths(vec![audio.clone()]);
+        assert_eq!(added.len(), 1);
+        // The backend already owns the path: keep the row and drop the hit.
+        app.status = Status::Running;
+        let _ = app.update(Message::TranscriptAdopted(
+            true,
+            AdoptedTranscript {
+                audio: audio.clone(),
+                transcript,
+                text: "[00:00] SPEAKER 1: adopted line\n".to_string(),
+                duration: Some(12.0),
+            },
+        ));
+
+        assert_eq!(app.queue.len(), 1);
+        assert!(matches!(app.queue[0].status, ItemStatus::Pending));
+        assert_eq!(app.queue[0].transcript, None);
+        assert!(app.recent.is_empty());
 
         let _ = std::fs::remove_dir_all(&media);
     }
@@ -21076,10 +20942,11 @@ mod tests {
         let added = app.add_paths(vec![audio.clone()]);
         assert_eq!(added.len(), 1);
         // Nothing to adopt, so the add looks exactly as it did before.
-        assert!(find_transcripts(&[(0, audio)], None).is_empty());
+        assert!(find_transcripts(&[audio], None).is_empty());
         assert!(matches!(app.queue[0].status, ItemStatus::Pending));
         assert_eq!(app.queue[0].transcript, None);
         assert_eq!(app.selected, None);
+        assert!(app.recent.is_empty());
 
         let _ = std::fs::remove_dir_all(&media);
     }
@@ -21153,9 +21020,6 @@ mod tests {
             status: ItemStatus::Failed("boom".to_string()),
             duration: None,
             transcript: None,
-            stats: None,
-            turns: Vec::new(),
-            peaks: Arc::new(Vec::new()),
         });
 
         // A running batch cannot be mutated.
@@ -21188,9 +21052,6 @@ mod tests {
                 status: ItemStatus::Pending,
                 duration: None,
                 transcript: None,
-                stats: None,
-                turns: Vec::new(),
-                peaks: Arc::new(Vec::new()),
             });
         }
         app.selected = Some(0);
@@ -21256,9 +21117,9 @@ mod tests {
     }
 
     #[test]
-    fn clicking_a_finished_transcript_opens_it_during_a_run() {
+    fn opening_history_during_a_run_is_pro_only() {
         let _guard = env_lock();
-        let dir = temp_dir("finished-click-media");
+        let dir = temp_dir("history-run-media");
 
         let done_audio = dir.join("done.mp3");
         std::fs::write(&done_audio, b"audio").unwrap();
@@ -21267,79 +21128,63 @@ mod tests {
         let pending_audio = dir.join("next.mp3");
         std::fs::write(&pending_audio, b"audio").unwrap();
 
-        // A live run with one adopted (not yet reaped) finished row and one
-        // waiting row.
+        // A live run with one history entry and the file being transcribed.
         let seed = |app: &mut App| {
-            app.queue.push(QueueItem {
-                path: done_audio.clone(),
-                audio: Some(done_audio.clone()),
-                status: ItemStatus::Done,
-                duration: Some(1.5),
-                transcript: Some(transcript.clone()),
-                stats: None,
-                turns: Vec::new(),
-                peaks: Arc::new(vec![0.1, 0.2, 0.3]),
-            });
+            push_recent(
+                app,
+                Some(done_audio.clone()),
+                transcript.clone(),
+                Some(1.5),
+                Vec::new(),
+            );
             app.queue.push(QueueItem {
                 path: pending_audio.clone(),
                 audio: Some(pending_audio.clone()),
-                status: ItemStatus::Pending,
+                status: ItemStatus::Running,
                 duration: None,
                 transcript: None,
-                stats: None,
-                turns: Vec::new(),
-                peaks: Arc::new(Vec::new()),
             });
+            app.current_index = Some(0);
             app.status = Status::Running;
             app.selected = None;
             app.selected_view = None;
         };
 
-        // Pro: the click opens the finished row even from the live run view.
+        // Pro: the history opens even from the live run view.
         {
-            let _config = ConfigEnv::new("finished-click-pro");
+            let _config = ConfigEnv::new("history-run-pro");
             let mut app = pro_app();
             seed(&mut app);
 
-            let _ = app.update(Message::QueueDragStart(0));
-            assert!(app.queue_drag.is_none());
-            assert_eq!(app.selected, Some(0));
-            assert!(app.selected_view.is_some());
+            let _ = app.update(Message::OpenRecent(0));
+            assert_eq!(app.selected_recent, Some(0));
+            assert!(app.selected_view.as_ref().is_some_and(|view| view.finished));
             // Retention keys on the open finished view, not on the click.
             assert!(app.keeps_finished_view());
 
             // The row being transcribed is still clickable: it returns to the
             // live transcript from the pinned one.
-            app.queue[1].status = ItemStatus::Running;
-            app.current_index = Some(1);
-            let _ = app.update(Message::QueueDragStart(1));
+            let _ = app.update(Message::QueueDragStart(0));
             assert!(app.selected.is_none());
             assert!(app.selected_view.is_none());
-
-            // And the finished row can be opened again afterwards.
-            let _ = app.update(Message::QueueDragStart(0));
-            assert_eq!(app.selected, Some(0));
-            assert!(app.keeps_finished_view());
-            app.selected_view = None;
-            assert!(!app.keeps_finished_view());
         }
 
-        // Free: the same click is an upsell, not a view.
+        // Free: only the live transcript is visible during a run.
         {
-            let _config = ConfigEnv::new("finished-click-free");
+            let _config = ConfigEnv::new("history-run-free");
             let mut app = App::new();
             seed(&mut app);
             assert!(app.shows(license::Audience::FreeOnly));
 
-            let _ = app.update(Message::QueueDragStart(0));
-            assert!(app.queue_drag.is_none());
-            assert!(app.selected.is_none());
+            let _ = app.update(Message::OpenRecent(0));
             assert!(app.selected_view.is_none());
             assert_eq!(
                 app.toast.as_ref().map(|(text, _)| text.as_str()),
                 Some("Reviewing during active transcription is a Pro feature")
             );
         }
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -22234,9 +22079,6 @@ mod tests {
             status,
             duration,
             transcript: None,
-            stats: None,
-            turns: Vec::new(),
-            peaks: Arc::new(Vec::new()),
         }
     }
 

@@ -133,8 +133,8 @@ mod tests {
         set_modified(&pipeline, 60);
 
         assert_eq!(
-            find_transcripts(&[(0, audio.clone())], None),
-            vec![(0, audio.clone(), exact.clone())]
+            find_transcripts(&[audio.clone()], None),
+            vec![(audio.clone(), exact.clone())]
         );
 
         // Without the plain copy, the newest pipeline-named file wins.
@@ -144,8 +144,8 @@ mod tests {
         std::fs::write(&newer, "[00:00] A: three\n").unwrap();
         set_modified(&newer, 60);
         assert_eq!(
-            find_transcripts(&[(0, audio.clone())], None),
-            vec![(0, audio.clone(), newer.clone())]
+            find_transcripts(&[audio.clone()], None),
+            vec![(audio.clone(), newer.clone())]
         );
 
         // The save location is the fallback when the audio's own directory has
@@ -156,8 +156,8 @@ mod tests {
         std::fs::remove_file(&pipeline).unwrap();
         std::fs::remove_file(&newer).unwrap();
         assert_eq!(
-            find_transcripts(&[(7, audio.clone())], Some(&elsewhere)),
-            vec![(7, audio.clone(), moved)]
+            find_transcripts(&[audio.clone()], Some(&elsewhere)),
+            vec![(audio.clone(), moved)]
         );
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -174,14 +174,14 @@ mod tests {
         std::fs::write(dir.join("empty.txt.hippo-transcribe.bak"), "backup\n").unwrap();
 
         // Only an empty plain copy and the app's own sidecars: no transcript.
-        assert!(find_transcripts(&[(0, audio.clone())], None).is_empty());
+        assert!(find_transcripts(&[audio.clone()], None).is_empty());
 
         // A pipeline file with content is taken once the plain copy is empty.
         let pipeline = dir.join("empty-balanced-transcription-2speakers.txt");
         std::fs::write(&pipeline, "[00:00] A: kept\n").unwrap();
         assert_eq!(
-            find_transcripts(&[(0, audio.clone())], None),
-            vec![(0, audio.clone(), pipeline)]
+            find_transcripts(&[audio.clone()], None),
+            vec![(audio.clone(), pipeline)]
         );
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -194,7 +194,7 @@ mod tests {
         std::fs::write(&audio, b"audio").unwrap();
         std::fs::write(dir.join("silent-slow-transcription-2speakers.json"), "{}").unwrap();
 
-        assert!(find_transcripts(&[(3, audio)], None).is_empty());
+        assert!(find_transcripts(&[audio], None).is_empty());
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -278,7 +278,7 @@ fn is_transcription_of(name: &str, stem: &str) -> bool {
 }
 
 /// The transcript for each added audio file that already has one, as
-/// `(queue index, audio, transcript)`.
+/// `(audio, transcript)`.
 ///
 /// The rule, applied to the audio's own directory first and then to the
 /// configured save location:
@@ -295,13 +295,13 @@ fn is_transcription_of(name: &str, stem: &str) -> bool {
 /// Directories are read once per call, so a folder add of `n` files costs one
 /// `read_dir` per directory rather than `n`.
 pub(crate) fn find_transcripts(
-    added: &[(usize, PathBuf)],
+    added: &[PathBuf],
     output_dir: Option<&Path>,
-) -> Vec<(usize, PathBuf, PathBuf)> {
+) -> Vec<(PathBuf, PathBuf)> {
     let mut scans: Vec<(PathBuf, Option<DirScan>)> = Vec::new();
     let mut found = Vec::new();
 
-    for (index, audio) in added {
+    for audio in added {
         let Some(stem) = audio.file_stem().and_then(|stem| stem.to_str()) else {
             continue;
         };
@@ -320,7 +320,7 @@ pub(crate) fn find_transcripts(
             }
         }
         if let Some(transcript) = transcript {
-            found.push((*index, audio.clone(), transcript));
+            found.push((audio.clone(), transcript));
         }
     }
 
