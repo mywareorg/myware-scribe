@@ -80,9 +80,52 @@ pub struct PipelineOptions {
 #[derive(Debug, Clone)]
 struct Line {
     start: f32,
+    end: f32,
     speaker: String,
     text: String,
     confidence: f32,
+    /// Word times, when the decoder produced token timestamps.
+    words: Vec<crate::sidecar::Word>,
+}
+
+/// Group token pieces into words for the sidecar.
+///
+/// Whisper pieces start a new word when they begin with whitespace; punctuation
+/// and sub-word pieces are appended. Times come from the first and last piece,
+/// so a word's span includes its punctuation without inventing gaps.
+fn words_from_tokens(tokens: &[(f32, f32, String)]) -> Vec<crate::sidecar::Word> {
+    let mut words: Vec<crate::sidecar::Word> = Vec::new();
+    for (start, end, text) in tokens {
+        if text.trim().is_empty() {
+            continue;
+        }
+        let begins = text.starts_with(char::is_whitespace) || words.is_empty();
+        if begins {
+            words.push(crate::sidecar::Word {
+                start: *start,
+                end: *end,
+                text: text.trim_start().to_string(),
+            });
+        } else if let Some(word) = words.last_mut() {
+            word.text.push_str(text);
+            word.end = *end;
+        }
+    }
+    for word in &mut words {
+        word.text = word.text.trim().to_string();
+    }
+    words.retain(|word| !word.text.is_empty());
+    words
+}
+
+/// Absolute word times for one segment inside a clip.
+fn segment_words(segment: &Segment, offset: f32) -> Vec<crate::sidecar::Word> {
+    let tokens: Vec<(f32, f32, String)> = segment
+        .tokens
+        .iter()
+        .map(|token| (offset + token.start, offset + token.end, token.text.clone()))
+        .collect();
+    words_from_tokens(&tokens)
 }
 
 /// How often the in-progress transcript is parked beside the audio.
@@ -390,6 +433,7 @@ fn segment_lines(
     };
     let whole = || Line {
         start: clip.start + segment.start,
+        end: clip.start + segment.end,
         speaker: speaker_for(attribute_turn(
             clip,
             clip.start + segment.start,
@@ -397,6 +441,7 @@ fn segment_lines(
         )),
         text: vocabulary.apply(&segment.text),
         confidence: segment.confidence,
+        words: segment_words(segment, clip.start),
     };
 
     if segment.tokens.len() < 2 {
@@ -404,18 +449,27 @@ fn segment_lines(
         return vec![whole()];
     }
 
-    let mut groups: Vec<(Option<usize>, String, f32, f32, usize)> = Vec::new();
+    let mut groups: Vec<(Option<usize>, String, f32, f32, usize, Vec<(f32, f32, String)>)> =
+        Vec::new();
     for token in &segment.tokens {
         let start = clip.start + token.start;
         let end = clip.start + token.end;
         let turn = attribute_token(clip, start, end);
         match groups.last_mut() {
-            Some((last_turn, text, _, last_end, count)) if *last_turn == turn => {
+            Some((last_turn, text, _, last_end, count, tokens)) if *last_turn == turn => {
                 text.push_str(&token.text);
                 *last_end = end;
                 *count += 1;
+                tokens.push((start, end, token.text.clone()));
             }
-            _ => groups.push((turn, token.text.clone(), start, end, 1)),
+            _ => groups.push((
+                turn,
+                token.text.clone(),
+                start,
+                end,
+                1,
+                vec![(start, end, token.text.clone())],
+            )),
         }
     }
 
@@ -423,7 +477,7 @@ fn segment_lines(
     // speaker change. Judge that by duration, not word count: one word that
     // takes half a second ("What?") is a real interjection, one that barely
     // covers a moment is an artefact.
-    let mut runs: Vec<Option<usize>> = groups.iter().map(|(turn, _, _, _, _)| *turn).collect();
+    let mut runs: Vec<Option<usize>> = groups.iter().map(|(turn, _, _, _, _, _)| *turn).collect();
     runs.dedup();
     if runs.len() > 1 {
         stats.multi_turn += 1;
@@ -433,7 +487,7 @@ fn segment_lines(
     }
     let fragment = groups
         .iter()
-        .any(|(_, _, start, end, count)| *count < 2 && end - start < MIN_GROUP_S);
+        .any(|(_, _, start, end, count, _)| *count < 2 && end - start < MIN_GROUP_S);
     if fragment {
         stats.collapsed += 1;
         return vec![whole()];
@@ -442,13 +496,15 @@ fn segment_lines(
 
     groups
         .into_iter()
-        .filter_map(|(turn, text, start, _, _)| {
+        .filter_map(|(turn, text, start, end, _, tokens)| {
             let text = vocabulary.apply(text.trim());
             (!text.is_empty()).then(|| Line {
                 start,
+                end,
                 speaker: speaker_for(turn),
                 text,
                 confidence: segment.confidence,
+                words: words_from_tokens(&tokens),
             })
         })
         .collect()
@@ -1720,6 +1776,8 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
                     text: line.text.clone(),
                     start: Some(line.start),
                     confidence: Some(line.confidence),
+                    end: Some(line.end),
+                    words: line.words.clone(),
                     ..crate::sidecar::Line::default()
                 })
                 .collect(),
@@ -2026,6 +2084,25 @@ mod tests {
 
         assert_eq!(lines.len(), 1);
         assert_eq!(lines[0].text, "we use PyTorch");
+    }
+
+    #[test]
+    fn token_pieces_group_into_words() {
+        let tokens = vec![
+            (0.0, 0.4, " Hello".to_string()),
+            (0.4, 0.9, " there".to_string()),
+            (0.9, 1.0, ",".to_string()),
+            (1.1, 1.5, " gen".to_string()),
+            (1.5, 1.8, "eral".to_string()),
+        ];
+        let words = words_from_tokens(&tokens);
+        assert_eq!(words.len(), 3);
+        assert_eq!(words[0].text, "Hello");
+        assert_eq!(words[0].start, 0.0);
+        assert_eq!(words[1].text, "there,");
+        assert_eq!(words[1].end, 1.0);
+        assert_eq!(words[2].text, "general");
+        assert_eq!(words[2].end, 1.8);
     }
 
     #[test]

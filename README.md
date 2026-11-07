@@ -302,8 +302,15 @@ stays the source of truth.
 
 The Export picker writes the current transcript as plain text, SRT, WebVTT,
 JSON, Markdown, or CSV. Subtitle formats use the exact line bounds stored in the
-transcript's sidecar and refuse a transcript that has no timestamps. Failed
-queue items can be retried, and pending items can be reordered.
+transcript's sidecar; long lines are split at word boundaries when the decoder
+produced word times, and a transcript without timestamps is refused rather than
+exported at zero. Failed queue items can be retried, and pending items can be
+reordered.
+
+Word times are stored in the sidecar. While audio plays, the words already
+spoken on the active line are tinted (Pro). The Speed preset decodes without
+token timestamps, so those transcripts — and any produced before this change —
+export line-level cues instead.
 Keyboard: Up/Down moves through the transcript, Alt+Enter edits the active line,
 Space toggles playback, and Left/Right seek ±5 seconds while no text field has
 focus. Editing and playback keys require Pro.

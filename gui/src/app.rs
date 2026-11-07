@@ -28,6 +28,7 @@ use hippo_transcribe_core::export::ExportFormat;
 use hippo_transcribe_core::license;
 use hippo_transcribe_core::models;
 use hippo_briefing::{Briefing, BriefingLine};
+use hippo_transcribe_core::sidecar::Word;
 use hippo_transcribe_core::playback::AudioStream;
 use hippo_transcribe_core::vocabulary::Vocabulary;
 
@@ -1171,6 +1172,10 @@ pub struct App {
     recording: Option<crate::recording::Recorder>,
     /// The briefing dialog: absent when closed.
     briefing: Option<BriefingState>,
+    /// Word times for the line under the playhead, for karaoke highlighting.
+    karaoke_line: Option<usize>,
+    karaoke_source: Option<PathBuf>,
+    karaoke_words: Vec<Word>,
     summary_open: bool,
     pending_rename: bool,
     completion_pending: bool,
@@ -1469,6 +1474,9 @@ impl App {
             input_device: settings.input_device.clone(),
             recording: None,
             briefing: None,
+            karaoke_line: None,
+            karaoke_source: None,
+            karaoke_words: Vec::new(),
             summary_open: false,
             pending_rename: false,
             completion_pending: false,
@@ -5049,6 +5057,7 @@ impl App {
             }
             Message::Tick => {
                 self.poll_briefing();
+                self.refresh_karaoke();
                 if self.feature_deck_auto_advance() {
                     if self.feature_slide_at.elapsed() >= Duration::from_secs(7) {
                         self.feature_slide = (self.feature_slide + 1) % FEATURE_DECK.len();
@@ -9379,6 +9388,7 @@ impl App {
                     self.show_timestamps,
                     hovered,
                     self.confidence_view,
+                    self.karaoke_for(idx, active),
                 ));
             }
         }
@@ -10115,6 +10125,39 @@ impl App {
     }
 
     /// The line to highlight / keep in view.
+    /// Keep the karaoke word list in step with the line under the playhead.
+    ///
+    /// Reading the sidecar once per line change is cheaper than caching words
+    /// for every line, and it cannot drift after an edit.
+    fn refresh_karaoke(&mut self) {
+        let active = if self.player.is_some() {
+            self.active_line_index()
+        } else {
+            None
+        };
+        let source = self.shown_output().map(Path::to_path_buf);
+        if active == self.karaoke_line && source == self.karaoke_source {
+            return;
+        }
+        self.karaoke_line = active;
+        self.karaoke_source = source;
+        self.karaoke_words.clear();
+        let (Some(index), Some(path)) = (active, self.karaoke_source.as_deref()) else {
+            return;
+        };
+        self.karaoke_words = backend::read_line_words(path, index);
+    }
+
+    /// The karaoke payload for one line, when it is the active one and the
+    /// player is open.
+    fn karaoke_for(&self, index: usize, active: bool) -> Option<(&[Word], f32)> {
+        (active
+            && self.player.is_some()
+            && self.karaoke_line == Some(index)
+            && !self.karaoke_words.is_empty())
+        .then_some((self.karaoke_words.as_slice(), self.playhead))
+    }
+
     fn active_line_index(&self) -> Option<usize> {
         if self.shown_lines().is_empty() {
             return None;
@@ -14931,6 +14974,7 @@ fn line_element(
     show_timestamps: bool,
     hovered: bool,
     mark_confidence: bool,
+    karaoke: Option<(&[Word], f32)>,
 ) -> Element<'static, Message> {
     // A low-confidence line keeps its speaker hue but desaturates and dims its
     // text, so the difference survives next to a confident line of the same
@@ -14967,8 +15011,15 @@ fn line_element(
 
     // A press on the words reports where inside them it landed, so opening the
     // editor on a double-click can put the caret under the pointer.
-    content = content.push(Element::new(TextPress::new(
-        rich_text(styled_spans(
+    let words = match karaoke {
+        Some((words, at)) if query.is_empty() => {
+            karaoke_spans(&rest, words, at, ink, accent, size)
+        }
+        _ => None,
+    };
+    let body = match words {
+        Some(spans) => rich_text(spans),
+        None => rich_text(styled_spans(
             &rest,
             query,
             case_sensitive,
@@ -14977,8 +15028,8 @@ fn line_element(
             highlight,
             size,
         )),
-        idx,
-    )));
+    };
+    content = content.push(Element::new(TextPress::new(body, idx)));
     content = content.push(horizontal_space());
     // Reserved right-edge slot so revealing the swap button never rewraps the text.
     content = content.push(horizontal_space().width(Length::Fixed(size * 1.4)));
@@ -16104,6 +16155,37 @@ fn search_match_ranges(
         }
     }
     matches
+}
+
+/// Colour the words already spoken at `at`, leaving the rest in `ink`.
+///
+/// `None` when the stored words do not line up with the rendered text (an edit,
+/// a vocabulary replacement), so the caller falls back to plain spans.
+fn karaoke_spans(
+    raw: &str,
+    words: &[Word],
+    at: f32,
+    ink: Color,
+    spoken: Color,
+    size: f32,
+) -> Option<Vec<text::Span<'static, Message>>> {
+    let tokens: Vec<&str> = raw.split_whitespace().collect();
+    if tokens.is_empty() || tokens.len() != words.len() {
+        return None;
+    }
+    let mut spans = Vec::with_capacity(tokens.len() * 2);
+    for (index, token) in tokens.iter().enumerate() {
+        if index > 0 {
+            spans.push(text::Span::new(" ".to_string()).size(size));
+        }
+        let color = if words[index].end <= at { spoken } else { ink };
+        spans.push(
+            text::Span::new(token.to_string())
+                .size(size)
+                .color(color),
+        );
+    }
+    Some(spans)
 }
 
 fn styled_spans(
@@ -18971,6 +19053,46 @@ mod tests {
         let mut app = pro_app();
         let _ = app.update(Message::StopRecording);
         assert!(app.recording.is_none());
+    }
+
+    #[test]
+    fn karaoke_spans_colour_only_the_spoken_prefix() {
+        let words = vec![
+            Word {
+                start: 0.0,
+                end: 0.5,
+                text: "hello".to_string(),
+            },
+            Word {
+                start: 0.5,
+                end: 1.0,
+                text: "there".to_string(),
+            },
+        ];
+        let spans = karaoke_spans(
+            "hello there",
+            &words,
+            0.6,
+            Color::BLACK,
+            Color::WHITE,
+            14.0,
+        )
+        .unwrap();
+        let rebuilt: String = spans.iter().map(|span| span.text.as_ref()).collect();
+        assert_eq!(rebuilt, "hello there");
+        let colors: Vec<Color> = spans.iter().filter_map(|span| span.color).collect();
+        assert_eq!(colors, vec![Color::WHITE, Color::BLACK]);
+
+        // A line whose stored words no longer line up gets the plain renderer.
+        assert!(karaoke_spans(
+            "hello",
+            &words,
+            0.6,
+            Color::BLACK,
+            Color::WHITE,
+            14.0
+        )
+        .is_none());
     }
 
     #[test]

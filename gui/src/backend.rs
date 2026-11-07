@@ -125,6 +125,13 @@ pub fn write_sidecar_renamed(path: &Path, lines: &[DocLine], mapping: &[(String,
     let _ = sidecar::write_at(&json, &sidecar);
 }
 
+/// Word times for one transcript line, from its sidecar.
+pub fn read_line_words(path: &Path, index: usize) -> Vec<hippo_transcribe_core::sidecar::Word> {
+    sidecar::read(path)
+        .and_then(|sidecar| sidecar.lines.get(index).map(|line| line.words.clone()))
+        .unwrap_or_default()
+}
+
 /// Build export cues from the shown document.
 ///
 /// `source` is the transcript file whose sidecar holds exact line ends. When
@@ -134,10 +141,16 @@ pub fn export_cues(
     source: Option<&Path>,
     lines: &[DocLine],
 ) -> Vec<hippo_transcribe_core::export::Cue> {
-    let ends: Vec<Option<f32>> = source
+    let stored = source
         .and_then(|path| sidecar::read(path))
-        .filter(|sidecar| sidecar.lines.len() == lines.len())
-        .map(|sidecar| sidecar.lines.into_iter().map(|line| line.end).collect())
+        .filter(|sidecar| sidecar.lines.len() == lines.len());
+    let ends: Vec<Option<f32>> = stored
+        .as_ref()
+        .map(|sidecar| sidecar.lines.iter().map(|line| line.end).collect())
+        .unwrap_or_default();
+    let words: Vec<Vec<hippo_transcribe_core::sidecar::Word>> = stored
+        .as_ref()
+        .map(|sidecar| sidecar.lines.iter().map(|line| line.words.clone()).collect())
         .unwrap_or_default();
     lines
         .iter()
@@ -147,6 +160,7 @@ pub fn export_cues(
             end: ends.get(index).copied().flatten(),
             speaker: line.speaker.clone(),
             text: line_text(line),
+            words: words.get(index).cloned().unwrap_or_default(),
         })
         .collect()
 }
@@ -183,6 +197,12 @@ fn sidecar_line(line: &DocLine, previous: Option<&sidecar::Line>) -> sidecar::Li
                 .filter(|_| reuse)
                 .and_then(|previous| previous.confidence)
         }),
+        // Word times belong to the text they were decoded from; an edit drops
+        // them rather than attaching them to different words.
+        words: previous
+            .filter(|_| reuse)
+            .map(|previous| previous.words.clone())
+            .unwrap_or_default(),
         speaker_id: String::new(),
         end: None,
     }
@@ -733,7 +753,7 @@ mod tests {
         write_sidecar(&transcript, &lines);
 
         let saved = sidecar::read(&transcript).expect("sidecar");
-        assert_eq!(saved.version, 2);
+        assert_eq!(saved.version, 3);
         assert_eq!(saved.lines[0].text, "hello there");
         // Clamped to the turn each line starts in.
         assert_eq!(saved.lines[0].end, Some(3.0));
@@ -807,6 +827,42 @@ mod tests {
         assert_eq!(saved.lines[0].start, Some(3.0));
         assert_eq!(saved.lines[0].time, "00:03");
         assert_eq!(saved.lines[0].end, Some(7.0));
+    }
+
+    #[test]
+    fn sidecar_words_reach_the_exporter_and_survive_a_save() {
+        let dir = scratch("words");
+        let transcript = dir.join("talk.txt");
+        std::fs::write(&transcript, "[00:00] A: hello there\n").unwrap();
+        std::fs::write(
+            dir.join("talk-ts.json"),
+            r#"{
+                "version": 3,
+                "lines": [{
+                    "time": "00:00", "speaker": "A", "text": "hello there",
+                    "start": 0.0, "confidence": -0.2, "end": 2.0, "speaker_id": "S1",
+                    "words": [
+                        {"start": 0.0, "end": 0.8, "text": "hello"},
+                        {"start": 0.8, "end": 1.4, "text": "there"}
+                    ]
+                }],
+                "turns": [],
+                "duration": 5.0,
+                "speakers": [{"id": "S1", "name": "A"}]
+            }"#,
+        )
+        .unwrap();
+
+        let lines = vec![doc_line("[00:00] A: hello there", "A", 0.0)];
+        let cues = export_cues(Some(&transcript), &lines);
+        assert_eq!(cues[0].words.len(), 2);
+        assert_eq!(cues[0].words[0].text, "hello");
+
+        write_sidecar(&transcript, &lines);
+
+        let saved = sidecar::read(&transcript).unwrap();
+        assert_eq!(saved.lines[0].words.len(), 2);
+        assert_eq!(saved.lines[0].words[0].text, "hello");
     }
 
     #[test]

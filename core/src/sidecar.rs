@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 use crate::event::Turn;
 
 /// Schema version written by this build. Files without a `version` are v1.
-pub const VERSION: u32 = 2;
+pub const VERSION: u32 = 3;
 
 /// A speaker identity that survives a rename.
 ///
@@ -32,6 +32,16 @@ pub const VERSION: u32 = 2;
 pub struct Speaker {
     pub id: String,
     pub name: String,
+}
+
+/// One word inside a line. Added in v3; absent from v2 files and from files
+/// decoded without token timestamps (the speed preset).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Word {
+    pub start: f32,
+    pub end: f32,
+    #[serde(default)]
+    pub text: String,
 }
 
 /// One transcript line.
@@ -55,6 +65,9 @@ pub struct Line {
     /// Added in v2: the utterance's end, derived when absent.
     #[serde(default)]
     pub end: Option<f32>,
+    /// Added in v3: word times, when the decoder produced them.
+    #[serde(default)]
+    pub words: Vec<Word>,
 }
 
 /// A diarization segment as stored in the sidecar.
@@ -396,7 +409,7 @@ mod tests {
 
         let sidecar = Sidecar::from_json(json).expect("parse v1");
 
-        assert_eq!(sidecar.version, 2);
+        assert_eq!(sidecar.version, 3);
         assert_eq!(sidecar.lines.len(), 2);
         assert_eq!(sidecar.lines[0].end, Some(3.0)); // clamped to the turn
         assert_eq!(sidecar.lines[1].end, Some(10.0)); // clamped to duration
@@ -532,8 +545,35 @@ mod tests {
         let read_back: Sidecar =
             serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(read_back, sidecar);
-        assert_eq!(read_back.version, 2);
+        assert_eq!(read_back.version, 3);
         assert_eq!(read_back.audio.as_deref(), Some("/tmp/talk.mp3"));
+    }
+
+    #[test]
+    fn words_round_trip_and_old_files_get_none() {
+        let mut line = line(1.0, "A", "hello there");
+        line.words = vec![
+            Word {
+                start: 1.0,
+                end: 1.3,
+                text: "hello".to_string(),
+            },
+            Word {
+                start: 1.3,
+                end: 1.8,
+                text: "there".to_string(),
+            },
+        ];
+        let sidecar = Sidecar::new(vec![line], Vec::new(), Meta::default());
+        let json = serde_json::to_string(&sidecar).unwrap();
+        let read_back = Sidecar::from_json(&json).unwrap();
+        assert_eq!(read_back.lines[0].words.len(), 2);
+        assert_eq!(read_back.lines[0].words[1].text, "there");
+
+        // A v2 file has no words and must keep loading.
+        let v2 = r#"{"lines":[{"time":"00:01","speaker":"A","text":"hello","start":1.0,"confidence":-0.2,"speaker_id":"S1","end":2.0}],"turns":[],"duration":9.0,"speakers":[{"id":"S1","name":"A"}]}"#;
+        let old = Sidecar::from_json(v2).unwrap();
+        assert!(old.lines[0].words.is_empty());
     }
 
     #[test]

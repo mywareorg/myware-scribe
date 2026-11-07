@@ -14,6 +14,7 @@ use std::path::Path;
 use serde_json::{json, Value};
 
 use crate::event::Turn;
+use crate::sidecar::Word;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExportFormat {
@@ -91,6 +92,8 @@ pub struct Cue {
     pub end: Option<f32>,
     pub speaker: String,
     pub text: String,
+    /// Word times, when the sidecar has them (v3, quality presets).
+    pub words: Vec<Word>,
 }
 
 /// Build cues from rendered `[MM:SS] SPEAKER: text` lines.
@@ -118,6 +121,7 @@ pub fn cues_from_text(text: &str) -> Vec<Cue> {
             end: None,
             speaker,
             text,
+            words: Vec::new(),
         });
     }
     cues
@@ -140,10 +144,16 @@ pub fn write(
     if format.needs_timing() {
         require_timing(cues)?;
     }
+    // A subtitle cue may cover a whole sentence; word times let it be cut into
+    // readable pieces without splitting a word.
+    let timed = match format {
+        ExportFormat::Srt | ExportFormat::Vtt => split_cues(cues),
+        _ => cues.to_vec(),
+    };
     match format {
         ExportFormat::Txt => fs::write(path, transcript_text.as_bytes()),
-        ExportFormat::Srt => fs::write(path, render_srt(cues, duration).as_bytes()),
-        ExportFormat::Vtt => fs::write(path, render_vtt(cues, duration).as_bytes()),
+        ExportFormat::Srt => fs::write(path, render_srt(&timed, duration).as_bytes()),
+        ExportFormat::Vtt => fs::write(path, render_vtt(&timed, duration).as_bytes()),
         ExportFormat::Json => {
             let json = render_json(cues, turns, duration)?;
             fs::write(path, json.as_bytes())
@@ -195,6 +205,66 @@ fn render_vtt(cues: &[Cue], duration: Option<f32>) -> String {
     out
 }
 
+/// Split cues that carry word times into short subtitle cues.
+///
+/// Anything without words, or short enough already, is passed through.
+fn split_cues(cues: &[Cue]) -> Vec<Cue> {
+    const MAX_WORDS: usize = 8;
+    const MAX_SECONDS: f32 = 5.0;
+    let mut out = Vec::with_capacity(cues.len());
+    for cue in cues {
+        let Some(start) = cue.start else {
+            out.push(cue.clone());
+            continue;
+        };
+        if cue.words.is_empty() {
+            out.push(cue.clone());
+            continue;
+        }
+        let mut groups: Vec<&[Word]> = Vec::new();
+        let mut first = 0usize;
+        for (index, word) in cue.words.iter().enumerate() {
+            let group_start = cue.words[first].start;
+            let too_many = index - first + 1 > MAX_WORDS;
+            let too_long = word.end - group_start > MAX_SECONDS && index > first;
+            if too_many || too_long {
+                groups.push(&cue.words[first..index]);
+                first = index;
+            }
+        }
+        groups.push(&cue.words[first..]);
+
+        if groups.len() <= 1 {
+            out.push(cue.clone());
+            continue;
+        }
+        for group in groups {
+            let Some(first_word) = group.first() else {
+                continue;
+            };
+            let Some(last_word) = group.last() else {
+                continue;
+            };
+            let text = group
+                .iter()
+                .map(|word| word.text.trim())
+                .collect::<Vec<_>>()
+                .join(" ");
+            if text.is_empty() {
+                continue;
+            }
+            out.push(Cue {
+                start: Some(first_word.start.max(start)),
+                end: Some(last_word.end.max(first_word.start)),
+                speaker: cue.speaker.clone(),
+                text,
+                words: group.to_vec(),
+            });
+        }
+    }
+    out
+}
+
 fn render_json(cues: &[Cue], turns: &[Turn], duration: Option<f32>) -> io::Result<String> {
     let use_hours = duration.is_some_and(|seconds| seconds >= 3600.0)
         || cues
@@ -209,6 +279,7 @@ fn render_json(cues: &[Cue], turns: &[Turn], duration: Option<f32>) -> io::Resul
                 "text": cue.text,
                 "start": cue.start,
                 "end": cue.end,
+                "words": cue.words,
             })
         })
         .collect();
@@ -448,12 +519,14 @@ mod tests {
                 end: Some(2.5),
                 speaker: "A".to_string(),
                 text: "one".to_string(),
+                words: Vec::new(),
             },
             Cue {
                 start: Some(5.0),
                 end: None,
                 speaker: "B".to_string(),
                 text: "two".to_string(),
+                words: Vec::new(),
             },
         ];
         write(&path, ExportFormat::Srt, "", &cues, &[], Some(9.0)).unwrap();
@@ -549,6 +622,33 @@ mod tests {
     }
 
     #[test]
+    fn long_cues_split_at_word_times() {
+        let dir = temp_dir("srt-split");
+        let path = dir.join("out.srt");
+        let words: Vec<Word> = (0..12)
+            .map(|index| Word {
+                start: index as f32 * 0.5,
+                end: index as f32 * 0.5 + 0.4,
+                text: format!("w{index}"),
+            })
+            .collect();
+        let cues = vec![Cue {
+            start: Some(0.0),
+            end: Some(6.0),
+            speaker: "A".to_string(),
+            text: (0..12).map(|index| format!("w{index}")).collect::<Vec<_>>().join(" "),
+            words,
+        }];
+        write(&path, ExportFormat::Srt, "", &cues, &[], Some(10.0)).unwrap();
+        let text = fs::read_to_string(&path).unwrap();
+        assert_eq!(text.matches(" --> ").count(), 2, "{text}");
+        assert!(text.contains("00:00:00,000 --> 00:00:03,900"), "{text}");
+        assert!(text.contains("w0 w1 w2 w3 w4 w5 w6 w7"), "{text}");
+        assert!(text.contains("w8 w9 w10 w11"), "{text}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn subtitles_refuse_an_untimed_transcript() {
         let dir = temp_dir("untimed");
         let path = dir.join("out.srt");
@@ -557,6 +657,7 @@ mod tests {
             end: None,
             speaker: "A".to_string(),
             text: "hello".to_string(),
+            words: Vec::new(),
         }];
         let error = write(&path, ExportFormat::Srt, "hello\n", &cues, &[], None).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
@@ -572,6 +673,7 @@ mod tests {
             end: None,
             speaker: "A".to_string(),
             text: "hello".to_string(),
+            words: Vec::new(),
         }];
         let md = dir.join("out.md");
         write(&md, ExportFormat::Markdown, "", &cues, &[], None).unwrap();
