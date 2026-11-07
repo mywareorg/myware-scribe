@@ -6,6 +6,7 @@ mod documents;
 mod files;
 mod format;
 mod options;
+mod recording;
 mod theme;
 
 use app::App;

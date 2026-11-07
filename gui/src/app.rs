@@ -30,6 +30,9 @@ use hippo_transcribe_core::models;
 use hippo_transcribe_core::playback::AudioStream;
 use hippo_transcribe_core::vocabulary::Vocabulary;
 
+/// The Settings label that means "whatever Windows has as default".
+const SYSTEM_DEFAULT_DEVICE: &str = "System default";
+
 const AUDIO_EXTS: &[&str] = &[
     "mp3", "mp2", "wav", "aif", "aiff", "m4a", "m4b", "m4r", "m4v", "aac", "flac", "ogg", "oga",
     "opus", "caf", "mp4", "mkv", "mov", "webm", "3gp", "3g2",
@@ -553,6 +556,9 @@ struct Settings {
     sms_mode: Option<bool>,
     num_speakers: Option<i32>,
     language: Option<String>,
+    /// Microphone chosen in Settings. `None` means the system default.
+    #[serde(default)]
+    input_device: Option<String>,
     #[serde(default = "timestamps_default")]
     show_timestamps: bool,
     #[serde(default = "notifications_default")]
@@ -602,6 +608,7 @@ impl Default for Settings {
             sms_mode: None,
             num_speakers: None,
             language: None,
+            input_device: None,
             show_timestamps: true,
             notifications: true,
             editing_tips: true,
@@ -859,6 +866,9 @@ pub enum Message {
     SaveVocabulary,
     /// Leave an interrupted file out of the next run without deleting its row.
     SkipItem(usize),
+    StartRecording,
+    StopRecording,
+    InputDeviceChanged(String),
     EditLine(usize),
     FlipLineSpeaker(usize),
     /// The line editor's speaker picker opened or closed its menu.
@@ -1119,6 +1129,10 @@ pub struct App {
     timeline_duration: Option<f32>,
     player: Option<Player>,
     output_txt: Option<PathBuf>,
+    /// Microphone chosen in Settings; `None` uses the system default.
+    input_device: Option<String>,
+    /// Capture in progress, if any.
+    recording: Option<crate::recording::Recorder>,
     summary_open: bool,
     pending_rename: bool,
     completion_pending: bool,
@@ -1414,6 +1428,8 @@ impl App {
             timeline_duration: None,
             player: None,
             output_txt: None,
+            input_device: settings.input_device.clone(),
+            recording: None,
             summary_open: false,
             pending_rename: false,
             completion_pending: false,
@@ -1652,6 +1668,7 @@ impl App {
             sms_mode: Some(self.sms_mode),
             num_speakers: self.num_speakers,
             language: self.language.clone(),
+            input_device: self.input_device.clone(),
             notifications: self.notifications,
             editing_tips: self.editing_tips,
             gpu_profiles: self.gpu_profiles.clone(),
@@ -4210,6 +4227,91 @@ impl App {
                         }
                     }
                 }
+                Task::none()
+            }
+            Message::StartRecording => {
+                if self.recording.is_some() {
+                    return Task::none();
+                }
+                let Some(dir) = self
+                    .output_dir
+                    .clone()
+                    .or_else(|| Self::config_dir().map(|dir| dir.join("recordings")))
+                else {
+                    self.toast =
+                        Some(("No folder to record into".to_string(), Instant::now()));
+                    return Task::none();
+                };
+                if let Err(error) = std::fs::create_dir_all(&dir) {
+                    self.toast = Some((
+                        format!("Could not create {}: {error}", dir.display()),
+                        Instant::now(),
+                    ));
+                    return Task::none();
+                }
+                let path = dir.join(crate::recording::default_name());
+                match crate::recording::Recorder::start(self.input_device.clone(), path) {
+                    Ok(recorder) => {
+                        self.recording = Some(recorder);
+                        self.toast =
+                            Some((format!("Recording to {}", dir.display()), Instant::now()));
+                    }
+                    Err(message) => {
+                        self.toast = Some((
+                            format!(
+                                "Could not record: {message}. Check the microphone in Settings."
+                            ),
+                            Instant::now(),
+                        ));
+                    }
+                }
+                Task::none()
+            }
+            Message::StopRecording => {
+                let Some(recorder) = self.recording.take() else {
+                    return Task::none();
+                };
+                match recorder.stop() {
+                    Ok((path, seconds)) => {
+                        let added = self.add_paths(vec![path]);
+                        let count = added.len();
+                        let task = self.added_tasks(added);
+                        if count == 0 {
+                            self.toast = Some((
+                                "The recording was already in the queue".to_string(),
+                                Instant::now(),
+                            ));
+                        } else {
+                            self.toast = Some((
+                                format!(
+                                    "Recorded {} \u{2014} added to the queue",
+                                    format_secs(seconds as f64)
+                                ),
+                                Instant::now(),
+                            ));
+                            // The chosen behaviour: a fresh recording starts
+                            // transcribing at once. A run already in flight
+                            // picks it up in the follow-up pass.
+                            if !matches!(self.status, Status::Running) {
+                                self.start();
+                            }
+                        }
+                        return task;
+                    }
+                    Err(message) => {
+                        self.toast =
+                            Some((format!("Recording failed: {message}"), Instant::now()));
+                    }
+                }
+                Task::none()
+            }
+            Message::InputDeviceChanged(name) => {
+                self.input_device = if name == SYSTEM_DEFAULT_DEVICE {
+                    None
+                } else {
+                    Some(name)
+                };
+                self.save_settings();
                 Task::none()
             }
             Message::AddFiles => Task::perform(
@@ -8397,6 +8499,40 @@ impl App {
             &scheme,
         );
 
+        let capturing = self.recording.is_some();
+        let record_button = self.tip(
+            action(
+                row![
+                    icon_colored(
+                        ICON_MIC,
+                        14.0,
+                        if capturing { scheme.on_accent } else { scheme.text },
+                    ),
+                    text(if capturing { "Stop" } else { "Record" }).wrapping(NO_WRAP),
+                ]
+                .spacing(4)
+                .align_y(iced::Alignment::Center),
+            )
+            .on_press(if capturing {
+                Message::StopRecording
+            } else {
+                Message::StartRecording
+            })
+            .style(move |theme, status| {
+                if capturing {
+                    color_button(scheme.danger, scheme.on_accent)(theme, status)
+                } else {
+                    pill_button_secondary(theme, status)
+                }
+            }),
+            if capturing {
+                "Stop recording"
+            } else {
+                "Record from the microphone"
+            },
+            &scheme,
+        );
+
         let folder_button: Element<Message> = if self.can(license::Feature::Batch) {
             self.tip(
                 action(icon(ICON_FOLDER_PLUS, 16.0))
@@ -8425,12 +8561,51 @@ impl App {
 
         let toolbar = row![
             add_button,
+            record_button,
             folder_button,
             horizontal_space(),
             clear_button,
         ]
         .spacing(theme::SPACE_SM)
         .align_y(iced::Alignment::Center);
+
+        let strip: Option<Element<'_, Message>> = self.recording.as_ref().map(|recorder| {
+            let level = recorder.take_level();
+            container(
+                row![
+                    icon_colored(ICON_MIC, 14.0, scheme.danger),
+                    text("Recording").size(theme::TEXT_SM).color(scheme.text),
+                    text(format_secs(recorder.elapsed() as f64))
+                        .size(theme::TEXT_XS)
+                        .color(scheme.muted),
+                    progress_bar(0.0..=1.0, level)
+                        .width(Length::Fill)
+                        .height(Length::Fixed(6.0))
+                        .style(move |_theme| progress_bar::Style {
+                            background: scheme.bar_track.into(),
+                            bar: scheme.danger.into(),
+                            border: iced::border::rounded(3.0),
+                        }),
+                    action_text("Stop")
+                        .on_press(Message::StopRecording)
+                        .style(color_button(scheme.danger, scheme.on_accent)),
+                ]
+                .spacing(theme::SPACE_SM)
+                .align_y(iced::Alignment::Center),
+            )
+            .width(Length::Fill)
+            .padding([4, 8])
+            .style(move |_theme| container::Style {
+                background: Some(scheme.field_bg.into()),
+                border: iced::border::Border {
+                    color: scheme.border,
+                    width: 1.0,
+                    radius: 6.0.into(),
+                },
+                ..container::Style::default()
+            })
+            .into()
+        });
 
         let body: Element<Message> = if has_queue {
             let mut rows = column![].spacing(4).width(Length::Fill);
@@ -8525,7 +8700,14 @@ impl App {
         .spacing(8)
         .align_y(iced::Alignment::Center);
 
-        let content = column![header, toolbar, body, horizontal_rule(1), controls,]
+        let mut content = column![header, toolbar];
+        if let Some(strip) = strip {
+            content = content.push(strip);
+        }
+        let content = content
+            .push(body)
+            .push(horizontal_rule(1))
+            .push(controls)
             .spacing(12)
             .height(Length::Fill);
 
@@ -11141,6 +11323,26 @@ impl App {
                 Message::TimestampsToggled(!timestamps_on),
             ),
         );
+        let mut inputs = vec![SYSTEM_DEFAULT_DEVICE.to_string()];
+        inputs.extend(crate::recording::input_devices());
+        let current_mic = self
+            .input_device
+            .clone()
+            .unwrap_or_else(|| SYSTEM_DEFAULT_DEVICE.to_string());
+        let microphone: Element<Message> = if inputs.len() <= 1 {
+            text("No input devices found")
+                .size(theme::TEXT_XS)
+                .color(scheme.muted)
+                .into()
+        } else {
+            pick_list(inputs, Some(current_mic), Message::InputDeviceChanged)
+                .style(pill_pick(scheme))
+                .menu_style(pick_menu_style(scheme))
+                .handle(caret_handle())
+                .width(Length::Fixed(180.0))
+                .into()
+        };
+
         let notifications_on = self.notifications;
         let notifications = settings_control(
             toggle_button(
@@ -11261,6 +11463,9 @@ impl App {
             body = body.push(settings_row("Follow playhead", follow, scheme));
             body = body.push(settings_divider(scheme));
         }
+        body = body.push(settings_section_label("Recording", scheme));
+        body = body.push(settings_row("Microphone", microphone, scheme));
+        body = body.push(settings_divider(scheme));
         body = body.push(settings_section_label("Notifications", scheme));
         body = body.push(settings_row(
             "Completion notifications",
@@ -18260,6 +18465,36 @@ mod tests {
         assert!(matches!(app.queue[0].status, ItemStatus::Failed(_)));
         assert!(!parked.exists());
         assert_eq!(app.transcribe_label(), "Transcribe");
+    }
+
+    #[test]
+    fn the_microphone_choice_is_remembered() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("mic-config");
+
+        let mut app = pro_app();
+        let _ = app.update(Message::InputDeviceChanged("USB Microphone".to_string()));
+        assert_eq!(app.input_device.as_deref(), Some("USB Microphone"));
+        assert_eq!(
+            App::load_settings().input_device.as_deref(),
+            Some("USB Microphone")
+        );
+
+        let _ = app.update(Message::InputDeviceChanged(
+            SYSTEM_DEFAULT_DEVICE.to_string(),
+        ));
+        assert_eq!(app.input_device, None);
+        assert_eq!(App::load_settings().input_device, None);
+    }
+
+    #[test]
+    fn stopping_without_a_recording_is_harmless() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("mic-idle");
+
+        let mut app = pro_app();
+        let _ = app.update(Message::StopRecording);
+        assert!(app.recording.is_none());
     }
 
     #[test]

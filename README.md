@@ -272,7 +272,11 @@ the Store does not resolve an add-on for an app that is not yet published.
 
 Run `hippo-transcribe` with no arguments. Add files/folders to the queue, or drag audio
 files and folders anywhere into the window, then choose a preset and speaker
-count and press Transcribe. The Help menu holds the appearance choices (Light,
+count and press Transcribe. **Record** in the queue toolbar captures from the
+microphone (48 kHz mono WAV, written beside your transcripts or to the save
+location), shows a level meter, and starts transcribing as soon as you stop;
+recording is available during a run and in the free tier. The microphone is
+chosen in Settings. The Help menu holds the appearance choices (Light,
 Dark, System; System follows the desktop and is the default) and the header
 theme button cycles them. Files added while a run is active join the queue and
 are processed in a follow-up pass automatically. The gear button (or `Ctrl+,`)

@@ -29,6 +29,9 @@ the network.
   the file finishes.
 - **Custom vocabulary** — the terms and replacements you enter, stored as
   `vocabulary.json` beside the settings. It holds only what you typed.
+- **Microphone recordings** — only when you press Record. Capture happens on
+  the machine and the WAV is written where your transcripts go; nothing is sent
+  anywhere.
 
 - **Entitlement** — a Pro purchase writes the tier and the last verified state to
   `license.json` beside the settings. It holds no audio, no transcript and no
