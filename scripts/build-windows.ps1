@@ -126,6 +126,16 @@ trap {
             }
             $extract += @("", "=== last 40 lines ===")
             $extract += (Get-Content -Path $buildLog -Tail 40 -ErrorAction SilentlyContinue)
+            # The merged log puts one stream before the other. Cargo's progress
+            # is stderr and libtest's results are stdout, so include both tails:
+            # a failing test's name lives only in the stdout tail.
+            foreach ($stream in @("out", "err")) {
+                $streamLog = Join-Path $repo "build-windows.$stream.log"
+                if (Test-Path $streamLog) {
+                    $extract += @("", "=== last 40 lines of build-windows.$stream.log ===")
+                    $extract += (Get-Content -Path $streamLog -Tail 40 -ErrorAction SilentlyContinue)
+                }
+            }
             Add-Content -Path $logPath -Value ($extract -join "`r`n") -Encoding UTF8
         }
 
@@ -264,15 +274,24 @@ function Invoke-Native {
     }
 
     if ($exitCode -ne 0) {
-        $tail = @(Get-Content -Path $log -Tail 60 -ErrorAction SilentlyContinue)
-        if ($tail.Count -gt 0) {
-            Write-Host ""
-            Write-Host "Last lines of ${log}:" -ForegroundColor Yellow
-            foreach ($line in $tail) {
-                Write-Host "    $line"
+        # Tail each captured stream separately. Cargo writes progress to stderr
+        # and libtest writes its results to stdout, so a failing test's name is
+        # only ever in the stdout tail while compiler errors are in the stderr
+        # tail. Tailing the merged log alone hides whichever stream was
+        # appended first.
+        foreach ($file in @($stdoutFile, $stderrFile)) {
+            if (Test-Path $file) {
+                $tail = @(Get-Content -Path $file -Tail 40 -ErrorAction SilentlyContinue)
+                if ($tail.Count -gt 0) {
+                    Write-Host ""
+                    Write-Host "Last lines of ${file}:" -ForegroundColor Yellow
+                    foreach ($line in $tail) {
+                        Write-Host "    $line"
+                    }
+                }
             }
-            Write-Host ""
         }
+        Write-Host ""
         throw "$commandLine failed with exit code $exitCode (full output in $log)"
     }
 }

@@ -24376,18 +24376,13 @@ mod tests {
             .unwrap()
             .contains("[00:05] SPEAKER 3: two"));
 
-        // Cycling a *different* line walks the same order the chip uses, so the
-        // new name has to be in it: 1 -> 2 -> 3.
+        // SPEAKER 2 owned only the edited line, so the edit removed it from the
+        // document and the cycle. The created name must still be in the order
+        // the chip and the swap action share: 1 -> 3.
         assert_eq!(
             app.speaker_order(),
-            vec![
-                "SPEAKER 1".to_string(),
-                "SPEAKER 2".to_string(),
-                "SPEAKER 3".to_string()
-            ]
+            vec!["SPEAKER 1".to_string(), "SPEAKER 3".to_string()]
         );
-        let _ = app.update(Message::FlipLineSpeaker(0));
-        assert_eq!(app.shown_lines()[0].speaker, "SPEAKER 2");
         let _ = app.update(Message::FlipLineSpeaker(0));
         assert_eq!(
             app.shown_lines()[0].speaker, "SPEAKER 3",
