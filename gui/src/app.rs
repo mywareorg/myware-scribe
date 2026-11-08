@@ -883,24 +883,10 @@ enum EtaPhase {
     Finishing,
 }
 
-impl EtaPhase {
-    fn label(self) -> &'static str {
-        match self {
-            Self::Preparing => "preparing",
-            Self::Transcribing => "transcribing",
-            Self::Diarizing => "diarizing",
-            Self::Writing => "writing",
-            Self::Finishing => "finishing",
-        }
-    }
-}
-
-/// What the readout says: which phase the run is in, and seconds left when that
-/// phase can honestly be estimated.
+/// What the readout says: seconds left when the phase can honestly be estimated.
 ///
 /// `remaining: None` is a real answer, not a failure: a phase that reports no
-/// rate gets its name and no digits, rather than a number made up from another
-/// phase's rate.
+/// rate gets no digits, rather than a number made up from another phase's rate.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct EtaView {
     phase: EtaPhase,
@@ -10044,14 +10030,11 @@ impl App {
         let Some(view) = self.eta_shown else {
             return elapsed;
         };
-        let phase = view.phase.label();
+        // The bar already names the stage. The readout keeps the two facts it
+        // alone carries: how long this run has taken and how much is left.
         match view.remaining.filter(|left| left.is_finite()) {
-            Some(left) => format!(
-                "{elapsed} \u{00b7} {phase} \u{00b7} ~{} left",
-                eta_bucket(left)
-            ),
-            // No rate for this phase: its name, and no number to be wrong.
-            None => format!("{elapsed} \u{00b7} {phase}\u{2026}"),
+            Some(left) => format!("{elapsed} \u{00b7} ~{} left", eta_bucket(left)),
+            None => elapsed,
         }
     }
 
@@ -27251,11 +27234,12 @@ mod tests {
         assert_eq!(view.phase, EtaPhase::Transcribing);
         assert_eq!(view.remaining, None, "a rate was invented");
 
-        // The readout names the phase instead of printing digits.
+        // Without a number the readout keeps the clock and invents nothing.
         app.eta_shown = Some(view);
         app.run_start = Some(Instant::now() - Duration::from_secs(42));
         let text = app.timer_text();
-        assert!(text.contains("transcribing"), "{text}");
+        assert!(text.starts_with("0:4"), "{text}");
+        assert!(!text.contains("transcribing"), "{text}");
         assert!(!text.contains("left"), "{text}");
         assert!(!text.contains("finishing"), "{text}");
     }
@@ -27279,11 +27263,11 @@ mod tests {
         let eta = view.remaining.expect("number");
         assert!((eta - 150.0).abs() <= 1.0, "{eta}");
 
-        // And it reaches the label with the phase in front of it.
+        // And it reaches the label without repeating the stage named in the bar.
         app.eta_shown = Some(view);
         app.run_start = Some(Instant::now() - Duration::from_secs(42));
         let text = app.timer_text();
-        assert!(text.contains("transcribing"), "{text}");
+        assert!(!text.contains("transcribing"), "{text}");
         assert!(text.contains("left"), "{text}");
     }
 
@@ -27421,7 +27405,7 @@ mod tests {
             remaining: Some(4.0),
         });
         let text = app.timer_text();
-        assert!(text.contains("writing"), "{text}");
+        assert!(!text.contains("writing"), "{text}");
         assert!(text.contains("5 s left"), "{text}");
         assert!(!text.contains("finishing"), "{text}");
     }
@@ -27440,7 +27424,7 @@ mod tests {
         assert_eq!(view.remaining, None);
         app.eta_shown = Some(view);
         let text = app.timer_text();
-        assert!(text.contains("finishing"), "{text}");
+        assert!(!text.contains("finishing"), "{text}");
         assert!(!text.contains("left"), "{text}");
     }
 
@@ -27477,7 +27461,7 @@ mod tests {
         app.eta_shown = Some(view);
         app.run_start = Some(Instant::now() - Duration::from_secs(42));
         let text = app.timer_text();
-        assert!(text.contains("diarizing"), "{text}");
+        assert!(!text.contains("diarizing"), "{text}");
         assert!(!text.contains("left"), "{text}");
     }
 
