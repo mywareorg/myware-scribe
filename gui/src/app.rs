@@ -15131,7 +15131,11 @@ impl App {
     /// Waveform/speaker timeline strip. The speaker band comes from the
     /// transcript's own turns, so it is drawn as soon as the duration is known;
     /// the waveform fills in when the probe (or its cache) arrives.
-    fn timeline_element(&self, scheme: &Scheme) -> Element<'_, Message> {
+    fn timeline_element<'a>(
+        &'a self,
+        scheme: &Scheme,
+        toggle: Option<Element<'a, Message>>,
+    ) -> Element<'a, Message> {
         let duration = self.shown_duration().unwrap_or(0.0);
         let enabled = duration > 0.0;
         let locked = !self.can(license::Feature::Playback);
@@ -15162,20 +15166,29 @@ impl App {
             enabled,
             zoom: self.waveform_zoom,
         };
-        let strip = canvas(program)
+        let strip: Element<'_, Message> = canvas(program)
             .width(Length::Fill)
-            .height(Length::Fixed(TIMELINE_HEIGHT));
-        let mut column = column![].spacing(4).width(Length::Fill);
-        if locked {
+            .height(Length::Fixed(TIMELINE_HEIGHT))
+            .into();
+        let waveform = if locked {
             let click = mouse_area(strip)
                 .interaction(mouse::Interaction::Pointer)
                 .on_press(Message::LockedPlayer);
-            column = column.push(self.tip(click, "Player is a Pro feature", scheme));
+            self.tip(click, "Player is a Pro feature", scheme)
         } else if enabled {
-            column = column.push(self.tip(strip, "Click/drag to seek, scroll to zoom", scheme));
-            column = column.push(self.timeline_legend(scheme));
+            self.tip(strip, "Click/drag to seek, scroll to zoom", scheme)
         } else {
-            column = column.push(strip);
+            strip
+        };
+        let mut waveform_row = row![container(waveform).width(Length::Fill)]
+            .width(Length::Fill)
+            .align_y(iced::Alignment::Center);
+        if let Some(toggle) = toggle {
+            waveform_row = waveform_row.push(toggle).spacing(theme::SPACE_SM);
+        }
+        let mut column = column![waveform_row].spacing(4).width(Length::Fill);
+        if enabled && !locked {
+            column = column.push(self.timeline_legend(scheme));
         }
         column.into()
     }
@@ -17556,11 +17569,10 @@ impl App {
         // which stacked one white surface on another; it is a sibling card above
         // the player instead.
         //
-        // Expanded, the card is a `Player` title matching the queue card's title
-        // (12 px padding, 12 px down to the controls), then the waveform, then
-        // the transport row. Collapsed, the title goes, the waveform becomes the
-        // thin scrubber above the same transport row, and the caret moves into
-        // that row so the card is two lines rather than three.
+        // Expanded, the waveform carries the disclosure caret on its right, then
+        // the transport row. Collapsed, the waveform becomes the thin scrubber
+        // above the same transport row, and the caret ends that row so the card
+        // is two lines rather than three.
         let collapse = if self.player_collapsed {
             ICON_CARET_UP
         } else {
@@ -17582,15 +17594,9 @@ impl App {
             &scheme,
         );
 
-        let mut player_body = column![].spacing(8).width(Length::Fill);
-        if !self.player_collapsed {
-            player_body = player_body.push(self.timeline_element(&scheme));
-        }
-        player_body = player_body.push(self.player_element(&scheme));
-
         let player_box = if self.player_collapsed {
-            // Collapsed: no title. The scrubber takes the waveform's place above
-            // the transport row, keeping the expanded order, and the caret ends
+            // Collapsed: the scrubber takes the waveform's place above the
+            // transport row, keeping the expanded order, and the caret ends
             // that row so the card is two lines rather than three.
             container(
                 column![
@@ -17603,23 +17609,13 @@ impl App {
                 .width(Length::Fill),
             )
         } else {
-            let title_row = row![
-                text("Player")
-                    .size(theme::TEXT_MD)
-                    .font(Font {
-                        weight: font::Weight::Bold,
-                        ..Font::DEFAULT
-                    })
-                    .wrapping(NO_WRAP),
-                horizontal_space(),
-                caret,
-            ]
-            .spacing(theme::SPACE_SM)
-            .align_y(iced::Alignment::Center);
             container(
-                column![title_row, player_body]
-                    .spacing(theme::SPACE_LG)
-                    .width(Length::Fill),
+                column![
+                    self.timeline_element(&scheme, Some(caret)),
+                    self.player_element(&scheme),
+                ]
+                .spacing(theme::SPACE_LG)
+                .width(Length::Fill),
             )
         };
 
