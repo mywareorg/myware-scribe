@@ -19532,12 +19532,6 @@ fn sms_bubble(
     } else {
         ink
     };
-    let dark = theme::is_dark_scheme(scheme);
-    let band = theme::mix(
-        background,
-        if dark { Color::BLACK } else { Color::WHITE },
-        if dark { 0.40 } else { 0.45 },
-    );
     let border = if active {
         iced::border::Border {
             color: ink,
@@ -19590,7 +19584,7 @@ fn sms_bubble(
     // passes the point on, which also puts the caret under the pointer.
     let karaoke_words = match karaoke {
         Some((words, at, playing)) if query.is_empty() => {
-            karaoke_spans(content, words, at, ink, band, size, playing)
+            karaoke_spans(content, words, at, ink, size, playing)
         }
         _ => None,
     };
@@ -19777,10 +19771,6 @@ fn line_element(
     } else {
         scheme.ink
     };
-
-    // The colour actually painted behind this row. The karaoke band is derived
-    // from it so it reads on the accent, on a low-confidence dull, and on a
-    // search tint alike.
     let background = search_tint.unwrap_or_else(|| {
         if unsure {
             theme::mix(accent, scheme.panel_bg, 0.74)
@@ -19788,12 +19778,6 @@ fn line_element(
             accent
         }
     });
-    let dark = theme::is_dark_scheme(scheme);
-    let band = theme::mix(
-        background,
-        if dark { Color::BLACK } else { Color::WHITE },
-        if dark { 0.40 } else { 0.45 },
-    );
 
     let speaker = line.speaker.clone();
     let rest = line_text(line);
@@ -19822,7 +19806,7 @@ fn line_element(
     // editor on a double-click can put the caret under the pointer.
     let words = match karaoke {
         Some((words, at, playing)) if query.is_empty() => {
-            karaoke_spans(&rest, words, at, ink, band, size, playing)
+            karaoke_spans(&rest, words, at, ink, size, playing)
         }
         _ => None,
     };
@@ -21140,30 +21124,25 @@ fn search_match_ranges(
     matches
 }
 
-/// Highlight the words already spoken at `at`.
+/// Mark the word being spoken at `at`.
 ///
-/// A band behind the words, not a colour change: the row's own fill comes from
-/// the same speaker accent, so tinting the text made it disappear. All glyphs
-/// keep `ink`; the current word is underlined while audio is playing. Returns
-/// `None` when the stored words do not line up with the rendered text, so the
-/// caller falls back to plain spans.
+/// Karaoke is deliberately quiet: every glyph keeps `ink` and the row's own
+/// background, and only the current word is underlined while audio is playing.
+/// Returns `None` when the stored words do not line up with the rendered text,
+/// so the caller falls back to plain spans.
 fn karaoke_spans(
     raw: &str,
     words: &[Word],
     at: f32,
     ink: Color,
-    band: Color,
     size: f32,
     playing: bool,
 ) -> Option<Vec<text::Span<'static, Message>>> {
     let runs = karaoke_runs(raw, words, at, playing)?;
     Some(
         runs.into_iter()
-            .map(|(text, spoken, current)| {
+            .map(|(text, _spoken, current)| {
                 let mut span = text::Span::new(text).size(size).color(ink);
-                if spoken {
-                    span = span.background(band);
-                }
                 if current {
                     span = span.underline(true);
                 }
@@ -25408,7 +25387,7 @@ mod tests {
     }
 
     #[test]
-    fn karaoke_bands_the_spoken_prefix_without_recolouring_text() {
+    fn karaoke_underlines_only_the_current_word() {
         let words = vec![
             Word {
                 start: 0.0,
@@ -25436,7 +25415,6 @@ mod tests {
             &words,
             0.6,
             Color::BLACK,
-            Color::WHITE,
             14.0,
             true,
         )
