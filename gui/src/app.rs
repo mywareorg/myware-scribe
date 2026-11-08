@@ -109,6 +109,11 @@ const FOLLOW_JUMP_ROWS: f32 = 10.0;
 /// the pane trailing the pointer.
 const FOLLOW_SEEK_QUIET: Duration = Duration::from_millis(200);
 
+/// How long the countdown runs between Record and capture. The stream is open
+/// for the whole of it, so the meter is live and the capture warm-up has
+/// finished before the first sample is written.
+const COUNTDOWN: Duration = Duration::from_millis(1_500);
+
 /// Logical 4:3 sizing for the window (default) and floors.
 // The transcript header and bottom action row need this much horizontal room
 // for the fixed-width Time, Reveal and Rename buttons to keep their size.
@@ -742,6 +747,33 @@ enum Status {
     Error(String),
 }
 
+/// Where the recording workflow is. The recorder owns the WAV while the
+/// session exists; `Preparing`/`Transcribing` continue after the file is
+/// finished and the item is in the history.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RecordPhase {
+    Countdown,
+    Capturing,
+    Preparing,
+    #[allow(dead_code)] // R1b2 moves the session here once transcription starts.
+    Transcribing,
+}
+
+/// The one recording workflow, if any. A session holds the workflow lock: it
+/// is both the reason to keep ticking and the thing that disables navigation
+/// and a second run.
+struct RecordSession {
+    phase: RecordPhase,
+    /// Present until capture stops; `None` while preparing or transcribing.
+    recorder: Option<crate::recording::Recorder>,
+    /// When the countdown ends, while `phase == Countdown`.
+    countdown_ends: Option<Instant>,
+    /// The history item the capture was stored as, once it exists.
+    item: Option<usize>,
+    /// Audio seconds captured so far, refreshed on `Tick`.
+    captured: f32,
+}
+
 /// The phase a run is in, as the readout names it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum EtaPhase {
@@ -1252,8 +1284,9 @@ pub struct App {
     output_txt: Option<PathBuf>,
     /// Microphone chosen in Settings; `None` uses the system default.
     input_device: Option<String>,
-    /// Capture in progress, if any.
-    recording: Option<crate::recording::Recorder>,
+    /// The recording workflow, if any. While it exists it holds the workflow
+    /// lock; see [`App::record_lock`].
+    record: Option<RecordSession>,
     /// Lift quiet recordings before transcription.
     normalize: bool,
     /// Highlight words as playback reaches them.
@@ -1582,7 +1615,7 @@ impl App {
             input_device: settings.input_device.clone(),
             normalize: settings.normalize,
             karaoke: settings.karaoke,
-            recording: None,
+            record: None,
             briefing: None,
             karaoke_line: None,
             karaoke_source: None,
@@ -2165,6 +2198,37 @@ impl App {
         }
         self.refresh_recent_presence();
         self.save_queue();
+    }
+
+    /// Store a finished capture as a history item and return its index. The
+    /// item is ready for transcription but has no transcript yet; a repeated
+    /// path keeps the user's favorite through [`merge_recent_entry`].
+    fn upsert_recording_item(&mut self, path: PathBuf, seconds: f32) -> usize {
+        let index = self.merge_recent(RecentEntry {
+            audio: Some(path),
+            transcript: None,
+            finished_at: unix_secs(),
+            duration: Some(seconds as f64),
+            speakers: Some(1),
+            recording: true,
+            state: ItemState::Ready,
+            ..Default::default()
+        });
+        self.save_queue();
+        index
+    }
+
+    /// R1b2: transcribe the recording the session just stored.
+    ///
+    /// R1b1 leaves this seam empty on purpose: the item exists, the session is
+    /// in `Preparing`, and nothing has been sent to the backend. The next phase
+    /// must use `recording_preset()`, `recording_models_ready()` and the
+    /// ASR-only (`--single-speaker`) path, then move the session to
+    /// `Transcribing` and fill the item through `mark_item_ready` /
+    /// `mark_item_failed`.
+    fn start_recording_transcription(&mut self) -> Task<Message> {
+        // TODO(R1b2): start the ASR-only run for the session item.
+        Task::none()
     }
 
     /// Drop a recent entry and persist the shortened history. If the pane is
@@ -3367,7 +3431,7 @@ impl App {
     /// something is actually animating or draining a background queue.
     fn needs_ticks(&self) -> bool {
         matches!(self.status, Status::Running)
-            || self.recording.is_some()
+            || self.record.is_some()
             || self.player.as_ref().is_some_and(Player::is_playing)
             || self.toast.is_some()
             || self.model_download.is_some()
@@ -3375,6 +3439,68 @@ impl App {
             || self.window_dirty
             || self.feature_deck_visible()
             || self.completion_pending
+    }
+
+    /// True while a recording workflow owns the app: nothing that would change
+    /// the pane or start another run may pass. See
+    /// [`Self::record_message_allowed`] for the exceptions.
+    fn record_lock(&self) -> bool {
+        self.record.is_some()
+    }
+
+    /// Record is unavailable while a batch is transcribing, and while a
+    /// recording workflow is already under way.
+    fn record_blocked(&self) -> bool {
+        matches!(self.status, Status::Running) || self.record_lock()
+    }
+
+    /// Starting a transcription while a recording workflow is active would
+    /// compete for the microphone and the pane, so it waits for the workflow.
+    fn transcribe_blocked(&self) -> bool {
+        self.record.is_some()
+    }
+
+    /// Recordings use their own preset: Speed when the license allows it,
+    /// otherwise Balanced. The user's batch preset is deliberately untouched.
+    #[allow(dead_code)] // R1b2 starts the transcription run.
+    fn recording_preset(&self) -> Preset {
+        if self.can(license::Feature::SpeedPreset) {
+            Preset::Speed
+        } else {
+            Preset::Balanced
+        }
+    }
+
+    /// Recordings are ASR-only, so only the preset's models are required; no
+    /// diarization models are downloaded or checked.
+    #[allow(dead_code)] // R1b2 starts the transcription run.
+    fn recording_models_ready(&self) -> bool {
+        download::ready_for(self.recording_preset().arg(), false)
+    }
+
+    /// Messages that may run while the recording lock is held.
+    ///
+    /// Everything else (adding files, changing tabs, opening history, menus,
+    /// settings, export, playback and a second run) is a navigation or edit
+    /// action that would lose the workflow's state, so [`Self::update`] drops
+    /// it at the door. Model-download progress is drained on `Tick` and needs
+    /// no entry of its own.
+    fn record_message_allowed(&self, message: &Message) -> bool {
+        match message {
+            Message::Tick
+            | Message::Frame(_)
+            | Message::StopRecording
+            | Message::Cancel
+            | Message::WindowEvent(_)
+            | Message::Noop => true,
+            // The workflow owns the row being removed; anything else is a
+            // navigation attempt and stays blocked.
+            Message::RemoveRecent(index) => self
+                .record
+                .as_ref()
+                .is_some_and(|session| session.item == Some(*index)),
+            _ => false,
+        }
     }
 
     pub fn subscription(&self) -> Subscription<Message> {
@@ -3496,6 +3622,11 @@ impl App {
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
+        // A recording workflow owns the pane. Drop anything that is not part
+        // of it here, in one place, rather than guarding every handler.
+        if self.record_lock() && !self.record_message_allowed(&message) {
+            return Task::none();
+        }
         let task = self.dispatch(message);
         // Karaoke must follow a seek, a pause or a line change, not only the
         // tick, so it is refreshed at the message boundary.
@@ -3701,6 +3832,7 @@ impl App {
             }
             Message::OpenRunSetup => {
                 if !matches!(self.status, Status::Running)
+                    && !self.transcribe_blocked()
                     && (!self.queue.is_empty() || self.retranscribe_target().is_some())
                 {
                     self.header_menu = None;
@@ -3714,6 +3846,9 @@ impl App {
             }
             Message::ConfirmRunSetup => {
                 self.run_setup_open = false;
+                if self.transcribe_blocked() {
+                    return Task::none();
+                }
                 self.start();
                 Task::none()
             }
@@ -4743,7 +4878,13 @@ impl App {
                 Task::none()
             }
             Message::StartRecording => {
-                if self.recording.is_some() {
+                if self.record_blocked() {
+                    let reason = if self.record_lock() {
+                        "A recording is already in progress"
+                    } else {
+                        "A transcription run is in progress"
+                    };
+                    self.toast = Some((reason.to_string(), Instant::now()));
                     return Task::none();
                 }
                 let Some(dir) = self
@@ -4762,12 +4903,24 @@ impl App {
                     ));
                     return Task::none();
                 }
+                // A take starts on a clean live pane, not on whatever was being
+                // read. The live buffers stay: the session only resets the
+                // selection and playback.
+                self.return_to_live();
                 let path = dir.join(crate::recording::default_name());
                 match crate::recording::Recorder::start(self.input_device.clone(), path) {
                     Ok(recorder) => {
-                        self.recording = Some(recorder);
-                        self.toast =
-                            Some((format!("Recording to {}", dir.display()), Instant::now()));
+                        self.record = Some(RecordSession {
+                            phase: RecordPhase::Countdown,
+                            recorder: Some(recorder),
+                            countdown_ends: Some(Instant::now() + COUNTDOWN),
+                            item: None,
+                            captured: 0.0,
+                        });
+                        self.toast = Some((
+                            "Recording starts in a moment".to_string(),
+                            Instant::now(),
+                        ));
                     }
                     Err(message) => {
                         self.toast = Some((
@@ -4781,42 +4934,57 @@ impl App {
                 Task::none()
             }
             Message::StopRecording => {
-                let Some(recorder) = self.recording.take() else {
+                let Some(mut session) = self.record.take() else {
                     return Task::none();
                 };
-                match recorder.stop() {
-                    Ok((path, seconds)) => {
-                        let added = self.add_paths(vec![path]);
-                        let count = added.len();
-                        let task = self.added_tasks(added);
-                        if count == 0 {
-                            self.toast = Some((
-                                "The recording was already in the queue".to_string(),
-                                Instant::now(),
-                            ));
-                        } else {
-                            self.toast = Some((
-                                format!(
-                                    "Recorded {} \u{2014} added to the queue",
-                                    format_secs(seconds as f64)
-                                ),
-                                Instant::now(),
-                            ));
-                            // The chosen behaviour: a fresh recording starts
-                            // transcribing at once. A run already in flight
-                            // picks it up in the follow-up pass.
-                            if !matches!(self.status, Status::Running) {
-                                self.start();
+                match session.phase {
+                    RecordPhase::Countdown => {
+                        // Nothing was armed: discard the partial WAV and leave
+                        // no history row.
+                        if let Some(recorder) = session.recorder.take() {
+                            recorder.cancel();
+                        }
+                        self.status = Status::Idle;
+                        Task::none()
+                    }
+                    RecordPhase::Capturing => {
+                        let Some(recorder) = session.recorder.take() else {
+                            self.status = Status::Idle;
+                            return Task::none();
+                        };
+                        match recorder.stop() {
+                            Ok((path, seconds)) => {
+                                let index = self.upsert_recording_item(path, seconds);
+                                session.item = Some(index);
+                                session.captured = seconds;
+                                session.phase = RecordPhase::Preparing;
+                                self.record = Some(session);
+                                self.toast = Some((
+                                    format!(
+                                        "Recorded {} \u{2014} preparing the transcript",
+                                        format_secs(seconds as f64)
+                                    ),
+                                    Instant::now(),
+                                ));
+                                self.start_recording_transcription()
+                            }
+                            Err(message) => {
+                                self.status = Status::Idle;
+                                self.toast = Some((
+                                    format!("Recording failed: {message}"),
+                                    Instant::now(),
+                                ));
+                                Task::none()
                             }
                         }
-                        return task;
                     }
-                    Err(message) => {
-                        self.toast =
-                            Some((format!("Recording failed: {message}"), Instant::now()));
+                    // The capture is already in the history; these phases are
+                    // stopped through the workflow's own control, not Record.
+                    RecordPhase::Preparing | RecordPhase::Transcribing => {
+                        self.record = Some(session);
+                        Task::none()
                     }
                 }
-                Task::none()
             }
             Message::InputDeviceChanged(name) => {
                 self.input_device = if name == SYSTEM_DEFAULT_DEVICE {
@@ -5072,6 +5240,16 @@ impl App {
                 self.open_recent(index, None)
             }
             Message::RemoveRecent(index) => {
+                // Removing the workflow's own item cancels the workflow before
+                // the row disappears; no other removal is allowed while it is
+                // active (see `record_message_allowed`).
+                if self
+                    .record
+                    .as_ref()
+                    .is_some_and(|session| session.item == Some(index))
+                {
+                    self.cancel_recording();
+                }
                 self.remove_recent(index);
                 Task::none()
             }
@@ -5506,7 +5684,11 @@ impl App {
                 Task::none()
             }
             Message::Cancel => {
-                self.cancel();
+                if self.record.is_some() {
+                    self.cancel_recording();
+                } else {
+                    self.cancel();
+                }
                 Task::none()
             }
             Message::Frame(now) => {
@@ -5562,6 +5744,35 @@ impl App {
                 Task::batch(tasks)
             }
             Message::Tick => {
+                // Drive the recording phase machine before anything else, so
+                // the countdown ends and capture starts on the first tick past
+                // its deadline rather than after the view work.
+                if let Some(session) = &mut self.record {
+                    match session.phase {
+                        RecordPhase::Countdown => {
+                            let due = session
+                                .countdown_ends
+                                .is_some_and(|deadline| Instant::now() >= deadline);
+                            if due {
+                                if let Some(recorder) = session.recorder.as_mut() {
+                                    recorder.begin_capture();
+                                }
+                                session.phase = RecordPhase::Capturing;
+                                session.countdown_ends = None;
+                            }
+                        }
+                        RecordPhase::Capturing => {
+                            let captured = session
+                                .recorder
+                                .as_ref()
+                                .map(crate::recording::Recorder::elapsed);
+                            if let Some(seconds) = captured {
+                                session.captured = seconds;
+                            }
+                        }
+                        RecordPhase::Preparing | RecordPhase::Transcribing => {}
+                    }
+                }
                 self.poll_briefing();
                 if self.feature_deck_auto_advance() {
                     if self.feature_slide_at.elapsed() >= Duration::from_secs(7) {
@@ -6330,6 +6541,9 @@ impl App {
     }
 
     fn start(&mut self) {
+        if self.transcribe_blocked() {
+            return;
+        }
         // Transcribing is queue work, including a history entry re-run.
         self.pane_tab = PaneTab::Queue;
         self.recent_hover = None;
@@ -6609,6 +6823,20 @@ impl App {
                     .is_some_and(|(a, b)| a == b)
                 || item.path.file_name() == path.file_name()
         })
+    }
+
+    /// Abandon the recording workflow. A capture still in progress is stopped
+    /// and its WAV removed; a capture already stored as a history item stays
+    /// there. R1b2 kills the preparation/transcription run from here.
+    fn cancel_recording(&mut self) {
+        let Some(session) = self.record.take() else {
+            return;
+        };
+        if let Some(recorder) = session.recorder {
+            recorder.cancel();
+        }
+        // TODO(R1b2): kill the transcription run for this session's item.
+        self.status = Status::Idle;
     }
 
     fn cancel(&mut self) {
@@ -9395,7 +9623,7 @@ impl App {
             &scheme,
         );
 
-        let capturing = self.recording.is_some();
+        let capturing = self.record.is_some();
         let record_button = self.tip(
             action(
                 row![
@@ -9564,11 +9792,22 @@ impl App {
     /// recording is never hidden by switching to Transcripts.
     fn recording_strip(&self, scheme: &Scheme) -> Option<Element<'_, Message>> {
         let scheme = *scheme;
-        let recorder = self.recording.as_ref()?;
+        let session = self.record.as_ref()?;
+        let recorder = session.recorder.as_ref()?;
         let reading = recorder.meter();
         // Normalizing against the room hides overload, so the strip says so in
         // words as well as changing the fill.
         let clipping = reading.clipping;
+        let label = match session.phase {
+            RecordPhase::Countdown => "Starting",
+            _ => {
+                if clipping {
+                    "Clipping"
+                } else {
+                    "Recording"
+                }
+            }
+        };
         let meter = canvas(RecordingMeter {
             level: reading.level,
             peak: reading.peak,
@@ -9593,10 +9832,10 @@ impl App {
             container(
                 row![
                     icon_colored(ICON_MIC, 14.0, scheme.danger),
-                    text(if clipping { "Clipping" } else { "Recording" })
+                    text(label)
                         .size(theme::TEXT_SM)
                         .color(if clipping { scheme.danger } else { scheme.text }),
-                    text(format_secs(recorder.elapsed() as f64))
+                    text(format_secs(session.captured as f64))
                         .size(theme::TEXT_XS)
                         .color(scheme.muted),
                     meter,
@@ -21129,7 +21368,175 @@ mod tests {
 
         let mut app = pro_app();
         let _ = app.update(Message::StopRecording);
-        assert!(app.recording.is_none());
+        assert!(app.record.is_none());
+    }
+
+    fn countdown_session() -> RecordSession {
+        RecordSession {
+            phase: RecordPhase::Countdown,
+            recorder: None,
+            countdown_ends: Some(Instant::now() + COUNTDOWN),
+            item: None,
+            captured: 0.0,
+        }
+    }
+
+    fn queue_item(path: PathBuf) -> QueueItem {
+        QueueItem {
+            path: path.clone(),
+            audio: Some(path),
+            status: ItemStatus::Pending,
+            duration: Some(1.0),
+            transcript: None,
+        }
+    }
+
+    #[test]
+    fn record_blocked_while_a_batch_runs() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("record-batch-lock");
+
+        let mut app = pro_app();
+        app.status = Status::Running;
+        assert!(app.record_blocked());
+        let _ = app.update(Message::StartRecording);
+        assert!(
+            app.record.is_none(),
+            "Record must refuse while a batch is transcribing"
+        );
+    }
+
+    #[test]
+    fn transcribe_blocked_during_a_recording_session() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("transcribe-record-lock");
+
+        let mut app = pro_app();
+        app.queue.push(queue_item(PathBuf::from("/media/talk.mp3")));
+        app.record = Some(countdown_session());
+        assert!(app.transcribe_blocked());
+
+        let _ = app.update(Message::OpenRunSetup);
+        assert!(!app.run_setup_open, "run setup opened behind a recording");
+        app.start();
+        assert!(
+            !matches!(app.status, Status::Running),
+            "a transcription started behind a recording"
+        );
+    }
+
+    #[test]
+    fn lock_blocks_navigation_messages() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("record-navigation-lock");
+
+        let mut app = pro_app();
+        app.recent.push(RecentEntry {
+            audio: Some(PathBuf::from("/media/old.wav")),
+            finished_at: 1,
+            ..Default::default()
+        });
+        app.queue.push(queue_item(PathBuf::from("/media/talk.mp3")));
+        app.record = Some(countdown_session());
+
+        let _ = app.update(Message::SelectTab(PaneTab::Transcripts));
+        assert_eq!(app.pane_tab, PaneTab::Queue);
+
+        let _ = app.update(Message::OpenRecent(0));
+        assert!(app.selected_recent.is_none());
+
+        let _ = app.update(Message::OpenRunSetup);
+        assert!(!app.run_setup_open);
+
+        let _ = app.update(Message::AddFiles);
+        let _ = app.update(Message::FilesPicked(Some(vec![PathBuf::from(
+            "/media/added.mp3",
+        )])));
+        assert_eq!(app.queue.len(), 1, "an add slipped through the lock");
+
+        // Only the session's own item may be removed, and it does not exist
+        // during the countdown.
+        let _ = app.update(Message::RemoveRecent(0));
+        assert_eq!(app.recent.len(), 1);
+
+        // Allowed messages still run.
+        let _ = app.update(Message::Tick);
+        assert!(app.record.is_some());
+    }
+
+    #[test]
+    fn stop_during_countdown_leaves_no_item() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("record-stop-countdown");
+
+        let mut app = pro_app();
+        app.record = Some(countdown_session());
+        let _ = app.update(Message::StopRecording);
+
+        assert!(app.record.is_none());
+        assert!(app.recent.is_empty(), "the countdown created an item");
+        assert!(matches!(app.status, Status::Idle));
+    }
+
+    #[test]
+    fn stop_after_capture_creates_a_recording_item() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("record-stop-capture");
+        let dir = temp_dir("record-stop-capture-media");
+        let path = dir.join("take.wav");
+        let mut wav = crate::recording::WavWriter::create(&path, 48_000).unwrap();
+        wav.write(&[0i16; 480]).unwrap();
+        wav.finish().unwrap();
+
+        let mut app = pro_app();
+        app.record = Some(RecordSession {
+            phase: RecordPhase::Capturing,
+            recorder: Some(crate::recording::test_recorder(path.clone(), Some(2.0))),
+            countdown_ends: None,
+            item: None,
+            captured: 2.0,
+        });
+
+        let _ = app.update(Message::StopRecording);
+
+        let session = app.record.as_ref().expect("a preparing session");
+        assert_eq!(session.phase, RecordPhase::Preparing);
+        let index = session.item.expect("the capture's item");
+        let entry = &app.recent[index];
+        assert!(entry.recording);
+        assert_eq!(entry.state, ItemState::Ready);
+        assert_eq!(entry.speakers, Some(1));
+        assert!(entry.transcript.is_none());
+        assert_eq!(entry.audio.as_deref(), Some(path.as_path()));
+        assert!(entry.duration.unwrap() >= 1.9);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_countdown_arms_capture_on_the_first_tick_past_its_deadline() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("record-countdown-tick");
+        let dir = temp_dir("record-countdown-tick-media");
+        let path = dir.join("take.wav");
+        std::fs::write(&path, b"placeholder").unwrap();
+
+        let mut app = pro_app();
+        app.record = Some(RecordSession {
+            phase: RecordPhase::Countdown,
+            recorder: Some(crate::recording::test_recorder(path, None)),
+            countdown_ends: Some(Instant::now() - Duration::from_millis(1)),
+            item: None,
+            captured: 0.0,
+        });
+
+        let _ = app.update(Message::Tick);
+
+        let session = app.record.as_ref().unwrap();
+        assert_eq!(session.phase, RecordPhase::Capturing);
+        assert!(session.countdown_ends.is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

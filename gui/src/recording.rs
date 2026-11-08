@@ -30,10 +30,18 @@ pub const TARGET_RATE: u32 = 48_000;
 const CHANNEL_CHUNKS: usize = 256;
 
 /// A recording in progress.
+///
+/// The stream opens as soon as [`Recorder::start`] returns, but nothing is
+/// written until [`Recorder::begin_capture`] is called: the countdown before a
+/// recording runs on the live meter, while the writer drops chunks. Elapsed
+/// time and the final duration are measured from that same moment.
 pub struct Recorder {
     stop: Sender<()>,
     meter: Arc<MeterShared>,
-    started: Instant,
+    /// True once [`Recorder::begin_capture`] has armed the writer.
+    capture: Arc<AtomicBool>,
+    /// When capture was armed; `None` until then.
+    capture_started: Option<Instant>,
     path: PathBuf,
     worker: Option<JoinHandle<Result<(), String>>>,
 }
@@ -92,18 +100,28 @@ impl Recorder {
         let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<(), String>>();
         let (stop_tx, stop_rx) = std::sync::mpsc::channel::<()>();
         let meter = Arc::new(MeterShared::default());
+        let capture_flag = Arc::new(AtomicBool::new(false));
 
         let worker_meter = meter.clone();
+        let worker_capture = capture_flag.clone();
         let worker_path = path.clone();
         let worker = std::thread::spawn(move || {
-            capture(device_name, worker_path, stop_rx, worker_meter, ready_tx)
+            capture(
+                device_name,
+                worker_path,
+                stop_rx,
+                worker_meter,
+                worker_capture,
+                ready_tx,
+            )
         });
 
         match ready_rx.recv_timeout(Duration::from_secs(10)) {
             Ok(Ok(())) => Ok(Self {
                 stop: stop_tx,
                 meter,
-                started: Instant::now(),
+                capture: capture_flag,
+                capture_started: None,
                 path,
                 worker: Some(worker),
             }),
@@ -119,8 +137,20 @@ impl Recorder {
         }
     }
 
+    /// Arm the writer. Chunks before this are discarded, so nothing from the
+    /// countdown (or the capture stream's warm-up) reaches the WAV. Idempotent.
+    pub fn begin_capture(&mut self) {
+        if self.capture_started.is_none() {
+            self.capture_started = Some(Instant::now());
+            self.capture.store(true, Ordering::SeqCst);
+        }
+    }
+
+    /// Seconds since capture was armed; zero while still counting down.
     pub fn elapsed(&self) -> f32 {
-        self.started.elapsed().as_secs_f32()
+        self.capture_started
+            .map(|started| started.elapsed().as_secs_f32())
+            .unwrap_or(0.0)
     }
 
     /// The latest meter snapshot. Reading it does not reset the meter: the
@@ -130,6 +160,9 @@ impl Recorder {
     }
 
     /// Stop capture, finalize the WAV, and return its path and duration.
+    ///
+    /// A recorder stopped before capture began reports zero seconds rather than
+    /// the time the stream was open.
     pub fn stop(mut self) -> Result<(PathBuf, f32), String> {
         let _ = self.stop.send(());
         if let Some(worker) = self.worker.take() {
@@ -139,11 +172,41 @@ impl Recorder {
                 Err(_) => return Err("the recorder stopped unexpectedly".to_string()),
             }
         }
-        let seconds = self.started.elapsed().as_secs_f32();
+        let seconds = self
+            .capture_started
+            .map(|started| started.elapsed().as_secs_f32())
+            .unwrap_or(0.0);
         if !self.path.is_file() {
             return Err("the recording could not be written".to_string());
         }
         Ok((self.path, seconds))
+    }
+
+    /// Stop the stream without keeping anything: used when the user cancels
+    /// during the countdown, or the recording session is dropped.
+    pub fn cancel(mut self) {
+        let _ = self.stop.send(());
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+/// A recorder with no microphone behind it, for tests that drive the UI state
+/// machine. `captured_seconds` arms it at that elapsed time; `None` leaves it
+/// waiting for [`Recorder::begin_capture`].
+#[cfg(test)]
+pub(crate) fn test_recorder(path: PathBuf, captured_seconds: Option<f32>) -> Recorder {
+    let (stop, _stop_rx) = std::sync::mpsc::channel();
+    Recorder {
+        stop,
+        meter: Arc::new(MeterShared::default()),
+        capture: Arc::new(AtomicBool::new(captured_seconds.is_some())),
+        capture_started: captured_seconds
+            .map(|seconds| Instant::now() - Duration::from_secs_f32(seconds)),
+        path,
+        worker: None,
     }
 }
 
@@ -165,6 +228,7 @@ fn capture(
     path: PathBuf,
     stop: Receiver<()>,
     meter: Arc<MeterShared>,
+    capture: Arc<AtomicBool>,
     ready: Sender<Result<(), String>>,
 ) -> Result<(), String> {
     let host = cpal::default_host();
@@ -201,7 +265,8 @@ fn capture(
     let config: cpal::StreamConfig = chosen.into();
 
     let (tx, rx) = sync_channel::<Vec<i16>>(CHANNEL_CHUNKS);
-    let writer = std::thread::spawn(move || write_wav(path, rate, rx));
+    let writer_capture = capture.clone();
+    let writer = std::thread::spawn(move || write_wav(path, rate, writer_capture, rx));
 
     let error_meter = meter.clone();
     let error_cb = move |error: cpal::StreamError| {
@@ -500,16 +565,28 @@ fn decibels(peak: f32) -> f32 {
 }
 
 /// The recording thread's writer: a WAV whose sizes are patched on finish.
-fn write_wav(path: PathBuf, rate: u32, rx: Receiver<Vec<i16>>) {
+///
+/// Chunks that arrive before capture is armed are dropped here rather than in
+/// the callback, so the stream can keep its meter alive through the countdown.
+fn write_wav(path: PathBuf, rate: u32, capture: Arc<AtomicBool>, rx: Receiver<Vec<i16>>) {
     let Ok(mut wav) = WavWriter::create(&path, rate) else {
         return;
     };
     while let Ok(chunk) = rx.recv() {
-        if wav.write(&chunk).is_err() {
+        if write_chunk(&mut wav, &capture, &chunk).is_err() {
             break;
         }
     }
     let _ = wav.finish();
+}
+
+/// Write one chunk if capture has begun. Split out so the arm filter can be
+/// tested without a stream.
+fn write_chunk(wav: &mut WavWriter, capture: &AtomicBool, chunk: &[i16]) -> std::io::Result<()> {
+    if !capture.load(Ordering::SeqCst) {
+        return Ok(());
+    }
+    wav.write(chunk)
 }
 
 /// A single-channel 16-bit WAV.
@@ -787,6 +864,72 @@ mod tests {
 
         let (decoded, _) = hippo_transcribe_core::audio::decode(&path).unwrap();
         assert!((decoded.len() as f32 / 16_000.0 - 0.25).abs() < 0.01);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_writer_drops_chunks_before_capture_begins() {
+        let dir = scratch("writer-arm");
+        let path = dir.join("take.wav");
+        let capture = AtomicBool::new(false);
+        let mut wav = WavWriter::create(&path, 48_000).unwrap();
+
+        // The countdown's chunks must not reach the file.
+        write_chunk(&mut wav, &capture, &[1i16; 4_800]).unwrap();
+        capture.store(true, Ordering::SeqCst);
+        write_chunk(&mut wav, &capture, &[2i16; 9_600]).unwrap();
+        wav.finish().unwrap();
+
+        let bytes = std::fs::read(&path).unwrap();
+        let data = u32::from_le_bytes(bytes[40..44].try_into().unwrap());
+        assert_eq!(data, 9_600 * 2, "only the armed chunk was written");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_unarmed_recorder_reports_no_elapsed_time() {
+        let dir = scratch("recorder-arm");
+        let path = dir.join("take.wav");
+        std::fs::write(&path, b"placeholder").unwrap();
+
+        let mut recorder = test_recorder(path.clone(), None);
+        assert_eq!(recorder.elapsed(), 0.0);
+
+        // Stopping before the countdown ends reports zero, not stream time.
+        let (stopped, seconds) = recorder.stop().unwrap();
+        assert_eq!(stopped, path);
+        assert_eq!(seconds, 0.0);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn arming_a_recorder_starts_its_clock() {
+        let dir = scratch("recorder-begin");
+        let path = dir.join("take.wav");
+        std::fs::write(&path, b"placeholder").unwrap();
+
+        let mut recorder = test_recorder(path, None);
+        recorder.begin_capture();
+        std::thread::sleep(Duration::from_millis(15));
+        assert!(recorder.elapsed() > 0.0);
+
+        let (_, seconds) = recorder.stop().unwrap();
+        assert!(seconds > 0.0);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cancel_removes_the_unfinished_file() {
+        let dir = scratch("recorder-cancel");
+        let path = dir.join("take.wav");
+        std::fs::write(&path, b"placeholder").unwrap();
+
+        test_recorder(path.clone(), None).cancel();
+        assert!(!path.exists());
 
         let _ = std::fs::remove_dir_all(&dir);
     }
