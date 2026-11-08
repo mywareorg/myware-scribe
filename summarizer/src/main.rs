@@ -7,6 +7,7 @@
 //!
 //! Protocol: one JSON object per line on stdout.
 //! `{"event":"stage","label":"...","fraction":0.4}`
+//! `{"event":"part","briefing":{...}}` after each transcribed chunk
 //! `{"event":"done"}` or `{"event":"error","message":"..."}`
 //!
 //! The result is written to the response file, not to stdout, so progress and
@@ -24,14 +25,15 @@ use llama_cpp_2::model::{LlamaChatMessage, LlamaChatTemplate, LlamaModel};
 use llama_cpp_2::sampling::LlamaSampler;
 
 use hippo_briefing::{
-    chunk_lines, merge, messages_for, parse_overview, parse_reply, reduce_messages, Briefing,
-    BriefingLine
+    chunk_lines, merge, messages_for, overview_from_parts, parse_reply, Briefing, BriefingLine
 };
 
-/// Context size. Chunks are sized for a 4k prompt; the rest is reply room.
+/// Context size. Chunks are sized for a large prompt; the rest is reply room.
 const CTX: u32 = 8192;
-/// Tokens one answer may take.
-const MAX_NEW: usize = 700;
+/// Tokens one answer may take. The prompt caps the item counts, so this is
+/// enough to close the JSON object plus the overview; a larger ceiling mostly
+/// buys longer pauses and more near-duplicates.
+const MAX_NEW: usize = 600;
 
 fn main() {
     if let Err(message) = run() {
@@ -81,7 +83,16 @@ fn run() -> Result<(), String> {
 
     event(serde_json::json!({ "event": "stage", "label": "Loading the briefing model", "fraction": 0.0 }));
     let backend = LlamaBackend::init().map_err(|error| format!("llama backend: {error}"))?;
-    let params = LlamaModelParams::default().with_n_gpu_layers(0);
+    // Offload only when the caller asks and the build has a GPU backend.
+    // A CPU-only llama.cpp ignores the request, so the knob is safe by default.
+    let gpu_layers = std::env::var("HIPPO_BRIEFING_GPU_LAYERS")
+        .ok()
+        .and_then(|value| value.parse::<u32>().ok())
+        .unwrap_or(0);
+    if gpu_layers > 0 {
+        eprintln!("offloading {gpu_layers} layers to the GPU");
+    }
+    let params = LlamaModelParams::default().with_n_gpu_layers(gpu_layers);
     let model = LlamaModel::load_from_file(&backend, &model_path, &params)
         .map_err(|error| format!("could not load {}: {error}", model_path.display()))?;
     let template = model
@@ -93,6 +104,12 @@ fn run() -> Result<(), String> {
         .unwrap_or(4);
     let context_params = LlamaContextParams::default()
         .with_n_ctx(NonZeroU32::new(CTX))
+        // The prompt is decoded in one batch. llama.cpp aborts the process when
+        // a decode carries more tokens than n_batch, and a 6,500-character
+        // chunk is roughly 2,700 tokens — above llama.cpp's 2,048 default.
+        // Size the batch to the context so a legal chunk can never abort the
+        // helper.
+        .with_n_batch(CTX)
         .with_n_threads(threads)
         .with_n_threads_batch(threads);
     let mut ctx = model
@@ -102,7 +119,7 @@ fn run() -> Result<(), String> {
     let chunks = chunk_lines(&request.lines);
     let total = chunks.len();
     let mut parts: Vec<Briefing> = Vec::new();
-    let mut gists: Vec<String> = Vec::new();
+    let mut last_error: Option<String> = None;
 
     for (index, chunk) in chunks.iter().enumerate() {
         event(serde_json::json!({
@@ -112,28 +129,59 @@ fn run() -> Result<(), String> {
         }));
 
         let (system, user) = messages_for(chunk);
-        let mut reply = generate(&model, &mut ctx, &template, &system, &user)?;
+        // A chunk the model cannot take must not take the whole briefing down:
+        // skip it, remember why, and let the other chunks still produce a
+        // result. If every chunk fails, the last reason is the error the user
+        // sees instead of a generic one.
+        let reply = match generate(&model, &mut ctx, &template, &system, &user) {
+            Ok(reply) => reply,
+            Err(message) => {
+                last_error = Some(message.clone());
+                event(serde_json::json!({
+                    "event": "stage",
+                    "label": format!("Part {} was unusable: {message}", index + 1),
+                    "fraction": 0.05 + 0.85 * ((index + 1) as f32 / total as f32),
+                }));
+                continue;
+            }
+        };
         let mut parsed = parse_reply(&reply, chunk);
         if parsed.is_err() {
             // One retry with the constraint restated; a small model sometimes
             // wraps the object in prose.
-            reply = generate(
+            let reply = match generate(
                 &model,
                 &mut ctx,
                 &template,
                 &system,
                 &format!("{user}\n\nReturn only the JSON object, with no other text."),
-            )?;
+            ) {
+                Ok(reply) => reply,
+                Err(message) => {
+                    last_error = Some(message.clone());
+                    event(serde_json::json!({
+                        "event": "stage",
+                        "label": format!("Part {} was unusable: {message}", index + 1),
+                        "fraction": 0.05 + 0.85 * ((index + 1) as f32 / total as f32),
+                    }));
+                    continue;
+                }
+            };
             parsed = parse_reply(&reply, chunk);
         }
         match parsed {
             Ok(part) => {
-                if !part.overview.trim().is_empty() {
-                    gists.push(part.overview.trim().to_string());
-                }
                 parts.push(part);
+                // Show the accumulated briefing while later chunks run. The
+                // final response file still carries the merged result; this
+                // only stops a long transcript from looking stalled.
+                event(serde_json::json!({
+                    "event": "part",
+                    "briefing": merge(parts.clone(), overview_from_parts(&parts)),
+                }));
             }
             Err(message) => {
+                last_error = Some(message.clone());
                 crate::event(serde_json::json!({
                     "event": "stage",
                     "label": format!("Part {} was unusable: {message}", index + 1),
@@ -144,20 +192,12 @@ fn run() -> Result<(), String> {
     }
 
     if parts.is_empty() {
-        return Err("the model produced no usable summary".to_string());
+        return Err(last_error.unwrap_or_else(|| "the model produced no usable summary".to_string()));
     }
 
-    let overview = if gists.len() > 1 {
-        event(serde_json::json!({ "event": "stage", "label": "Writing the overview", "fraction": 0.95 }));
-        let (system, user) = reduce_messages(&gists);
-        match generate(&model, &mut ctx, &template, &system, &user) {
-            Ok(reply) => parse_overview(&reply),
-            Err(_) => None,
-        }
-    } else {
-        gists.first().cloned()
-    };
-
+    // The per-chunk overviews already say what each part was about. Composing
+    // the final paragraph from them removes a whole extra model pass.
+    let overview = overview_from_parts(&parts);
     let briefing = merge(parts, overview);
     let text = serde_json::to_string(&briefing)
         .map_err(|error| format!("could not encode the briefing: {error}"))?;
@@ -183,8 +223,16 @@ fn generate(
         .apply_chat_template(template, &messages, true)
         .map_err(|error| format!("chat template: {error}"))?;
     let tokens = model.vocab().tokenize(prompt.as_bytes(), true, true);
-    if tokens.len() + 128 >= CTX as usize {
-        return Err("a transcript chunk is too long for the briefing model".to_string());
+    if std::env::var_os("HIPPO_BRIEFING_DEBUG").is_some() {
+        eprintln!("HIPPO prompt tokens: {}", tokens.len());
+    }
+    // Reserve the reply as well as the prompt: a chunk that only fits because
+    // the check ignored MAX_NEW would overflow context mid-answer.
+    if tokens.len() + MAX_NEW + 16 >= CTX as usize {
+        return Err(format!(
+            "a transcript chunk is too long for the briefing model ({} tokens)",
+            tokens.len()
+        ));
     }
 
     ctx.clear_kv_cache();

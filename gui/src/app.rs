@@ -3950,6 +3950,9 @@ impl App {
             || self.window_dirty
             || self.feature_deck_visible()
             || self.completion_pending
+            // A running briefing streams its partial result, so the dialog must
+            // keep polling even when no transcription is animating.
+            || matches!(self.briefing, Some(BriefingState::Running(_)))
             // A cross-pane cue is timed: this keeps the loop alive until the
             // tick that clears it, so it never sticks if nothing else happens.
             || self.pane_cue.is_some()
