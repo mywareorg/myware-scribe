@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 use crate::event::Turn;
 
 /// Schema version written by this build. Files without a `version` are v1.
-pub const VERSION: u32 = 3;
+pub const VERSION: u32 = 4;
 
 /// A speaker identity that survives a rename.
 ///
@@ -93,6 +93,13 @@ pub struct Meta {
     pub preset: Option<String>,
     pub language: Option<String>,
     pub model: Option<String>,
+    /// Language the caller asked for; `None` means auto-detect.
+    pub language_requested: Option<String>,
+    /// Language pinned by detection; `None` when one was requested.
+    pub language_detected: Option<String>,
+    pub normalize: Option<bool>,
+    pub producer: Option<String>,
+    pub run_id: Option<String>,
 }
 
 /// A transcript's sidecar.
@@ -118,6 +125,18 @@ pub struct Sidecar {
     pub language: Option<String>,
     #[serde(default)]
     pub model: Option<String>,
+    /// Added in v4: requested vs detected language, normalization, producer
+    /// versions and a stable run id. Absent from v3 and older files.
+    #[serde(default)]
+    pub language_requested: Option<String>,
+    #[serde(default)]
+    pub language_detected: Option<String>,
+    #[serde(default)]
+    pub normalize: Option<bool>,
+    #[serde(default)]
+    pub producer: Option<String>,
+    #[serde(default)]
+    pub run_id: Option<String>,
 }
 
 impl Sidecar {
@@ -133,6 +152,11 @@ impl Sidecar {
             preset: meta.preset,
             language: meta.language,
             model: meta.model,
+            language_requested: meta.language_requested,
+            language_detected: meta.language_detected,
+            normalize: meta.normalize,
+            producer: meta.producer,
+            run_id: meta.run_id,
         };
         sidecar.rebuild(lines);
         sidecar
@@ -409,7 +433,7 @@ mod tests {
 
         let sidecar = Sidecar::from_json(json).expect("parse v1");
 
-        assert_eq!(sidecar.version, 3);
+        assert_eq!(sidecar.version, VERSION);
         assert_eq!(sidecar.lines.len(), 2);
         assert_eq!(sidecar.lines[0].end, Some(3.0)); // clamped to the turn
         assert_eq!(sidecar.lines[1].end, Some(10.0)); // clamped to duration
@@ -537,7 +561,12 @@ mod tests {
                 duration: Some(9.0),
                 preset: Some("accuracy".to_string()),
                 language: Some("en".to_string()),
-                model: None,
+                model: Some("ggml-large-v3-turbo-q5_0.bin".to_string()),
+                language_requested: Some("en".to_string()),
+                language_detected: None,
+                normalize: Some(true),
+                producer: Some("core 1.0.0 / asr-v1".to_string()),
+                run_id: Some("run-1".to_string()),
             },
         );
         write_at(&path, &sidecar).unwrap();
@@ -545,8 +574,22 @@ mod tests {
         let read_back: Sidecar =
             serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(read_back, sidecar);
-        assert_eq!(read_back.version, 3);
+        assert_eq!(read_back.version, VERSION);
         assert_eq!(read_back.audio.as_deref(), Some("/tmp/talk.mp3"));
+        assert_eq!(read_back.model.as_deref(), Some("ggml-large-v3-turbo-q5_0.bin"));
+        assert_eq!(read_back.run_id.as_deref(), Some("run-1"));
+        assert_eq!(read_back.normalize, Some(true));
+    }
+
+    #[test]
+    fn v3_sidecars_gain_the_provenance_fields_on_read() {
+        let json = r#"{"version":3,"lines":[{"time":"00:00","speaker":"A","text":"hi","start":0.0}],"turns":[],"duration":1.0}"#;
+        let sidecar = Sidecar::from_json(json).expect("parse v3");
+        assert_eq!(sidecar.version, VERSION);
+        assert_eq!(sidecar.model, None);
+        assert_eq!(sidecar.language_requested, None);
+        assert_eq!(sidecar.language_detected, None);
+        assert_eq!(sidecar.run_id, None);
     }
 
     #[test]

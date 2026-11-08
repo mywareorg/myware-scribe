@@ -25,6 +25,27 @@ pub struct Stats {
     pub num_speakers: Option<i32>,
     pub preset: String,
     pub speaker_stats: HashMap<String, SpeakerStat>,
+    /// Resolved model identity that actually produced this output.
+    #[serde(default)]
+    pub model: Option<String>,
+    /// Effective decode language: requested when given, otherwise detected.
+    #[serde(default)]
+    pub language: Option<String>,
+    /// Language the caller asked for; `None` means auto-detect.
+    #[serde(default)]
+    pub language_requested: Option<String>,
+    /// Language the pipeline pinned by detection; `None` when one was requested.
+    #[serde(default)]
+    pub language_detected: Option<String>,
+    /// Whether quiet audio was lifted before ASR and diarization.
+    #[serde(default)]
+    pub normalize: bool,
+    /// Producer versions, e.g. `core 1.0.0 / asr-v1`.
+    #[serde(default)]
+    pub producer: Option<String>,
+    /// Stable id for this output, used by the version manifest.
+    #[serde(default)]
+    pub run_id: Option<String>,
     /// Wall-clock seconds spent decoding audio for this file.
     #[serde(default)]
     pub decode_seconds: f64,
@@ -84,4 +105,43 @@ pub enum Event {
     Error { message: String },
     #[serde(rename = "all_done")]
     AllDone,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn old_stats_payloads_gain_empty_provenance() {
+        let stats: Stats = serde_json::from_str(r#"{"preset":"speed","speakers":2}"#)
+            .expect("old stats must still parse");
+        assert_eq!(stats.preset, "speed");
+        assert!(stats.model.is_none());
+        assert!(stats.language.is_none());
+        assert!(stats.language_requested.is_none());
+        assert!(stats.language_detected.is_none());
+        assert!(stats.run_id.is_none());
+        assert!(!stats.normalize);
+    }
+
+    #[test]
+    fn provenance_survives_a_round_trip() {
+        let stats = Stats {
+            preset: "accuracy".to_string(),
+            model: Some("ggml-large-v3-turbo-q5_0.bin".to_string()),
+            language: Some("en".to_string()),
+            language_requested: Some("en".to_string()),
+            language_detected: None,
+            normalize: true,
+            producer: Some("core 1.0.0 / asr-v1".to_string()),
+            run_id: Some("run-1".to_string()),
+            ..Stats::default()
+        };
+        let text = serde_json::to_string(&stats).unwrap();
+        let back: Stats = serde_json::from_str(&text).unwrap();
+        assert_eq!(back.model, stats.model);
+        assert_eq!(back.language, stats.language);
+        assert_eq!(back.run_id, stats.run_id);
+        assert!(back.normalize);
+    }
 }

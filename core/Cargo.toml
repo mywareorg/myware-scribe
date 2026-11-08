@@ -26,6 +26,7 @@ rubato = "0.15"
 whisper-rs = "0.16"
 num_cpus = "1"
 ureq = "2"
+uuid = { version = "1", features = ["v4"] }
 
 # Windows loads the sherpa-onnx C API from a DLL shipped beside the executable,
 # so no native library is linked into the binary. Other platforms keep the

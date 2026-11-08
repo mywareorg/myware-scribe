@@ -206,6 +206,49 @@ pub fn whisper_model(preset: &str) -> PathBuf {
     resolve(&whisper_relative(preset))
 }
 
+/// Identity of the model actually used for a preset, for cache keys.
+///
+/// The default is the pinned file name, so existing ASR caches keep hitting.
+/// An override needs more: two different files can share a name. Include the
+/// file name, size and modification time, so changing the override misses the
+/// cache instead of returning segments decoded by another model.
+pub fn whisper_identity(preset: &str) -> String {
+    let Some(path) =
+        crate::env_compat("HIPPO_TRANSCRIBE_WHISPER_MODEL", "TRANSIEL_WHISPER_MODEL")
+    else {
+        return whisper_relative(preset);
+    };
+    model_identity(Path::new(&path))
+}
+
+/// Human-facing name of the model a preset resolves to (override included).
+pub fn whisper_model_name(preset: &str) -> String {
+    whisper_model(preset)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(str::to_string)
+        .unwrap_or_else(|| whisper_relative(preset))
+}
+
+fn model_identity(path: &Path) -> String {
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("model");
+    match std::fs::metadata(path) {
+        Ok(metadata) => {
+            let modified = metadata
+                .modified()
+                .ok()
+                .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|since| since.as_secs())
+                .unwrap_or(0);
+            format!("{name}:{}:{modified}", metadata.len())
+        }
+        Err(_) => path.display().to_string(),
+    }
+}
+
 pub fn segmentation_relative() -> String {
     spec("segmentation")
         .map(|model| model.file.clone())
@@ -318,5 +361,22 @@ mod tests {
         assert_eq!(whisper_relative("balanced"), "ggml-small-q5_1.bin");
         assert_eq!(whisper_relative("accuracy"), "ggml-large-v3-turbo-q5_0.bin");
         assert_eq!(embedding_relative(), "wespeaker_en_voxceleb_CAM++_LM.onnx");
+    }
+
+    #[test]
+    fn a_model_identity_tracks_the_override_file() {
+        let dir = std::env::temp_dir().join(format!("hippo-model-id-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("custom.bin");
+        std::fs::write(&path, b"1234").unwrap();
+        let first = model_identity(&path);
+        assert!(first.starts_with("custom.bin:4:"));
+
+        // A different file must not hit the cache the first one populated.
+        std::fs::write(&path, b"12345").unwrap();
+        assert_ne!(first, model_identity(&path));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -1717,6 +1717,7 @@ dependencies = [
  "symphonia",
  "symphonia-adapter-libopus",
  "ureq",
+ "uuid",
  "whisper-rs",
  "zip",
 ]

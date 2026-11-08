@@ -20,6 +20,39 @@ const MIN_GROUP_S: f32 = 0.5;
 const CLIP_PAD_S: f32 = 0.1;
 /// Bucket count for the waveform emitted once diarization identifies speakers.
 const TIMELINE_BUCKETS: usize = 2000;
+/// Which pipeline produced an output. Bump when decode or attribution changes
+/// in a way that makes an old transcript non-reproducible.
+const PIPELINE_VERSION: &str = "asr-v1";
+
+/// Producer string recorded beside each output.
+fn producer() -> String {
+    format!("core {} / {PIPELINE_VERSION}", env!("CARGO_PKG_VERSION"))
+}
+
+/// Write through a temporary file in the same directory, then rename over the
+/// target. A crash cannot leave a half-written transcript.
+fn write_text_atomic(path: &Path, text: &str) -> std::io::Result<()> {
+    static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
+    let directory = path.parent().unwrap_or_else(|| Path::new("."));
+    let name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "transcript".to_string());
+    let sequence = NEXT_TEMP.fetch_add(1, Ordering::Relaxed);
+    let temporary = directory.join(format!(".{name}.{}.{sequence}.tmp", std::process::id()));
+    if let Err(error) = std::fs::write(&temporary, text) {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(error);
+    }
+    match std::fs::rename(&temporary, path) {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            let _ = std::fs::remove_file(&temporary);
+            Err(error)
+        }
+    }
+}
+
 /// Per-file progress after decoding and after diarization. Keeping these as
 /// fixed phase boundaries makes the progress bar monotonic across stages
 /// instead of jumping back to zero when transcription starts.
@@ -1351,7 +1384,12 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
             .map(|value| value as i32)
             .unwrap_or(1)
             .max(1);
-        let model_name = models::whisper_relative(&opts.preset);
+        // The identity, not the preset, keys the ASR cache: an override can
+        // point at a different model under the same preset.
+        let model_name = models::whisper_identity(&opts.preset);
+        let model_display = models::whisper_model_name(&opts.preset);
+        let run_id = uuid::Uuid::new_v4().to_string();
+        let mut detected_language: Option<String> = None;
 
         let mut lines: Vec<Line> = Vec::new();
         let mut split_stats = SplitStats::default();
@@ -1405,6 +1443,7 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
                 spans.len(),
                 per_call_threads,
             );
+            detected_language = pinned_language.clone();
             let language = decode_language.or(pinned_language.as_deref());
             let asr_started = Instant::now();
             let mut results: Vec<Option<Result<Vec<Segment>, String>>> =
@@ -1620,6 +1659,7 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
                     spans.len(),
                     per_call_threads,
                 );
+                detected_language = pinned_language.clone();
                 let language = decode_language.or(pinned_language.as_deref());
                 let asr_started = Instant::now();
                 let mut pending: BTreeMap<usize, Result<Vec<Segment>, String>> = BTreeMap::new();
@@ -1784,12 +1824,12 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        if let Err(error) = std::fs::write(&path, format!("{txt}\n")) {
+        if let Err(error) = write_text_atomic(&path, &format!("{txt}\n")) {
             emit(Event::Log {
                 message: format!("could not write {}: {error}", path.display()),
             });
         }
-        if let Err(error) = std::fs::write(&ts_path, format!("{txt_ts}\n")) {
+        if let Err(error) = write_text_atomic(&ts_path, &format!("{txt_ts}\n")) {
             emit(Event::Log {
                 message: format!("could not write {}: {error}", ts_path.display()),
             });
@@ -1797,6 +1837,10 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
 
         // Sidecar with per-line confidence and bounds, so the viewer, exports
         // and summaries all read the same record. Line order matches `txt_ts`.
+        let requested_language = decode_language.map(str::to_string);
+        let effective_language = requested_language
+            .clone()
+            .or_else(|| detected_language.clone());
         let json_path = ts_path.with_extension("json");
         let sidecar = crate::sidecar::Sidecar::new(
             lines
@@ -1817,8 +1861,13 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
                 audio: Some(input.display().to_string()),
                 duration: Some(duration as f32),
                 preset: Some(opts.preset.clone()),
-                language: opts.language.clone(),
-                model: None,
+                language: effective_language.clone(),
+                model: Some(model_display.clone()),
+                language_requested: requested_language.clone(),
+                language_detected: detected_language.clone(),
+                normalize: Some(opts.normalize),
+                producer: Some(producer()),
+                run_id: Some(run_id.clone()),
             },
         );
         if let Err(error) = crate::sidecar::write_at(&json_path, &sidecar) {
@@ -1895,6 +1944,13 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
                 diarize_seconds: diarized_at.duration_since(decoded_at).as_secs_f64(),
                 asr_seconds: asr_at.duration_since(diarized_at).as_secs_f64(),
                 prepare_seconds,
+                model: Some(model_display),
+                language: effective_language,
+                language_requested: requested_language,
+                language_detected: detected_language,
+                normalize: opts.normalize,
+                producer: Some(producer()),
+                run_id: Some(run_id),
             },
         });
     }
