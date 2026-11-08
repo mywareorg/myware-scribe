@@ -441,6 +441,40 @@ mod tests {
     }
 
     #[test]
+    fn scanning_and_reserializing_round_trips() {
+        let dir = std::env::temp_dir().join(format!("hippo-roundtrip-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for (name, hash) in [("one.mp3", "aaaaaaaa"), ("two.mp3", "bbbbbbbb")] {
+            let audio = dir.join(name);
+            std::fs::write(&audio, b"audio").unwrap();
+            let path = manifest_path(&audio, None, Some(hash));
+            let mut manifest = Manifest::new(&path, &audio);
+            manifest.upsert(version(name, &format!("{name}-ts.txt")));
+            write_at(&path, &manifest).unwrap();
+        }
+
+        let scanned = scan(&dir);
+        assert_eq!(scanned.len(), 2);
+        let values: Vec<serde_json::Value> = scanned
+            .iter()
+            .map(|manifest| serde_json::to_value(manifest).unwrap())
+            .collect();
+        let reparsed: Vec<Manifest> = values
+            .iter()
+            .map(|value| serde_json::from_value(value.clone()).unwrap())
+            .collect();
+        assert_eq!(values.len(), reparsed.len());
+        for (before, after) in scanned.iter().zip(reparsed.iter()) {
+            assert_eq!(
+                serde_json::to_value(before).unwrap(),
+                serde_json::to_value(after).unwrap()
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn a_manifest_round_trips_and_keeps_unknown_keys() {
         let dir = std::env::temp_dir().join(format!("hippo-manifest-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);

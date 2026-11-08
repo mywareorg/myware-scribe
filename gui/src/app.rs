@@ -628,6 +628,7 @@ struct VersionPreview {
     row: usize,
     version_id: String,
     label: String,
+    current: bool,
 }
 
 /// A short-lived tint marking a pane that something outside it just changed.
@@ -1428,6 +1429,8 @@ pub enum Message {
     RunVersionAgain,
     /// Return from a version preview to the row's current transcript.
     CloseVersionPreview,
+    /// Delete a non-current version and its files.
+    RemoveVersion(String),
     /// Ask to revert the row's current transcript to its unedited copy.
     RevertVersion,
     /// The keyboard opened the context menu for the selected row.
@@ -3697,6 +3700,7 @@ impl App {
         self.close_find();
         self.commit_inline_edit(false);
         self.version_preview = None;
+        self.sync_manifest_edit_state(index);
         let Some(entry) = self.recent.get(index).cloned() else {
             return Task::none();
         };
@@ -6314,6 +6318,9 @@ impl App {
                 Task::none()
             }
             Message::OpenInfo(tab, index) => {
+                if tab != PaneTab::Queue {
+                    self.sync_manifest_edit_state(index);
+                }
                 self.info_open = self.capture_file_info(tab, index);
                 Task::none()
             }
@@ -6335,6 +6342,7 @@ impl App {
             Message::MakeVersionCurrent => self.make_version_current(),
             Message::RunVersionAgain => self.run_version_again(),
             Message::CloseVersionPreview => self.close_version_preview(),
+            Message::RemoveVersion(id) => self.remove_version(&id),
             Message::RevertVersion => self.revert_version(),
             Message::OpenRowMenuForSelection => {
                 let tab = self.pane_tab;
@@ -6762,6 +6770,7 @@ impl App {
                         match result {
                             Ok(()) => {
                                 self.modified = false;
+                                self.mark_version_edited(&path);
                                 self.toast =
                                     Some((format!("Saved {}", path.display()), Instant::now()));
                             }
@@ -7431,8 +7440,12 @@ impl App {
     /// its own path, and must not be overwritten from here.
     fn refresh_transcript(&mut self) {
         self.transcript = lines_text(&self.lines);
-        if let Some(path) = &self.output_txt {
+        let written = self.output_txt.clone();
+        if let Some(path) = &written {
             let _ = write_transcript_file(path, &self.transcript);
+        }
+        if let Some(path) = written.as_deref() {
+            self.mark_version_edited(path);
         }
     }
 
@@ -7674,6 +7687,7 @@ impl App {
             row: row_index,
             version_id: row.id,
             label,
+            current: row.current,
         });
         task
     }
@@ -7788,6 +7802,118 @@ impl App {
             return Task::none();
         };
         self.open_recent(preview.row, None)
+    }
+
+    /// Delete a non-current version and the files that belong only to it.
+    fn remove_version(&mut self, id: &str) -> Task<Message> {
+        if matches!(self.status, Status::Running) {
+            self.toast = Some((
+                "Finish the current transcription first".to_string(),
+                Instant::now(),
+            ));
+            return Task::none();
+        }
+        let Some(preview) = self.version_preview.clone() else {
+            return Task::none();
+        };
+        if preview.version_id != id || preview.current {
+            return Task::none();
+        }
+        let Some(entry) = self.recent.get(preview.row).cloned() else {
+            return Task::none();
+        };
+        let Some(manifest_path) = entry.manifest.clone() else {
+            return Task::none();
+        };
+        let path = PathBuf::from(&manifest_path);
+        let Some(mut manifest) = hippo_transcribe_core::versions::read(&path) else {
+            self.toast = Some((
+                "Could not read the version records".to_string(),
+                Instant::now(),
+            ));
+            return Task::none();
+        };
+        let Some(position) = manifest
+            .versions
+            .iter()
+            .position(|version| version.id == id)
+        else {
+            return Task::none();
+        };
+        let version = manifest.versions.remove(position);
+        let directory = path.parent().unwrap_or_else(|| Path::new("."));
+        for relative in [
+            Some(version.transcript.as_str()),
+            Some(version.plain.as_str()),
+            version.sidecar.as_deref(),
+            version.original.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            let _ = std::fs::remove_file(directory.join(relative));
+        }
+        let _ = std::fs::remove_file(hippo_transcribe_core::versions::unedited_path(
+            &directory.join(&version.transcript),
+        ));
+        let _ = std::fs::remove_file(hippo_transcribe_core::versions::unedited_path(
+            &directory.join(&version.plain),
+        ));
+        let _ = hippo_transcribe_core::versions::write_at(&path, &manifest);
+        self.version_preview = None;
+        self.toast = Some(("Removed version".to_string(), Instant::now()));
+        self.open_recent(preview.row, None)
+    }
+
+    /// Recompute one row's manifest edit flag from the files on disk.
+    fn sync_manifest_edit_state(&mut self, index: usize) {
+        let Some(entry) = self.recent.get(index).cloned() else {
+            return;
+        };
+        let (Some(manifest_path), Some(version_id), Some(transcript)) = (
+            entry.manifest.clone(),
+            entry.version_id.clone(),
+            Self::current_transcript(&entry).map(Path::to_path_buf),
+        ) else {
+            return;
+        };
+        let edited = transcript_differs_from_original(&transcript);
+        let path = Path::new(&manifest_path);
+        let Some(mut manifest) = hippo_transcribe_core::versions::read(path) else {
+            return;
+        };
+        let Some(version) = manifest
+            .versions
+            .iter_mut()
+            .find(|version| version.id == version_id)
+        else {
+            return;
+        };
+        let directory = path.parent().unwrap_or_else(|| Path::new("."));
+        let original = edited.then(|| {
+            hippo_transcribe_core::versions::relative(
+                directory,
+                &crate::files::unedited_path(&transcript),
+            )
+        });
+        if version.edited == edited && version.original == original {
+            return;
+        }
+        version.edited = edited;
+        version.original = original;
+        let _ = hippo_transcribe_core::versions::write_at(path, &manifest);
+    }
+
+    /// Update the manifest after a transcript file was written.
+    fn mark_version_edited(&mut self, transcript: &Path) {
+        let Some(index) = self
+            .recent
+            .iter()
+            .position(|entry| Self::current_transcript(entry) == Some(transcript))
+        else {
+            return;
+        };
+        self.sync_manifest_edit_state(index);
     }
 
     /// Revert the row's current transcript, not the previewed older version.
@@ -9547,6 +9673,14 @@ impl App {
                 backend::write_sidecar_renamed(path, &self.lines, &mapping);
             }
         }
+        let written = self
+            .selected_view
+            .as_ref()
+            .and_then(|view| view.output.clone())
+            .or_else(|| self.output_txt.clone());
+        if let Some(path) = written.as_deref() {
+            self.mark_version_edited(path);
+        }
         self.invalidate_derived();
         self.rename_open = false;
     }
@@ -9932,6 +10066,14 @@ impl App {
             if let Some(path) = &self.output_txt {
                 backend::write_sidecar(path, &self.lines);
             }
+        }
+        let written = self
+            .selected_view
+            .as_ref()
+            .and_then(|view| view.output.clone())
+            .or_else(|| self.output_txt.clone());
+        if let Some(path) = written.as_deref() {
+            self.mark_version_edited(path);
         }
         self.invalidate_derived();
         // The sidecar's word times no longer match the document.
@@ -16011,7 +16153,7 @@ impl App {
     fn version_banner(&self, scheme: &Scheme) -> Option<Element<'_, Message>> {
         let preview = self.version_preview.as_ref()?;
         let scheme = *scheme;
-        let banner = row![
+        let mut banner = row![
             text(format!(
                 "Viewing an earlier version \u{00b7} {}",
                 preview.label
@@ -16026,12 +16168,23 @@ impl App {
             action_text("Run again")
                 .on_press(Message::RunVersionAgain)
                 .style(pill_button_secondary),
-            action_text("Close")
-                .on_press(Message::CloseVersionPreview)
-                .style(pill_button_secondary),
         ]
         .spacing(8)
         .align_y(iced::Alignment::Center);
+        if !preview.current {
+            banner = banner.push(
+                action_text("Remove version")
+                    .on_press(Message::RemoveVersion(preview.version_id.clone()))
+                    .style(move |theme, status| {
+                        color_button(scheme.danger, scheme.on_accent)(theme, status)
+                    }),
+            );
+        }
+        banner = banner.push(
+            action_text("Close")
+                .on_press(Message::CloseVersionPreview)
+                .style(pill_button_secondary),
+        );
         Some(
             container(banner)
                 .padding([6, 10])
@@ -20217,6 +20370,16 @@ fn transcript_edited(entry: &RecentEntry) -> bool {
         .is_some_and(|path| crate::files::unedited_path(path).is_file())
 }
 
+/// Whether the transcript differs from its pre-edit copy. Used when the
+/// manifest's flag needs recomputing, not per frame.
+fn transcript_differs_from_original(transcript: &Path) -> bool {
+    let original = crate::files::unedited_path(transcript);
+    match (std::fs::read(transcript), std::fs::read(&original)) {
+        (Ok(current), Ok(original)) => current != original,
+        _ => false,
+    }
+}
+
 fn recent_meta(entry: &RecentEntry, transcript_present: bool) -> String {
     if !transcript_present {
         return "Transcript missing".to_string();
@@ -24234,6 +24397,110 @@ mod tests {
                 .any(|item| item.audio.as_deref() == Some(audio.as_path())),
             "the audio was not queued"
         );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn editing_and_reverting_update_the_manifest_flag() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("versions-edit-flag");
+        let dir = temp_dir("versions-edit-flag-media");
+        let audio = dir.join("talk.mp3");
+        std::fs::write(&audio, b"audio").unwrap();
+        let transcript = dir.join("one-ts.txt");
+        std::fs::write(&transcript, "one\n").unwrap();
+        let original = crate::files::unedited_path(&transcript);
+        std::fs::write(&original, "one\n").unwrap();
+        let manifest_path = dir.join("talk-hash.hippo.json");
+        let manifest = serde_json::json!({
+            "schema_version": 1,
+            "asset": { "id": "a1", "audio": "talk.mp3" },
+            "current": "v1",
+            "versions": [{
+                "id": "v1", "settings_key": "k1", "preset": "accuracy",
+                "created_at": 1, "transcript": "one-ts.txt", "plain": "one.txt",
+                "origin": "run"
+            }]
+        });
+        std::fs::write(&manifest_path, manifest.to_string()).unwrap();
+
+        let mut app = pro_app();
+        app.recent.push(RecentEntry {
+            audio: Some(audio),
+            transcript: Some(transcript.clone()),
+            version_id: Some("v1".to_string()),
+            manifest: Some(manifest_path.display().to_string()),
+            ..Default::default()
+        });
+
+        std::fs::write(&transcript, "two\n").unwrap();
+        app.sync_manifest_edit_state(0);
+        let manifest = hippo_transcribe_core::versions::read(&manifest_path).unwrap();
+        assert!(manifest.versions[0].edited);
+        assert_eq!(
+            manifest.versions[0].original.as_deref(),
+            Some("one-ts-unedited.txt")
+        );
+
+        std::fs::write(&transcript, "one\n").unwrap();
+        app.sync_manifest_edit_state(0);
+        let manifest = hippo_transcribe_core::versions::read(&manifest_path).unwrap();
+        assert!(!manifest.versions[0].edited);
+        assert_eq!(manifest.versions[0].original, None);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn removing_a_non_current_version_deletes_its_files() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("versions-remove");
+        let dir = temp_dir("versions-remove-media");
+        let audio = dir.join("talk.mp3");
+        std::fs::write(&audio, b"audio").unwrap();
+        let current = dir.join("one-ts.txt");
+        std::fs::write(&current, "one\n").unwrap();
+        let older = dir.join("two-ts.txt");
+        std::fs::write(&older, "two\n").unwrap();
+        let manifest_path = dir.join("talk-hash.hippo.json");
+        let manifest = serde_json::json!({
+            "schema_version": 1,
+            "asset": { "id": "a1", "audio": "talk.mp3" },
+            "current": "v1",
+            "versions": [
+                {
+                    "id": "v1", "settings_key": "k1", "preset": "accuracy",
+                    "created_at": 2, "transcript": "one-ts.txt", "plain": "one.txt",
+                    "origin": "run"
+                },
+                {
+                    "id": "v2", "settings_key": "k2", "preset": "speed",
+                    "created_at": 1, "transcript": "two-ts.txt", "plain": "two.txt",
+                    "origin": "run"
+                }
+            ]
+        });
+        std::fs::write(&manifest_path, manifest.to_string()).unwrap();
+
+        let mut app = pro_app();
+        app.recent.push(RecentEntry {
+            audio: Some(audio),
+            transcript: Some(current),
+            version_id: Some("v1".to_string()),
+            manifest: Some(manifest_path.display().to_string()),
+            ..Default::default()
+        });
+        let _ = app.update(Message::OpenVersions(PaneTab::History, 0));
+        let _ = app.update(Message::PreviewVersion("v2".to_string()));
+        assert!(older.is_file());
+        let _ = app.update(Message::RemoveVersion("v2".to_string()));
+
+        assert!(!older.is_file(), "the removed version's transcript survived");
+        let manifest = hippo_transcribe_core::versions::read(&manifest_path).unwrap();
+        assert_eq!(manifest.versions.len(), 1);
+        assert_eq!(manifest.current.as_deref(), Some("v1"));
+        assert!(app.version_preview.is_none());
 
         let _ = std::fs::remove_dir_all(&dir);
     }
