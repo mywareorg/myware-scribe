@@ -1132,6 +1132,8 @@ pub enum Message {
     CopyQueuePath(usize),
     /// Queue a history entry for a fresh run and open its options.
     RetranscribeRecent(usize),
+    /// Add a recent item's audio to the queue without starting it.
+    EnqueueRecent(usize),
     /// Open a recent item and run the existing Export As flow.
     ExportRecent(usize),
     /// Show a queue row's transcript/preview, or return to the live run.
@@ -5622,6 +5624,7 @@ impl App {
                 iced::clipboard::write(text)
             }
             Message::RetranscribeRecent(index) => self.retranscribe_recent(index),
+            Message::EnqueueRecent(index) => self.enqueue_recent_from_menu(index),
             Message::ExportRecent(index) => self.export_recent(index),
             Message::OpenQueueRow(index) => self.view_item(index),
             Message::RowPressed(tab, index) => self.row_pressed(tab, index),
@@ -6843,6 +6846,23 @@ impl App {
         self.update(Message::OpenRunSetup)
     }
 
+    /// Add a history row's audio to the queue and show the queue, without
+    /// opening the run options. The context menu offers this beside
+    /// Retranscribe so several files can be staged before a run.
+    fn enqueue_recent_from_menu(&mut self, index: usize) -> Task<Message> {
+        if self.transcribe_blocked() {
+            self.toast = Some(("Finish the recording first".to_string(), Instant::now()));
+            return Task::none();
+        }
+        if !self.enqueue_recent(index) {
+            return Task::none();
+        }
+        self.pane_tab = PaneTab::Queue;
+        self.recent_hover = None;
+        self.toast = Some(("Added to queue".to_string(), Instant::now()));
+        Task::none()
+    }
+
     /// Open a history row and run the existing Export As flow on it.
     fn export_recent(&mut self, index: usize) -> Task<Message> {
         let already_open = self.selected_recent == Some(index)
@@ -7121,6 +7141,13 @@ impl App {
             .iter_mut()
             .find(|item| item.audio.as_deref() == Some(audio.as_path()))
         {
+            if matches!(row.status, ItemStatus::Running) {
+                self.toast = Some((
+                    "This file is already being transcribed".to_string(),
+                    Instant::now(),
+                ));
+                return false;
+            }
             if !matches!(row.status, ItemStatus::Pending) {
                 row.status = ItemStatus::Pending;
                 row.transcript = None;
@@ -11766,6 +11793,29 @@ impl App {
         };
 
         let open = row("Open", open_enabled, open_hint, Message::OpenRecent(index));
+        let running_audio = self
+            .queue
+            .iter()
+            .find(|item| matches!(item.status, ItemStatus::Running))
+            .and_then(|item| item.audio.as_deref());
+        let already_running =
+            entry.audio.as_deref().is_some_and(|audio| Some(audio) == running_audio);
+        let add_enabled = audio_present && !already_running && !locked;
+        let add_hint = if !audio_present {
+            Some("The audio file is missing.")
+        } else if already_running {
+            Some("This file is already being transcribed.")
+        } else if locked {
+            Some("Finish the recording first.")
+        } else {
+            None
+        };
+        let add_to_queue = row(
+            "Add to queue",
+            add_enabled,
+            add_hint,
+            Message::EnqueueRecent(index),
+        );
         let reveal_transcript = row(
             "Reveal transcript",
             entry.transcript.is_some(),
@@ -11815,6 +11865,7 @@ impl App {
         match tab {
             PaneTab::Favorites => vec![
                 open,
+                add_to_queue,
                 retranscribe,
                 row(
                     "Unfavorite",
@@ -11830,6 +11881,7 @@ impl App {
             ],
             PaneTab::Recordings => vec![
                 open,
+                add_to_queue,
                 retranscribe,
                 reveal_audio,
                 reveal_transcript,
@@ -11838,6 +11890,7 @@ impl App {
             ],
             _ => vec![
                 open,
+                add_to_queue,
                 retranscribe,
                 reveal_transcript,
                 reveal_audio,
@@ -17575,6 +17628,7 @@ fn closes_row_menu(message: &Message) -> bool {
             | Message::CopyRecentText(_)
             | Message::CopyQueuePath(_)
             | Message::RetranscribeRecent(_)
+            | Message::EnqueueRecent(_)
             | Message::ExportRecent(_)
             | Message::OpenQueueRow(_)
             | Message::RemoveItem(_)
@@ -26948,11 +27002,16 @@ mod tests {
         app.refresh_recent_presence();
         let scheme = app.scheme();
 
-        // History: open, retranscribe, reveal, copy, export and remove.
+        // History: open, add to queue, retranscribe, reveal, copy, export and
+        // remove.
         let rows = app.row_menu_rows(PaneTab::History, Some(0), &scheme);
         assert!(matches!(
             menu_entry(&rows, "Open").action,
             Some(Message::OpenRecent(0))
+        ));
+        assert!(matches!(
+            menu_entry(&rows, "Add to queue").action,
+            Some(Message::EnqueueRecent(0))
         ));
         assert!(matches!(
             menu_entry(&rows, "Retranscribe").action,
@@ -27010,6 +27069,46 @@ mod tests {
         assert!(!history_empty.iter().any(|row| row.label == "Clear queue"));
         assert!(history_empty.iter().any(|row| row.label == "Add files"));
         assert!(history_empty.iter().any(|row| row.label == "Add folder"));
+
+        let _ = std::fs::remove_dir_all(&media);
+    }
+
+    #[test]
+    fn add_to_queue_enqueues_without_opening_setup() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("enqueue-recent");
+        let media = temp_dir("enqueue-recent-media");
+        let audio = media.join("talk.mp3");
+        std::fs::write(&audio, b"audio").unwrap();
+        let transcript = media.join("talk.txt");
+        std::fs::write(&transcript, "[00:00] SPEAKER 1: hi\n").unwrap();
+
+        let mut app = pro_app();
+        app.recent.push(RecentEntry {
+            audio: Some(audio.clone()),
+            transcript: Some(transcript),
+            state: ItemState::Ready,
+            finished_at: 5,
+            ..Default::default()
+        });
+        app.refresh_recent_presence();
+
+        let _ = app.update(Message::EnqueueRecent(0));
+        assert_eq!(app.queue.len(), 1);
+        assert!(matches!(app.queue[0].status, ItemStatus::Pending));
+        assert_eq!(app.queue[0].audio.as_deref(), Some(audio.as_path()));
+        assert_eq!(app.pane_tab, PaneTab::Queue);
+        assert!(!app.run_setup_open);
+
+        // Adding the same audio again reuses the row instead of duplicating it.
+        let _ = app.update(Message::EnqueueRecent(0));
+        assert_eq!(app.queue.len(), 1);
+
+        // A row that is already running is left alone.
+        app.queue[0].status = ItemStatus::Running;
+        let _ = app.update(Message::EnqueueRecent(0));
+        assert!(matches!(app.queue[0].status, ItemStatus::Running));
+        assert_eq!(app.queue.len(), 1);
 
         let _ = std::fs::remove_dir_all(&media);
     }
