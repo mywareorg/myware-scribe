@@ -6906,8 +6906,8 @@ impl App {
         self.update(Message::OpenRunSetup)
     }
 
-    /// Add a history row's audio to the queue and show the queue, without
-    /// opening the run options. The context menu offers this beside
+    /// Add a history row's audio to the queue without leaving the current tab
+    /// or opening the run options. The context menu offers this beside
     /// Retranscribe so several files can be staged before a run.
     fn enqueue_recent_from_menu(&mut self, index: usize) -> Task<Message> {
         if self.transcribe_blocked() {
@@ -6917,8 +6917,6 @@ impl App {
         if !self.enqueue_recent(index) {
             return Task::none();
         }
-        self.pane_tab = PaneTab::Queue;
-        self.recent_hover = None;
         self.toast = Some(("Added to queue".to_string(), Instant::now()));
         Task::none()
     }
@@ -27201,12 +27199,17 @@ mod tests {
             ..Default::default()
         });
         app.refresh_recent_presence();
+        app.pane_tab = PaneTab::History;
 
         let _ = app.update(Message::EnqueueRecent(0));
         assert_eq!(app.queue.len(), 1);
         assert!(matches!(app.queue[0].status, ItemStatus::Pending));
         assert_eq!(app.queue[0].audio.as_deref(), Some(audio.as_path()));
-        assert_eq!(app.pane_tab, PaneTab::Queue);
+        assert_eq!(
+            app.pane_tab,
+            PaneTab::History,
+            "adding to the queue must not switch tabs"
+        );
         assert!(!app.run_setup_open);
 
         // Adding the same audio again reuses the row instead of duplicating it.
