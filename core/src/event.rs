@@ -46,6 +46,15 @@ pub struct Stats {
     /// Stable id for this output, used by the version manifest.
     #[serde(default)]
     pub run_id: Option<String>,
+    /// Settings hash that identifies this version in the manifest.
+    #[serde(default)]
+    pub settings_key: Option<String>,
+    /// Manifest this output was recorded in, when one was written.
+    #[serde(default)]
+    pub manifest: Option<String>,
+    /// Version id inside that manifest.
+    #[serde(default)]
+    pub version_id: Option<String>,
     /// Wall-clock seconds spent decoding audio for this file.
     #[serde(default)]
     pub decode_seconds: f64,

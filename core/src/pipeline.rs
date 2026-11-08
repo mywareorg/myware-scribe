@@ -29,6 +29,21 @@ fn producer() -> String {
     format!("core {} / {PIPELINE_VERSION}", env!("CARGO_PKG_VERSION"))
 }
 
+/// Whether to write the per-audio version manifest. On by default; headless
+/// callers that do not want the extra file can set the environment variable to
+/// `0`, `false`, `off` or `no`.
+fn manifest_enabled() -> bool {
+    !crate::env_compat("HIPPO_TRANSCRIBE_MANIFEST", "TRANSIEL_MANIFEST")
+        .is_some_and(|value| matches!(value.to_ascii_lowercase().as_str(), "0" | "false" | "off" | "no"))
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|since| since.as_secs())
+        .unwrap_or(0)
+}
+
 /// Write through a temporary file in the same directory, then rename over the
 /// target. A crash cannot leave a half-written transcript.
 fn write_text_atomic(path: &Path, text: &str) -> std::io::Result<()> {
@@ -1818,9 +1833,75 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
         let txt = render(false);
         let txt_ts = render(true);
 
-        let path = output_path(input, &opts.output_dir, &opts.preset, speaker_count);
-        let ts_path =
+        let requested_language = decode_language.map(str::to_string);
+        let effective_language = requested_language
+            .clone()
+            .or_else(|| detected_language.clone());
+
+        // Which files this run owns. Re-running the same settings replaces its
+        // version; a new combination takes a free name and never overwrites an
+        // unrelated transcript.
+        let base_plain = output_path(input, &opts.output_dir, &opts.preset, speaker_count);
+        let base_ts =
             output_path_with_suffix(input, &opts.output_dir, &opts.preset, speaker_count, "-ts");
+        let manifest_enabled = manifest_enabled();
+        let manifest_hash = audio_hash
+            .clone()
+            .or_else(|| crate::cache::audio_hash(input));
+        let manifest_path = crate::versions::manifest_path(
+            input,
+            opts.output_dir.as_deref(),
+            manifest_hash.as_deref(),
+        );
+        let manifest_dir = manifest_path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .to_path_buf();
+        let settings_key = crate::versions::settings_key(
+            &opts.preset,
+            &model_name,
+            requested_language.as_deref(),
+            opts.num_speakers,
+            opts.normalize,
+        );
+        let mut manifest = manifest_enabled
+            .then(|| crate::versions::read_or_new(&manifest_path, input));
+        if let Some(manifest) = manifest.as_mut() {
+            if manifest.asset.audio_hash.is_none() {
+                manifest.asset.audio_hash = manifest_hash.clone();
+            }
+        }
+        let (plain_name, ts_name) = manifest
+            .as_ref()
+            .and_then(|manifest| {
+                manifest
+                    .versions
+                    .iter()
+                    .find(|version| version.settings_key == settings_key)
+            })
+            .map(|version| (version.plain.clone(), version.transcript.clone()))
+            .unwrap_or_else(|| {
+                if manifest_enabled {
+                    crate::versions::free_paths(&manifest_dir, &base_plain, &base_ts)
+                } else {
+                    (
+                        base_plain
+                            .file_name()
+                            .map(|name| name.to_string_lossy().into_owned())
+                            .unwrap_or_else(|| "transcript.txt".to_string()),
+                        base_ts
+                            .file_name()
+                            .map(|name| name.to_string_lossy().into_owned())
+                            .unwrap_or_else(|| "transcript-ts.txt".to_string()),
+                    )
+                }
+            });
+        let path = manifest_dir.join(&plain_name);
+        let ts_path = manifest_dir.join(&ts_name);
+        // The run rewrites this transcript, so an older pre-edit copy no longer
+        // describes it.
+        let _ = std::fs::remove_file(crate::versions::unedited_path(&path));
+        let _ = std::fs::remove_file(crate::versions::unedited_path(&ts_path));
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
@@ -1837,10 +1918,6 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
 
         // Sidecar with per-line confidence and bounds, so the viewer, exports
         // and summaries all read the same record. Line order matches `txt_ts`.
-        let requested_language = decode_language.map(str::to_string);
-        let effective_language = requested_language
-            .clone()
-            .or_else(|| detected_language.clone());
         let json_path = ts_path.with_extension("json");
         let sidecar = crate::sidecar::Sidecar::new(
             lines
@@ -1875,6 +1952,39 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
                 message: format!("could not write {}: {error}", json_path.display()),
             });
         }
+        // The manifest is the commit point: text and sidecar are already on
+        // disk, so a crash before this leaves only unreferenced files.
+        let version_id = if let Some(manifest) = manifest.as_mut() {
+            let version = crate::versions::Version {
+                id: uuid::Uuid::new_v4().to_string(),
+                settings_key: settings_key.clone(),
+                run_id: Some(run_id.clone()),
+                preset: opts.preset.clone(),
+                model: Some(model_display.clone()),
+                language_requested: requested_language.clone(),
+                language_detected: detected_language.clone(),
+                speakers_requested: opts.num_speakers,
+                speakers_detected: Some(speaker_count),
+                normalize: opts.normalize,
+                producer: Some(producer()),
+                created_at: unix_now(),
+                transcript: crate::versions::relative(&manifest_dir, &ts_path),
+                plain: crate::versions::relative(&manifest_dir, &path),
+                sidecar: Some(crate::versions::relative(&manifest_dir, &json_path)),
+                edited: false,
+                original: None,
+                origin: "run".to_string(),
+            };
+            let id = manifest.upsert(version);
+            if let Err(error) = crate::versions::write_at(&manifest_path, manifest) {
+                emit(Event::Log {
+                    message: format!("could not write {}: {error}", manifest_path.display()),
+                });
+            }
+            Some(id)
+        } else {
+            None
+        };
         // The real transcript exists now; the parked copy is no longer needed.
         let _ = std::fs::remove_file(&checkpoint);
 
@@ -1951,6 +2061,9 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
                 normalize: opts.normalize,
                 producer: Some(producer()),
                 run_id: Some(run_id),
+                settings_key: Some(settings_key),
+                manifest: manifest_enabled.then(|| manifest_path.display().to_string()),
+                version_id,
             },
         });
     }

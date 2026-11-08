@@ -435,6 +435,10 @@ struct RecentEntry {
     normalize: bool,
     /// Resolved model identity/name that produced this transcript.
     model: Option<String>,
+    /// Manifest that owns this row's versions, when one was written.
+    manifest: Option<String>,
+    settings_key: Option<String>,
+    version_id: Option<String>,
     /// Pinned by the user. A view only; it does not affect the sort.
     favorite: bool,
     /// This item came from the recorder rather than a file.
@@ -640,6 +644,12 @@ struct RecentRecord {
     normalize: bool,
     #[serde(default)]
     model: Option<String>,
+    #[serde(default)]
+    manifest: Option<String>,
+    #[serde(default)]
+    settings_key: Option<String>,
+    #[serde(default)]
+    version_id: Option<String>,
     #[serde(default)]
     favorite: bool,
     #[serde(default)]
@@ -2254,6 +2264,10 @@ impl App {
 
     /// Load the queue, the paths from the most recent batch, the finished
     /// transcript history, and the saved Favorites order.
+    ///
+    /// This and [`Self::save_queue`] are the only readers and writers of the
+    /// index. Version data lives in the per-audio manifests; replacing this
+    /// pair with a SQLite store does not change the files on disk.
     fn load_queue_and_batch() -> (
         Vec<QueueItem>,
         Vec<PathBuf>,
@@ -2302,27 +2316,69 @@ impl App {
             } else {
                 (record.state, record.message)
             };
-            merge_recent_entry(
-                &mut recent,
-                RecentEntry {
-                    audio: record.audio.map(PathBuf::from),
-                    transcript,
-                    finished_at: record.finished_at,
-                    duration: record.duration,
-                    speakers: record.speakers,
-                    preset: record.preset,
-                    language_requested: record.language_requested,
-                    language_detected: record.language_detected,
-                    speakers_requested: record.speakers_requested,
-                    normalize: record.normalize,
-                    model: record.model,
-                    favorite: record.favorite,
-                    recording: record.recording,
-                    state,
-                    message,
+            let mut entry = RecentEntry {
+                audio: record.audio.map(PathBuf::from),
+                transcript,
+                finished_at: record.finished_at,
+                duration: record.duration,
+                speakers: record.speakers,
+                preset: record.preset,
+                language_requested: record.language_requested,
+                language_detected: record.language_detected,
+                speakers_requested: record.speakers_requested,
+                normalize: record.normalize,
+                model: record.model,
+                manifest: record.manifest,
+                settings_key: record.settings_key,
+                version_id: record.version_id,
+                favorite: record.favorite,
+                recording: record.recording,
+                state,
+                message,
                 ..Default::default()
-                },
-            );
+            };
+            // The manifest owns the current version; the index only points at
+            // it. Re-resolve on load so a moved transcript or a newer run in
+            // the same bundle is picked up without a queue rewrite.
+            let manifest_path = entry.manifest.clone();
+            if let Some(manifest_path) = manifest_path.as_deref() {
+                let path = Path::new(manifest_path);
+                if let Some(manifest) = hippo_transcribe_core::versions::read(path) {
+                    if let Some(directory) = path.parent() {
+                        if let Some(current) = manifest.current_version() {
+                            if let Some(transcript) = manifest.current_transcript(directory) {
+                                entry.transcript = Some(transcript);
+                            }
+                            entry.version_id = Some(current.id.clone());
+                            entry.settings_key = Some(current.settings_key.clone());
+                            if entry.preset.is_none() {
+                                entry.preset = Some(current.preset.clone());
+                            }
+                            if entry.language_requested.is_none() {
+                                entry.language_requested = current.language_requested.clone();
+                            }
+                            if entry.language_detected.is_none() {
+                                entry.language_detected = current.language_detected.clone();
+                            }
+                            if entry.speakers.is_none() {
+                                entry.speakers = current
+                                    .speakers_detected
+                                    .and_then(|count| u8::try_from(count).ok());
+                            }
+                            if entry.speakers_requested.is_none() {
+                                entry.speakers_requested = current
+                                    .speakers_requested
+                                    .and_then(|count| u8::try_from(count).ok());
+                            }
+                            if entry.model.is_none() {
+                                entry.model = current.model.clone();
+                            }
+                            entry.normalize = current.normalize;
+                        }
+                    }
+                }
+            }
+            merge_recent_entry(&mut recent, entry);
         }
         let mut items = Vec::new();
         for record in state.items {
@@ -2389,6 +2445,8 @@ impl App {
         serde_json::from_str::<QueueState>(&text).ok()?.last_run
     }
 
+    /// Write the index. See [`Self::load_queue_and_batch`] for the seam this
+    /// pair forms around the on-disk representation.
     fn save_queue(&self) {
         let Some(path) = Self::queue_path() else {
             return;
@@ -2447,6 +2505,9 @@ impl App {
                     speakers_requested: entry.speakers_requested,
                     normalize: entry.normalize,
                     model: entry.model.clone(),
+                    manifest: entry.manifest.clone(),
+                    settings_key: entry.settings_key.clone(),
+                    version_id: entry.version_id.clone(),
                     favorite: entry.favorite,
                     recording: entry.recording,
                     state: entry.state,
@@ -2507,11 +2568,17 @@ impl App {
     /// entry that arrived without a refresh counts as present: entries are
     /// added once their transcript was written, and the next refresh corrects
     /// it if the file moved.
+    /// The transcript a history row currently points at. The manifest owns
+    /// the current pointer; the index and this accessor agree on it.
+    fn current_transcript(entry: &RecentEntry) -> Option<&Path> {
+        entry.transcript.as_deref()
+    }
+
     fn recent_transcript_present(&self, index: usize) -> bool {
         self.recent_presence.get(index).copied().unwrap_or_else(|| {
             self.recent
                 .get(index)
-                .is_some_and(|entry| entry.transcript.is_some())
+                .is_some_and(|entry| Self::current_transcript(entry).is_some())
         })
     }
 
@@ -2657,6 +2724,9 @@ impl App {
             .filter(|count| *count > 0)
             .or(entry.speakers);
         entry.normalize = stats.normalize;
+        entry.manifest = stats.manifest.clone();
+        entry.settings_key = stats.settings_key.clone();
+        entry.version_id = stats.version_id.clone();
     }
 
     /// Store a finished capture as a history item and return its index. The
@@ -3487,7 +3557,10 @@ impl App {
         self.selected_recent = Some(index);
         // Opening a row is not a tab change: each list keeps its place. The
         // single-file adoption path asks for History explicitly.
-        let Some(source) = entry.transcript.clone().or_else(|| entry.audio.clone()) else {
+        let Some(source) = Self::current_transcript(&entry)
+            .map(Path::to_path_buf)
+            .or_else(|| entry.audio.clone())
+        else {
             return Task::none();
         };
 
@@ -7593,7 +7666,7 @@ impl App {
         let Some(entry) = self.recent.get(index).cloned() else {
             return Task::none();
         };
-        let Some(transcript) = entry.transcript.clone() else {
+        let Some(transcript) = Self::current_transcript(&entry).map(Path::to_path_buf) else {
             self.toast = Some(("No transcript to export".to_string(), Instant::now()));
             return Task::none();
         };
@@ -9978,6 +10051,9 @@ impl App {
                         let language_requested = stats.language_requested.clone();
                         let language_detected = stats.language_detected.clone();
                         let normalize = stats.normalize;
+                        let manifest = stats.manifest.clone();
+                        let settings_key = stats.settings_key.clone();
+                        let version_id = stats.version_id.clone();
                         let (label, measured, audio) = match self.queue.get(index) {
                             Some(item) => (
                                 item.audio
@@ -10021,6 +10097,9 @@ impl App {
                                     speakers_requested,
                                     normalize,
                                     model,
+                                    manifest,
+                                    settings_key,
+                                    version_id,
                                     ..Default::default()
                                 },
                             ));
@@ -23384,6 +23463,65 @@ mod tests {
         assert_eq!(value["future_field"]["keep"], true);
         assert_eq!(value["recent"][0]["preset"], "accuracy");
         assert!(path.with_extension("json.bak").is_file());
+    }
+
+    #[test]
+    fn loading_resolves_the_manifest_current_transcript() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("manifest-load");
+        let dir = temp_dir("manifest-load-media");
+        let audio = dir.join("talk.mp3");
+        std::fs::write(&audio, b"audio").unwrap();
+        let current = dir.join("talk-accuracy-transcription-2speakers-ts.txt");
+        std::fs::write(&current, "[00:00] A: hi\n").unwrap();
+        let stale = dir.join("stale.txt");
+        std::fs::write(&stale, "old\n").unwrap();
+        let manifest_path = dir.join("talk-abcdef12.hippo.json");
+        let manifest = serde_json::json!({
+            "schema_version": 1,
+            "asset": { "id": "a1", "audio": "talk.mp3" },
+            "current": "v1",
+            "versions": [{
+                "id": "v1",
+                "settings_key": "key-1",
+                "preset": "accuracy",
+                "model": "ggml-large-v3-turbo-q5_0.bin",
+                "language_requested": "en",
+                "speakers_detected": 2,
+                "normalize": false,
+                "created_at": 1,
+                "transcript": "talk-accuracy-transcription-2speakers-ts.txt",
+                "plain": "talk-accuracy-transcription-2speakers.txt",
+                "origin": "run"
+            }]
+        });
+        std::fs::write(&manifest_path, manifest.to_string()).unwrap();
+
+        let queue_path = App::queue_path().unwrap();
+        std::fs::create_dir_all(queue_path.parent().unwrap()).unwrap();
+        let state = serde_json::json!({
+            "schema_version": 1,
+            "items": [],
+            "last_run": null,
+            "last_batch": [],
+            "favorite_order": [],
+            "recent": [{
+                "audio": audio,
+                "transcript": stale,
+                "finished_at": 1,
+                "manifest": manifest_path
+            }]
+        });
+        std::fs::write(&queue_path, state.to_string()).unwrap();
+
+        let (_, _, recent, _) = App::load_queue_and_batch();
+        assert_eq!(recent.len(), 1);
+        assert_eq!(recent[0].transcript.as_deref(), Some(current.as_path()));
+        assert_eq!(recent[0].preset.as_deref(), Some("accuracy"));
+        assert_eq!(recent[0].model.as_deref(), Some("ggml-large-v3-turbo-q5_0.bin"));
+        assert_eq!(recent[0].speakers, Some(2));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
