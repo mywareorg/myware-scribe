@@ -13317,12 +13317,17 @@ impl App {
         .align_y(iced::Alignment::Center)
         .width(Length::Fill);
         if edited {
-            meta_row = meta_row.push(
-                text("\u{270E} Edited")
-                    .size(10)
-                    .wrapping(NO_WRAP)
-                    .color(if locked { scheme.muted } else { scheme.blue }),
-            );
+            let edited_color = if locked { scheme.muted } else { scheme.blue };
+            // U+270E is not in the UI text font, so it rendered as tofu. Use
+            // the bundled icon font's pencil instead.
+            meta_row = meta_row
+                .push(icon_colored(ICON_PENCIL, 10.0, edited_color))
+                .push(
+                    text("Edited")
+                        .size(10)
+                        .wrapping(NO_WRAP)
+                        .color(edited_color),
+                );
         }
         meta_row = meta_row.push(horizontal_space());
         if tab == PaneTab::Recordings
@@ -19426,6 +19431,7 @@ const ICON_SPEAKERS: char = '\u{f4d0}';
 /// A person with a plus: a new voice on this line, which the transcript-wide
 /// `ICON_SPEAKERS` group cannot say.
 const ICON_PERSON_PLUS: char = '\u{f4dd}';
+const ICON_PENCIL: char = '\u{f4cb}';
 /// A repeat arrow for retrying a failed item. Distinct from the editor's redo
 /// glyph, which used to share this codepoint.
 const ICON_RETRY: char = '\u{f130}';
