@@ -505,6 +505,8 @@ struct FileInfo {
     /// Size and modification time of the primary file, read at capture time.
     size: Option<u64>,
     modified: Option<u64>,
+    /// Human labels for this asset's versions, current marked.
+    versions: Vec<String>,
 }
 
 impl FileInfo {
@@ -513,6 +515,119 @@ impl FileInfo {
     fn primary_path(&self) -> Option<&Path> {
         self.audio.as_deref().or(self.transcript.as_deref())
     }
+}
+
+/// One transcript version, as the version panel and preview banner show it.
+#[derive(Debug, Clone)]
+struct VersionRow {
+    id: String,
+    preset: String,
+    language_requested: Option<String>,
+    language_detected: Option<String>,
+    speakers_requested: Option<i32>,
+    speakers_detected: Option<usize>,
+    created_at: u64,
+    transcript: PathBuf,
+    edited: bool,
+    current: bool,
+    exists: bool,
+}
+
+impl VersionRow {
+    fn label(&self) -> String {
+        version_label(
+            &self.preset,
+            self.language_requested.as_deref(),
+            self.language_detected.as_deref(),
+            self.speakers_requested,
+            self.speakers_detected,
+        )
+    }
+}
+
+/// A human label for one settings combination.
+fn version_label(
+    preset: &str,
+    language_requested: Option<&str>,
+    language_detected: Option<&str>,
+    speakers_requested: Option<i32>,
+    speakers_detected: Option<usize>,
+) -> String {
+    let preset = preset_label(preset);
+    let speakers = speakers_detected
+        .or_else(|| speakers_requested.and_then(|count| usize::try_from(count).ok()));
+    let language = language_requested
+        .or(language_detected)
+        .map(language_label)
+        .filter(|label| !label.is_empty());
+    let mut parts = vec![preset];
+    if let Some(speakers) = speakers {
+        parts.push(format!(
+            "{speakers} {}",
+            if speakers == 1 { "speaker" } else { "speakers" }
+        ));
+    }
+    if let Some(language) = language {
+        parts.push(language);
+    }
+    parts.join(" \u{00b7} ")
+}
+
+/// Human labels for an asset's versions, as the Info popup lists them.
+fn version_lines(entry: &RecentEntry) -> Vec<String> {
+    let Some(path) = entry.manifest.as_deref() else {
+        return Vec::new();
+    };
+    let path = Path::new(path);
+    let Some(manifest) = hippo_transcribe_core::versions::read(path) else {
+        return Vec::new();
+    };
+    manifest
+        .versions
+        .iter()
+        .map(|version| {
+            let mut line = version_label(
+                &version.preset,
+                version.language_requested.as_deref(),
+                version.language_detected.as_deref(),
+                version.speakers_requested,
+                version.speakers_detected,
+            );
+            if version.edited {
+                line.push_str(" \u{00b7} Edited");
+            }
+            if manifest.current.as_deref() == Some(version.id.as_str()) {
+                line.push_str(" \u{00b7} Current");
+            }
+            line
+        })
+        .collect()
+}
+
+/// When a version was made, relative for recent days.
+fn version_when(created_at: u64) -> String {
+    if created_at == 0 {
+        return String::new();
+    }
+    format!(
+        "{} {}",
+        day_heading(created_at, unix_secs()),
+        clock_time(created_at)
+    )
+}
+
+/// The open version panel: the row it belongs to, its manifest and rows.
+struct VersionsDialog {
+    row: usize,
+    versions: Vec<VersionRow>,
+}
+
+/// A version being previewed read-only, with the row it belongs to.
+#[derive(Debug, Clone)]
+struct VersionPreview {
+    row: usize,
+    version_id: String,
+    label: String,
 }
 
 /// A short-lived tint marking a pane that something outside it just changed.
@@ -1077,6 +1192,8 @@ pub enum Modal {
     Rename,
     Vocabulary,
     Briefing,
+    /// The Select version panel for one history row.
+    Versions,
     /// The File panel row's read-only details. Last in paint order: it only
     /// appears when nothing else is open, since a context menu opens it.
     Info,
@@ -1299,6 +1416,20 @@ pub enum Message {
     CloseInfo,
     /// Copy the Info popup's primary path to the clipboard.
     CopyInfoPath,
+    /// Show the version panel for a history row.
+    OpenVersions(PaneTab, usize),
+    /// Close the version panel.
+    CloseVersions,
+    /// Preview one version read-only, by its manifest id.
+    PreviewVersion(String),
+    /// Make the previewed version the row's current transcript.
+    MakeVersionCurrent,
+    /// Enqueue the audio and prefill Run setup from the previewed version.
+    RunVersionAgain,
+    /// Return from a version preview to the row's current transcript.
+    CloseVersionPreview,
+    /// Ask to revert the row's current transcript to its unedited copy.
+    RevertVersion,
     /// The keyboard opened the context menu for the selected row.
     OpenRowMenuForSelection,
     /// The pointer entered a row menu item; true while it is Export, whose
@@ -1572,6 +1703,10 @@ pub struct App {
     karaoke: bool,
     /// The briefing dialog: absent when closed.
     briefing: Option<BriefingState>,
+    /// The version panel, when open.
+    versions_open: Option<VersionsDialog>,
+    /// An older version shown read-only in the transcript pane.
+    version_preview: Option<VersionPreview>,
     /// Word times for the line under the playhead, for karaoke highlighting.
     karaoke_line: Option<usize>,
     karaoke_source: Option<PathBuf>,
@@ -1939,6 +2074,8 @@ impl App {
             #[cfg(test)]
             recording_models_ready_override: None,
             briefing: None,
+            versions_open: None,
+            version_preview: None,
             karaoke_line: None,
             karaoke_source: None,
             karaoke_all: Vec::new(),
@@ -2936,6 +3073,13 @@ impl App {
         let Some(entry) = self.recent.get(index).cloned() else {
             return;
         };
+        if self
+            .version_preview
+            .as_ref()
+            .is_some_and(|preview| preview.row == index)
+        {
+            self.version_preview = None;
+        }
         if let Some(key) = favorite_key(&entry) {
             self.favorite_order.retain(|other| other != &key);
         }
@@ -3501,6 +3645,7 @@ impl App {
         self.header_menu = None;
         self.close_find();
         self.commit_inline_edit(false);
+        self.version_preview = None;
         self.selected_recent = None;
         let Some(item) = self.queue.get(index) else {
             return Task::none();
@@ -3551,6 +3696,7 @@ impl App {
         self.header_menu = None;
         self.close_find();
         self.commit_inline_edit(false);
+        self.version_preview = None;
         let Some(entry) = self.recent.get(index).cloned() else {
             return Task::none();
         };
@@ -3640,6 +3786,7 @@ impl App {
         self.header_menu = None;
         self.close_find();
         self.commit_inline_edit(false);
+        self.version_preview = None;
         self.invalidate_derived();
         self.selected = None;
         self.selected_recent = None;
@@ -6179,6 +6326,16 @@ impl App {
                 self.toast = Some(("Copied path".to_string(), Instant::now()));
                 iced::clipboard::write(path)
             }
+            Message::OpenVersions(tab, index) => {
+                self.open_versions(tab, index);
+                Task::none()
+            }
+            Message::CloseVersions => self.close_modal(Modal::Versions),
+            Message::PreviewVersion(id) => self.preview_version(&id),
+            Message::MakeVersionCurrent => self.make_version_current(),
+            Message::RunVersionAgain => self.run_version_again(),
+            Message::CloseVersionPreview => self.close_version_preview(),
+            Message::RevertVersion => self.revert_version(),
             Message::OpenRowMenuForSelection => {
                 let tab = self.pane_tab;
                 let index = self.selected_row();
@@ -6218,6 +6375,7 @@ impl App {
             }
             Message::SelectTab(tab) => {
                 self.pane_tab = tab;
+                self.version_preview = None;
                 self.recent_hover = None;
                 self.row_menu = None;
                 self.export_submenu = false;
@@ -7421,6 +7579,235 @@ impl App {
 
     /// Capture a row's file details for the Info popup. The lists can shift
     /// while it is open, so every value is read now and the index is dropped.
+    /// Open the version panel for a history row.
+    fn open_versions(&mut self, _tab: PaneTab, index: usize) {
+        let Some(entry) = self.recent.get(index) else {
+            return;
+        };
+        let Some(manifest_path) = entry.manifest.clone() else {
+            self.toast = Some((
+                "No version records for this item".to_string(),
+                Instant::now(),
+            ));
+            return;
+        };
+        let path = PathBuf::from(manifest_path);
+        let Some(manifest) = hippo_transcribe_core::versions::read(&path) else {
+            self.toast = Some((
+                "Could not read the version records".to_string(),
+                Instant::now(),
+            ));
+            return;
+        };
+        let directory = path.parent().unwrap_or_else(|| Path::new("."));
+        let current = manifest.current.clone();
+        let mut versions: Vec<VersionRow> = manifest
+            .versions
+            .iter()
+            .map(|version| {
+                let transcript = directory.join(&version.transcript);
+                let edited = version.edited || crate::files::unedited_path(&transcript).is_file();
+                VersionRow {
+                    id: version.id.clone(),
+                    preset: version.preset.clone(),
+                    language_requested: version.language_requested.clone(),
+                    language_detected: version.language_detected.clone(),
+                    speakers_requested: version.speakers_requested,
+                    speakers_detected: version.speakers_detected,
+                    created_at: version.created_at,
+                    exists: transcript.is_file(),
+                    transcript,
+                    edited,
+                    current: current.as_deref() == Some(version.id.as_str()),
+                }
+            })
+            .collect();
+        versions.sort_by(|a, b| b.current.cmp(&a.current).then(b.created_at.cmp(&a.created_at)));
+        self.versions_open = Some(VersionsDialog { row: index, versions });
+    }
+
+    /// Show one version read-only. Nothing on disk is written.
+    fn preview_version(&mut self, id: &str) -> Task<Message> {
+        let Some((row_index, row)) = self.versions_open.as_ref().and_then(|dialog| {
+            dialog
+                .versions
+                .iter()
+                .find(|row| row.id == id)
+                .cloned()
+                .map(|row| (dialog.row, row))
+        }) else {
+            return Task::none();
+        };
+        if !row.exists {
+            self.toast = Some((
+                "That transcript file is missing".to_string(),
+                Instant::now(),
+            ));
+            return Task::none();
+        }
+        let Some(entry) = self.recent.get(row_index).cloned() else {
+            return Task::none();
+        };
+        let Some(text) = backend::read_transcript(&row.transcript) else {
+            self.toast = Some(("Could not read that version".to_string(), Instant::now()));
+            return Task::none();
+        };
+        let confidences = backend::read_confidences(&row.transcript);
+        self.commit_inline_edit(false);
+        self.versions_open = None;
+        self.selected = None;
+        self.selected_recent = Some(row_index);
+        let label = row.label();
+        let task = self.install_transcript_view(
+            row.transcript.clone(),
+            text.clone(),
+            attach_confidences(parse_lines(&text), &confidences),
+            Vec::new(),
+            Arc::new(Vec::new()),
+            entry.duration.map(|seconds| seconds as f32),
+            entry.audio.clone(),
+            entry.speakers.map(i32::from),
+            None,
+            true,
+        );
+        self.version_preview = Some(VersionPreview {
+            row: row_index,
+            version_id: row.id,
+            label,
+        });
+        task
+    }
+
+    /// Point the row at the previewed version. Transcript files are untouched.
+    fn make_version_current(&mut self) -> Task<Message> {
+        if matches!(self.status, Status::Running) {
+            self.toast = Some((
+                "Finish the current transcription first".to_string(),
+                Instant::now(),
+            ));
+            return Task::none();
+        }
+        let Some(preview) = self.version_preview.clone() else {
+            return Task::none();
+        };
+        let Some(entry) = self.recent.get(preview.row).cloned() else {
+            return Task::none();
+        };
+        let Some(manifest_path) = entry.manifest.clone() else {
+            return Task::none();
+        };
+        let path = PathBuf::from(manifest_path);
+        let Some(mut manifest) = hippo_transcribe_core::versions::read(&path) else {
+            self.toast = Some((
+                "Could not read the version records".to_string(),
+                Instant::now(),
+            ));
+            return Task::none();
+        };
+        let Some(version) = manifest
+            .versions
+            .iter()
+            .find(|version| version.id == preview.version_id)
+            .cloned()
+        else {
+            return Task::none();
+        };
+        manifest.current = Some(version.id.clone());
+        if let Err(error) = hippo_transcribe_core::versions::write_at(&path, &manifest) {
+            self.toast = Some((
+                format!("Could not update versions: {error}"),
+                Instant::now(),
+            ));
+            return Task::none();
+        }
+        let directory = path.parent().unwrap_or_else(|| Path::new("."));
+        if let Some(entry) = self.recent.get_mut(preview.row) {
+            entry.transcript = Some(directory.join(&version.transcript));
+            entry.version_id = Some(version.id.clone());
+            entry.settings_key = Some(version.settings_key.clone());
+            entry.preset = Some(version.preset.clone());
+            entry.language_requested = version.language_requested.clone();
+            entry.language_detected = version.language_detected.clone();
+            entry.speakers_requested = version
+                .speakers_requested
+                .and_then(|count| u8::try_from(count).ok());
+            entry.speakers = version
+                .speakers_detected
+                .and_then(|count| u8::try_from(count).ok())
+                .or(entry.speakers);
+            entry.model = version.model.clone();
+            entry.normalize = version.normalize;
+        }
+        self.refresh_recent_presence();
+        self.version_preview = None;
+        self.save_queue();
+        self.toast = Some((format!("Now using {}", preview.label), Instant::now()));
+        self.open_recent(preview.row, None)
+    }
+
+    /// Enqueue the row and prefill Run setup from the previewed version.
+    fn run_version_again(&mut self) -> Task<Message> {
+        let Some(preview) = self.version_preview.clone() else {
+            return Task::none();
+        };
+        let Some(entry) = self.recent.get(preview.row).cloned() else {
+            return Task::none();
+        };
+        let Some(manifest_path) = entry.manifest.clone() else {
+            return Task::none();
+        };
+        let path = PathBuf::from(manifest_path);
+        let Some(manifest) = hippo_transcribe_core::versions::read(&path) else {
+            self.toast = Some((
+                "Could not read the version records".to_string(),
+                Instant::now(),
+            ));
+            return Task::none();
+        };
+        let Some(version) = manifest
+            .versions
+            .iter()
+            .find(|version| version.id == preview.version_id)
+            .cloned()
+        else {
+            return Task::none();
+        };
+        if let Some(preset) = Preset::from_arg(&version.preset) {
+            self.preset = preset;
+        }
+        self.language = version.language_requested.clone();
+        self.num_speakers = version.speakers_requested;
+        self.normalize = version.normalize;
+        self.save_settings();
+        self.version_preview = None;
+        self.retranscribe_recent(preview.row)
+    }
+
+    fn close_version_preview(&mut self) -> Task<Message> {
+        let Some(preview) = self.version_preview.take() else {
+            return Task::none();
+        };
+        self.open_recent(preview.row, None)
+    }
+
+    /// Revert the row's current transcript, not the previewed older version.
+    fn revert_version(&mut self) -> Task<Message> {
+        let row = self
+            .version_preview
+            .as_ref()
+            .map(|preview| preview.row)
+            .or_else(|| self.versions_open.as_ref().map(|dialog| dialog.row))
+            .or(self.selected_recent);
+        let Some(row) = row else {
+            return Task::none();
+        };
+        self.version_preview = None;
+        self.versions_open = None;
+        let view = self.open_recent(row, None);
+        let reset = self.update(Message::RequestResetTranscript);
+        Task::batch([view, reset])
+    }
+
     fn capture_file_info(&self, tab: PaneTab, index: usize) -> Option<FileInfo> {
         let mut info = if tab == PaneTab::Queue {
             let item = self.queue.get(index)?;
@@ -7450,6 +7837,7 @@ impl App {
                 transcript_present: false,
                 size: None,
                 modified: None,
+                versions: Vec::new(),
             }
         } else {
             let entry = self.recent.get(index)?;
@@ -7484,6 +7872,7 @@ impl App {
                 transcript_present: false,
                 size: None,
                 modified: None,
+                versions: version_lines(entry),
             }
         };
 
@@ -7641,11 +8030,31 @@ impl App {
     /// Add a history row's audio to the queue without leaving the current tab
     /// or opening the run options. The context menu offers this as Add to queue
     /// so several files can be staged before a run.
+    /// Apply a history row's recorded settings to the run options. Used by
+    /// Add to queue so a row runs with the settings that produced its current
+    /// transcript. Rows without provenance leave the options alone.
+    fn apply_entry_settings(&mut self, index: usize) {
+        let Some(entry) = self.recent.get(index) else {
+            return;
+        };
+        let Some(preset) = entry.preset.as_deref() else {
+            return;
+        };
+        if let Some(preset) = Preset::from_arg(preset) {
+            self.preset = preset;
+        }
+        self.language = entry.language_requested.clone();
+        self.num_speakers = entry.speakers_requested.map(i32::from);
+        self.normalize = entry.normalize;
+        self.save_settings();
+    }
+
     fn enqueue_recent_from_menu(&mut self, index: usize) -> Task<Message> {
         if self.transcribe_blocked() {
             self.toast = Some(("Finish the recording first".to_string(), Instant::now()));
             return Task::none();
         }
+        self.apply_entry_settings(index);
         let Some(row) = self.enqueue_recent(index) else {
             return Task::none();
         };
@@ -8100,6 +8509,7 @@ impl App {
             return;
         }
         // Transcribing is queue work, including a history entry re-run.
+        self.version_preview = None;
         self.pane_tab = PaneTab::Queue;
         self.recent_hover = None;
         let has_pending = self
@@ -13136,6 +13546,15 @@ impl App {
             },
             Message::OpenExportSubmenu,
         );
+        let select_version = row(
+            "Select version\u{2026}",
+            entry.manifest.is_some(),
+            entry
+                .manifest
+                .is_none()
+                .then_some("No versions recorded for this item."),
+            Message::OpenVersions(tab, index),
+        );
         let mut rows = match tab {
             PaneTab::Favorites => vec![
                 copy_text,
@@ -13166,6 +13585,7 @@ impl App {
                 reveal_audio,
             ],
         };
+        rows.push(select_version.separated());
         rows.push(row("Info", true, None, Message::OpenInfo(tab, index)).separated());
         rows
     }
@@ -14811,6 +15231,8 @@ impl App {
             Some(Modal::Vocabulary)
         } else if self.briefing.is_some() {
             Some(Modal::Briefing)
+        } else if self.versions_open.is_some() {
+            Some(Modal::Versions)
         } else if self.info_open.is_some() {
             // Lowest priority: the Info popup only ever comes from a context
             // menu, which cannot open while another dialog is up.
@@ -14871,6 +15293,7 @@ impl App {
                 }
                 self.briefing = None;
             }
+            Modal::Versions => self.versions_open = None,
         }
         Task::none()
     }
@@ -15584,6 +16007,144 @@ impl App {
 
     /// The File panel row's details: the full paths, whether they are on disk,
     /// and the sizes and times behind them.
+    /// A strip above the transcript saying an older version is on screen.
+    fn version_banner(&self, scheme: &Scheme) -> Option<Element<'_, Message>> {
+        let preview = self.version_preview.as_ref()?;
+        let scheme = *scheme;
+        let banner = row![
+            text(format!(
+                "Viewing an earlier version \u{00b7} {}",
+                preview.label
+            ))
+            .size(theme::TEXT_XS)
+            .wrapping(NO_WRAP)
+            .color(scheme.text),
+            horizontal_space(),
+            action_text("Make current")
+                .on_press(Message::MakeVersionCurrent)
+                .style(pill_button_secondary),
+            action_text("Run again")
+                .on_press(Message::RunVersionAgain)
+                .style(pill_button_secondary),
+            action_text("Close")
+                .on_press(Message::CloseVersionPreview)
+                .style(pill_button_secondary),
+        ]
+        .spacing(8)
+        .align_y(iced::Alignment::Center);
+        Some(
+            container(banner)
+                .padding([6, 10])
+                .width(Length::Fill)
+                .style(move |_theme| container::Style {
+                    background: Some(scheme.warn_tint.into()),
+                    border: island_border(&scheme),
+                    ..container::Style::default()
+                })
+                .into(),
+        )
+    }
+
+    /// The Select version panel: current pinned, newest first, read-only
+    /// preview on press.
+    fn versions_dialog(&self, scheme: &Scheme) -> Element<'_, Message> {
+        let scheme = *scheme;
+        let Some(dialog) = &self.versions_open else {
+            return container(horizontal_space()).into();
+        };
+        let mut list = column![].spacing(2).width(Length::Fill);
+        for row in &dialog.versions {
+            let label = row.label();
+            let detail = if row.edited {
+                format!("{} \u{00b7} Edited", version_when(row.created_at))
+            } else {
+                version_when(row.created_at)
+            };
+            let marker = if row.current { "\u{25cf}" } else { "\u{25cb}" };
+            let marker_color = if row.current {
+                scheme.green
+            } else {
+                scheme.muted
+            };
+            let exists = row.exists;
+            let line = row![
+                text(marker).size(12).color(marker_color),
+                column![
+                    text(label)
+                        .size(theme::TEXT_SM)
+                        .wrapping(NO_WRAP)
+                        .color(scheme.text),
+                    text(detail)
+                        .size(theme::TEXT_XS)
+                        .wrapping(NO_WRAP)
+                        .color(scheme.muted),
+                ]
+                .spacing(1)
+                .width(Length::Fill),
+                if exists {
+                    Element::from(horizontal_space())
+                } else {
+                    Element::from(text("Missing").size(10).color(scheme.danger))
+                },
+            ]
+            .spacing(8)
+            .align_y(iced::Alignment::Center);
+            let id = row.id.clone();
+            list = list.push(
+                button(container(line).width(Length::Fill).padding([6, 8]))
+                    .width(Length::Fill)
+                    .padding(0)
+                    .on_press_maybe(exists.then_some(Message::PreviewVersion(id)))
+                    .style(move |theme, status| {
+                        if exists {
+                            pill_button_secondary(theme, status)
+                        } else {
+                            greyed_button(scheme)(theme, status)
+                        }
+                    }),
+            );
+        }
+        let current_edited = dialog
+            .versions
+            .iter()
+            .find(|row| row.current)
+            .is_some_and(|row| row.edited && row.exists);
+        let revert: Element<Message> = if current_edited {
+            action_text("Revert to unedited\u{2026}")
+                .on_press(Message::RevertVersion)
+                .style(pill_button_secondary)
+                .into()
+        } else {
+            horizontal_space().into()
+        };
+        let footer = row![
+            revert,
+            horizontal_space(),
+            action_text("Close")
+                .on_press(Message::CloseVersions)
+                .style(pill_button_secondary),
+        ]
+        .spacing(8)
+        .align_y(iced::Alignment::Center);
+        let body = column![
+            text("Select version").size(20).color(scheme.text),
+            text(
+                "The current transcript is the one the row opens, exports and copies. \
+                 Older versions stay read-only."
+            )
+            .size(theme::TEXT_XS)
+            .color(scheme.muted),
+            scrollable(list)
+                .direction(app_scroll_direction())
+                .height(Length::Fixed(300.0))
+                .style(visible_scrollbar_style),
+            footer,
+        ]
+        .spacing(theme::SPACE_MD)
+        .width(Length::Fill);
+        modal_card(body, 520.0, scheme)
+    }
+
     fn info_dialog(&self, scheme: &Scheme) -> Element<'_, Message> {
         let scheme = *scheme;
         let Some(info) = &self.info_open else {
@@ -15676,6 +16237,29 @@ impl App {
         ]
         .spacing(theme::SPACE_LG)
         .width(Length::Fill);
+
+        if !info.versions.is_empty() {
+            let mut versions = column![
+                text("Versions")
+                    .size(theme::TEXT_SM)
+                    .font(Font {
+                        weight: font::Weight::Bold,
+                        ..Font::DEFAULT
+                    })
+                    .color(scheme.text),
+            ]
+            .spacing(4)
+            .width(Length::Fill);
+            for line in &info.versions {
+                versions = versions.push(
+                    text(line.clone())
+                        .size(theme::TEXT_XS)
+                        .wrapping(NO_WRAP)
+                        .color(scheme.muted),
+                );
+            }
+            body = body.push(versions);
+        }
 
         let mut footer = row![horizontal_space()]
             .spacing(theme::SPACE_MD)
@@ -16873,6 +17457,10 @@ impl App {
                 top_slot_col = top_slot_col.push(notice);
                 has_top = true;
             }
+            if let Some(banner) = self.version_banner(&scheme) {
+                top_slot_col = top_slot_col.push(banner);
+                has_top = true;
+            }
         }
         // In the empty state the progress/timeline/player chrome has nothing to
         // act on; let the welcome card own the panel instead.
@@ -17037,11 +17625,16 @@ impl App {
             Some(Modal::Rename) => self.rename_dialog(&scheme),
             Some(Modal::Vocabulary) => self.vocabulary_dialog(&scheme),
             Some(Modal::Briefing) => self.briefing_dialog(&scheme),
+            Some(Modal::Versions) => self.versions_dialog(&scheme),
             Some(Modal::Info) => self.info_dialog(&scheme),
         };
         // The Info popup is read-only and transient: its scrim dismisses it,
         // unlike the dialogs that hold a decision or a completion chain.
-        let dismiss = matches!(self.open_modal(), Some(Modal::Info)).then_some(Message::CloseInfo);
+        let dismiss = match self.open_modal() {
+            Some(Modal::Info) => Some(Message::CloseInfo),
+            Some(Modal::Versions) => Some(Message::CloseVersions),
+            _ => None,
+        };
         modal_overlay(base, dialog, scheme, dismiss)
     }
 }
@@ -19736,6 +20329,7 @@ fn closes_row_menu(message: &Message) -> bool {
             | Message::AddFolder
             | Message::ClearQueue
             | Message::ClearHistory
+            | Message::OpenVersions(_, _)
     )
 }
 
@@ -23525,6 +24119,159 @@ mod tests {
     }
 
     #[test]
+    fn a_version_preview_is_read_only_and_make_current_moves_the_pointer() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("versions-ui");
+        let dir = temp_dir("versions-ui-media");
+        let audio = dir.join("talk.mp3");
+        std::fs::write(&audio, b"audio").unwrap();
+        let current = dir.join("one-ts.txt");
+        std::fs::write(&current, "[00:00] A: one\n").unwrap();
+        let older = dir.join("two-ts.txt");
+        std::fs::write(&older, "[00:00] A: two\n").unwrap();
+        let manifest_path = dir.join("talk-hash.hippo.json");
+        let manifest = serde_json::json!({
+            "schema_version": 1,
+            "asset": { "id": "a1", "audio": "talk.mp3" },
+            "current": "v1",
+            "versions": [
+                {
+                    "id": "v1", "settings_key": "k1", "preset": "accuracy",
+                    "language_requested": "en", "speakers_requested": 2,
+                    "speakers_detected": 2, "created_at": 2,
+                    "transcript": "one-ts.txt", "plain": "one.txt", "origin": "run"
+                },
+                {
+                    "id": "v2", "settings_key": "k2", "preset": "speed",
+                    "language_requested": "es", "speakers_requested": 3,
+                    "speakers_detected": 1, "created_at": 1,
+                    "transcript": "two-ts.txt", "plain": "two.txt", "origin": "run"
+                }
+            ]
+        });
+        std::fs::write(&manifest_path, manifest.to_string()).unwrap();
+
+        let mut app = pro_app();
+        app.recent.push(RecentEntry {
+            audio: Some(audio.clone()),
+            transcript: Some(current.clone()),
+            finished_at: 5,
+            preset: Some("accuracy".to_string()),
+            manifest: Some(manifest_path.display().to_string()),
+            ..Default::default()
+        });
+        app.pane_tab = PaneTab::History;
+
+        let _ = app.update(Message::OpenVersions(PaneTab::History, 0));
+        let dialog = app.versions_open.as_ref().expect("version panel");
+        assert_eq!(dialog.versions.len(), 2);
+        assert!(dialog.versions[0].current, "the current version is pinned first");
+
+        let _ = app.update(Message::PreviewVersion("v2".to_string()));
+        assert!(app.versions_open.is_none());
+        let view = app.selected_view.as_ref().expect("preview view");
+        assert_eq!(view.source, older);
+        assert!(view.output.is_none(), "an older version must be read-only");
+        assert_eq!(
+            app.version_preview.as_ref().map(|preview| preview.version_id.as_str()),
+            Some("v2")
+        );
+
+        let _ = app.update(Message::MakeVersionCurrent);
+        assert!(app.version_preview.is_none());
+        assert_eq!(app.recent[0].transcript.as_deref(), Some(older.as_path()));
+        let reread = hippo_transcribe_core::versions::read(&manifest_path).unwrap();
+        assert_eq!(reread.current.as_deref(), Some("v2"));
+        assert_eq!(std::fs::read_to_string(&current).unwrap(), "[00:00] A: one\n");
+        assert_eq!(std::fs::read_to_string(&older).unwrap(), "[00:00] A: two\n");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn run_again_prefills_the_previewed_versions_settings() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("versions-run-again");
+        let dir = temp_dir("versions-run-again-media");
+        let audio = dir.join("talk.mp3");
+        std::fs::write(&audio, b"audio").unwrap();
+        let transcript = dir.join("speed-ts.txt");
+        std::fs::write(&transcript, "[00:00] A: hi\n").unwrap();
+        let manifest_path = dir.join("talk-hash.hippo.json");
+        let manifest = serde_json::json!({
+            "schema_version": 1,
+            "asset": { "id": "a1", "audio": "talk.mp3" },
+            "current": "v1",
+            "versions": [{
+                "id": "v1", "settings_key": "k1", "preset": "speed",
+                "language_requested": "es", "speakers_requested": 3,
+                "speakers_detected": 2, "normalize": true, "created_at": 2,
+                "transcript": "speed-ts.txt", "plain": "speed.txt", "origin": "run"
+            }]
+        });
+        std::fs::write(&manifest_path, manifest.to_string()).unwrap();
+
+        let mut app = pro_app();
+        app.recent.push(RecentEntry {
+            audio: Some(audio.clone()),
+            transcript: Some(transcript),
+            finished_at: 5,
+            manifest: Some(manifest_path.display().to_string()),
+            ..Default::default()
+        });
+        let _ = app.update(Message::OpenVersions(PaneTab::History, 0));
+        let _ = app.update(Message::PreviewVersion("v1".to_string()));
+        let _ = app.update(Message::RunVersionAgain);
+
+        assert_eq!(app.preset, Preset::Speed);
+        assert_eq!(app.language.as_deref(), Some("es"));
+        assert_eq!(app.num_speakers, Some(3));
+        assert!(app.normalize);
+        assert!(app.run_setup_open, "run setup did not open");
+        assert!(
+            app.queue
+                .iter()
+                .any(|item| item.audio.as_deref() == Some(audio.as_path())),
+            "the audio was not queued"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn add_to_queue_uses_the_current_versions_settings() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("versions-add-settings");
+        let dir = temp_dir("versions-add-settings-media");
+        let audio = dir.join("talk.mp3");
+        std::fs::write(&audio, b"audio").unwrap();
+        let queued = audio.clone();
+        let mut app = pro_app();
+        app.recent.push(RecentEntry {
+            audio: Some(audio),
+            transcript: Some(dir.join("talk.txt")),
+            finished_at: 5,
+            preset: Some("speed".to_string()),
+            language_requested: None,
+            speakers_requested: None,
+            normalize: true,
+            ..Default::default()
+        });
+
+        let _ = app.update(Message::EnqueueRecent(0));
+
+        assert_eq!(app.preset, Preset::Speed);
+        assert_eq!(app.language, None, "auto stays auto");
+        assert_eq!(app.num_speakers, None, "auto speakers stay auto");
+        assert!(app.normalize);
+        assert!(app
+            .queue
+            .iter()
+            .any(|item| item.audio.as_deref() == Some(queued.as_path())));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn a_corrupt_queue_falls_back_to_the_backup() {
         let _guard = env_lock();
         let _config = ConfigEnv::new("queue-backup");
@@ -25274,7 +26021,7 @@ mod tests {
 
     /// Every dialog, so a variant added to `Modal` cannot go untested: the
     /// escape and render passes below each walk this list.
-    const ALL_MODALS: [Modal; 10] = [
+    const ALL_MODALS: [Modal; 11] = [
         Modal::Reset,
         Modal::Summary,
         Modal::DeleteLine,
@@ -25285,6 +26032,7 @@ mod tests {
         Modal::RunSetup,
         Modal::Rename,
         Modal::Info,
+        Modal::Versions,
     ];
 
     /// Raise one dialog the way the app would.
@@ -25319,6 +26067,42 @@ mod tests {
                 });
                 let index = app.recent.len() - 1;
                 app.info_open = app.capture_file_info(PaneTab::History, index);
+            }
+            Modal::Versions => {
+                let dir = std::env::temp_dir().join(format!(
+                    "hippo-modal-versions-{}",
+                    std::process::id()
+                ));
+                let _ = std::fs::create_dir_all(&dir);
+                let audio = dir.join("talk.mp3");
+                std::fs::write(&audio, b"audio").unwrap();
+                let transcript = dir.join("talk-ts.txt");
+                std::fs::write(&transcript, "[00:00] A: hi\n").unwrap();
+                let manifest = serde_json::json!({
+                    "schema_version": 1,
+                    "asset": { "id": "a1", "audio": "talk.mp3" },
+                    "current": "v1",
+                    "versions": [{
+                        "id": "v1",
+                        "settings_key": "key-1",
+                        "preset": "accuracy",
+                        "created_at": 1,
+                        "transcript": "talk-ts.txt",
+                        "plain": "talk.txt",
+                        "origin": "run"
+                    }]
+                });
+                let manifest_path = dir.join("talk-hash.hippo.json");
+                std::fs::write(&manifest_path, manifest.to_string()).unwrap();
+                app.recent.push(RecentEntry {
+                    audio: Some(audio),
+                    transcript: Some(transcript),
+                    manifest: Some(manifest_path.display().to_string()),
+                    finished_at: 5,
+                    ..Default::default()
+                });
+                let index = app.recent.len() - 1;
+                app.open_versions(PaneTab::History, index);
             }
         }
     }
@@ -29703,6 +30487,10 @@ mod tests {
             Some(Message::OpenExportSubmenu)
         ));
         assert!(!rows.iter().any(|row| row.label == "Remove item"));
+        assert!(
+            !menu_entry(&rows, "Select version\u{2026}").enabled,
+            "a row without a manifest has no versions"
+        );
 
         // Info sits at the bottom, separated, and carries the row it was
         // opened on rather than a live index.
