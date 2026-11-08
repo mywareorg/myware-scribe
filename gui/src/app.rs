@@ -128,6 +128,8 @@ const ASPECT_INV: f32 = 3.0 / 4.0; // h/w
 const PANEL_GAP: f32 = 12.0;
 const OUTER_PADDING: f32 = 12.0;
 const LEFT_PANEL_WIDTH: f32 = 380.0;
+/// Shape of `queue.json`. Additive changes keep older builds reading it.
+const QUEUE_SCHEMA_VERSION: u32 = 1;
 
 /// UI chrome never wraps; labels are shortened or ellipsized instead.
 const NO_WRAP: iced::widget::text::Wrapping = iced::widget::text::Wrapping::None;
@@ -419,7 +421,20 @@ struct RecentEntry {
     /// Unix seconds when the item finished; the history sorts newest first.
     finished_at: u64,
     duration: Option<f64>,
+    /// Detected speaker count.
     speakers: Option<u8>,
+    /// Settings that produced this transcript. `None` for adopted or legacy
+    /// items whose provenance was never recorded.
+    preset: Option<String>,
+    /// Language the run asked for; `None` means auto-detect.
+    language_requested: Option<String>,
+    /// Language the pipeline detected; `None` when one was requested.
+    language_detected: Option<String>,
+    /// Speaker count the run asked for; `None` means auto.
+    speakers_requested: Option<u8>,
+    normalize: bool,
+    /// Resolved model identity/name that produced this transcript.
+    model: Option<String>,
     /// Pinned by the user. A view only; it does not affect the sort.
     favorite: bool,
     /// This item came from the recorder rather than a file.
@@ -549,6 +564,10 @@ pub(crate) struct AdoptedTranscript {
 /// batch are written; finished transcripts also live in `RecentRecord`.
 #[derive(Serialize, Deserialize)]
 struct QueueState {
+    /// Shape of this file. Additive fields keep older builds reading it; a
+    /// later build can migrate on the value.
+    #[serde(default)]
+    schema_version: u32,
     #[serde(default)]
     items: Vec<QueueRecord>,
     /// Options of the batch that was last started.
@@ -609,6 +628,18 @@ struct RecentRecord {
     duration: Option<f64>,
     #[serde(default)]
     speakers: Option<u8>,
+    #[serde(default)]
+    preset: Option<String>,
+    #[serde(default)]
+    language_requested: Option<String>,
+    #[serde(default)]
+    language_detected: Option<String>,
+    #[serde(default)]
+    speakers_requested: Option<u8>,
+    #[serde(default)]
+    normalize: bool,
+    #[serde(default)]
+    model: Option<String>,
     #[serde(default)]
     favorite: bool,
     #[serde(default)]
@@ -2216,7 +2247,8 @@ impl App {
             .into_iter()
             .flatten()
         {
-            let _ = std::fs::remove_file(path);
+            let _ = std::fs::remove_file(&path);
+            let _ = std::fs::remove_file(path.with_extension("json.bak"));
         }
     }
 
@@ -2228,15 +2260,29 @@ impl App {
         Vec<RecentEntry>,
         Vec<String>,
     ) {
-        let text = Self::queue_path()
+        let path = Self::queue_path();
+        let text = path
+            .as_deref()
             .and_then(|path| std::fs::read_to_string(path).ok())
             .or_else(|| {
                 Self::legacy_queue_path().and_then(|path| std::fs::read_to_string(path).ok())
             });
-        let Some(text) = text else {
-            return (Vec::new(), Vec::new(), Vec::new(), Vec::new());
-        };
-        let Ok(state) = serde_json::from_str::<QueueState>(&text) else {
+        let state = text
+            .and_then(|text| serde_json::from_str::<QueueState>(&text).ok())
+            .or_else(|| {
+                // A save interrupted before its rename leaves the previous
+                // state in the backup; recover from it rather than starting
+                // with an empty history. A missing main file is a deliberate
+                // reset, not corruption, so the backup must not resurrect it.
+                let main = path.as_deref()?;
+                if !main.is_file() {
+                    return None;
+                }
+                let backup = main.with_extension("json.bak");
+                let text = std::fs::read_to_string(backup).ok()?;
+                serde_json::from_str(&text).ok()
+            });
+        let Some(state) = state else {
             return (Vec::new(), Vec::new(), Vec::new(), Vec::new());
         };
         let batch_paths = state.last_batch.into_iter().map(PathBuf::from).collect();
@@ -2264,6 +2310,12 @@ impl App {
                     finished_at: record.finished_at,
                     duration: record.duration,
                     speakers: record.speakers,
+                    preset: record.preset,
+                    language_requested: record.language_requested,
+                    language_detected: record.language_detected,
+                    speakers_requested: record.speakers_requested,
+                    normalize: record.normalize,
+                    model: record.model,
                     favorite: record.favorite,
                     recording: record.recording,
                     state,
@@ -2345,6 +2397,7 @@ impl App {
             let _ = std::fs::create_dir_all(parent);
         }
         let state = QueueState {
+            schema_version: QUEUE_SCHEMA_VERSION,
             last_run: self.last_run.clone(),
             items: self
                 .queue
@@ -2388,6 +2441,12 @@ impl App {
                     finished_at: entry.finished_at,
                     duration: entry.duration,
                     speakers: entry.speakers,
+                    preset: entry.preset.clone(),
+                    language_requested: entry.language_requested.clone(),
+                    language_detected: entry.language_detected.clone(),
+                    speakers_requested: entry.speakers_requested,
+                    normalize: entry.normalize,
+                    model: entry.model.clone(),
                     favorite: entry.favorite,
                     recording: entry.recording,
                     state: entry.state,
@@ -2396,8 +2455,26 @@ impl App {
                 .collect(),
             favorite_order: self.favorite_order.clone(),
         };
-        if let Ok(text) = serde_json::to_string_pretty(&state) {
-            let _ = std::fs::write(path, text);
+        let Ok(mut value) = serde_json::to_value(&state) else {
+            return;
+        };
+        // Keep a copy of the previous state and preserve top-level keys this
+        // build does not know about, so a newer build's fields survive an
+        // older build saving the file.
+        if let Ok(existing) = std::fs::read_to_string(&path) {
+            let _ = std::fs::write(path.with_extension("json.bak"), &existing);
+            if let Ok(serde_json::Value::Object(old)) =
+                serde_json::from_str::<serde_json::Value>(&existing)
+            {
+                if let serde_json::Value::Object(new) = &mut value {
+                    for (key, field) in old {
+                        new.entry(key).or_insert(field);
+                    }
+                }
+            }
+        }
+        if let Ok(text) = serde_json::to_string_pretty(&value) {
+            let _ = crate::files::write_atomic(&path, &text);
         }
     }
 
@@ -2562,6 +2639,24 @@ impl App {
         }
         self.refresh_recent_presence();
         self.save_queue();
+    }
+
+    /// Copy a finished run's provenance onto its history row. Recordings use
+    /// this after `mark_item_ready`; the batch path fills the fields directly.
+    fn apply_stats_provenance(&mut self, index: usize, stats: &backend::Stats) {
+        let Some(entry) = self.recent.get_mut(index) else {
+            return;
+        };
+        entry.preset = Some(stats.preset.clone());
+        entry.model = stats.model.clone();
+        entry.language_requested = stats.language_requested.clone();
+        entry.language_detected = stats.language_detected.clone();
+        entry.speakers_requested = stats.num_speakers.and_then(|count| u8::try_from(count).ok());
+        entry.speakers = u8::try_from(stats.speakers)
+            .ok()
+            .filter(|count| *count > 0)
+            .or(entry.speakers);
+        entry.normalize = stats.normalize;
     }
 
     /// Store a finished capture as a history item and return its index. The
@@ -9854,6 +9949,7 @@ impl App {
                         let transcript_for_view = transcript.clone();
                         if let Some(item) = item {
                             self.mark_item_ready(item, transcript, duration, Some(1));
+                            self.apply_stats_provenance(item, &stats);
                         }
                         self.record = None;
                         self.status = Status::Done;
@@ -9868,10 +9964,20 @@ impl App {
                         }
                         self.toast = Some(("Recording saved".to_string(), Instant::now()));
                     } else if let Some(index) = self.current.take() {
-                        let speakers = stats
-                            .num_speakers
-                            .and_then(|count| u8::try_from(count).ok())
+                        // Detected count for display; requested count kept
+                        // separately so a re-run can prefill what the user
+                        // actually asked for (auto stays auto).
+                        let speakers = u8::try_from(stats.speakers)
+                            .ok()
                             .filter(|count| *count > 0);
+                        let speakers_requested = stats
+                            .num_speakers
+                            .and_then(|count| u8::try_from(count).ok());
+                        let preset = Some(stats.preset.clone());
+                        let model = stats.model.clone();
+                        let language_requested = stats.language_requested.clone();
+                        let language_detected = stats.language_detected.clone();
+                        let normalize = stats.normalize;
                         let (label, measured, audio) = match self.queue.get(index) {
                             Some(item) => (
                                 item.audio
@@ -9909,6 +10015,12 @@ impl App {
                                     finished_at: unix_secs(),
                                     duration: measured,
                                     speakers,
+                                    preset,
+                                    language_requested,
+                                    language_detected,
+                                    speakers_requested,
+                                    normalize,
+                                    model,
                                     ..Default::default()
                                 },
                             ));
@@ -12475,32 +12587,54 @@ impl App {
         let cued = self.row_cue_active(tab, index);
         let record_locked = self.record_lock();
 
-        let meta_line: Element<'static, Message> = if tab == PaneTab::Recordings
+        let edited = transcript_edited(entry);
+        let chip = settings_label(entry);
+        let mut meta_row = row![
+            text(meta)
+                .size(11)
+                .wrapping(NO_WRAP)
+                .color(meta_color),
+        ]
+        .spacing(4)
+        .align_y(iced::Alignment::Center)
+        .width(Length::Fill);
+        if edited {
+            meta_row = meta_row.push(
+                text("\u{270E} Edited")
+                    .size(10)
+                    .wrapping(NO_WRAP)
+                    .color(if locked { scheme.muted } else { scheme.blue }),
+            );
+        }
+        meta_row = meta_row.push(horizontal_space());
+        if tab == PaneTab::Recordings
             && self.retryable_recording(index)
             && audio_present
             && !record_locked
         {
-            row![
-                text(meta.clone())
-                    .size(11)
-                    .wrapping(NO_WRAP)
-                    .color(meta_color),
-                horizontal_space(),
+            meta_row = meta_row.push(
                 action(text("Retry").size(10).wrapping(NO_WRAP))
                     .padding([0, 3])
                     .on_press(Message::RetryRecording(index))
                     .style(pill_button_secondary),
-            ]
-            .spacing(4)
-            .align_y(iced::Alignment::Center)
-            .into()
-        } else {
-            text(meta)
-                .size(11)
-                .wrapping(NO_WRAP)
-                .color(meta_color)
-                .into()
-        };
+            );
+        } else if let Some(chip) = chip {
+            meta_row = meta_row.push(
+                container(
+                    text(chip)
+                        .size(10)
+                        .wrapping(NO_WRAP)
+                        .color(scheme.muted),
+                )
+                .padding([1, 6])
+                .style(move |_theme| container::Style {
+                    background: Some(scheme.bar_track.into()),
+                    border: iced::border::rounded(999.0),
+                    ..container::Style::default()
+                }),
+            );
+        }
+        let meta_line: Element<'static, Message> = meta_row.into();
 
         let label = column![
             text(name)
@@ -19368,6 +19502,49 @@ fn distinct_speaker_count(turns: &[backend::Turn]) -> Option<u8> {
 
 /// One line for a history row: duration, speaker count and the finish time.
 /// A row whose transcript is gone says so instead, in the danger colour.
+/// Human label for a preset argument, e.g. `accuracy` -> `Accuracy`.
+fn preset_label(preset: &str) -> String {
+    Preset::from_arg(preset)
+        .map(|preset| preset.label().to_string())
+        .unwrap_or_else(|| preset.to_string())
+}
+
+/// Human label for a language code. Unknown codes are uppercased.
+fn language_label(code: &str) -> String {
+    if code.is_empty() || code.eq_ignore_ascii_case("auto") {
+        return String::new();
+    }
+    let option = LanguageOpt::from_code(Some(code));
+    if option == LanguageOpt::Auto {
+        code.to_uppercase()
+    } else {
+        option.label().to_string()
+    }
+}
+
+/// The settings chip for a row: the preset plus the language actually used.
+fn settings_label(entry: &RecentEntry) -> Option<String> {
+    let preset = preset_label(entry.preset.as_deref()?);
+    let language = entry
+        .language_requested
+        .as_deref()
+        .or(entry.language_detected.as_deref())
+        .map(language_label)
+        .filter(|label| !label.is_empty());
+    Some(match language {
+        Some(language) => format!("{preset} \u{00b7} {language}"),
+        None => preset,
+    })
+}
+
+/// Whether an older, unedited copy of this transcript exists beside it.
+fn transcript_edited(entry: &RecentEntry) -> bool {
+    entry
+        .transcript
+        .as_deref()
+        .is_some_and(|path| crate::files::unedited_path(path).is_file())
+}
+
 fn recent_meta(entry: &RecentEntry, transcript_present: bool) -> String {
     if !transcript_present {
         return "Transcript missing".to_string();
@@ -23105,6 +23282,7 @@ mod tests {
         let audio = dir.join("stale.mp3");
         std::fs::write(&audio, b"audio").unwrap();
         let state = QueueState {
+            schema_version: QUEUE_SCHEMA_VERSION,
             last_run: None,
             items: vec![QueueRecord {
                 audio: Some(audio.display().to_string()),
@@ -23130,6 +23308,112 @@ mod tests {
         assert!(app.batch_paths.is_empty());
         assert!(!App::queue_path().unwrap().exists());
         assert!(App::settings_path().unwrap().exists());
+    }
+
+    #[test]
+    fn settings_chip_names_the_preset_and_language() {
+        let entry = RecentEntry {
+            preset: Some("accuracy".to_string()),
+            language_requested: Some("en".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(
+            settings_label(&entry).as_deref(),
+            Some("Accuracy \u{00b7} English")
+        );
+
+        let detected = RecentEntry {
+            preset: Some("speed".to_string()),
+            language_detected: Some("es".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(
+            settings_label(&detected).as_deref(),
+            Some("Speed \u{00b7} Spanish")
+        );
+
+        let preset_only = RecentEntry {
+            preset: Some("balanced".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(settings_label(&preset_only).as_deref(), Some("Balanced"));
+        assert_eq!(settings_label(&RecentEntry::default()), None);
+    }
+
+    #[test]
+    fn an_edited_transcript_is_detected_from_its_original_copy() {
+        let dir = temp_dir("edited-flag");
+        let transcript = dir.join("talk-accuracy-transcription-2speakers-ts.txt");
+        std::fs::write(&transcript, "[00:00] A: hi\n").unwrap();
+        let entry = RecentEntry {
+            transcript: Some(transcript.clone()),
+            ..Default::default()
+        };
+        assert!(!transcript_edited(&entry));
+
+        std::fs::write(crate::files::unedited_path(&transcript), "hi\n").unwrap();
+        assert!(transcript_edited(&entry));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn saving_the_queue_is_atomic_and_preserves_unknown_keys() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("queue-atomic");
+        let mut app = pro_app();
+        let path = App::queue_path().unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            r#"{"schema_version":0,"items":[],"last_run":null,"last_batch":[],"recent":[],"favorite_order":[],"future_field":{"keep":true}}"#,
+        )
+        .unwrap();
+
+        app.recent.push(RecentEntry {
+            transcript: Some(PathBuf::from("/media/talk.txt")),
+            finished_at: 1,
+            preset: Some("accuracy".to_string()),
+            ..Default::default()
+        });
+        app.save_queue();
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(value["schema_version"], QUEUE_SCHEMA_VERSION);
+        assert_eq!(value["future_field"]["keep"], true);
+        assert_eq!(value["recent"][0]["preset"], "accuracy");
+        assert!(path.with_extension("json.bak").is_file());
+    }
+
+    #[test]
+    fn a_corrupt_queue_falls_back_to_the_backup() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("queue-backup");
+        let path = App::queue_path().unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "{not json").unwrap();
+        let backup = serde_json::json!({
+            "schema_version": 1,
+            "items": [],
+            "last_run": null,
+            "last_batch": [],
+            "favorite_order": [],
+            "recent": [{
+                "audio": null,
+                "transcript": "/media/kept.txt",
+                "finished_at": 3,
+                "state": "Ready"
+            }]
+        });
+        std::fs::write(path.with_extension("json.bak"), backup.to_string()).unwrap();
+
+        let (_, _, recent, _) = App::load_queue_and_batch();
+        assert_eq!(recent.len(), 1);
+        assert_eq!(
+            recent[0].transcript.as_deref(),
+            Some(Path::new("/media/kept.txt"))
+        );
     }
 
     #[test]
@@ -27019,6 +27303,7 @@ mod tests {
         // deleting the file this test writes.
         let mut app = pro_app();
         let state = QueueState {
+            schema_version: QUEUE_SCHEMA_VERSION,
             last_run: None,
             items: vec![QueueRecord {
                 audio: Some(audio.display().to_string()),
