@@ -288,9 +288,9 @@ speaker count and press Transcribe. **Record** captures from the microphone
 1.5 s countdown starts the take, the meter and stop control live in the
 transcription pane, and stopping transcribes it immediately with no setup —
 Speed on Pro, Balanced on free, one speaker. Recording is available in the free
-tier, but not while a transcription is running; the button greys out and says
-why. A recording workflow locks the panel until it finishes. The microphone is
-chosen in Settings. The Help menu holds the appearance choices (Light,
+tier. Pressing Record while a batch is transcribing stops the batch, leaves the
+queued files for later, and records the take on its own. A recording workflow
+locks the panel until it finishes. The microphone is chosen in Settings. The Help menu holds the appearance choices (Light,
 Dark, System; System follows the desktop and is the default) and the header
 theme button cycles them. Files added while a run is active join the queue and
 are processed in a follow-up pass automatically. The gear button (or `Ctrl+,`)

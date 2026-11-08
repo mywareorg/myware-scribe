@@ -1387,6 +1387,9 @@ pub struct App {
     record: Option<RecordSession>,
     /// What the backend events in flight belong to.
     run_kind: RunKind,
+    /// A recording was requested while a batch was running. Start it once the
+    /// cancelled batch reports `AllDone`, and discard that batch's events.
+    record_after_batch: bool,
     /// Tests only: never start a real model download or backend process, so a
     /// transition can be exercised without the network or a child process.
     #[cfg(test)]
@@ -1736,6 +1739,7 @@ impl App {
             karaoke: settings.karaoke,
             record: None,
             run_kind: RunKind::Batch,
+            record_after_batch: false,
             #[cfg(test)]
             recording_test_no_spawn: true,
             #[cfg(test)]
@@ -2364,6 +2368,101 @@ impl App {
         });
         self.save_queue();
         index
+    }
+
+    /// Start the microphone capture. `StartRecording` calls this when the app
+    /// is idle, and again after a preempted batch reports `AllDone`.
+    fn start_recording_capture(&mut self) -> Task<Message> {
+        let Some(dir) = self
+            .output_dir
+            .clone()
+            .or_else(|| Self::config_dir().map(|dir| dir.join("recordings")))
+        else {
+            self.toast = Some(("No folder to record into".to_string(), Instant::now()));
+            return Task::none();
+        };
+        if let Err(error) = std::fs::create_dir_all(&dir) {
+            self.toast = Some((
+                format!("Could not create {}: {error}", dir.display()),
+                Instant::now(),
+            ));
+            return Task::none();
+        }
+        // A take starts on a clean live pane, not on whatever was being read.
+        // The live buffers stay: the session only resets the selection and
+        // playback.
+        self.return_to_live();
+        let path = dir.join(crate::recording::default_name());
+        match crate::recording::Recorder::start(self.input_device.clone(), path) {
+            Ok(recorder) => {
+                self.record = Some(RecordSession {
+                    phase: RecordPhase::Countdown,
+                    recorder: Some(recorder),
+                    countdown_ends: Some(Instant::now() + COUNTDOWN),
+                    item: None,
+                    captured: 0.0,
+                });
+                // A take is recording work: the pane shows Recordings from its
+                // first countdown tick.
+                self.pane_tab = PaneTab::Recordings;
+                self.recent_hover = None;
+                self.failed_recording = None;
+                self.toast = Some((
+                    "Recording starts in a moment".to_string(),
+                    Instant::now(),
+                ));
+            }
+            Err(message) => {
+                self.toast = Some((
+                    format!(
+                        "Could not record: {message}. Check the microphone in Settings."
+                    ),
+                    Instant::now(),
+                ));
+            }
+        }
+        Task::none()
+    }
+
+    /// Stop the running batch without transcribing the rest of the queue. The
+    /// in-flight row becomes resumable and pending rows stay pending. The
+    /// recording starts from `AllDone`, which is also when the batch's late
+    /// events stop being read.
+    fn skip_batch_for_recording(&mut self) {
+        for item in &mut self.queue {
+            if matches!(item.status, ItemStatus::Running) {
+                item.status = ItemStatus::Interrupted;
+            }
+        }
+        let pid = self.pid.load(Ordering::SeqCst);
+        if pid != 0 {
+            backend::kill(pid);
+        }
+        self.pid.store(0, Ordering::SeqCst);
+        self.cancelled.store(true, Ordering::SeqCst);
+        self.batch = false;
+        self.current = None;
+        self.current_index = None;
+        self.batch_paths.clear();
+        self.batch_summary.clear();
+        self.batch_total = 0.0;
+        self.batch_done = 0.0;
+        self.run_kind = RunKind::Batch;
+        self.record_after_batch = true;
+        self.status = Status::Cancelled;
+        self.stage = "cancelled".to_string();
+        self.stage_id = "cancelled".to_string();
+        self.progress = 0.0;
+        self.progress_shown = 0.0;
+        self.overall_shown = 0.0;
+        self.run_start = None;
+        self.elapsed_final = None;
+        self.eta_shown = None;
+        self.toast = Some((
+            "Stopping the queue to record".to_string(),
+            Instant::now(),
+        ));
+        self.save_queue();
     }
 
     /// R1b2: transcribe the recording the session just stored.
@@ -3735,18 +3834,17 @@ impl App {
         self.record.is_some()
     }
 
-    /// Record is unavailable while a batch is transcribing, and while a
-    /// recording workflow is already under way.
+    /// Record is unavailable while a recording workflow is already under way.
+    /// A batch is different: pressing Record stops it and leaves the queue for
+    /// later, so the recording is the only thing transcribed.
     fn record_blocked(&self) -> bool {
-        matches!(self.status, Status::Running)
-            || self.record_lock()
-            || self.run_kind == RunKind::Recording
+        self.record_lock() || self.run_kind == RunKind::Recording
     }
 
     /// Starting a transcription while a recording workflow is active would
     /// compete for the microphone and the pane, so it waits for the workflow.
     fn transcribe_blocked(&self) -> bool {
-        self.record.is_some() || self.run_kind == RunKind::Recording
+        self.record.is_some() || self.run_kind == RunKind::Recording || self.record_after_batch
     }
 
     /// Recordings use their own preset: Speed when the license allows it,
@@ -5184,65 +5282,27 @@ impl App {
                 Task::none()
             }
             Message::StartRecording => {
-                if self.record_blocked() {
-                    let reason = if self.record_lock() {
-                        "A recording is already in progress"
-                    } else {
-                        "A transcription run is in progress"
-                    };
-                    self.toast = Some((reason.to_string(), Instant::now()));
-                    return Task::none();
-                }
-                let Some(dir) = self
-                    .output_dir
-                    .clone()
-                    .or_else(|| Self::config_dir().map(|dir| dir.join("recordings")))
-                else {
-                    self.toast =
-                        Some(("No folder to record into".to_string(), Instant::now()));
-                    return Task::none();
-                };
-                if let Err(error) = std::fs::create_dir_all(&dir) {
+                if self.record_after_batch {
                     self.toast = Some((
-                        format!("Could not create {}: {error}", dir.display()),
+                        "The recorder starts when the queue stops".to_string(),
                         Instant::now(),
                     ));
                     return Task::none();
                 }
-                // A take starts on a clean live pane, not on whatever was being
-                // read. The live buffers stay: the session only resets the
-                // selection and playback.
-                self.return_to_live();
-                let path = dir.join(crate::recording::default_name());
-                match crate::recording::Recorder::start(self.input_device.clone(), path) {
-                    Ok(recorder) => {
-                        self.record = Some(RecordSession {
-                            phase: RecordPhase::Countdown,
-                            recorder: Some(recorder),
-                            countdown_ends: Some(Instant::now() + COUNTDOWN),
-                            item: None,
-                            captured: 0.0,
-                        });
-                        // A take is recording work: the pane shows Recordings
-                        // from its first countdown tick.
-                        self.pane_tab = PaneTab::Recordings;
-                        self.recent_hover = None;
-                        self.failed_recording = None;
-                        self.toast = Some((
-                            "Recording starts in a moment".to_string(),
-                            Instant::now(),
-                        ));
-                    }
-                    Err(message) => {
-                        self.toast = Some((
-                            format!(
-                                "Could not record: {message}. Check the microphone in Settings."
-                            ),
-                            Instant::now(),
-                        ));
-                    }
+                if self.record_blocked() {
+                    self.toast = Some((
+                        "A recording is already in progress".to_string(),
+                        Instant::now(),
+                    ));
+                    return Task::none();
                 }
-                Task::none()
+                // A batch is the only other run. Drop it and its queued work;
+                // the recording is transcribed on its own.
+                if matches!(self.status, Status::Running) {
+                    self.skip_batch_for_recording();
+                    return Task::none();
+                }
+                self.start_recording_capture()
             }
             Message::StopRecording => {
                 let Some(mut session) = self.record.take() else {
@@ -7630,7 +7690,11 @@ impl App {
         if stopping {
             ("Stop", true, "Stop recording")
         } else if self.record_blocked() {
-            ("Record", false, "Finish the current transcription before recording.")
+            ("Record", false, "Finish the current recording before recording.")
+        } else if self.record_after_batch {
+            ("Record", false, "The recorder starts when the queue stops.")
+        } else if matches!(self.status, Status::Running) {
+            ("Record", true, "Stop the queue and record")
         } else {
             ("Record", true, "Record from the microphone")
         }
@@ -8781,6 +8845,33 @@ impl App {
                 .ok()
                 .and_then(|mut queue| queue.pop_front());
             let Some(event) = event else { break };
+            // A batch was stopped to make room for a recording. Ignore
+            // everything it still emits, including a late File/Done, until its
+            // AllDone proves the backend is gone.
+            if self.record_after_batch {
+                if matches!(event, Event::AllDone) {
+                    self.record_after_batch = false;
+                    Self::clear_gpu_guard();
+                    self.gpu_retry_pending = false;
+                    self.completion_pending = false;
+                    self.run_kind = RunKind::Batch;
+                    self.batch = false;
+                    self.current = None;
+                    self.current_index = None;
+                    self.status = Status::Idle;
+                    self.stage = "idle".to_string();
+                    self.stage_id = "idle".to_string();
+                    self.progress = 0.0;
+                    self.progress_shown = 0.0;
+                    self.overall_shown = 0.0;
+                    self.run_start = None;
+                    self.elapsed_final = None;
+                    self.eta_shown = None;
+                    self.save_queue();
+                    tasks.push(Task::done(Message::StartRecording));
+                }
+                continue;
+            }
             match event {
                 Event::Stage {
                     stage,
@@ -23823,18 +23914,25 @@ mod tests {
     }
 
     #[test]
-    fn record_blocked_while_a_batch_runs() {
+    fn recording_stops_a_running_batch_and_leaves_the_queue() {
         let _guard = env_lock();
-        let _config = ConfigEnv::new("record-batch-lock");
+        let _config = ConfigEnv::new("record-batch-preempt");
 
         let mut app = pro_app();
+        app.queue.push(queue_item(PathBuf::from("/media/a.mp3")));
+        app.queue.push(queue_item(PathBuf::from("/media/b.mp3")));
+        app.queue[0].status = ItemStatus::Running;
         app.status = Status::Running;
-        assert!(app.record_blocked());
+        app.run_kind = RunKind::Batch;
+
+        assert!(!app.record_blocked(), "a batch can be preempted");
         let _ = app.update(Message::StartRecording);
-        assert!(
-            app.record.is_none(),
-            "Record must refuse while a batch is transcribing"
-        );
+
+        assert!(app.record_after_batch);
+        assert!(app.record.is_none(), "the recorder waits for AllDone");
+        assert!(matches!(app.status, Status::Cancelled));
+        assert!(matches!(app.queue[0].status, ItemStatus::Interrupted));
+        assert!(matches!(app.queue[1].status, ItemStatus::Pending));
     }
 
     #[test]
@@ -27232,11 +27330,7 @@ mod tests {
         app.status = Status::Running;
         assert_eq!(
             app.record_button_state(),
-            (
-                "Record",
-                false,
-                "Finish the current transcription before recording."
-            )
+            ("Record", true, "Stop the queue and record")
         );
 
         app.record = Some(RecordSession {
@@ -27263,7 +27357,7 @@ mod tests {
             (
                 "Record",
                 false,
-                "Finish the current transcription before recording."
+                "Finish the current recording before recording."
             )
         );
     }
