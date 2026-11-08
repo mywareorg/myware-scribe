@@ -286,8 +286,9 @@ pub fn unedited_path(path: &Path) -> PathBuf {
     path.with_file_name(format!("{stem}-unedited.txt"))
 }
 
-/// Every manifest in `directory`. Used to rebuild an index and by tests.
-pub fn scan(directory: &Path) -> Vec<Manifest> {
+/// Every manifest in `directory`, with the file it was read from. Used by the
+/// explicit import and by tests.
+pub fn scan_with_paths(directory: &Path) -> Vec<(PathBuf, Manifest)> {
     let Ok(entries) = std::fs::read_dir(directory) else {
         return Vec::new();
     };
@@ -305,10 +306,63 @@ pub fn scan(directory: &Path) -> Vec<Manifest> {
             continue;
         }
         if let Some(manifest) = read(&path) {
-            manifests.push(manifest);
+            manifests.push((path, manifest));
         }
     }
     manifests
+}
+
+/// Every manifest in `directory`.
+pub fn scan(directory: &Path) -> Vec<Manifest> {
+    scan_with_paths(directory)
+        .into_iter()
+        .map(|(_, manifest)| manifest)
+        .collect()
+}
+
+/// Pipeline-named transcripts in `directory` that no manifest references.
+/// Only files that look like pipeline output are considered, so exports and
+/// user-created text are never reported. This is a maintenance report, not an
+/// automatic deletion: the caller decides what to do with it.
+pub fn unreferenced_transcripts(directory: &Path) -> Vec<PathBuf> {
+    let manifests = scan_with_paths(directory);
+    let mut referenced: Vec<PathBuf> = Vec::new();
+    for (manifest_path, manifest) in &manifests {
+        let dir = manifest_path.parent().unwrap_or(directory);
+        for version in &manifest.versions {
+            for relative in [
+                Some(version.transcript.as_str()),
+                Some(version.plain.as_str()),
+                version.sidecar.as_deref(),
+                version.original.as_deref(),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                let path = dir.join(relative);
+                referenced.push(path.clone());
+                referenced.push(unedited_path(&path));
+            }
+        }
+    }
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return Vec::new();
+    };
+    let mut orphans = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default();
+        if !name.ends_with(".txt") || !name.contains("-transcription-") {
+            continue;
+        }
+        if !referenced.iter().any(|known| known == &path) {
+            orphans.push(path);
+        }
+    }
+    orphans
 }
 
 fn modified_secs(meta: &std::fs::Metadata) -> Option<u64> {
@@ -471,6 +525,32 @@ mod tests {
                 serde_json::to_value(after).unwrap()
             );
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_orphan_report_ignores_referenced_and_unrelated_files() {
+        let dir = std::env::temp_dir().join(format!("hippo-orphans-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let audio = dir.join("talk.mp3");
+        std::fs::write(&audio, b"audio").unwrap();
+        let referenced = dir.join("talk-accuracy-transcription-2speakers.txt");
+        std::fs::write(&referenced, "kept").unwrap();
+        let orphan = dir.join("talk-speed-transcription-2speakers.txt");
+        std::fs::write(&orphan, "orphan").unwrap();
+        let user_file = dir.join("notes.txt");
+        std::fs::write(&user_file, "mine").unwrap();
+
+        let path = manifest_path(&audio, None, Some("abcdef123456"));
+        let mut manifest = Manifest::new(&path, &audio);
+        let mut version = version("a", "talk-accuracy-transcription-2speakers-ts.txt");
+        version.plain = "talk-accuracy-transcription-2speakers.txt".to_string();
+        manifest.upsert(version);
+        write_at(&path, &manifest).unwrap();
+
+        let orphans = unreferenced_transcripts(&dir);
+        assert_eq!(orphans, vec![orphan]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

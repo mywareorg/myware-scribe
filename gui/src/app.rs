@@ -1419,6 +1419,10 @@ pub enum Message {
     CopyInfoPath,
     /// Show the version panel for a history row.
     OpenVersions(PaneTab, usize),
+    /// Rebuild history rows from the manifests in the save location.
+    ImportVersions,
+    /// Report pipeline transcripts no manifest references.
+    ScanOrphans,
     /// Close the version panel.
     CloseVersions,
     /// Preview one version read-only, by its manifest id.
@@ -6337,6 +6341,14 @@ impl App {
                 self.open_versions(tab, index);
                 Task::none()
             }
+            Message::ImportVersions => {
+                self.import_versions();
+                Task::none()
+            }
+            Message::ScanOrphans => {
+                self.scan_orphans();
+                Task::none()
+            }
             Message::CloseVersions => self.close_modal(Modal::Versions),
             Message::PreviewVersion(id) => self.preview_version(&id),
             Message::MakeVersionCurrent => self.make_version_current(),
@@ -7592,6 +7604,81 @@ impl App {
 
     /// Capture a row's file details for the Info popup. The lists can shift
     /// while it is open, so every value is read now and the index is dropped.
+    /// Rebuild history rows from the manifests in the configured save
+    /// location. Explicit, never automatic, so cleared rows stay cleared.
+    fn import_versions(&mut self) {
+        let Some(directory) = self.output_dir.clone() else {
+            self.toast = Some(("Set a save location first".to_string(), Instant::now()));
+            return;
+        };
+        let manifests = hippo_transcribe_core::versions::scan_with_paths(&directory);
+        let mut imported = 0;
+        for (path, manifest) in manifests {
+            let Some(version) = manifest.current_version() else {
+                continue;
+            };
+            let directory = path.parent().unwrap_or_else(|| Path::new("."));
+            let transcript = directory.join(&version.transcript);
+            if !transcript.is_file() {
+                continue;
+            }
+            let audio = {
+                let candidate = directory.join(&manifest.asset.audio);
+                candidate.is_file().then_some(candidate)
+            };
+            let entry = RecentEntry {
+                audio,
+                transcript: Some(transcript),
+                finished_at: version.created_at,
+                speakers: version
+                    .speakers_detected
+                    .and_then(|count| u8::try_from(count).ok()),
+                preset: Some(version.preset.clone()),
+                language_requested: version.language_requested.clone(),
+                language_detected: version.language_detected.clone(),
+                speakers_requested: version
+                    .speakers_requested
+                    .and_then(|count| u8::try_from(count).ok()),
+                normalize: version.normalize,
+                model: version.model.clone(),
+                manifest: Some(path.display().to_string()),
+                settings_key: Some(version.settings_key.clone()),
+                version_id: Some(version.id.clone()),
+                ..Default::default()
+            };
+            merge_recent_entry(&mut self.recent, entry);
+            imported += 1;
+        }
+        if imported == 0 {
+            self.toast = Some(("No version records found".to_string(), Instant::now()));
+            return;
+        }
+        self.refresh_recent_presence();
+        self.pane_tab = PaneTab::History;
+        self.selected_recent = Some(0);
+        self.save_queue();
+        self.toast = Some((
+            format!("Imported {imported} version record(s)"),
+            Instant::now(),
+        ));
+    }
+
+    /// Report pipeline transcripts that no manifest references. Report only:
+    /// deleting from a count would be a destructive surprise.
+    fn scan_orphans(&mut self) {
+        let Some(directory) = self.output_dir.clone() else {
+            self.toast = Some(("Set a save location first".to_string(), Instant::now()));
+            return;
+        };
+        let orphans = hippo_transcribe_core::versions::unreferenced_transcripts(&directory);
+        let message = match orphans.len() {
+            0 => "No orphaned transcripts".to_string(),
+            1 => "1 orphaned transcript".to_string(),
+            count => format!("{count} orphaned transcripts"),
+        };
+        self.toast = Some((message, Instant::now()));
+    }
+
     /// Open the version panel for a history row.
     fn open_versions(&mut self, _tab: PaneTab, index: usize) {
         let Some(entry) = self.recent.get(index) else {
@@ -13492,6 +13579,28 @@ impl App {
                 );
             }
             if tab == PaneTab::History {
+                rows.push(
+                    row(
+                        "Import version records\u{2026}",
+                        self.output_dir.is_some(),
+                        self.output_dir
+                            .is_none()
+                            .then_some("Set a save location first."),
+                        Message::ImportVersions,
+                    )
+                    .separated(),
+                );
+                rows.push(
+                    row(
+                        "Find orphaned transcripts\u{2026}",
+                        self.output_dir.is_some(),
+                        self.output_dir
+                            .is_none()
+                            .then_some("Set a save location first."),
+                        Message::ScanOrphans,
+                    )
+                    .separated(),
+                );
                 rows.push(
                     row(
                         "Clear history",
@@ -20493,6 +20602,8 @@ fn closes_row_menu(message: &Message) -> bool {
             | Message::ClearQueue
             | Message::ClearHistory
             | Message::OpenVersions(_, _)
+            | Message::ImportVersions
+            | Message::ScanOrphans
     )
 }
 
@@ -24502,6 +24613,40 @@ mod tests {
         assert_eq!(manifest.current.as_deref(), Some("v1"));
         assert!(app.version_preview.is_none());
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn import_versions_rebuilds_rows_from_manifests() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("versions-import");
+        let dir = temp_dir("versions-import-media");
+        let audio = dir.join("talk.mp3");
+        std::fs::write(&audio, b"audio").unwrap();
+        let transcript = dir.join("one-ts.txt");
+        std::fs::write(&transcript, "one\n").unwrap();
+        let manifest_path = dir.join("talk-hash.hippo.json");
+        let manifest = serde_json::json!({
+            "schema_version": 1,
+            "asset": { "id": "a1", "audio": "talk.mp3" },
+            "current": "v1",
+            "versions": [{
+                "id": "v1", "settings_key": "k1", "preset": "accuracy",
+                "language_requested": "en", "speakers_detected": 2,
+                "created_at": 7, "transcript": "one-ts.txt", "plain": "one.txt",
+                "origin": "run"
+            }]
+        });
+        std::fs::write(&manifest_path, manifest.to_string()).unwrap();
+
+        let mut app = pro_app();
+        app.output_dir = Some(dir.clone());
+        let _ = app.update(Message::ImportVersions);
+
+        assert_eq!(app.recent.len(), 1);
+        assert_eq!(app.recent[0].transcript.as_deref(), Some(transcript.as_path()));
+        assert_eq!(app.recent[0].preset.as_deref(), Some("accuracy"));
+        assert_eq!(app.pane_tab, PaneTab::History);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
