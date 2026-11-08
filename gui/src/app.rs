@@ -11113,7 +11113,7 @@ impl App {
         let has_queue = !self.queue.is_empty();
         let can_start = !running
             && !self.transcribe_blocked()
-            && (has_queue || self.retranscribe_target().is_some())
+            && has_queue
             && self.models_ready();
 
         // Clear is queue state, so it lives here and nowhere else. It is quiet:
@@ -11190,13 +11190,9 @@ impl App {
             .into()
         };
 
-        // One button for the whole run: start/retry while idle, stop while a
-        // run is in flight.
-        let primary_label = if running {
-            "Cancel"
-        } else {
-            self.transcribe_label()
-        };
+        // One button for the whole run: Transcribe while idle, Cancel while a
+        // run is in flight. It is only available when there is queued work.
+        let primary_label = if running { "Cancel" } else { "Transcribe" };
         let primary_message = if running {
             Some(Message::Cancel)
         } else {
