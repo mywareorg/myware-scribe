@@ -247,6 +247,11 @@ const HEADER_LOGO_SIZE: f32 = 67.0;
 /// right edge because the button ends the row.
 const HELP_MENU_TOP: f32 = OUTER_PADDING + HEADER_LOGO_SIZE + theme::SPACE_SM;
 
+/// Widest the notification card may grow, so a long message stays a notice
+/// rather than a banner. The header's centre column is narrower at small window
+/// sizes, and the card wraps inside it.
+const HEADER_TOAST_MAX_WIDTH: f32 = 360.0;
+
 /// The header's horizontal padding. The menus hang from the same left edge, so
 /// this is named rather than written into both.
 const HEADER_PAD_X: f32 = 8.0;
@@ -15596,79 +15601,54 @@ impl App {
         )
     }
 
-    /// Bottom-right notification layer for the right pane.
+    /// The header's centre column: the toast when one is showing, nothing at
+    /// all otherwise.
     ///
-    /// The returned tree keeps the same shape whether or not a toast is up.
-    /// Swapping between a bare panel and a stack remounts everything below it,
-    /// including the transcript scrollable, whose fresh state reports offset 0
-    /// — which is why every line edit (all of them raise a toast) looked like
-    /// Follow jumping to the top and back.
-    fn with_toast<'a>(
-        &'a self,
-        base: Element<'a, Message>,
-        scheme: Scheme,
-        bottom: f32,
-    ) -> Element<'a, Message> {
-        let toast: Option<Element<'a, Message>> = self.toast.as_ref().map(|(message, _)| {
-            let dot_color = match toast_tone(message) {
-                ToastTone::Success => scheme.green,
-                ToastTone::Info => scheme.blue,
-                ToastTone::Danger => scheme.danger,
-            };
-            let toast_text = ellipsize(message, 44);
-            let width =
-                ((toast_text.chars().count() as f32 * 7.2 + 46.0).clamp(180.0, 320.0)).max(180.0);
-            let dot = container(horizontal_space())
-                .width(Length::Fixed(6.0))
-                .height(Length::Fixed(6.0))
-                .style(move |_theme| container::Style {
-                    background: Some(dot_color.into()),
-                    border: iced::border::rounded(3.0),
-                    ..container::Style::default()
-                });
-            mouse_area(
-                container(
-                    row![dot, text(toast_text).size(13).wrapping(NO_WRAP)]
-                        .spacing(8)
-                        .align_y(iced::Alignment::Center),
-                )
-                .width(Length::Fixed(width))
-                .height(Length::Fixed(36.0))
-                .align_y(iced::Alignment::Center)
-                .padding([0, 12])
-                .style(move |_theme| container::Style {
-                    background: Some(scheme.dialog_bg.into()),
-                    text_color: Some(scheme.text),
-                    border: iced::border::Border {
-                        color: scheme.border,
-                        width: 1.0,
-                        radius: 12.0.into(),
-                    },
-                    shadow: soft_shadow(),
-                    ..container::Style::default()
-                }),
-            )
-            .on_press(Message::DismissToast)
-            .into()
-        });
-        // No toast: an empty, non-interactive filler so the stack shape (and
-        // therefore the scrollable's state) is identical either way.
-        let layer: Element<'a, Message> = match toast {
-            Some(toast) => toast,
-            None => horizontal_space().into(),
+    /// The row keeps equal flexible space on either side of this slot, so the
+    /// card is centred between the fixed identity block and the fixed
+    /// license/Help controls. The caller gives the slot the logo's height so the
+    /// row never grows and the card shares the logo's vertical centre.
+    fn header_toast<'a>(&'a self, scheme: Scheme) -> Element<'a, Message> {
+        let Some((message, _)) = self.toast.as_ref() else {
+            return horizontal_space().width(Length::Fixed(0.0)).into();
         };
-        let overlay = container(layer)
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .align_x(iced::Alignment::End)
-            .align_y(iced::Alignment::End)
-            .padding(iced::Padding {
-                top: 0.0,
-                right: 16.0,
-                bottom,
-                left: 0.0,
+        let dot_color = match toast_tone(message) {
+            ToastTone::Success => scheme.green,
+            ToastTone::Info => scheme.blue,
+            ToastTone::Danger => scheme.danger,
+        };
+        let dot = container(horizontal_space())
+            .width(Length::Fixed(6.0))
+            .height(Length::Fixed(6.0))
+            .style(move |_theme| container::Style {
+                background: Some(dot_color.into()),
+                border: iced::border::rounded(3.0),
+                ..container::Style::default()
             });
-        stack![base, overlay].into()
+        // Natural width, capped so a long message stays a notice and wraps
+        // rather than being cut to a character budget.
+        mouse_area(
+            container(
+                row![dot, text(message.as_str()).size(theme::TEXT_SM)]
+                    .spacing(theme::SPACE_MD)
+                    .align_y(iced::Alignment::Center),
+            )
+            .max_width(HEADER_TOAST_MAX_WIDTH)
+            .padding([theme::SPACE_MD as u16, theme::SPACE_LG as u16])
+            .style(move |_theme| container::Style {
+                background: Some(scheme.dialog_bg.into()),
+                text_color: Some(scheme.text),
+                border: iced::border::Border {
+                    color: scheme.border,
+                    width: 1.0,
+                    radius: 10.0.into(),
+                },
+                shadow: soft_shadow(),
+                ..container::Style::default()
+            }),
+        )
+        .on_press(Message::DismissToast)
+        .into()
     }
 
     /// The Help menu's own layer over the window.
@@ -16181,10 +16161,14 @@ impl App {
         .width(Length::Fill)
         .height(Length::Fill)
         .into();
-        // The toast clears the Find row; the editor strip is inside the card, so it
-        // changes nothing down here.
-        let toast_bottom = if show_search { 48.0 } else { 20.0 };
-        let right_panel = self.with_toast(right_panel, scheme, toast_bottom);
+
+        // The toast sits at the header row's centre: equal flexible space on
+        // each side keeps it between the fixed identity block and the fixed
+        // license/Help controls. The slot is as tall as the logo, so the row's
+        // height never changes and the card shares the hippo's vertical centre.
+        let toast_slot = container(self.header_toast(scheme))
+            .height(Length::Fixed(HEADER_LOGO_SIZE))
+            .align_y(iced::Alignment::Center);
 
         let mut header = row![
             iced::widget::image(header_logo_handle())
@@ -16200,6 +16184,8 @@ impl App {
                     .color(scheme.muted),
             ]
             .spacing(theme::SPACE_2XS),
+            horizontal_space(),
+            toast_slot,
             horizontal_space(),
             self.license_button(&scheme),
         ]
