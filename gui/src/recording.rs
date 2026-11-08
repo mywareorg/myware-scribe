@@ -894,7 +894,7 @@ mod tests {
         let path = dir.join("take.wav");
         std::fs::write(&path, b"placeholder").unwrap();
 
-        let mut recorder = test_recorder(path.clone(), None);
+        let recorder = test_recorder(path.clone(), None);
         assert_eq!(recorder.elapsed(), 0.0);
 
         // Stopping before the countdown ends reports zero, not stream time.
