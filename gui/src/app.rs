@@ -1155,12 +1155,8 @@ pub enum Message {
     RevealQueueAudio(usize),
     /// Star or unstar a history/recording row. Free opens the paywall.
     ToggleFavorite(usize),
-    /// Copy a recent item's audio path.
-    CopyItemPath(usize),
     /// Copy a recent item's transcript text.
     CopyRecentText(usize),
-    /// Copy a queue item's audio path.
-    CopyQueuePath(usize),
     /// Queue a history entry for a fresh run and open its options.
     RetranscribeRecent(usize),
     /// Add a recent item's audio to the queue without starting it.
@@ -1184,6 +1180,9 @@ pub enum Message {
     OpenRowMenu(PaneTab, Option<usize>),
     /// The keyboard opened the context menu for the selected row.
     OpenRowMenuForSelection,
+    /// The pointer entered a row menu item; true while it is Export, whose
+    /// format list opens on hover.
+    RowMenuHover(bool),
     CloseRowMenu,
     /// The pointer moved onto a history row, or off every row.
     RecentHover(Option<usize>),
@@ -5813,20 +5812,6 @@ impl App {
                 }
                 Task::none()
             }
-            Message::CopyItemPath(index) => {
-                let path = self
-                    .recent
-                    .get(index)
-                    .and_then(|entry| entry.audio.clone());
-                self.copy_path_to_clipboard(path.as_deref(), "path")
-            }
-            Message::CopyQueuePath(index) => {
-                let path = self
-                    .queue
-                    .get(index)
-                    .and_then(|item| item.audio.clone().or_else(|| Some(item.path.clone())));
-                self.copy_path_to_clipboard(path.as_deref(), "path")
-            }
             Message::CopyRecentText(index) => {
                 let text = self
                     .recent
@@ -5865,6 +5850,12 @@ impl App {
                 let index = self.selected_row();
                 let anchor = self.row_menu_anchor();
                 self.open_row_menu(tab, index, anchor);
+                Task::none()
+            }
+            Message::RowMenuHover(is_export) => {
+                if self.row_menu.is_some() {
+                    self.export_submenu = is_export;
+                }
                 Task::none()
             }
             Message::CloseRowMenu => {
@@ -7170,15 +7161,6 @@ impl App {
             }
         }
         Task::none()
-    }
-
-    /// Copy one path to the clipboard with a short confirmation.
-    fn copy_path_to_clipboard(&mut self, path: Option<&Path>, label: &str) -> Task<Message> {
-        let Some(path) = path else {
-            return Task::none();
-        };
-        self.toast = Some((format!("Copied {label}"), Instant::now()));
-        iced::clipboard::write(path.display().to_string())
     }
 
     /// Swap one queue entry with another, keeping selection indices in sync.
@@ -12178,6 +12160,7 @@ impl App {
             hint: hint.map(str::to_string),
             action: enabled.then_some(action),
             danger: false,
+            separator_before: false,
         };
         let danger = |label: &'static str,
                       enabled: bool,
@@ -12188,6 +12171,7 @@ impl App {
             hint: hint.map(str::to_string),
             action: enabled.then_some(action),
             danger: true,
+            separator_before: false,
         };
 
         let Some(index) = index else {
@@ -12197,16 +12181,19 @@ impl App {
                 row("Add folder", !locked, None, Message::AddFolder),
             ];
             if tab == PaneTab::Queue {
-                rows.push(row(
-                    "Clear queue",
-                    !running && !self.queue.is_empty(),
-                    Some(if running {
-                        "Stop the run before clearing the queue."
-                    } else {
-                        "Nothing in the queue."
-                    }),
-                    Message::ClearQueue,
-                ));
+                rows.push(
+                    row(
+                        "Clear queue",
+                        !running && !self.queue.is_empty(),
+                        Some(if running {
+                            "Stop the run before clearing the queue."
+                        } else {
+                            "Nothing in the queue."
+                        }),
+                        Message::ClearQueue,
+                    )
+                    .separated(),
+                );
             }
             return rows;
         };
@@ -12236,18 +12223,13 @@ impl App {
                         audio.is_none().then_some("No audio file."),
                         Message::RevealQueueAudio(index),
                     ),
-                    row(
-                        "Copy path",
-                        audio.is_some(),
-                        audio.is_none().then_some("No audio file."),
-                        Message::CopyQueuePath(index),
-                    ),
                     danger(
                         "Remove",
                         !running,
                         running.then_some("Stop the run before removing rows."),
                         Message::RemoveItem(index),
-                    ),
+                    )
+                    .separated(),
                 ],
                 ItemStatus::Interrupted => vec![
                     row(
@@ -12268,18 +12250,13 @@ impl App {
                         audio.is_none().then_some("No audio file."),
                         Message::RevealQueueAudio(index),
                     ),
-                    row(
-                        "Copy path",
-                        audio.is_some(),
-                        audio.is_none().then_some("No audio file."),
-                        Message::CopyQueuePath(index),
-                    ),
                     danger(
                         "Remove",
                         !running,
                         running.then_some("Stop the run before removing rows."),
                         Message::RemoveItem(index),
-                    ),
+                    )
+                    .separated(),
                 ],
                 ItemStatus::Failed(_) => vec![
                     row(
@@ -12294,18 +12271,13 @@ impl App {
                         audio.is_none().then_some("No audio file."),
                         Message::RevealQueueAudio(index),
                     ),
-                    row(
-                        "Copy path",
-                        audio.is_some(),
-                        audio.is_none().then_some("No audio file."),
-                        Message::CopyQueuePath(index),
-                    ),
                     danger(
                         "Remove",
                         !running,
                         running.then_some("Stop the run before removing rows."),
                         Message::RemoveItem(index),
-                    ),
+                    )
+                    .separated(),
                 ],
             };
         }
@@ -12351,6 +12323,7 @@ impl App {
                 (!retry_enabled).then_some(retry_hint.unwrap_or("Retry is unavailable.")),
                 Message::RetryRecording(index),
             )
+            .separated()
         } else {
             row(
                 "Retranscribe",
@@ -12358,6 +12331,7 @@ impl App {
                 (!queue_enabled).then_some(queue_hint.unwrap_or("Retranscribe is unavailable.")),
                 Message::EnqueueRecent(index),
             )
+            .separated()
         };
         let reveal_transcript = row(
             "Reveal transcript",
@@ -12374,12 +12348,6 @@ impl App {
             entry.audio.is_some(),
             entry.audio.is_none().then_some("No audio file."),
             Message::RevealRecentAudio(index),
-        );
-        let copy_path = row(
-            "Copy path",
-            entry.audio.is_some(),
-            entry.audio.is_none().then_some("No audio file."),
-            Message::CopyItemPath(index),
         );
         let copy_text = row(
             "Copy text",
@@ -12403,37 +12371,35 @@ impl App {
 
         match tab {
             PaneTab::Favorites => vec![
+                export,
                 retranscribe,
+                reveal_transcript,
+                reveal_audio,
+                copy_text,
                 row(
                     "Unfavorite",
                     true,
                     None,
                     Message::ToggleFavorite(index),
-                ),
-                reveal_transcript,
-                reveal_audio,
-                copy_path,
-                copy_text,
-                export,
+                )
+                .separated(),
                 remove,
             ],
             PaneTab::Recordings => vec![
+                export,
                 retranscribe,
                 reveal_audio,
                 reveal_transcript,
-                copy_path,
                 copy_text,
-                export,
-                remove,
+                remove.separated(),
             ],
             _ => vec![
+                export,
                 retranscribe,
                 reveal_transcript,
                 reveal_audio,
-                copy_path,
                 copy_text,
-                export,
-                remove,
+                remove.separated(),
             ],
         }
     }
@@ -15679,7 +15645,8 @@ impl App {
             return horizontal_space().into();
         };
         let rows = self.row_menu_rows(menu.tab, menu.index, scheme);
-        let height = rows.len() as f32 * ROW_MENU_ROW_HEIGHT + 16.0;
+        let separators = rows.iter().filter(|row| row.separator_before).count() as f32;
+        let height = rows.len() as f32 * ROW_MENU_ROW_HEIGHT + separators * 3.0 + 16.0;
         let max_x = (self.window_size.width - ROW_MENU_WIDTH - 8.0).max(0.0);
         let max_y = (self.window_size.height - height - 8.0).max(0.0);
         let x = menu.position.x.clamp(0.0, max_x);
@@ -15708,6 +15675,7 @@ impl App {
                         hint: None,
                         action: Some(Message::ExportRecentAs(index, *format)),
                         danger: false,
+                        separator_before: false,
                     })
                     .collect();
                 let sub_height = entries.len() as f32 * ROW_MENU_ROW_HEIGHT + 16.0;
@@ -15716,7 +15684,7 @@ impl App {
                 let sub_y = (y + 8.0 + row as f32 * ROW_MENU_ROW_HEIGHT)
                     .clamp(0.0, (self.window_size.height - sub_height - 8.0).max(0.0));
                 Some(
-                    container(row_menu_card(entries, *scheme))
+                    container(row_menu_card(entries, *scheme, false))
                         .width(Length::Fill)
                         .height(Length::Fill)
                         .align_x(iced::Alignment::Start)
@@ -15731,7 +15699,7 @@ impl App {
             }
             _ => None,
         };
-        let card = container(row_menu_card(rows, *scheme))
+        let card = container(row_menu_card(rows, *scheme, true))
             .width(Length::Fill)
             .height(Length::Fill)
             .align_x(iced::Alignment::Start)
@@ -18247,9 +18215,7 @@ fn closes_row_menu(message: &Message) -> bool {
             | Message::RevealRecentAudio(_)
             | Message::RevealQueueAudio(_)
             | Message::ToggleFavorite(_)
-            | Message::CopyItemPath(_)
             | Message::CopyRecentText(_)
-            | Message::CopyQueuePath(_)
             | Message::RetranscribeRecent(_)
             | Message::EnqueueRecent(_)
             | Message::ExportRecentAs(_, _)
@@ -19706,15 +19672,47 @@ struct RowMenuEntry {
     hint: Option<String>,
     action: Option<Message>,
     danger: bool,
+    /// Draw a hairline above this row to separate groups.
+    separator_before: bool,
+}
+
+impl RowMenuEntry {
+    fn separated(mut self) -> Self {
+        self.separator_before = true;
+        self
+    }
 }
 
 /// The File panel's context menu card. Fixed width so it can be clamped to the
 /// window before layout; disabled rows keep their place and explain themselves
 /// in a tooltip.
-fn row_menu_card(rows: Vec<RowMenuEntry>, scheme: Scheme) -> Element<'static, Message> {
+fn row_menu_card(
+    rows: Vec<RowMenuEntry>,
+    scheme: Scheme,
+    track_export_hover: bool,
+) -> Element<'static, Message> {
     let mut body = column![].spacing(2).width(Length::Fill);
     for row in rows {
-        body = body.push(row_menu_item(row, scheme));
+        if row.separator_before {
+            body = body.push(
+                container(horizontal_space())
+                    .width(Length::Fill)
+                    .height(Length::Fixed(1.0))
+                    .style(move |_theme| container::Style {
+                        background: Some(scheme.border.into()),
+                        ..container::Style::default()
+                    }),
+            );
+        }
+        let is_export = row.label == "Export as\u{2026}";
+        let item = row_menu_item(row, scheme);
+        if track_export_hover {
+            body = body.push(
+                mouse_area(item).on_enter(Message::RowMenuHover(is_export)),
+            );
+        } else {
+            body = body.push(item);
+        }
     }
     let card = container(body)
         .width(Length::Fixed(ROW_MENU_WIDTH))
@@ -27818,6 +27816,8 @@ mod tests {
         // export and remove. Open, Add to queue and Copy transcript path are
         // gone; the row's own press still opens it.
         let rows = app.row_menu_rows(PaneTab::History, Some(0), &scheme);
+        assert_eq!(rows[0].label, "Export as\u{2026}");
+        assert!(!rows.iter().any(|row| row.label == "Copy path"));
         assert!(!rows.iter().any(|row| row.label == "Open"));
         assert!(!rows.iter().any(|row| row.label == "Add to queue"));
         assert!(!rows.iter().any(|row| row.label == "Copy transcript path"));
@@ -27854,11 +27854,9 @@ mod tests {
             menu_entry(&rows, "Transcribe").action,
             Some(Message::OpenRunSetup)
         ));
-        assert!(matches!(
-            menu_entry(&rows, "Copy path").action,
-            Some(Message::CopyQueuePath(0))
-        ));
+        assert!(!rows.iter().any(|row| row.label == "Copy path"));
         assert!(rows.iter().any(|row| row.label == "Remove"));
+        assert!(rows.iter().any(|row| row.separator_before));
 
         app.queue[0].status = ItemStatus::Running;
         let rows = app.row_menu_rows(PaneTab::Queue, Some(0), &scheme);
