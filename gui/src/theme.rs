@@ -332,7 +332,9 @@ impl Scheme {
                 Color::from_rgb(109.0 / 255.0, 40.0 / 255.0, 217.0 / 255.0), // violet 700
                 Color::from_rgb(162.0 / 255.0, 28.0 / 255.0, 175.0 / 255.0), // fuchsia 700
             ],
-            star: Color::from_rgb(241.0 / 255.0, 194.0 / 255.0, 27.0 / 255.0), // yellow 30
+            // A brighter yellow than the amber ramp: that ramp is too close to
+            // the dark panel's warm greys to read as a filled star.
+            star: Color::from_rgb(1.0, 212.0 / 255.0, 59.0 / 255.0),
             sms0: Color::from_rgb(29.0 / 255.0, 78.0 / 255.0, 216.0 / 255.0),
             sms1: Color::from_rgb(190.0 / 255.0, 18.0 / 255.0, 60.0 / 255.0),
             warn_tint: Color::from_rgba(0.471, 0.663, 1.0, 0.18),
@@ -369,6 +371,8 @@ mod tests {
     fn the_favorite_star_stays_bright_in_both_palettes() {
         let luminance = |color: Color| 0.2126 * color.r + 0.7152 * color.g + 0.0722 * color.b;
         assert!(luminance(Scheme::light().star) > 0.55);
-        assert!(luminance(Scheme::dark().star) > 0.55);
+        // The dark panel needs a brighter fill than the amber ramp gives it;
+        // this pins the yellow-20 value rather than the old yellow-30 one.
+        assert!(luminance(Scheme::dark().star) > 0.78);
     }
 }

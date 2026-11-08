@@ -421,6 +421,32 @@ struct RowMenu {
     position: Point,
 }
 
+/// A short-lived tint marking a pane that something outside it just changed.
+/// It is an acknowledgement, not state: the tick clears it and nothing else
+/// remembers it.
+#[derive(Debug, Clone, Copy)]
+struct PaneCue {
+    tab: PaneTab,
+    /// The row that changed in that pane, when marking it helps.
+    row: Option<usize>,
+    at: Instant,
+}
+
+/// How long a cross-pane cue stays visible. Two or three ticks at 10 Hz: long
+/// enough to catch the eye, short enough not to read as a permanent state.
+const PANE_CUE: Duration = Duration::from_millis(420);
+
+/// One add's progress toward its summary toast. A file may be queued for a run
+/// or, when a transcript is found beside it, restored into History. The toast
+/// waits until every transcript lookup has settled so both counts are final.
+struct AddReport {
+    queued: usize,
+    restored: usize,
+    /// Lookups still outstanding. `None` until the transcript scan reports, so
+    /// "waiting to hear" is not confused with "settled at zero".
+    pending: Option<usize>,
+}
+
 /// A transcript found beside one of the audio files just added.
 #[derive(Debug, Clone)]
 pub(crate) struct TranscriptHit {
@@ -453,6 +479,11 @@ struct QueueState {
     /// Finished transcripts kept as history; independent of the live queue.
     #[serde(default)]
     recent: Vec<RecentRecord>,
+    /// Favorites in the order the user dragged them into. Each entry is the
+    /// item's stable key (audio path, else transcript path); a favorite that
+    /// is not listed here keeps its newest-first place after these.
+    #[serde(default)]
+    favorite_order: Vec<String>,
 }
 
 /// The options a batch was started with, kept so an interrupted run can say
@@ -1086,7 +1117,9 @@ pub enum Message {
     /// Commit the inline editor and close it, resuming playback if it was
     /// playing when the edit started.
     DoneLineEdit,
-    /// Close the inline editor and drop what was typed.
+    /// Close the inline editor and drop what was typed. The strip's X button
+    /// is gone, but Escape still uses this path and tests drive it directly.
+    #[allow(dead_code)]
     CancelLineEdit,
     /// Ask before removing the line being edited.
     DeleteLineEdit,
@@ -1124,8 +1157,6 @@ pub enum Message {
     ToggleFavorite(usize),
     /// Copy a recent item's audio path.
     CopyItemPath(usize),
-    /// Copy a recent item's transcript path.
-    CopyTranscriptPath(usize),
     /// Copy a recent item's transcript text.
     CopyRecentText(usize),
     /// Copy a queue item's audio path.
@@ -1134,8 +1165,14 @@ pub enum Message {
     RetranscribeRecent(usize),
     /// Add a recent item's audio to the queue without starting it.
     EnqueueRecent(usize),
-    /// Open a recent item and run the existing Export As flow.
-    ExportRecent(usize),
+    /// Export a history row directly in a chosen format, without the Save As
+    /// dialog. The format list is the context menu's Export submenu.
+    ExportRecentAs(usize, ExportFormat),
+    /// Open the context menu's nested format list for the row it hangs from.
+    OpenExportSubmenu,
+    /// A found transcript could not be read or was empty. Settles the add
+    /// report without restoring anything.
+    TranscriptAdoptionMissed,
     /// Show a queue row's transcript/preview, or return to the live run.
     OpenQueueRow(usize),
     /// A row was pressed. Carries the list because the same index means
@@ -1166,6 +1203,12 @@ pub enum Message {
     QueueHover(Option<usize>),
     QueuePointerMoved(Point),
     QueuePointerLeft,
+    /// Favorites-only drag reordering: press picks the row up, release on a
+    /// row drops it there. History and Recordings keep their own order.
+    FavoriteDragStart(usize),
+    FavoriteDrop(usize),
+    FavoritePointerMoved(Point),
+    FavoritePointerLeft,
     ResetOutputDir,
     OpenModelsFolder,
 }
@@ -1563,6 +1606,24 @@ pub struct App {
     queue_hover: Option<usize>,
     /// Pointer position inside the queue list while dragging.
     queue_pointer: Option<Point>,
+    /// Favorites list row (an index into `recent`) being dragged, if any.
+    favorite_drag: Option<usize>,
+    /// Favorites row under the pointer while dragging, for the drop marker.
+    favorite_hover: Option<usize>,
+    /// Pointer position inside the Favorites list while dragging.
+    favorite_pointer: Option<Point>,
+    /// Favorites in the user's order, keyed by audio path else transcript path.
+    favorite_order: Vec<String>,
+    /// Speaker names created through the line editor this session. A name lives
+    /// on the document only while some row uses it; keeping it here means a
+    /// just-created speaker stays reachable by the chip and the swap action.
+    custom_speakers: Vec<String>,
+    /// An add whose summary toast is waiting on the transcript lookups.
+    add_report: Option<AddReport>,
+    /// A pane changed by an action taken elsewhere: tint it for a moment.
+    pane_cue: Option<PaneCue>,
+    /// The context menu's Export format list is showing.
+    export_submenu: bool,
     batch: bool,
     /// Queue paths belonging to the current (or most recent) transcription
     /// batch, including follow-up passes for files added during a run.
@@ -1667,11 +1728,11 @@ impl App {
     pub fn new() -> Self {
         let settings = Self::load_settings();
         let first_run = Self::is_first_run();
-        let (queue, batch_paths, recent) = if first_run {
+        let (queue, batch_paths, recent, favorite_order) = if first_run {
             // Never restore a queue left behind by an older install or a
             // previous build. The first launch of the app starts clean.
             Self::clear_queue_files();
-            (Vec::new(), Vec::new(), Vec::new())
+            (Vec::new(), Vec::new(), Vec::new(), Vec::new())
         } else {
             Self::load_queue_and_batch()
         };
@@ -1845,6 +1906,14 @@ impl App {
             queue_drag: None,
             queue_hover: None,
             queue_pointer: None,
+            favorite_drag: None,
+            favorite_hover: None,
+            favorite_pointer: None,
+            favorite_order,
+            custom_speakers: Vec::new(),
+            add_report: None,
+            pane_cue: None,
+            export_submenu: false,
             batch: false,
             batch_paths,
             batch_summary: Vec::new(),
@@ -2057,19 +2126,24 @@ impl App {
         }
     }
 
-    /// Load the queue, the paths from the most recent batch, and the finished
-    /// transcript history.
-    fn load_queue_and_batch() -> (Vec<QueueItem>, Vec<PathBuf>, Vec<RecentEntry>) {
+    /// Load the queue, the paths from the most recent batch, the finished
+    /// transcript history, and the saved Favorites order.
+    fn load_queue_and_batch() -> (
+        Vec<QueueItem>,
+        Vec<PathBuf>,
+        Vec<RecentEntry>,
+        Vec<String>,
+    ) {
         let text = Self::queue_path()
             .and_then(|path| std::fs::read_to_string(path).ok())
             .or_else(|| {
                 Self::legacy_queue_path().and_then(|path| std::fs::read_to_string(path).ok())
             });
         let Some(text) = text else {
-            return (Vec::new(), Vec::new(), Vec::new());
+            return (Vec::new(), Vec::new(), Vec::new(), Vec::new());
         };
         let Ok(state) = serde_json::from_str::<QueueState>(&text) else {
-            return (Vec::new(), Vec::new(), Vec::new());
+            return (Vec::new(), Vec::new(), Vec::new(), Vec::new());
         };
         let batch_paths = state.last_batch.into_iter().map(PathBuf::from).collect();
         let mut recent = Vec::new();
@@ -2158,7 +2232,7 @@ impl App {
                 transcript,
             });
         }
-        (items, batch_paths, recent)
+        (items, batch_paths, recent, state.favorite_order)
     }
 
     /// The options recorded for the last batch, read back independently of the
@@ -2225,6 +2299,7 @@ impl App {
                     message: entry.message.clone(),
                 })
                 .collect(),
+            favorite_order: self.favorite_order.clone(),
         };
         if let Ok(text) = serde_json::to_string_pretty(&state) {
             let _ = std::fs::write(path, text);
@@ -2290,13 +2365,55 @@ impl App {
             .position(|entry| entry.audio.as_deref() == Some(path))
     }
 
-    /// Flip an item's favorite flag and persist it. Favorites are a view, so
-    /// the list order does not change.
+    /// Flip an item's favorite flag and persist it. Favorites are a view, so the
+    /// recent list's own order does not change; the Favorites order records the
+    /// star so the list can show it in the user's arrangement.
     fn toggle_favorite(&mut self, index: usize) {
         let Some(entry) = self.recent.get_mut(index) else {
             return;
         };
         entry.favorite = !entry.favorite;
+        let favorite = entry.favorite;
+        let key = favorite_key(entry);
+        if let Some(key) = key {
+            self.favorite_order.retain(|other| other != &key);
+            if favorite {
+                // A freshly starred item leads: starring is a deliberate
+                // "look at this now" gesture, so it must not hide at the end.
+                self.favorite_order.insert(0, key);
+            }
+        }
+        if favorite {
+            // The row just landed in the Favorites tab, which is not the list
+            // the user is looking at.
+            self.cue_pane(PaneTab::Favorites, Some(index));
+        }
+        self.save_queue();
+    }
+
+    /// Move a favorite to sit before another one in the Favorites list. Only the
+    /// saved order changes: `recent` keeps its newest-first order, so History
+    /// and Recordings are untouched. The drop indicator draws above the target
+    /// row, so the moved item is inserted there rather than swapped into it.
+    fn move_favorite(&mut self, from: usize, to: usize) {
+        let order = self.favorite_indices();
+        let (Some(from_position), true) = (
+            order.iter().position(|index| *index == from),
+            order.contains(&to),
+        ) else {
+            return;
+        };
+        if from == to {
+            return;
+        }
+        let mut indices = order;
+        let moved = indices.remove(from_position);
+        let target = indices.iter().position(|index| *index == to).unwrap_or(0);
+        indices.insert(target, moved);
+        self.favorite_order = indices
+            .iter()
+            .filter_map(|index| favorite_key(&self.recent[*index]))
+            .collect();
         self.save_queue();
     }
 
@@ -2367,6 +2484,9 @@ impl App {
             ..Default::default()
         });
         self.save_queue();
+        // The take appears in Recordings while the workflow still owns the
+        // pane; the cue marks where it landed.
+        self.cue_pane(PaneTab::Recordings, Some(index));
         index
     }
 
@@ -2597,6 +2717,9 @@ impl App {
         let Some(entry) = self.recent.get(index).cloned() else {
             return;
         };
+        if let Some(key) = favorite_key(&entry) {
+            self.favorite_order.retain(|other| other != &key);
+        }
         self.recent.remove(index);
         self.recent_hover = None;
         // Keep the presence caches parallel without another probe.
@@ -2903,6 +3026,13 @@ impl App {
             self.toast = Some(("This transcript is read-only".to_string(), Instant::now()));
             return Task::none();
         }
+        // A swap lands on the same undo stack as a text edit, so an open editor
+        // is committed first: its snapshot and the swap must not interleave.
+        // The speaker order is read after that commit, so it describes the
+        // document as written rather than a row that is no longer a field.
+        if self.line_edit.is_some() {
+            self.commit_inline_edit(false);
+        }
         let speakers = self.speaker_order();
         if speakers.len() < 2 {
             self.toast = Some((
@@ -2910,11 +3040,6 @@ impl App {
                 Instant::now(),
             ));
             return Task::none();
-        }
-        // A swap lands on the same undo stack as a text edit, so an open editor
-        // is committed first: its snapshot and the swap must not interleave.
-        if self.line_edit.is_some() {
-            self.commit_inline_edit(false);
         }
         let mut lines = self.edit_lines().to_vec();
         let Some(line) = lines.get(index) else {
@@ -2996,6 +3121,9 @@ impl App {
         self.joined_lines.clear();
         self.joined_transcript.clear();
         self.modified = false;
+        // A new document has its own speakers; a name invented in the previous
+        // one must not appear in this transcript's cycle.
+        self.custom_speakers.clear();
         self.selected_view = Some(ItemView {
             source: source.clone(),
             finished,
@@ -3080,6 +3208,7 @@ impl App {
             self.joined_transcript.clear();
             self.modified = false;
             self.selected = Some(index);
+            self.custom_speakers.clear();
             self.selected_view = Some(ItemView {
                 source: item.path.clone(),
                 finished: false,
@@ -3198,6 +3327,7 @@ impl App {
         self.selected = None;
         self.selected_recent = None;
         self.selected_view = None;
+        self.custom_speakers.clear();
         self.line_history = LineHistory::default();
         self.view_error = None;
         self.join_lines = false;
@@ -3825,6 +3955,9 @@ impl App {
             || self.window_dirty
             || self.feature_deck_visible()
             || self.completion_pending
+            // A cross-pane cue is timed: this keeps the loop alive until the
+            // tick that clears it, so it never sticks if nothing else happens.
+            || self.pane_cue.is_some()
     }
 
     /// True while a recording workflow owns the app: nothing that would change
@@ -4053,11 +4186,13 @@ impl App {
             self.transcript_line_hover = None;
             self.queue_hover = None;
             self.row_menu = None;
+            self.export_submenu = false;
         }
         // Choosing a context-menu action closes the menu before it runs, so
         // the action sees the surface without a menu over it.
         if self.row_menu.is_some() && closes_row_menu(&message) {
             self.row_menu = None;
+            self.export_submenu = false;
         }
         match message {
             Message::TogglePlayerCollapsed => {
@@ -4408,14 +4543,7 @@ impl App {
                             self.toast = Some(("Already in the queue".to_string(), Instant::now()));
                             return Task::none();
                         }
-                        let count = added.len();
-                        self.toast = Some((
-                            format!(
-                                "Added {count} file{} to the queue",
-                                if count == 1 { "" } else { "s" }
-                            ),
-                            Instant::now(),
-                        ));
+                        self.begin_add_report(added.len());
                         return self.added_tasks(added);
                     }
                     _ => {}
@@ -4582,6 +4710,48 @@ impl App {
                 self.queue_pointer = None;
                 Task::none()
             }
+            Message::FavoriteDragStart(index) => {
+                if self.pointer_blocked() || self.pane_tab != PaneTab::Favorites {
+                    return Task::none();
+                }
+                if self.recent.get(index).is_some_and(|entry| entry.favorite) {
+                    self.favorite_drag = Some(index);
+                }
+                Task::none()
+            }
+            Message::FavoriteDrop(index) => {
+                let Some(from) = self.favorite_drag.take() else {
+                    return Task::none();
+                };
+                self.favorite_hover = None;
+                self.favorite_pointer = None;
+                if from == index {
+                    // A press and release on the same row is a click: open it.
+                    if self.recent_row_opens(index) {
+                        return self.update(Message::OpenRecent(index));
+                    }
+                    return Task::none();
+                }
+                if self.pane_tab == PaneTab::Favorites {
+                    self.move_favorite(from, index);
+                }
+                Task::none()
+            }
+            Message::FavoritePointerMoved(point) => {
+                if self.favorite_drag.is_some() {
+                    self.favorite_pointer = Some(point);
+                }
+                Task::none()
+            }
+            Message::FavoritePointerLeft => {
+                self.favorite_pointer = None;
+                // The pointer left the Favorites list entirely: the drop
+                // marker has no row to sit above, and a release outside the
+                // list has nowhere to land, so the drag ends with it.
+                self.favorite_hover = None;
+                self.favorite_drag = None;
+                Task::none()
+            }
             Message::ResetOutputDir => {
                 if !matches!(self.status, Status::Running) {
                     self.output_dir = None;
@@ -4687,6 +4857,9 @@ impl App {
                     return Task::none();
                 }
                 let name = next_speaker_name(&self.speaker_order());
+                // The name is reachable from every other line for the rest of
+                // the session, not only while this editor holds it.
+                self.remember_speaker(&name);
                 if let Some(edit) = self.line_edit.as_mut() {
                     let position = edit.current_position();
                     if let Some(row) = edit.rows.get_mut(position) {
@@ -5381,14 +5554,7 @@ impl App {
                         self.toast = Some(("Already in the queue".to_string(), Instant::now()));
                         return Task::none();
                     }
-                    self.toast = Some((
-                        format!(
-                            "Added {} {} to the queue",
-                            added.len(),
-                            if added.len() == 1 { "file" } else { "files" }
-                        ),
-                        Instant::now(),
-                    ));
+                    self.begin_add_report(added.len());
                     return self.added_tasks(added);
                 }
                 Task::none()
@@ -5417,19 +5583,15 @@ impl App {
                         self.toast = Some(("Already in the queue".to_string(), Instant::now()));
                         return Task::none();
                     }
-                    self.toast = Some((
-                        format!(
-                            "Added {} {} to the queue",
-                            added.len(),
-                            if added.len() == 1 { "file" } else { "files" }
-                        ),
-                        Instant::now(),
-                    ));
+                    self.begin_add_report(added.len());
                     return self.added_tasks(added);
                 }
                 Task::none()
             }
             Message::TranscriptsFound(single, hits) => {
+                // The add's toast waits for these lookups: one hit may become a
+                // restored History row instead of a queued file.
+                self.add_report_found(hits.len());
                 // Reading the transcript and probing its length is per file, so
                 // one slow probe cannot hold up the others.
                 Task::batch(hits.into_iter().map(move |hit| {
@@ -5449,15 +5611,17 @@ impl App {
                         },
                         move |adopted| match adopted {
                             Some(adopted) => Message::TranscriptAdopted(single, adopted),
-                            None => Message::Noop,
+                            None => Message::TranscriptAdoptionMissed,
                         },
                     )
                 }))
             }
             Message::TranscriptAdopted(single, adopted) => {
                 // A run already owns this path: the backend has it in its input
-                // list, so leave the queue alone and drop the hit.
+                // list, so leave the queue alone and drop the hit. The file is
+                // still queued, and the report counts it there.
                 if matches!(self.status, Status::Running) {
+                    self.add_report_settled(false);
                     return Task::none();
                 }
                 // The pending row exists only because the add created it.
@@ -5471,8 +5635,9 @@ impl App {
                     self.remove_queue_row(index);
                 }
                 if already.is_some() {
-                    self.toast =
-                        Some(("Already in History".to_string(), Instant::now()));
+                    // The file is in History either way, which is what the
+                    // summary is counting; no per-file toast needed.
+                    self.add_report_settled(true);
                     self.save_queue();
                     return Task::none();
                 }
@@ -5488,30 +5653,31 @@ impl App {
                 ..Default::default()
                 });
                 self.save_queue();
+                self.add_report_settled(true);
+                // An adopted transcript arrived in History from an add made
+                // somewhere else; mark the row so the change is not silent.
+                self.cue_pane(PaneTab::History, Some(index));
                 // A single file is the case where the user is waiting to see
                 // the text, so it opens; a folder add adopts silently.
                 if !single {
                     return Task::none();
                 }
-                let name = adopted
-                    .audio
-                    .file_name()
-                    .map(|name| name.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| adopted.audio.display().to_string());
                 let editable = adopted
                     .transcript
                     .extension()
                     .and_then(|ext| ext.to_str())
                     .is_some_and(|ext| ext.eq_ignore_ascii_case("txt"));
                 let output = editable.then(|| adopted.transcript.clone());
-                self.toast = Some((
-                    format!("Added {name} with its transcript"),
-                    Instant::now(),
-                ));
                 // An adopted single file is the case that opens itself, and it
-                // still lands in History as it always has.
+                // still lands in History as it always has. Its toast is the add
+                // summary, shown once the report settles.
                 self.pane_tab = PaneTab::History;
                 self.open_recent(index, Some((adopted.text, output)))
+            }
+            Message::TranscriptAdoptionMissed => {
+                // Nothing was restored: the file stays queued for a run.
+                self.add_report_settled(false);
+                Task::none()
             }
             Message::ItemDurationProbed(path, seconds) => {
                 if let Some(item) = self
@@ -5654,13 +5820,6 @@ impl App {
                     .and_then(|entry| entry.audio.clone());
                 self.copy_path_to_clipboard(path.as_deref(), "path")
             }
-            Message::CopyTranscriptPath(index) => {
-                let path = self
-                    .recent
-                    .get(index)
-                    .and_then(|entry| entry.transcript.clone());
-                self.copy_path_to_clipboard(path.as_deref(), "transcript path")
-            }
             Message::CopyQueuePath(index) => {
                 let path = self
                     .queue
@@ -5685,7 +5844,11 @@ impl App {
             }
             Message::RetranscribeRecent(index) => self.retranscribe_recent(index),
             Message::EnqueueRecent(index) => self.enqueue_recent_from_menu(index),
-            Message::ExportRecent(index) => self.export_recent(index),
+            Message::ExportRecentAs(index, format) => self.export_recent_as(index, format),
+            Message::OpenExportSubmenu => {
+                self.export_submenu = true;
+                Task::none()
+            }
             Message::OpenQueueRow(index) => self.view_item(index),
             Message::RowPressed(tab, index) => self.row_pressed(tab, index),
             Message::PanelPointerMoved(point) => {
@@ -5706,9 +5869,19 @@ impl App {
             }
             Message::CloseRowMenu => {
                 self.row_menu = None;
+                self.export_submenu = false;
                 Task::none()
             }
             Message::RecentHover(index) => {
+                // While a favorite is being dragged, the row's enter names the
+                // row the drop marker should sit above. An exit is ignored: it
+                // can arrive after the next row's enter in the same update, and
+                // clearing on it would drop the marker the pointer is over.
+                if self.favorite_drag.is_some() {
+                    if let Some(index) = index {
+                        self.favorite_hover = Some(index);
+                    }
+                }
                 self.recent_hover = index;
                 Task::none()
             }
@@ -5716,6 +5889,10 @@ impl App {
                 self.pane_tab = tab;
                 self.recent_hover = None;
                 self.row_menu = None;
+                self.export_submenu = false;
+                self.favorite_drag = None;
+                self.favorite_hover = None;
+                self.favorite_pointer = None;
                 // Entering a history list is where presence is re-probed: a
                 // file deleted while the app was open shows as missing from
                 // here.
@@ -6439,6 +6616,13 @@ impl App {
                 {
                     self.toast = None;
                 }
+                // A cue clears on its own; no other message has to arrive.
+                if self
+                    .pane_cue
+                    .is_some_and(|cue| cue.at.elapsed() >= PANE_CUE)
+                {
+                    self.pane_cue = None;
+                }
                 Task::batch(tasks)
             }
             Message::RenameSave => {
@@ -6770,6 +6954,7 @@ impl App {
             index,
             position: anchor,
         });
+        self.export_submenu = false;
         if let Some(index) = index {
             match tab {
                 PaneTab::Queue => {
@@ -6820,6 +7005,7 @@ impl App {
             self.last_row_click = None;
             // The second press must not also be a drag release.
             self.queue_drag = None;
+            self.favorite_drag = None;
             return match tab {
                 PaneTab::Queue => self.activate_queue_row(index),
                 _ => self.activate_recent_row(index),
@@ -6829,6 +7015,14 @@ impl App {
             // The queue keeps its drag model: press starts the drag, release
             // selects and previews.
             PaneTab::Queue => self.update(Message::QueueDragStart(index)),
+            PaneTab::Favorites => {
+                // Pressing a favorite picks it up; release on a different row
+                // moves it, release on the same row opens it. Opening on press
+                // made every drag also open the transcript it was moving.
+                let drag = self.update(Message::FavoriteDragStart(index));
+                self.select_recent_row(tab, index);
+                drag
+            }
             _ => {
                 self.select_recent_row(tab, index);
                 if self.recent_row_opens(index) {
@@ -6894,47 +7088,88 @@ impl App {
         }
     }
 
-    /// Queue a history entry for a fresh run and open its options. This is the
-    /// Retranscribe the context menu offers; double-click never reaches it.
+    /// Queue a history entry for a fresh run and open its options. The File
+    /// panel footer offers this as its general action; double-click never
+    /// reaches it, and the context menu now stages the file instead.
     fn retranscribe_recent(&mut self, index: usize) -> Task<Message> {
         if matches!(self.status, Status::Running) || self.transcribe_blocked() {
             return Task::none();
         }
-        if !self.enqueue_recent(index) {
+        if self.enqueue_recent(index).is_none() {
             return Task::none();
         }
         self.update(Message::OpenRunSetup)
     }
 
     /// Add a history row's audio to the queue without leaving the current tab
-    /// or opening the run options. The context menu offers this beside
-    /// Retranscribe so several files can be staged before a run.
+    /// or opening the run options. The context menu offers this as Retranscribe
+    /// so several files can be staged before a run.
     fn enqueue_recent_from_menu(&mut self, index: usize) -> Task<Message> {
         if self.transcribe_blocked() {
             self.toast = Some(("Finish the recording first".to_string(), Instant::now()));
             return Task::none();
         }
-        if !self.enqueue_recent(index) {
+        let Some(row) = self.enqueue_recent(index) else {
             return Task::none();
-        }
+        };
         self.toast = Some(("Added to queue".to_string(), Instant::now()));
+        // The row landed in the Queue tab while the user is looking at another
+        // list: say so there, since nothing on this tab changes.
+        self.cue_pane(PaneTab::Queue, Some(row));
         Task::none()
     }
 
-    /// Open a history row and run the existing Export As flow on it.
-    fn export_recent(&mut self, index: usize) -> Task<Message> {
-        let already_open = self.selected_recent == Some(index)
-            && self
-                .selected_view
-                .as_ref()
-                .and_then(|view| self.recent.get(index).map(|entry| entry.transcript.as_deref() == Some(view.source.as_path())))
-                .unwrap_or(false);
-        let mut tasks = Vec::new();
-        if !already_open {
-            tasks.push(self.open_recent(index, None));
+    /// Export a history row directly in `format`, without the Save As dialog.
+    /// The file lands beside the row's transcript; a plain-text export beside
+    /// it gets an `-export` suffix so it cannot overwrite the transcript.
+    fn export_recent_as(&mut self, index: usize, format: ExportFormat) -> Task<Message> {
+        // The row may be the document on screen with an open editor; commit it
+        // first so the export reads what the user actually sees.
+        self.commit_inline_edit(false);
+        let Some(entry) = self.recent.get(index).cloned() else {
+            return Task::none();
+        };
+        let Some(transcript) = entry.transcript.clone() else {
+            self.toast = Some(("No transcript to export".to_string(), Instant::now()));
+            return Task::none();
+        };
+        let Some(text) = backend::read_transcript(&transcript) else {
+            self.toast = Some((
+                format!("Could not read {}", transcript.display()),
+                Instant::now(),
+            ));
+            return Task::none();
+        };
+        if text.trim().is_empty() {
+            self.toast = Some(("No transcript to export".to_string(), Instant::now()));
+            return Task::none();
         }
-        tasks.push(self.update(Message::SaveTranscriptAs));
-        Task::batch(tasks)
+        let stem = transcript
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or("transcript");
+        let mut path = transcript.with_file_name(format!("{stem}.{}", format.extension()));
+        if path == transcript {
+            path = transcript.with_file_name(format!("{stem}-export.{}", format.extension()));
+        }
+        // The JSON beside a transcript is usually its metadata sidecar; writing
+        // an export over it would erase speaker ids and line bounds.
+        if format == ExportFormat::Json
+            && hippo_transcribe_core::sidecar::locate(&transcript).as_deref() == Some(path.as_path())
+        {
+            path = transcript.with_file_name(format!("{stem}-export.{}", format.extension()));
+        }
+        let lines = attach_confidences(parse_lines(&text), &backend::read_confidences(&transcript));
+        let cues = backend::export_cues(Some(transcript.as_path()), &lines);
+        let turns = turns_from_lines(&lines, entry.duration);
+        let duration = entry.duration.map(|seconds| seconds as f32);
+        match hippo_transcribe_core::export::write(&path, format, &text, &cues, &turns, duration) {
+            Ok(()) => self.toast = Some((format!("Saved {}", path.display()), Instant::now())),
+            Err(error) => {
+                self.toast = Some((format!("Could not export: {error}"), Instant::now()))
+            }
+        }
+        Task::none()
     }
 
     /// Copy one path to the clipboard with a short confirmation.
@@ -6962,6 +7197,79 @@ impl App {
         remap(&mut self.selected);
         self.invalidate_derived();
         self.save_queue();
+    }
+
+    /// Start tracking one add. Its toast waits for the transcript lookups, so
+    /// the counts describe what actually landed rather than the first guess.
+    fn begin_add_report(&mut self, queued: usize) {
+        self.add_report = Some(AddReport {
+            queued,
+            restored: 0,
+            pending: None,
+        });
+    }
+
+    /// The transcript scan reported how many lookups it spawned. Zero settles
+    /// the report at once; otherwise each adoption decrements `pending`.
+    fn add_report_found(&mut self, hits: usize) {
+        if let Some(report) = self.add_report.as_mut() {
+            report.pending = Some(hits);
+        }
+        self.settle_add_report();
+    }
+
+    /// One lookup settled. `restored` says the file moved into History, so it
+    /// is no longer queue work.
+    fn add_report_settled(&mut self, restored: bool) {
+        if let Some(report) = self.add_report.as_mut() {
+            if let Some(pending) = report.pending.as_mut() {
+                *pending = pending.saturating_sub(1);
+            }
+            if restored {
+                report.restored += 1;
+                report.queued = report.queued.saturating_sub(1);
+            }
+        }
+        self.settle_add_report();
+    }
+
+    /// Show the final summary once every lookup has settled. Runs from the
+    /// adoption messages, not the tick, so it does not depend on other events.
+    fn settle_add_report(&mut self) {
+        let Some(report) = &self.add_report else {
+            return;
+        };
+        if report.pending != Some(0) {
+            return;
+        }
+        let (restored, queued) = (report.restored, report.queued);
+        self.add_report = None;
+        if restored + queued > 0 {
+            self.toast = Some((add_summary(restored, queued), Instant::now()));
+        }
+    }
+
+    /// Tint a pane briefly because something changed in it from elsewhere. The
+    /// tick clears the cue, so it never becomes a lasting state.
+    fn cue_pane(&mut self, tab: PaneTab, row: Option<usize>) {
+        self.pane_cue = Some(PaneCue {
+            tab,
+            row,
+            at: Instant::now(),
+        });
+    }
+
+    /// Whether a pane is inside its cue window.
+    fn cue_active(&self, tab: PaneTab) -> bool {
+        self.pane_cue
+            .is_some_and(|cue| cue.tab == tab && cue.at.elapsed() < PANE_CUE)
+    }
+
+    /// Whether a specific row is inside its cue window.
+    fn row_cue_active(&self, tab: PaneTab, index: usize) -> bool {
+        self.pane_cue.is_some_and(|cue| {
+            cue.tab == tab && cue.row == Some(index) && cue.at.elapsed() < PANE_CUE
+        })
     }
 
     fn add_paths(&mut self, paths: Vec<PathBuf>) -> Vec<PathBuf> {
@@ -7002,6 +7310,8 @@ impl App {
                 self.feature_slide = 0;
                 self.feature_slide_at = Instant::now();
             }
+            // The rows just pushed are the tail of the queue; mark the first.
+            self.cue_pane(PaneTab::Queue, Some(self.queue.len() - added.len()));
             self.save_queue();
         }
         added
@@ -7025,9 +7335,8 @@ impl App {
             Task::perform(
                 async move { crate::files::find_transcripts(&lookup_paths, output_dir.as_deref()) },
                 move |hits| {
-                    if hits.is_empty() {
-                        return Message::Noop;
-                    }
+                    // An empty result still has to come back: it is what settles
+                    // the add report when nothing was adopted.
                     Message::TranscriptsFound(
                         single,
                         hits.into_iter()
@@ -7167,18 +7476,19 @@ impl App {
         })
     }
 
-    /// Queue a history entry for a new run. Returns false when it has no audio
-    /// left to transcribe, with a toast saying why.
-    fn enqueue_recent(&mut self, index: usize) -> bool {
+    /// Queue a history entry for a new run. Returns the queue row now holding
+    /// it, or `None` when it has no audio left to transcribe (with a toast
+    /// saying why).
+    fn enqueue_recent(&mut self, index: usize) -> Option<usize> {
         let Some(entry) = self.recent.get(index).cloned() else {
-            return false;
+            return None;
         };
         let Some(audio) = entry.audio else {
             self.toast = Some((
                 "This history entry has no audio file to transcribe".to_string(),
                 Instant::now(),
             ));
-            return false;
+            return None;
         };
         if !audio.is_file() {
             let name = audio
@@ -7189,7 +7499,7 @@ impl App {
                 format!("Audio file is missing: {name}"),
                 Instant::now(),
             ));
-            return false;
+            return None;
         }
         // A row for this audio is the same work; reuse it rather than adding a
         // duplicate. Done here means an adopted transcript, which a rerun
@@ -7204,7 +7514,7 @@ impl App {
                     "This file is already being transcribed".to_string(),
                     Instant::now(),
                 ));
-                return false;
+                return None;
             }
             if !matches!(row.status, ItemStatus::Pending) {
                 row.status = ItemStatus::Pending;
@@ -7230,7 +7540,7 @@ impl App {
         self.selected_recent = Some(index);
         self.invalidate_derived();
         self.save_queue();
-        true
+        row_index
     }
 
     fn start(&mut self) {
@@ -7248,7 +7558,7 @@ impl App {
             // Nothing is waiting. A history entry is transcribed again; the
             // queue itself is never re-run wholesale.
             if let Some(index) = self.retranscribe_target() {
-                if !self.enqueue_recent(index) {
+                if self.enqueue_recent(index).is_none() {
                     return;
                 }
             } else if self.queue.is_empty() {
@@ -7419,6 +7729,7 @@ impl App {
         self.commit_inline_edit(false);
         self.transcript.clear();
         self.lines.clear();
+        self.custom_speakers.clear();
         self.pending_lines.clear();
         // A new run is a new document; no earlier edits can be undone onto it.
         self.line_history = LineHistory::default();
@@ -7516,12 +7827,27 @@ impl App {
         !self.shows(license::Audience::ProOnly)
     }
 
-    /// The recent entries on the Favorites tab, in the store's newest-first
-    /// order.
+    /// The recent entries on the Favorites tab, in the order the user dragged
+    /// them into. Favorites with no saved key (starred before the order
+    /// existed, or on another machine) follow in the store's newest-first
+    /// order; they are never reordered against the user's arrangement.
     fn favorite_indices(&self) -> Vec<usize> {
-        (0..self.recent.len())
-            .filter(|index| self.recent[*index].favorite)
-            .collect()
+        let mut indices = Vec::new();
+        let mut placed = vec![false; self.recent.len()];
+        for key in &self.favorite_order {
+            if let Some(index) = self.recent.iter().enumerate().position(|(index, entry)| {
+                !placed[index] && entry.favorite && favorite_key(entry).as_deref() == Some(key.as_str())
+            }) {
+                placed[index] = true;
+                indices.push(index);
+            }
+        }
+        for (index, entry) in self.recent.iter().enumerate() {
+            if entry.favorite && !placed[index] {
+                indices.push(index);
+            }
+        }
+        indices
     }
 
     /// The recent entries on the Recordings tab, newest first.
@@ -8404,11 +8730,13 @@ impl App {
         // must not write this row into whatever is on screen now.
         if self.line_edit_document != self.edit_document() {
             self.line_edit_document = None;
+            self.prune_speakers();
             self.reset_pane_geometry();
             return;
         }
         let Some(row) = edit.current_row() else {
             self.line_edit_document = None;
+            self.prune_speakers();
             self.reset_pane_geometry();
             return;
         };
@@ -8427,6 +8755,7 @@ impl App {
                 ));
             } else {
                 self.line_edit_document = None;
+                self.prune_speakers();
                 self.reset_pane_geometry();
             }
             return;
@@ -8492,6 +8821,7 @@ impl App {
         if self.line_edit.take().is_some() {
             // A speaker added to the discarded row must not linger in the
             // legend or the chip colours.
+            self.prune_speakers();
             self.invalidate_derived();
             self.line_edit_resume = false;
             self.line_edit_document = None;
@@ -9714,11 +10044,19 @@ impl App {
     ///
     /// The edited row is not in the document yet, so a speaker assigned to it
     /// would otherwise have no palette colour and no place in the chip's cycle.
+    /// Names created through that editor also stay registered for the session
+    /// (`custom_speakers`), so the swap action on another line can reach a
+    /// speaker that no row of the document uses any more.
     fn speaker_order(&self) -> Vec<String> {
         if let Some(order) = self.speaker_order_cache.borrow().as_ref() {
             return order.clone();
         }
         let mut order = distinct_speaker_order(self.shown_lines());
+        for name in &self.custom_speakers {
+            if !name.is_empty() && !order.contains(name) {
+                order.push(name.clone());
+            }
+        }
         if let Some(edit) = self.line_edit.as_ref() {
             for row in &edit.rows {
                 if !row.speaker.is_empty() && !order.contains(&row.speaker) {
@@ -9731,6 +10069,36 @@ impl App {
         sort_speaker_names(&mut order);
         *self.speaker_order_cache.borrow_mut() = Some(order.clone());
         order
+    }
+
+    /// Keep a speaker name reachable for the rest of the session, even after
+    /// the only row using it is renamed or removed.
+    fn remember_speaker(&mut self, name: &str) {
+        let name = name.trim();
+        if name.is_empty() || self.custom_speakers.iter().any(|known| known == name) {
+            return;
+        }
+        self.custom_speakers.push(name.to_string());
+        // Only the order is stale: the document did not change.
+        let _ = self.speaker_order_cache.replace(None);
+    }
+
+    /// Drop registered names that neither the document nor the open editor row
+    /// uses, after an edit that was cancelled. The registry exists to keep a
+    /// name the user just created reachable for the session, not to remember
+    /// names from an edit that was thrown away.
+    fn prune_speakers(&mut self) {
+        let mut present: Vec<String> = distinct_speaker_order(self.document_lines());
+        if let Some(edit) = self.line_edit.as_ref() {
+            for row in &edit.rows {
+                if !row.speaker.is_empty() && !present.contains(&row.speaker) {
+                    present.push(row.speaker.clone());
+                }
+            }
+        }
+        self.custom_speakers
+            .retain(|name| present.iter().any(|used| used == name));
+        let _ = self.speaker_order_cache.replace(None);
     }
 
     /// True when diarization ran and found a single voice, so every line lost
@@ -10570,7 +10938,7 @@ impl App {
             .padding(0)
             .width(Length::Fill)
             .height(Length::Fill)
-            .style(segment_button(scheme, selected, muted))
+            .style(segment_button(scheme, selected, muted, false))
         };
 
         let cpu_selected = !selected;
@@ -10986,7 +11354,10 @@ impl App {
     fn pane_tabs(&self, scheme: &Scheme) -> Element<'_, Message> {
         let scheme = *scheme;
         let locked = self.record_lock();
-        let tab = |label: Element<'static, Message>, selected: bool, message: Message| {
+        let tab = |label: Element<'static, Message>,
+                   selected: bool,
+                   cue: bool,
+                   message: Message| {
             button(
                 container(label)
                     .width(Length::Fill)
@@ -10998,7 +11369,7 @@ impl App {
             .width(Length::Fill)
             .height(Length::Fill)
             .on_press_maybe((!locked).then_some(message))
-            .style(segment_button(scheme, selected, locked))
+            .style(segment_button(scheme, selected, locked, cue))
         };
 
         let label = |name: &str, selected: bool| {
@@ -11037,6 +11408,7 @@ impl App {
         let queue_tab = tab(
             queue_label,
             self.pane_tab == PaneTab::Queue,
+            self.cue_active(PaneTab::Queue),
             Message::SelectTab(PaneTab::Queue),
         );
 
@@ -11069,16 +11441,19 @@ impl App {
         let favorites_tab = tab(
             favorites_label,
             favorites_selected,
+            self.cue_active(PaneTab::Favorites),
             Message::SelectTab(PaneTab::Favorites),
         );
         let history_tab = tab(
             label(pane_tab_label(PaneTab::History), self.pane_tab == PaneTab::History).into(),
             self.pane_tab == PaneTab::History,
+            self.cue_active(PaneTab::History),
             Message::SelectTab(PaneTab::History),
         );
         let recordings_tab = tab(
             label(pane_tab_label(PaneTab::Recordings), self.pane_tab == PaneTab::Recordings).into(),
             self.pane_tab == PaneTab::Recordings,
+            self.cue_active(PaneTab::Recordings),
             Message::SelectTab(PaneTab::Recordings),
         );
 
@@ -11371,23 +11746,95 @@ impl App {
         tab: PaneTab,
         scheme: &Scheme,
         locked: bool,
-    ) -> Element<'static, Message> {
+    ) -> Element<'_, Message> {
         let scheme = *scheme;
         let mut rows = column![].spacing(2).width(Length::Fill);
         for index in indices {
             // During a recording workflow every row but the session's item is
             // dimmed; the active row is the one the right pane is describing.
             let dimmed = self.recording_row_dimmed(tab, index, locked);
+            // Favorites is drag-reorderable: a thin rule above the row the
+            // item would land on, the same cue the queue uses for its drop.
+            if tab == PaneTab::Favorites
+                && self.favorite_drag.is_some()
+                && self.favorite_hover == Some(index)
+                && self.favorite_drag != Some(index)
+            {
+                rows = rows.push(
+                    container(horizontal_space())
+                        .width(Length::Fill)
+                        .height(Length::Fixed(2.0))
+                        .style(move |_theme| container::Style {
+                            background: Some(scheme.blue.into()),
+                            border: iced::border::rounded(1.0),
+                            ..container::Style::default()
+                        }),
+                );
+            }
             rows = rows.push(self.recent_row(index, tab, &scheme, dimmed));
         }
-        mouse_area(
+        let list = mouse_area(
             scrollable(rows)
                 .width(Length::Fill)
                 .height(Length::Fill)
                 .style(visible_scrollbar_style),
         )
-        .on_right_press(Message::OpenRowMenu(tab, None))
-        .into()
+        .on_right_press(Message::OpenRowMenu(tab, None));
+        if tab == PaneTab::Favorites {
+            let list = list
+                .on_move(Message::FavoritePointerMoved)
+                .on_exit(Message::FavoritePointerLeft);
+            match self.favorite_drag_ghost(&scheme) {
+                Some(ghost) => stack![list, ghost].into(),
+                None => list.into(),
+            }
+        } else {
+            list.into()
+        }
+    }
+
+    /// The card that follows the pointer while a favorite is dragged. Same
+    /// shape as the queue's ghost, but it names the entry being reordered.
+    fn favorite_drag_ghost(&self, scheme: &Scheme) -> Option<Element<'_, Message>> {
+        let index = self.favorite_drag?;
+        let point = self.favorite_pointer?;
+        let entry = self.recent.get(index)?;
+        let name = ellipsize_middle(&recent_title(entry), 32);
+        let scheme = *scheme;
+        let ghost = container(
+            row![
+                icon(ICON_STAR_FILL, 12.0),
+                text(name).size(12).wrapping(NO_WRAP),
+            ]
+            .spacing(6)
+            .align_y(iced::Alignment::Center),
+        )
+        .padding([6, 10])
+        .style(move |_theme| container::Style {
+            background: Some(scheme.dialog_bg.into()),
+            text_color: Some(scheme.text),
+            border: iced::border::Border {
+                color: scheme.blue,
+                width: 1.0,
+                radius: 8.0.into(),
+            },
+            shadow: dialog_shadow(),
+            ..container::Style::default()
+        });
+        Some(
+            container(ghost)
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .align_x(iced::Alignment::Start)
+                .align_y(iced::Alignment::Start)
+                .padding(iced::Padding {
+                    top: (point.y - 18.0).max(0.0),
+                    left: (point.x + 12.0).max(0.0),
+                    right: 0.0,
+                    bottom: 0.0,
+                })
+                .into(),
+        )
     }
 
     fn history_empty_state(&self, scheme: &Scheme) -> Element<'_, Message> {
@@ -11502,6 +11949,10 @@ impl App {
         };
         let selected = self.selected_recent == Some(index);
         let hovered = self.recent_hover == Some(index);
+        // A row that just arrived in this list from another pane keeps the same
+        // short accent wash the queue row uses, so an adopted transcript or a
+        // freshly starred item says where it went.
+        let cued = self.row_cue_active(tab, index);
         let record_locked = self.record_lock();
 
         let meta_line: Element<'static, Message> = if tab == PaneTab::Recordings
@@ -11608,12 +12059,17 @@ impl App {
         };
         let background = if selected {
             row_tint
+        } else if cued {
+            Color {
+                a: 0.16,
+                ..scheme.blue
+            }
         } else if hovered {
             scheme.bar_track
         } else {
             Color::TRANSPARENT
         };
-        let border_color = if selected {
+        let border_color = if selected || cued {
             scheme.blue
         } else {
             Color::TRANSPARENT
@@ -11649,7 +12105,12 @@ impl App {
             .on_exit(Message::RecentHover(None))
             .on_press(Message::RowPressed(tab, index))
             .on_right_press(Message::OpenRowMenu(tab, Some(index)));
-        area.into()
+        // Only Favorites is re-orderable; release elsewhere keeps its meaning.
+        if tab == PaneTab::Favorites {
+            area.on_release(Message::FavoriteDrop(index)).into()
+        } else {
+            area.into()
+        }
     }
 
     /// The meta line and whether it reads as a warning. Recordings add their
@@ -11856,14 +12317,6 @@ impl App {
         let audio_present = self.recent_audio_present(index);
         let review_blocked =
             running && self.shows(license::Audience::FreeOnly) && tab == PaneTab::History;
-        let open_enabled = entry.state == ItemState::Ready && transcript_present && !review_blocked;
-        let open_hint = if review_blocked {
-            Some("Reviewing during active transcription is a Pro feature")
-        } else if !transcript_present {
-            Some("No transcript file to open.")
-        } else {
-            None
-        };
         let retry_recording = self.retryable_recording(index);
         let retry_enabled = audio_present && !running && !locked;
         let retry_hint = if !audio_present {
@@ -11871,6 +12324,26 @@ impl App {
         } else {
             Some("Finish the current run first.")
         };
+        let running_audio = self
+            .queue
+            .iter()
+            .find(|item| matches!(item.status, ItemStatus::Running))
+            .and_then(|item| item.audio.as_deref());
+        let already_running =
+            entry.audio.as_deref().is_some_and(|audio| Some(audio) == running_audio);
+        let queue_enabled = audio_present && !already_running && !locked;
+        let queue_hint = if !audio_present {
+            Some("The audio file is missing.")
+        } else if already_running {
+            Some("This file is already being transcribed.")
+        } else if locked {
+            Some("Finish the recording first.")
+        } else {
+            None
+        };
+        // A failed recording is retried through the recording workflow; every
+        // other row's Retranscribe now stages it in the queue without opening
+        // the run options.
         let retranscribe = if retry_recording {
             row(
                 "Retry recording",
@@ -11881,36 +12354,11 @@ impl App {
         } else {
             row(
                 "Retranscribe",
-                retry_enabled,
-                (!retry_enabled).then_some(retry_hint.unwrap_or("Retranscribe is unavailable.")),
-                Message::RetranscribeRecent(index),
+                queue_enabled,
+                (!queue_enabled).then_some(queue_hint.unwrap_or("Retranscribe is unavailable.")),
+                Message::EnqueueRecent(index),
             )
         };
-
-        let open = row("Open", open_enabled, open_hint, Message::OpenRecent(index));
-        let running_audio = self
-            .queue
-            .iter()
-            .find(|item| matches!(item.status, ItemStatus::Running))
-            .and_then(|item| item.audio.as_deref());
-        let already_running =
-            entry.audio.as_deref().is_some_and(|audio| Some(audio) == running_audio);
-        let add_enabled = audio_present && !already_running && !locked;
-        let add_hint = if !audio_present {
-            Some("The audio file is missing.")
-        } else if already_running {
-            Some("This file is already being transcribed.")
-        } else if locked {
-            Some("Finish the recording first.")
-        } else {
-            None
-        };
-        let add_to_queue = row(
-            "Add to queue",
-            add_enabled,
-            add_hint,
-            Message::EnqueueRecent(index),
-        );
         let reveal_transcript = row(
             "Reveal transcript",
             entry.transcript.is_some(),
@@ -11933,18 +12381,14 @@ impl App {
             entry.audio.is_none().then_some("No audio file."),
             Message::CopyItemPath(index),
         );
-        let copy_transcript_path = row(
-            "Copy transcript path",
-            entry.transcript.is_some(),
-            entry.transcript.is_none().then_some("No transcript file."),
-            Message::CopyTranscriptPath(index),
-        );
         let copy_text = row(
             "Copy text",
             transcript_present,
             (!transcript_present).then_some("No transcript file."),
             Message::CopyRecentText(index),
         );
+        // The row opens a nested format list rather than the Save As dialog;
+        // each entry in it exports this row in that format directly.
         let export = row(
             "Export as\u{2026}",
             transcript_present && !review_blocked,
@@ -11953,14 +12397,12 @@ impl App {
             } else {
                 (!transcript_present).then_some("No transcript to export.")
             },
-            Message::ExportRecent(index),
+            Message::OpenExportSubmenu,
         );
         let remove = danger("Remove item", !locked, None, Message::RemoveRecent(index));
 
         match tab {
             PaneTab::Favorites => vec![
-                open,
-                add_to_queue,
                 retranscribe,
                 row(
                     "Unfavorite",
@@ -11971,25 +12413,24 @@ impl App {
                 reveal_transcript,
                 reveal_audio,
                 copy_path,
-                copy_transcript_path,
+                copy_text,
+                export,
                 remove,
             ],
             PaneTab::Recordings => vec![
-                open,
-                add_to_queue,
                 retranscribe,
                 reveal_audio,
                 reveal_transcript,
                 copy_path,
+                copy_text,
+                export,
                 remove,
             ],
             _ => vec![
-                open,
-                add_to_queue,
                 retranscribe,
                 reveal_transcript,
                 reveal_audio,
-                copy_transcript_path,
+                copy_path,
                 copy_text,
                 export,
                 remove,
@@ -12160,9 +12601,18 @@ impl App {
         let row_text = scheme.text;
         let dragging = self.queue_drag == Some(index);
         let hovered = self.queue_hover == Some(index);
+        // A row that just arrived from another pane glows briefly. The marker
+        // is time-limited by `PANE_CUE`, so this never becomes a permanent
+        // highlight.
+        let cued = self.row_cue_active(PaneTab::Queue, index);
         let background = if dragging {
             Color {
                 a: 0.14,
+                ..scheme.blue
+            }
+        } else if cued {
+            Color {
+                a: 0.16,
                 ..scheme.blue
             }
         } else if viewing {
@@ -12174,6 +12624,11 @@ impl App {
         };
         let border_color = if dragging || viewing {
             scheme.blue
+        } else if cued {
+            Color {
+                a: 0.75,
+                ..scheme.blue
+            }
         } else {
             Color::TRANSPARENT
         };
@@ -12526,8 +12981,8 @@ impl App {
     }
 
     /// Controls for the line being edited: its speaker, the structural edits
-    /// (join, split, delete), undo/redo, and the commit pair. Inserted between the
-    /// transcript header and the list while the editor is open.
+    /// (join, split, delete), undo/redo, and the commit button. Inserted between
+    /// the transcript header and the list while the editor is open.
     fn line_edit_panel(&self, scheme: Scheme) -> Option<Element<'_, Message>> {
         let edit = self.line_edit.as_ref()?;
         let row = edit.current_row()?;
@@ -12558,13 +13013,10 @@ impl App {
                 .style(panel_icon_button(scheme, enabled))
                 .on_press_maybe(enabled.then_some(message))
         };
-        // Cancel stays live whatever the state: it is the way out of a row the
-        // panel can no longer write to.
-        let cancel = icon_circle(ICON_X, scheme.ink)
-            .on_press(Message::CancelLineEdit)
-            .style(panel_icon_button(scheme, true));
+        // Cancel stays out of the strip: Escape is the cancel path, and a
+        // second X beside the delete button read as another delete.
         // Same box as Reveal: the label sets the height, and the width is the
-        // width that label reserves, so the commit pair matches the row of
+        // width that label reserves, so the commit button matches the row of
         // transcript actions beneath the pane.
         let done = action(
             row![
@@ -12582,9 +13034,10 @@ impl App {
         // The strip is a full-width band inside the card, so it follows the same
         // grammar as the header above it and the Find row below. Three groups:
         // history at the left edge, what the line can become in the middle, the
-        // commit pair at the right where a dialog's buttons would. The middle
+        // commit button at the right where a dialog's buttons would. The middle
         // group is centred by the two elastic gaps around it, which are equal, so
-        // it stays put when the pane is wide.
+        // it stays put when the pane is wide. Escape is the only cancel path, so
+        // the right edge carries one button rather than a pair.
         let history = row![
             self.tip(
                 button(ICON_UNDO, undo, false, Message::UndoLineEdit),
@@ -12643,7 +13096,6 @@ impl App {
             horizontal_space(),
             edits,
             horizontal_space(),
-            self.tip(cancel, "Cancel (Esc) and keep the line as it was", &scheme),
             self.tip(done, "Save this line (Enter)", &scheme),
         ]
         .spacing(LINE_EDIT_GAP)
@@ -12956,14 +13408,14 @@ impl App {
                         action: Some(Message::OpenVocabulary),
                     },
                     MenuRow {
-                        label: "Copy",
+                        label: "Copy Text",
                         key: None,
                         checked: false,
                         enabled: has_text,
                         action: has_text.then_some(Message::CopyTranscript),
                     },
                     MenuRow {
-                        label: "Reset",
+                        label: "Reset Edits",
                         key: None,
                         checked: false,
                         enabled: reset,
@@ -15240,6 +15692,45 @@ impl App {
         .interaction(mouse::Interaction::Idle)
         .on_press(Message::CloseRowMenu)
         .on_right_press(Message::CloseRowMenu);
+        // The Export formats hang off the Export row as a second card. A true
+        // nested `pick_list` would not match this hand-drawn menu's chrome, so
+        // the submenu is the same card, placed one row down and one card right.
+        let export_row = rows
+            .iter()
+            .position(|row| row.label == "Export as\u{2026}");
+        let submenu = match (self.export_submenu, export_row, menu.index) {
+            (true, Some(row), Some(index)) => {
+                let entries: Vec<RowMenuEntry> = ExportFormat::ALL
+                    .iter()
+                    .map(|format| RowMenuEntry {
+                        label: format.label(),
+                        enabled: true,
+                        hint: None,
+                        action: Some(Message::ExportRecentAs(index, *format)),
+                        danger: false,
+                    })
+                    .collect();
+                let sub_height = entries.len() as f32 * ROW_MENU_ROW_HEIGHT + 16.0;
+                let sub_x = (x + ROW_MENU_WIDTH + 4.0)
+                    .clamp(0.0, (self.window_size.width - ROW_MENU_WIDTH - 8.0).max(0.0));
+                let sub_y = (y + 8.0 + row as f32 * ROW_MENU_ROW_HEIGHT)
+                    .clamp(0.0, (self.window_size.height - sub_height - 8.0).max(0.0));
+                Some(
+                    container(row_menu_card(entries, *scheme))
+                        .width(Length::Fill)
+                        .height(Length::Fill)
+                        .align_x(iced::Alignment::Start)
+                        .align_y(iced::Alignment::Start)
+                        .padding(iced::Padding {
+                            top: sub_y,
+                            right: 0.0,
+                            bottom: 0.0,
+                            left: sub_x,
+                        }),
+                )
+            }
+            _ => None,
+        };
         let card = container(row_menu_card(rows, *scheme))
             .width(Length::Fill)
             .height(Length::Fill)
@@ -15251,7 +15742,10 @@ impl App {
                 bottom: 0.0,
                 left: x,
             });
-        stack![catcher, card].into()
+        match submenu {
+            Some(submenu) => stack![catcher, card, submenu].into(),
+            None => stack![catcher, card].into(),
+        }
     }
 
     pub fn view(&self) -> Element<'_, Message> {
@@ -16095,6 +16589,33 @@ fn attach_confidences(mut lines: Vec<DocLine>, confidences: &[Option<f32>]) -> V
         }
     }
     lines
+}
+
+/// Speaker turns derived from rendered transcript lines, for the JSON export.
+/// Each line starts a turn that ends where the next one does; a document with
+/// no timestamps yields no turns at all rather than invented ones.
+fn turns_from_lines(lines: &[DocLine], duration: Option<f64>) -> Vec<backend::Turn> {
+    let mut turns = Vec::new();
+    for (index, line) in lines.iter().enumerate() {
+        let Some(start) = line.start else {
+            continue;
+        };
+        if line.speaker.is_empty() {
+            continue;
+        }
+        let end = lines
+            .iter()
+            .skip(index + 1)
+            .find_map(|next| next.start)
+            .or(duration.map(|seconds| seconds as f32))
+            .unwrap_or(start + 2.0);
+        turns.push(backend::Turn {
+            start,
+            end: end.max(start + 0.2),
+            speaker: line.speaker.clone(),
+        });
+    }
+    turns
 }
 
 /// Order speaker names the way the rename dialog shows them: by the number in
@@ -17727,12 +18248,11 @@ fn closes_row_menu(message: &Message) -> bool {
             | Message::RevealQueueAudio(_)
             | Message::ToggleFavorite(_)
             | Message::CopyItemPath(_)
-            | Message::CopyTranscriptPath(_)
             | Message::CopyRecentText(_)
             | Message::CopyQueuePath(_)
             | Message::RetranscribeRecent(_)
             | Message::EnqueueRecent(_)
-            | Message::ExportRecent(_)
+            | Message::ExportRecentAs(_, _)
             | Message::OpenQueueRow(_)
             | Message::RemoveItem(_)
             | Message::RetryItem(_)
@@ -17742,6 +18262,17 @@ fn closes_row_menu(message: &Message) -> bool {
             | Message::AddFolder
             | Message::ClearQueue
     )
+}
+
+/// Stable identity for the Favorites order: the audio path, or the transcript
+/// path for a history entry whose audio is gone. The same key survives a
+/// re-transcription, which replaces the files but keeps the audio name.
+fn favorite_key(entry: &RecentEntry) -> Option<String> {
+    entry
+        .audio
+        .as_deref()
+        .or(entry.transcript.as_deref())
+        .map(|path| path.display().to_string())
 }
 
 fn merge_recent_entry(recent: &mut Vec<RecentEntry>, mut entry: RecentEntry) -> usize {
@@ -17881,6 +18412,28 @@ fn toast_ttl(message: &str) -> Duration {
         ToastTone::Danger => Duration::from_secs(6),
         ToastTone::Info => Duration::from_secs(3),
         ToastTone::Success => Duration::from_millis(2400),
+    }
+}
+
+/// An add's final summary: "N items restored, M items queued". A zero clause is
+/// dropped entirely rather than printed as "0 items", and an empty summary is
+/// returned when nothing landed at all.
+fn add_summary(restored: usize, queued: usize) -> String {
+    let clause = |count: usize, verb: &str| {
+        format!(
+            "{count} item{} {verb}",
+            if count == 1 { "" } else { "s" }
+        )
+    };
+    match (restored, queued) {
+        (0, 0) => String::new(),
+        (0, queued) => clause(queued, "queued"),
+        (restored, 0) => clause(restored, "restored"),
+        (restored, queued) => format!(
+            "{}, {}",
+            clause(restored, "restored"),
+            clause(queued, "queued")
+        ),
     }
 }
 
@@ -19539,6 +20092,7 @@ fn segment_button(
     scheme: Scheme,
     selected: bool,
     muted: bool,
+    cue: bool,
 ) -> impl Fn(&iced::Theme, button::Status) -> button::Style {
     move |theme, status| {
         let text = button_label(theme);
@@ -19594,19 +20148,33 @@ fn segment_button(
                 button::Status::Disabled => (0.0, Color { a: 0.45, ..scheme.text }),
                 button::Status::Active => (0.0, idle),
             };
-            (
-                Color { a: fill, ..text }.into(),
-                color,
-                Color::TRANSPARENT,
-                Shadow::default(),
-            )
+            // A cue is a quiet wash of the accent plus a rim: the same blue the
+            // selected half uses, at an alpha that reads as "look here" without
+            // competing with the actual selection.
+            let background = if cue {
+                Color {
+                    a: 0.16,
+                    ..scheme.blue
+                }
+            } else {
+                Color { a: fill, ..text }
+            };
+            let border = if cue {
+                Color {
+                    a: 0.70,
+                    ..scheme.blue
+                }
+            } else {
+                Color::TRANSPARENT
+            };
+            (background.into(), color, border, Shadow::default())
         };
         button::Style {
             background: Some(background),
             text_color: color,
             border: iced::border::Border {
                 color: border,
-                width: if selected { 1.0 } else { 0.0 },
+                width: if selected || cue { 1.0 } else { 0.0 },
                 radius: PILL.into(),
             },
             shadow,
@@ -20287,7 +20855,7 @@ mod tests {
         app.batch_paths = vec![audio.clone()];
         app.save_queue();
 
-        let (loaded, batch, recent) = App::load_queue_and_batch();
+        let (loaded, batch, recent, _) = App::load_queue_and_batch();
         assert!(recent.is_empty());
         assert_eq!(loaded.len(), 1);
         assert_eq!(batch, vec![audio.clone()]);
@@ -20353,7 +20921,7 @@ mod tests {
         )
         .unwrap();
 
-        let (_, _, recent) = App::load_queue_and_batch();
+        let (_, _, recent, _) = App::load_queue_and_batch();
         assert_eq!(recent.len(), 1);
         assert_eq!(recent[0].state, ItemState::Ready);
         assert!(!recent[0].favorite);
@@ -20391,7 +20959,7 @@ mod tests {
             Some(Path::new("/media/new.mp3"))
         );
 
-        let (_, _, recent) = App::load_queue_and_batch();
+        let (_, _, recent, _) = App::load_queue_and_batch();
         assert_eq!(recent.len(), 2);
         assert_eq!(recent[0].audio.as_deref(), Some(Path::new("/media/new.mp3")));
         assert!(!recent[0].favorite);
@@ -20399,7 +20967,7 @@ mod tests {
 
         app.toggle_favorite(1);
         assert!(!app.recent[1].favorite);
-        let (_, _, recent) = App::load_queue_and_batch();
+        let (_, _, recent, _) = App::load_queue_and_batch();
         assert!(!recent[1].favorite);
     }
 
@@ -20417,7 +20985,7 @@ mod tests {
         });
         app.save_queue();
 
-        let (_, _, recent) = App::load_queue_and_batch();
+        let (_, _, recent, _) = App::load_queue_and_batch();
         assert_eq!(recent.len(), 1);
         assert!(recent[0].recording);
         assert_eq!(recent[0].state, ItemState::Failed);
@@ -20437,7 +21005,7 @@ mod tests {
         )
         .unwrap();
 
-        let (_, _, recent) = App::load_queue_and_batch();
+        let (_, _, recent, _) = App::load_queue_and_batch();
         assert_eq!(recent.len(), 1);
         assert!(recent[0].recording);
         assert_eq!(recent[0].state, ItemState::Failed);
@@ -20504,7 +21072,7 @@ mod tests {
         assert!(app.recent.is_empty());
         assert_eq!(app.item_for_audio(Path::new("/media/rec.wav")), None);
 
-        let (_, _, recent) = App::load_queue_and_batch();
+        let (_, _, recent, _) = App::load_queue_and_batch();
         assert!(recent.is_empty());
     }
 
@@ -21169,7 +21737,7 @@ mod tests {
         }];
         app.save_queue();
 
-        let (_, _, loaded) = App::load_queue_and_batch();
+        let (_, _, loaded, _) = App::load_queue_and_batch();
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].audio.as_deref(), Some(audio.as_path()));
         assert_eq!(loaded[0].transcript.as_deref(), Some(transcript.as_path()));
@@ -21183,7 +21751,7 @@ mod tests {
             r#"{"recent":[{"transcript":"old.txt"}]}"#,
         )
         .unwrap();
-        let (_, _, loaded) = App::load_queue_and_batch();
+        let (_, _, loaded, _) = App::load_queue_and_batch();
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].audio, None);
         assert_eq!(loaded[0].transcript.as_deref(), Some(Path::new("old.txt")));
@@ -21214,6 +21782,7 @@ mod tests {
             }],
             last_batch: vec![audio.display().to_string()],
             recent: Vec::new(),
+            favorite_order: Vec::new(),
         };
         std::fs::write(
             config_dir.join("queue.json"),
@@ -23180,6 +23749,73 @@ mod tests {
     }
 
     #[test]
+    fn a_speaker_added_in_the_editor_is_reachable_from_another_line() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("strip-new-speaker-other-line");
+        let original =
+            "[00:00] SPEAKER 1: one\n[00:05] SPEAKER 2: two\n[00:09] SPEAKER 1: three\n";
+        let (mut app, transcript, media) = line_edit_fixture("strip-new-speaker-other-line", original);
+
+        // Give the middle line a voice diarization missed and save it.
+        open_line_edit(&mut app, 1);
+        let _ = app.update(Message::AddLineSpeaker);
+        assert_eq!(current_row_mut(&mut app).speaker, "SPEAKER 3");
+        let _ = app.update(Message::DoneLineEdit);
+        assert_eq!(app.shown_lines()[1].speaker, "SPEAKER 3");
+        assert!(std::fs::read_to_string(&transcript)
+            .unwrap()
+            .contains("[00:05] SPEAKER 3: two"));
+
+        // Cycling a *different* line walks the same order the chip uses, so the
+        // new name has to be in it: 1 -> 2 -> 3.
+        assert_eq!(
+            app.speaker_order(),
+            vec![
+                "SPEAKER 1".to_string(),
+                "SPEAKER 2".to_string(),
+                "SPEAKER 3".to_string()
+            ]
+        );
+        let _ = app.update(Message::FlipLineSpeaker(0));
+        assert_eq!(app.shown_lines()[0].speaker, "SPEAKER 2");
+        let _ = app.update(Message::FlipLineSpeaker(0));
+        assert_eq!(
+            app.shown_lines()[0].speaker, "SPEAKER 3",
+            "the new speaker must be reachable from another line"
+        );
+
+        let _ = std::fs::remove_dir_all(&media);
+    }
+
+    #[test]
+    fn a_speaker_cycled_out_of_the_editor_stays_reachable() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("strip-new-speaker-registry");
+        let original = "[00:00] SPEAKER 1: one\n[00:05] SPEAKER 2: two\n";
+        let (mut app, _transcript, media) = line_edit_fixture("strip-new-speaker-registry", original);
+
+        // Add a third voice, then cycle the chip back to the first before
+        // saving. Nothing in the document ever uses SPEAKER 3, so only the
+        // session registry can keep it in the order the swap action walks.
+        open_line_edit(&mut app, 1);
+        let _ = app.update(Message::AddLineSpeaker);
+        assert_eq!(current_row_mut(&mut app).speaker, "SPEAKER 3");
+        let _ = app.update(Message::CycleLineSpeaker);
+        assert_eq!(current_row_mut(&mut app).speaker, "SPEAKER 1");
+        let _ = app.update(Message::DoneLineEdit);
+        assert!(
+            app.speaker_order().iter().any(|name| name == "SPEAKER 3"),
+            "the created name must stay reachable for the session"
+        );
+
+        // Another line can pick it up from the cycle.
+        let _ = app.update(Message::FlipLineSpeaker(0));
+        assert_eq!(app.shown_lines()[0].speaker, "SPEAKER 3");
+
+        let _ = std::fs::remove_dir_all(&media);
+    }
+
+    #[test]
     fn a_dialog_keeps_the_pointer_off_the_queue() {
         let _guard = env_lock();
         let _config = ConfigEnv::new("queue-behind-dialog");
@@ -23605,7 +24241,7 @@ mod tests {
         });
         app.save_queue();
 
-        let (loaded, _, _) = App::load_queue_and_batch();
+        let (loaded, _, _, _) = App::load_queue_and_batch();
         assert!(matches!(loaded[0].status, ItemStatus::Interrupted));
     }
 
@@ -24991,12 +25627,13 @@ mod tests {
             }],
             last_batch: vec![audio.display().to_string()],
             recent: Vec::new(),
+            favorite_order: Vec::new(),
         };
         let path = App::queue_path().unwrap();
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, serde_json::to_string(&state).unwrap()).unwrap();
 
-        let (queue, _, recent) = App::load_queue_and_batch();
+        let (queue, _, recent, _) = App::load_queue_and_batch();
         assert!(queue.is_empty(), "a legacy done row stayed in the queue");
         assert_eq!(recent.len(), 1);
         assert_eq!(recent[0].audio.as_deref(), Some(audio.as_path()));
@@ -25008,7 +25645,7 @@ mod tests {
         // Saving and reloading keeps one entry, not a second copy.
         app.recent = recent;
         app.save_queue();
-        let (queue, _, recent) = App::load_queue_and_batch();
+        let (queue, _, recent, _) = App::load_queue_and_batch();
         assert!(queue.is_empty());
         assert_eq!(recent.len(), 1);
 
@@ -25310,10 +25947,9 @@ mod tests {
             app.recent[existing].transcript.as_deref(),
             Some(old_transcript.as_path())
         );
-        assert_eq!(
-            app.toast.as_ref().map(|(text, _)| text.as_str()),
-            Some("Already in History")
-        );
+        // No per-hit toast: the add's summary is the only acknowledgement, and
+        // it is shown once every lookup has settled.
+        assert!(app.toast.is_none());
 
         let _ = std::fs::remove_dir_all(&media);
     }
@@ -25453,7 +26089,7 @@ mod tests {
         assert!(matches!(app.queue[0].status, ItemStatus::Pending));
 
         // The pending state is persisted.
-        let (loaded, _, _) = App::load_queue_and_batch();
+        let (loaded, _, _, _) = App::load_queue_and_batch();
         assert!(matches!(loaded[0].status, ItemStatus::Pending));
     }
 
@@ -25523,7 +26159,7 @@ mod tests {
         assert_eq!(names(&app), vec!["a.mp3", "b.mp3", "c.mp3"]);
 
         // The order is persisted.
-        let (loaded, _, _) = App::load_queue_and_batch();
+        let (loaded, _, _, _) = App::load_queue_and_batch();
         let loaded_names: Vec<String> = loaded
             .iter()
             .map(|item| {
@@ -26994,8 +27630,8 @@ mod tests {
         assert!(free.paywall_open);
         assert!(!free.recent[0].favorite);
 
-        // Pro toggles it, and the flat list follows the store's newest-first
-        // order.
+        // Pro toggles it. Unsaved favorites keep the store's newest-first order;
+        // a freshly starred item leads so the star has a visible result.
         let mut pro = pro_app();
         assert!(!pro.favorites_locked());
         pro.recent = vec![
@@ -27022,12 +27658,66 @@ mod tests {
         ];
         assert_eq!(pro.favorite_indices(), vec![0, 1]);
 
+        // Starring puts the item at the top of Favorites, not at the bottom.
         let _ = pro.update(Message::ToggleFavorite(2));
         assert!(pro.recent[2].favorite);
-        assert_eq!(pro.favorite_indices(), vec![0, 1, 2]);
+        assert_eq!(pro.favorite_indices(), vec![2, 0, 1]);
         let _ = pro.update(Message::ToggleFavorite(0));
         assert!(!pro.recent[0].favorite);
-        assert_eq!(pro.favorite_indices(), vec![1, 2]);
+        assert_eq!(pro.favorite_indices(), vec![2, 1]);
+    }
+
+    #[test]
+    fn favorites_reorder_and_keep_their_order_across_restarts() {
+        let _guard = env_lock();
+        let config = ConfigEnv::new("favorite-order");
+        let dir = config.dir.clone();
+
+        let mut app = pro_app();
+        for (name, favorite, finished_at) in [
+            ("one", true, 30),
+            ("two", true, 20),
+            ("three", true, 10),
+        ] {
+            app.recent.push(RecentEntry {
+                audio: Some(dir.join(format!("{name}.mp3"))),
+                transcript: Some(dir.join(format!("{name}.txt"))),
+                finished_at,
+                favorite,
+                ..Default::default()
+            });
+        }
+        app.refresh_recent_presence();
+        assert_eq!(app.favorite_indices(), vec![0, 1, 2]);
+
+        // Drag the third favorite onto the first through the same messages the
+        // rows send: the Favorites order changes, `recent`'s newest-first order
+        // does not, so History is untouched.
+        app.pane_tab = PaneTab::Favorites;
+        let _ = app.update(Message::FavoriteDragStart(2));
+        assert_eq!(app.favorite_drag, Some(2));
+        let _ = app.update(Message::FavoriteDrop(0));
+        assert!(app.favorite_drag.is_none());
+        assert_eq!(app.favorite_indices(), vec![2, 0, 1]);
+        assert_eq!(
+            app.recent.iter().map(|entry| entry.finished_at).collect::<Vec<_>>(),
+            vec![30, 20, 10],
+            "reordering Favorites must not reorder History"
+        );
+        app.save_queue();
+
+        // The arrangement survives a reload.
+        let (_, _, recent, order) = App::load_queue_and_batch();
+        assert_eq!(recent.len(), 3);
+        assert_eq!(order.len(), 3);
+        assert_eq!(order[0], dir.join("three.mp3").display().to_string());
+
+        // A favorite saved without a key (an older queue file) still appears,
+        // after the arranged ones.
+        let _ = app.favorite_order.pop();
+        assert_eq!(app.favorite_indices(), vec![2, 0, 1]);
+        app.favorite_order.clear();
+        assert_eq!(app.favorite_indices(), vec![0, 1, 2]);
     }
 
     #[test]
@@ -27124,20 +27814,16 @@ mod tests {
         app.refresh_recent_presence();
         let scheme = app.scheme();
 
-        // History: open, add to queue, retranscribe, reveal, copy, export and
-        // remove.
+        // History: Retranscribe stages the file (no setup dialog), reveal, copy,
+        // export and remove. Open, Add to queue and Copy transcript path are
+        // gone; the row's own press still opens it.
         let rows = app.row_menu_rows(PaneTab::History, Some(0), &scheme);
-        assert!(matches!(
-            menu_entry(&rows, "Open").action,
-            Some(Message::OpenRecent(0))
-        ));
-        assert!(matches!(
-            menu_entry(&rows, "Add to queue").action,
-            Some(Message::EnqueueRecent(0))
-        ));
+        assert!(!rows.iter().any(|row| row.label == "Open"));
+        assert!(!rows.iter().any(|row| row.label == "Add to queue"));
+        assert!(!rows.iter().any(|row| row.label == "Copy transcript path"));
         assert!(matches!(
             menu_entry(&rows, "Retranscribe").action,
-            Some(Message::RetranscribeRecent(0))
+            Some(Message::EnqueueRecent(0))
         ));
         assert!(matches!(
             menu_entry(&rows, "Reveal transcript").action,
@@ -27148,16 +27834,12 @@ mod tests {
             Some(Message::RevealRecentAudio(0))
         ));
         assert!(matches!(
-            menu_entry(&rows, "Copy transcript path").action,
-            Some(Message::CopyTranscriptPath(0))
-        ));
-        assert!(matches!(
             menu_entry(&rows, "Copy text").action,
             Some(Message::CopyRecentText(0))
         ));
         assert!(matches!(
             menu_entry(&rows, "Export as\u{2026}").action,
-            Some(Message::ExportRecent(0))
+            Some(Message::OpenExportSubmenu)
         ));
         assert!(matches!(
             menu_entry(&rows, "Remove item").action,
@@ -27226,6 +27908,11 @@ mod tests {
             "adding to the queue must not switch tabs"
         );
         assert!(!app.run_setup_open);
+        // Staying on History, the Queue tab and the new row say where the file
+        // went; the cue is what makes the change visible without switching.
+        assert!(app.cue_active(PaneTab::Queue));
+        assert!(app.row_cue_active(PaneTab::Queue, 0));
+        assert!(!app.cue_active(PaneTab::History));
 
         // Adding the same audio again reuses the row instead of duplicating it.
         let _ = app.update(Message::EnqueueRecent(0));
@@ -27238,6 +27925,106 @@ mod tests {
         assert_eq!(app.queue.len(), 1);
 
         let _ = std::fs::remove_dir_all(&media);
+    }
+
+    #[test]
+    fn exporting_a_recent_row_writes_the_chosen_format_beside_it() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("row-export");
+        let media = temp_dir("row-export-media");
+        let audio = media.join("talk.mp3");
+        std::fs::write(&audio, b"audio").unwrap();
+        let transcript = media.join("talk.txt");
+        std::fs::write(&transcript, "[00:00] SPEAKER 1: hi\n[00:05] SPEAKER 2: bye\n").unwrap();
+
+        let mut app = pro_app();
+        push_recent(&mut app, Some(audio), transcript.clone(), Some(10.0), vec![0.2; 16]);
+
+        // The menu's format entry exports directly; there is no dialog here.
+        let _ = app.update(Message::ExportRecentAs(0, ExportFormat::Srt));
+        let srt = media.join("talk.srt");
+        let written = std::fs::read_to_string(&srt).expect("the SRT was not written");
+        assert!(written.contains("00:00:00,000 -->"), "{written}");
+        assert!(written.contains("SPEAKER 1: hi"), "{written}");
+
+        // A plain-text export beside the transcript gets its own name instead
+        // of overwriting the transcript it came from.
+        let _ = app.update(Message::ExportRecentAs(0, ExportFormat::Txt));
+        assert!(media.join("talk-export.txt").is_file());
+        assert_eq!(
+            std::fs::read_to_string(&transcript).unwrap(),
+            "[00:00] SPEAKER 1: hi\n[00:05] SPEAKER 2: bye\n"
+        );
+
+        let _ = std::fs::remove_dir_all(&media);
+    }
+
+    #[test]
+    fn add_summary_drops_a_zero_clause() {
+        assert_eq!(add_summary(1, 3), "1 item restored, 3 items queued");
+        assert_eq!(add_summary(2, 0), "2 items restored");
+        assert_eq!(add_summary(0, 4), "4 items queued");
+        assert_eq!(add_summary(1, 1), "1 item restored, 1 item queued");
+        assert_eq!(add_summary(0, 0), "");
+    }
+
+    #[test]
+    fn the_add_toast_waits_for_every_transcript_lookup() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("add-report");
+
+        let mut app = pro_app();
+        app.begin_add_report(2);
+        // Nothing is shown before the scan answers: the count is still a guess.
+        assert!(app.toast.is_none());
+        app.add_report_found(1);
+        assert!(app.toast.is_none(), "a lookup is still outstanding");
+        app.add_report_settled(true);
+        assert_eq!(
+            app.toast.as_ref().map(|(text, _)| text.as_str()),
+            Some("1 item restored, 1 item queued")
+        );
+
+        // No transcript anywhere: one clause, shown as soon as the scan says so.
+        app.begin_add_report(3);
+        app.add_report_found(0);
+        assert_eq!(
+            app.toast.as_ref().map(|(text, _)| text.as_str()),
+            Some("3 items queued")
+        );
+
+        // A lookup that finds nothing readable leaves the file queued.
+        app.begin_add_report(1);
+        app.add_report_found(1);
+        app.add_report_settled(false);
+        assert_eq!(
+            app.toast.as_ref().map(|(text, _)| text.as_str()),
+            Some("1 item queued")
+        );
+    }
+
+    #[test]
+    fn a_pane_cue_clears_on_its_own_tick() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("pane-cue");
+
+        let mut app = pro_app();
+        app.cue_pane(PaneTab::Queue, Some(0));
+        assert!(app.cue_active(PaneTab::Queue));
+        assert!(app.row_cue_active(PaneTab::Queue, 0));
+        assert!(app.needs_ticks(), "the cue keeps the tick subscribed");
+
+        // Age the cue past its window and let one tick arrive: nothing else
+        // has to happen for it to clear.
+        app.pane_cue = app.pane_cue.map(|cue| PaneCue {
+            at: Instant::now().checked_sub(PANE_CUE).unwrap(),
+            ..cue
+        });
+        app.toast = None;
+        let _ = app.update(Message::Tick);
+        assert!(app.pane_cue.is_none());
+        assert!(!app.cue_active(PaneTab::Queue));
+        assert!(!app.needs_ticks());
     }
 
     #[test]
