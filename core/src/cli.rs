@@ -24,6 +24,10 @@ pub fn run(args: &[String]) -> i32 {
     let mut progress_json = false;
     let mut cache = true;
     let mut mode = PipelineMode::Diarized;
+    // Label an ASR-only run's lone turn SPEAKER 1. The GUI sets this when the
+    // user picks a single speaker, so the lines still carry a label without
+    // loading the diarizer.
+    let mut single_speaker = false;
     // Diagnostic: run the diarizer only and print the turn map, so a long
     // file can be analysed in minutes instead of a full transcript run.
     let mut diarize_only = false;
@@ -58,6 +62,7 @@ pub fn run(args: &[String]) -> i32 {
             "--no-timestamps" => timestamps = false,
             "--progress-json" => progress_json = true,
             "--asr-only" => mode = PipelineMode::AsrOnly,
+            "--single-speaker" => single_speaker = true,
             "--diarize-only" => diarize_only = true,
             "--no-cache" => cache = false,
             "--normalize" => normalize = true,
@@ -95,7 +100,7 @@ pub fn run(args: &[String]) -> i32 {
         return 2;
     }
     if inputs.is_empty() {
-        eprintln!("usage: hippo-transcribe --cli <audio>... [--preset speed|balanced|accuracy] [--language <code>] [--asr-only] [--progress-json] [--normalize]");
+        eprintln!("usage: hippo-transcribe --cli <audio>... [--preset speed|balanced|accuracy] [--language <code>] [--asr-only] [--single-speaker] [--progress-json] [--normalize]");
         return 2;
     }
 
@@ -139,7 +144,10 @@ pub fn run(args: &[String]) -> i32 {
     }
 
     // A single speaker never needs diarization: same fast path as the GUI.
-    if mode == PipelineMode::Diarized {
+    // `--single-speaker` also asks for a label on that fast path.
+    if single_speaker {
+        mode = PipelineMode::AsrOnly;
+    } else if mode == PipelineMode::Diarized {
         mode = pipeline::route(num_speakers);
     }
 
@@ -152,6 +160,7 @@ pub fn run(args: &[String]) -> i32 {
         cache,
         language,
         mode,
+        single_speaker,
         normalize,
         cancel: None,
     };

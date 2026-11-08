@@ -302,6 +302,8 @@ pub fn spawn(
     cache: bool,
     // False runs ASR only: no diarization, no speaker labels.
     diarized: bool,
+    // Label the ASR-only run's single turn `SPEAKER 1`.
+    single_speaker: bool,
     // Lift quiet recordings before ASR and diarization.
     normalize: bool,
     events: Arc<Mutex<VecDeque<Event>>>,
@@ -344,6 +346,9 @@ pub fn spawn(
         }
         if !diarized {
             command.arg("--asr-only");
+        }
+        if single_speaker {
+            command.arg("--single-speaker");
         }
         command.arg(if normalize {
             "--normalize"

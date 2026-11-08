@@ -63,6 +63,21 @@ pub fn route(num_speakers: Option<i32>) -> PipelineMode {
     }
 }
 
+/// The one turn an ASR-only run transcribes. A caller that explicitly knows
+/// the recording is one voice can ask for a label on it; the default stays
+/// unlabelled so an ordinary ASR-only run keeps its text-only output.
+fn asr_only_turns(duration: f32, single_speaker: bool) -> Vec<Turn> {
+    vec![Turn {
+        start: 0.0,
+        end: duration,
+        speaker: if single_speaker {
+            "SPEAKER 1".to_string()
+        } else {
+            String::new()
+        },
+    }]
+}
+
 #[derive(Debug, Clone)]
 pub struct PipelineOptions {
     pub inputs: Vec<PathBuf>,
@@ -74,6 +89,9 @@ pub struct PipelineOptions {
     /// BCP-47-ish Whisper language code, or `None` for auto-detection.
     pub language: Option<String>,
     pub mode: PipelineMode,
+    /// Label the single ASR-only turn as `SPEAKER 1` instead of leaving it
+    /// unlabelled. Only meaningful when `mode` does not diarize.
+    pub single_speaker: bool,
     /// Lift quiet recordings to a workable level before ASR and diarization.
     pub normalize: bool,
     pub cancel: Option<Arc<AtomicBool>>,
@@ -1233,11 +1251,9 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
 
         let job = if !diarized {
             // ASR-only mode: no speaker turns, no sherpa models, no cache.
-            DiarizeJob::Ready(vec![Turn {
-                start: 0.0,
-                end: duration as f32,
-                speaker: String::new(),
-            }])
+            // An explicit single-speaker request labels the lone turn even
+            // though diarization never ran.
+            DiarizeJob::Ready(asr_only_turns(duration as f32, opts.single_speaker))
         } else if opts.num_speakers == Some(1) {
             // One speaker: skip diarization entirely and transcribe the file as
             // a single turn.
@@ -1932,6 +1948,53 @@ mod tests {
         assert_eq!(route(None), PipelineMode::Diarized);
         assert!(!PipelineMode::AsrOnly.diarizes());
         assert!(PipelineMode::Diarized.diarizes());
+    }
+
+    #[test]
+    fn asr_only_with_single_speaker_labels_lines() {
+        let segment = Segment {
+            start: 0.0,
+            end: 2.0,
+            text: "hello".to_string(),
+            confidence: 0.0,
+            tokens: Vec::new(),
+        };
+        let clip = |turns: &[Turn]| Clip {
+            turns: turns
+                .iter()
+                .enumerate()
+                .map(|(index, turn)| (index, turn.start, turn.end))
+                .collect(),
+            start: 0.0,
+            from: 0,
+            to: 32_000,
+        };
+        let vocabulary = crate::vocabulary::Vocabulary::default();
+
+        let labelled = asr_only_turns(2.0, true);
+        let mut stats = SplitStats::default();
+        let lines = segment_lines(
+            &clip(&labelled),
+            &segment,
+            &labelled,
+            &mut stats,
+            &vocabulary,
+        );
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].speaker, "SPEAKER 1");
+
+        // Without the option, the ASR-only path still has no label.
+        let unlabelled = asr_only_turns(2.0, false);
+        let mut stats = SplitStats::default();
+        let lines = segment_lines(
+            &clip(&unlabelled),
+            &segment,
+            &unlabelled,
+            &mut stats,
+            &vocabulary,
+        );
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].speaker, "");
     }
 
     #[test]

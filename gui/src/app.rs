@@ -344,9 +344,20 @@ struct QueueItem {
     transcript: Option<PathBuf>,
 }
 
-/// A finished transcript, kept outside the queue. The queue only holds work
-/// that is still in flight; this is the durable history the UI browses.
-#[derive(Debug, Clone)]
+/// Whether a history/recording item has usable output. A recording that is
+/// still being written is not persisted with this enum; a restart turns it
+/// into a failed item with a retry message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+enum ItemState {
+    #[default]
+    Ready,
+    Failed,
+}
+
+/// A finished transcript or recording, kept outside the queue. The queue only
+/// holds work that is still in flight; this is the durable history the UI
+/// browses, and the File panel's single item store.
+#[derive(Debug, Clone, Default)]
 struct RecentEntry {
     audio: Option<PathBuf>,
     transcript: Option<PathBuf>,
@@ -354,6 +365,13 @@ struct RecentEntry {
     finished_at: u64,
     duration: Option<f64>,
     speakers: Option<u8>,
+    /// Pinned by the user. A view only; it does not affect the sort.
+    favorite: bool,
+    /// This item came from the recorder rather than a file.
+    recording: bool,
+    state: ItemState,
+    /// Why a failed item failed, kept for the retry affordance.
+    message: Option<String>,
 }
 
 /// Which list the left pane is showing. In-flight work and finished
@@ -441,6 +459,14 @@ struct RecentRecord {
     duration: Option<f64>,
     #[serde(default)]
     speakers: Option<u8>,
+    #[serde(default)]
+    favorite: bool,
+    #[serde(default)]
+    recording: bool,
+    #[serde(default)]
+    state: ItemState,
+    #[serde(default)]
+    message: Option<String>,
 }
 
 /// A completed item's content while it is being viewed.
@@ -1882,14 +1908,33 @@ impl App {
         let batch_paths = state.last_batch.into_iter().map(PathBuf::from).collect();
         let mut recent = Vec::new();
         for record in state.recent {
+            let transcript = record.transcript.map(PathBuf::from);
+            // A recording that was still in progress when the app closed has
+            // no output to show. Keep the row, but let it offer a retry.
+            let (state, message) = if record.recording
+                && transcript.is_none()
+                && record.state == ItemState::Ready
+            {
+                (
+                    ItemState::Failed,
+                    Some("Recording was interrupted. Retry.".to_string()),
+                )
+            } else {
+                (record.state, record.message)
+            };
             merge_recent_entry(
                 &mut recent,
                 RecentEntry {
                     audio: record.audio.map(PathBuf::from),
-                    transcript: record.transcript.map(PathBuf::from),
+                    transcript,
                     finished_at: record.finished_at,
                     duration: record.duration,
                     speakers: record.speakers,
+                    favorite: record.favorite,
+                    recording: record.recording,
+                    state,
+                    message,
+                ..Default::default()
                 },
             );
         }
@@ -1923,6 +1968,7 @@ impl App {
                         finished_at,
                         duration: record.duration,
                         speakers,
+                        ..Default::default()
                     },
                 );
                 continue;
@@ -2007,6 +2053,10 @@ impl App {
                     finished_at: entry.finished_at,
                     duration: entry.duration,
                     speakers: entry.speakers,
+                    favorite: entry.favorite,
+                    recording: entry.recording,
+                    state: entry.state,
+                    message: entry.message.clone(),
                 })
                 .collect(),
         };
@@ -2051,11 +2101,70 @@ impl App {
         })
     }
 
-    /// Index of the recent entry backed by this audio file, if any.
-    fn recent_for_audio(&self, path: &Path) -> Option<usize> {
+    /// Index of the item backed by this audio file, if any. History and
+    /// recordings share one store, so this is the File panel's lookup.
+    fn item_for_audio(&self, path: &Path) -> Option<usize> {
         self.recent
             .iter()
             .position(|entry| entry.audio.as_deref() == Some(path))
+    }
+
+    /// Flip an item's favorite flag and persist it. Favorites are a view, so
+    /// the list order does not change.
+    #[allow(dead_code)] // The File panel calls this in the next UI phase.
+    fn toggle_favorite(&mut self, index: usize) {
+        let Some(entry) = self.recent.get_mut(index) else {
+            return;
+        };
+        entry.favorite = !entry.favorite;
+        self.save_queue();
+    }
+
+    /// Record why an item failed. A failed recording has no transcript to
+    /// show, but keeps its message for the retry affordance.
+    #[allow(dead_code)] // The recording session calls this in R1b.
+    fn mark_item_failed(&mut self, index: usize, message: String) {
+        let Some(entry) = self.recent.get_mut(index) else {
+            return;
+        };
+        entry.state = ItemState::Failed;
+        entry.message = Some(message);
+        entry.transcript = None;
+        self.save_queue();
+    }
+
+    /// Finish an item at `index`, or append one when the index has no entry
+    /// yet. Clears any previous failure so the row shows its output.
+    #[allow(dead_code)] // The recording session calls this in R1b.
+    fn mark_item_ready(
+        &mut self,
+        index: usize,
+        transcript: PathBuf,
+        duration: Option<f64>,
+        speakers: Option<u8>,
+    ) {
+        match self.recent.get_mut(index) {
+            Some(entry) => {
+                entry.transcript = Some(transcript);
+                entry.duration = duration.or(entry.duration);
+                entry.speakers = speakers.or(entry.speakers);
+                entry.finished_at = unix_secs();
+                entry.state = ItemState::Ready;
+                entry.message = None;
+            }
+            None => {
+                self.recent.push(RecentEntry {
+                    transcript: Some(transcript),
+                    finished_at: unix_secs(),
+                    duration,
+                    speakers,
+                    state: ItemState::Ready,
+                    ..Default::default()
+                });
+            }
+        }
+        self.refresh_recent_presence();
+        self.save_queue();
     }
 
     /// Drop a recent entry and persist the shortened history. If the pane is
@@ -4818,7 +4927,7 @@ impl App {
                 });
                 // Already history: keep the original date and entry, and just
                 // drop the duplicate queue row.
-                let already = self.recent_for_audio(&adopted.audio);
+                let already = self.item_for_audio(&adopted.audio);
                 if let Some(index) = pending_row {
                     self.remove_queue_row(index);
                 }
@@ -4837,6 +4946,7 @@ impl App {
                     finished_at,
                     duration: adopted.duration,
                     speakers: None,
+                ..Default::default()
                 });
                 self.save_queue();
                 // A single file is the case where the user is waiting to see
@@ -4872,7 +4982,7 @@ impl App {
                 // An adopted transcript left the queue before its probe landed;
                 // its history row still needs the measured duration.
                 if let Some(seconds) = seconds {
-                    if let Some(index) = self.recent_for_audio(&path) {
+                    if let Some(index) = self.item_for_audio(&path) {
                         self.recent[index].duration = Some(seconds);
                     }
                 }
@@ -6463,11 +6573,28 @@ impl App {
             use_gpu,
             true, // diarization cache is always on
             self.pipelines_diarize(),
+            self.num_speakers == Some(1),
             self.normalize,
             self.events.clone(),
             self.pid.clone(),
             self.cancelled.clone(),
         );
+    }
+
+    /// Rows that still need work: pending, running and interrupted. Failed
+    /// rows are excluded so the File panel's count matches what a retry would
+    /// actually process.
+    #[allow(dead_code)] // The File panel shows this in the next UI phase.
+    fn queue_work_left(&self) -> usize {
+        self.queue
+            .iter()
+            .filter(|item| {
+                matches!(
+                    item.status,
+                    ItemStatus::Pending | ItemStatus::Running | ItemStatus::Interrupted
+                )
+            })
+            .count()
     }
 
     /// Match a backend-reported audio path to a queue item.
@@ -7430,7 +7557,7 @@ impl App {
                         // Capture what the summary and progress bar need before
                         // the row leaves the queue.
                         self.batch_done += measured.unwrap_or(1.0) as f32;
-                        self.batch_summary.push((label, stats));
+                        self.batch_summary.push((label.clone(), stats));
                         // The row never reads as Done: it goes straight into
                         // the history. The live buffer already holds the text.
                         self.remove_queue_row(index);
@@ -7440,7 +7567,9 @@ impl App {
                             finished_at: unix_secs(),
                             duration: measured,
                             speakers,
+                            ..Default::default()
                         });
+                        self.toast = Some((format!("Finished {label}"), Instant::now()));
                     }
                     self.current_index = None;
                     self.save_queue();
@@ -15227,7 +15356,7 @@ fn month_short(month: time::Month) -> &'static str {
 /// Insert or replace a history entry, newest first. Identity is the audio path
 /// when there is one, otherwise the transcript path, so re-running the same
 /// source replaces its entry instead of adding a second row. Returns its index.
-fn merge_recent_entry(recent: &mut Vec<RecentEntry>, entry: RecentEntry) -> usize {
+fn merge_recent_entry(recent: &mut Vec<RecentEntry>, mut entry: RecentEntry) -> usize {
     let existing = entry
         .audio
         .as_deref()
@@ -15249,6 +15378,10 @@ fn merge_recent_entry(recent: &mut Vec<RecentEntry>, entry: RecentEntry) -> usiz
         });
     let index = match existing {
         Some(index) => {
+            // A rerun replaces the output but must not clear the user's
+            // favorite, nor forget that the item came from the recorder.
+            entry.favorite |= recent[index].favorite;
+            entry.recording |= recent[index].recording;
             recent[index] = entry;
             index
         }
@@ -17579,6 +17712,7 @@ mod tests {
             finished_at,
             duration,
             speakers: None,
+        ..Default::default()
         })
     }
 
@@ -17651,6 +17785,7 @@ mod tests {
             finished_at: 10,
             duration: Some(1.0),
             speakers: Some(1),
+        ..Default::default()
         });
         app.upsert_recent(RecentEntry {
             audio: Some(audio_b),
@@ -17658,6 +17793,7 @@ mod tests {
             finished_at: 20,
             duration: Some(2.0),
             speakers: None,
+        ..Default::default()
         });
         // The same audio again replaces its entry and moves to the front.
         app.upsert_recent(RecentEntry {
@@ -17666,6 +17802,7 @@ mod tests {
             finished_at: 30,
             duration: Some(3.0),
             speakers: Some(2),
+        ..Default::default()
         });
 
         assert_eq!(app.recent.len(), 2);
@@ -17675,7 +17812,196 @@ mod tests {
             app.recent[0].transcript.as_deref(),
             Some(Path::new("a-again.txt"))
         );
-        assert_eq!(app.recent_for_audio(&audio_a), Some(0));
+        assert_eq!(app.item_for_audio(&audio_a), Some(0));
+    }
+
+    #[test]
+    fn legacy_recent_entries_default_to_ready_and_unfavorited() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("recent-legacy");
+        let path = App::queue_path().expect("queue path");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            r#"{"recent":[{"audio":"/media/talk.mp3","transcript":"/media/talk.txt","finished_at":5}]}"#,
+        )
+        .unwrap();
+
+        let (_, _, recent) = App::load_queue_and_batch();
+        assert_eq!(recent.len(), 1);
+        assert_eq!(recent[0].state, ItemState::Ready);
+        assert!(!recent[0].favorite);
+        assert!(!recent[0].recording);
+        assert_eq!(recent[0].message, None);
+        assert_eq!(recent[0].finished_at, 5);
+    }
+
+    #[test]
+    fn favorite_toggles_and_persists_without_reordering() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("recent-favorite");
+        let mut app = pro_app();
+        app.recent = vec![
+            RecentEntry {
+                audio: Some(PathBuf::from("/media/new.mp3")),
+                transcript: Some(PathBuf::from("/media/new.txt")),
+                finished_at: 20,
+                ..Default::default()
+            },
+            RecentEntry {
+                audio: Some(PathBuf::from("/media/old.mp3")),
+                transcript: Some(PathBuf::from("/media/old.txt")),
+                finished_at: 10,
+                ..Default::default()
+            },
+        ];
+
+        app.toggle_favorite(1);
+        assert!(!app.recent[0].favorite);
+        assert!(app.recent[1].favorite);
+        // Favorites are a view: the newest-first order is unchanged.
+        assert_eq!(
+            app.recent[0].audio.as_deref(),
+            Some(Path::new("/media/new.mp3"))
+        );
+
+        let (_, _, recent) = App::load_queue_and_batch();
+        assert_eq!(recent.len(), 2);
+        assert_eq!(recent[0].audio.as_deref(), Some(Path::new("/media/new.mp3")));
+        assert!(!recent[0].favorite);
+        assert!(recent[1].favorite);
+
+        app.toggle_favorite(1);
+        assert!(!app.recent[1].favorite);
+        let (_, _, recent) = App::load_queue_and_batch();
+        assert!(!recent[1].favorite);
+    }
+
+    #[test]
+    fn failed_recording_round_trips() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("recent-failed-recording");
+        let mut app = pro_app();
+        app.recent.push(RecentEntry {
+            recording: true,
+            state: ItemState::Failed,
+            message: Some("microphone unavailable".to_string()),
+            finished_at: 9,
+            ..Default::default()
+        });
+        app.save_queue();
+
+        let (_, _, recent) = App::load_queue_and_batch();
+        assert_eq!(recent.len(), 1);
+        assert!(recent[0].recording);
+        assert_eq!(recent[0].state, ItemState::Failed);
+        assert_eq!(recent[0].message.as_deref(), Some("microphone unavailable"));
+        assert_eq!(recent[0].transcript, None);
+    }
+
+    #[test]
+    fn interrupted_recording_loads_as_failed_with_a_retry_message() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("recent-interrupted-recording");
+        let path = App::queue_path().expect("queue path");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            r#"{"recent":[{"audio":"/media/rec.wav","finished_at":7,"recording":true}]}"#,
+        )
+        .unwrap();
+
+        let (_, _, recent) = App::load_queue_and_batch();
+        assert_eq!(recent.len(), 1);
+        assert!(recent[0].recording);
+        assert_eq!(recent[0].state, ItemState::Failed);
+        assert!(recent[0]
+            .message
+            .as_deref()
+            .is_some_and(|message| message.contains("Retry")));
+        assert_eq!(recent[0].transcript, None);
+    }
+
+    #[test]
+    fn rerunning_a_recording_keeps_recording_and_favorite() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("recent-rerun-recording");
+        let mut app = pro_app();
+        app.recent.push(RecentEntry {
+            audio: Some(PathBuf::from("/media/rec.wav")),
+            transcript: Some(PathBuf::from("/media/rec-old.txt")),
+            finished_at: 5,
+            recording: true,
+            favorite: true,
+            ..Default::default()
+        });
+
+        let index = app.merge_recent(RecentEntry {
+            audio: Some(PathBuf::from("/media/rec.wav")),
+            transcript: Some(PathBuf::from("/media/rec-new.txt")),
+            finished_at: 10,
+            duration: Some(12.0),
+            speakers: Some(1),
+            ..Default::default()
+        });
+
+        assert_eq!(index, 0);
+        assert_eq!(app.recent.len(), 1);
+        assert!(app.recent[0].recording);
+        assert!(app.recent[0].favorite);
+        assert_eq!(
+            app.recent[0].transcript.as_deref(),
+            Some(Path::new("/media/rec-new.txt"))
+        );
+        assert_eq!(app.recent[0].state, ItemState::Ready);
+        assert_eq!(app.recent[0].message, None);
+    }
+
+    #[test]
+    fn removal_from_either_tab_removes_the_single_item() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("recent-remove-shared");
+        let mut app = pro_app();
+        app.recent.push(RecentEntry {
+            audio: Some(PathBuf::from("/media/rec.wav")),
+            transcript: Some(PathBuf::from("/media/rec.txt")),
+            finished_at: 5,
+            recording: true,
+            favorite: true,
+            ..Default::default()
+        });
+
+        // The Queue and Transcripts tabs share this store, so the same
+        // removal message clears the item wherever it was opened from.
+        app.pane_tab = PaneTab::Queue;
+        let _ = app.update(Message::RemoveRecent(0));
+        assert!(app.recent.is_empty());
+        assert_eq!(app.item_for_audio(Path::new("/media/rec.wav")), None);
+
+        let (_, _, recent) = App::load_queue_and_batch();
+        assert!(recent.is_empty());
+    }
+
+    #[test]
+    fn queue_work_left_counts_only_work_left() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("queue-work-left");
+        let mut app = pro_app();
+        let item = |status| QueueItem {
+            path: PathBuf::from("talk.mp3"),
+            audio: Some(PathBuf::from("talk.mp3")),
+            status,
+            duration: None,
+            transcript: None,
+        };
+        app.queue = vec![
+            item(ItemStatus::Pending),
+            item(ItemStatus::Running),
+            item(ItemStatus::Interrupted),
+            item(ItemStatus::Failed("no".to_string())),
+        ];
+
+        assert_eq!(app.queue_work_left(), 3);
     }
 
     #[test]
@@ -17699,6 +18025,7 @@ mod tests {
             finished_at: 5,
             duration: Some(8.0),
             speakers: Some(2),
+        ..Default::default()
         });
 
         let _ = app.update(Message::OpenRecent(0));
@@ -17753,6 +18080,7 @@ mod tests {
                 finished_at: 20,
                 duration: Some(1.0),
                 speakers: Some(1),
+            ..Default::default()
             },
             RecentEntry {
                 audio: Some(audio_b),
@@ -17760,6 +18088,7 @@ mod tests {
                 finished_at: 10,
                 duration: Some(1.0),
                 speakers: Some(1),
+            ..Default::default()
             },
         ];
 
@@ -17808,6 +18137,7 @@ mod tests {
             finished_at: 5,
             duration: Some(1.0),
             speakers: Some(1),
+        ..Default::default()
         });
         app.recent_hover = Some(0);
 
@@ -17837,6 +18167,7 @@ mod tests {
             finished_at: 5,
             duration: Some(8.0),
             speakers: Some(1),
+        ..Default::default()
         });
         app.pane_tab = PaneTab::Queue;
 
@@ -17880,6 +18211,7 @@ mod tests {
             finished_at: 5,
             duration: None,
             speakers: None,
+        ..Default::default()
         });
         let (title, line) = app.queue_empty_copy();
         assert_eq!(title, "Nothing in flight");
@@ -17900,6 +18232,7 @@ mod tests {
             finished_at: 1_600_000_000,
             duration: Some(95.0),
             speakers: Some(2),
+        ..Default::default()
         };
         let meta = recent_meta(&entry, true);
         assert!(
@@ -17937,6 +18270,7 @@ mod tests {
             finished_at: 5,
             duration: None,
             speakers: None,
+        ..Default::default()
         };
         assert_eq!(
             recent_reveal_dir(&entry),
@@ -17969,6 +18303,7 @@ mod tests {
             finished_at: 5,
             duration: None,
             speakers: None,
+        ..Default::default()
         });
         // Neither the row with no paths nor an out-of-range index may reach
         // the file manager.
@@ -17984,6 +18319,7 @@ mod tests {
             finished_at: 5,
             duration: None,
             speakers: None,
+        ..Default::default()
         };
         assert_eq!(recent_tooltip(&entry, true), "/out/talk.txt");
         assert!(recent_tooltip(&entry, false).starts_with("Transcript missing"));
@@ -18014,6 +18350,7 @@ mod tests {
                 finished_at: unix_secs(),
                 duration: Some(8.0),
                 speakers: Some(2),
+            ..Default::default()
             },
             // Transcript gone: danger meta, Remove only.
             RecentEntry {
@@ -18022,6 +18359,7 @@ mod tests {
                 finished_at: 1,
                 duration: None,
                 speakers: None,
+            ..Default::default()
             },
             // No audio left: opens read-only.
             RecentEntry {
@@ -18030,6 +18368,7 @@ mod tests {
                 finished_at: 1,
                 duration: None,
                 speakers: None,
+            ..Default::default()
             },
         ];
         app.pane_tab = PaneTab::Transcripts;
@@ -18059,6 +18398,7 @@ mod tests {
             finished_at: 5,
             duration: Some(1.0),
             speakers: Some(1),
+        ..Default::default()
         });
         // The merge left the cache aligned and probed once.
         assert_eq!(app.recent_presence, vec![true]);
@@ -18084,6 +18424,7 @@ mod tests {
             finished_at: 6,
             duration: None,
             speakers: None,
+        ..Default::default()
         });
         assert!(app.recent_transcript_present(app.recent.len() - 1));
 
@@ -18101,6 +18442,7 @@ mod tests {
             finished_at: 5,
             duration: None,
             speakers: Some(1),
+        ..Default::default()
         });
         app.refresh_recent_presence();
         app.recent_hover = Some(0);
@@ -18131,6 +18473,7 @@ mod tests {
             finished_at: 5,
             duration: Some(8.0),
             speakers: Some(2),
+        ..Default::default()
         });
         let _ = app.update(Message::OpenRecent(0));
         let turns_before = app.selected_view.as_ref().unwrap().turns.len();
@@ -18175,6 +18518,7 @@ mod tests {
             finished_at: 5,
             duration: None,
             speakers: None,
+        ..Default::default()
         });
         let _ = app.update(Message::OpenRecent(0));
 
@@ -18224,6 +18568,7 @@ mod tests {
             finished_at: 5,
             duration: Some(8.0),
             speakers: Some(1),
+        ..Default::default()
         });
         let _ = app.update(Message::OpenRecent(0));
         assert!(app.selected_view.is_some());
@@ -18291,6 +18636,7 @@ mod tests {
             finished_at: 42,
             duration: Some(1.5),
             speakers: Some(2),
+        ..Default::default()
         }];
         app.save_queue();
 
