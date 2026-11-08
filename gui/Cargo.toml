@@ -3,6 +3,7 @@ name = "hippo-transcribe-gui"
 version = "1.0.0"
 edition = "2021"
 description = "Private, offline speaker diarization and transcription."
+license = "LGPL-2.1-only"
 repository = "https://gitlab.com/librewarelive/hippo-transcribe"
 
 [features]

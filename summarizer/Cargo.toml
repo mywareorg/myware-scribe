@@ -3,6 +3,7 @@ name = "hippo-summarize"
 version = "1.0.0"
 edition = "2021"
 description = "Briefing worker: runs the local model that writes a transcript briefing."
+license = "LGPL-2.1-only"
 
 [dependencies]
 hippo-briefing = { path = "../briefing" }

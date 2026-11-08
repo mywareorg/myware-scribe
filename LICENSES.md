@@ -1,7 +1,7 @@
 # Third-party notices
 
-Hippo Transcribe itself is licensed under the GNU General Public License v3.0
-(see `LICENSE`). Source code: https://gitlab.com/librewarelive/hippo-transcribe
+Hippo Transcribe itself is licensed under the GNU Lesser General Public License
+v2.1 (see `LICENSE`). Source code: https://gitlab.com/librewarelive/hippo-transcribe
 It uses the components and model weights below. This file ships inside the
 Store package and is also shown in **Help → Licences**.
 

@@ -125,6 +125,14 @@ if (-not (Test-Path $notices)) {
 }
 Copy-Item $notices $layout
 
+# The application's own licence. LICENSES.md points at it, and the Store
+# package has no README or source checkout to fall back on.
+$appLicense = Join-Path $Stage "LICENSE"
+if (-not (Test-Path $appLicense)) {
+    $appLicense = Join-Path $root "LICENSE"
+}
+Copy-Item $appLicense $layout
+
 # Optionally ship the models inside the package. The core looks for <exe>\models
 # before the per-user folder, so a bundled copy needs no download at all. The
 # Store build leaves them out and downloads them once on first run, which keeps
@@ -221,7 +229,7 @@ $required = @(
     "hippo-transcribe.exe", "hippo-summarize.exe", "AppxManifest.xml", "resources.pri",
     "sherpa-onnx-c-api.dll", "onnxruntime.dll",
     "vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll",
-    "sample-short.mp3", "LICENSES.md", "Assets\StoreLogo.png"
+    "sample-short.mp3", "LICENSES.md", "LICENSE", "Assets\StoreLogo.png"
 )
 foreach ($file in $required) {
     if ($packed -notcontains $file) {

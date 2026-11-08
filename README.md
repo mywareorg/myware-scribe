@@ -394,9 +394,9 @@ See [`PRIVACY.md`](PRIVACY.md) for the full data-flow and retention details.
 
 ## Licenses
 
-Hippo Transcribe itself is free software, licensed under the GNU General Public
-License v3.0. Copyright (C) 2026 Sean Wu. It is provided without warranty;
-see LICENSE for details.
+Hippo Transcribe itself is free software, licensed under the GNU Lesser General
+Public License v2.1 (LGPL-2.1). Copyright (C) 2026 Sean Wu. It is provided
+without warranty; see LICENSE for details.
 
 - `pyannote/segmentation-3.0` weights: MIT (via the sherpa-onnx ONNX conversion).
 - `wespeaker` speaker-embedding weights: CC BY 4.0 (attribution required).

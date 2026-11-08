@@ -18270,6 +18270,7 @@ fn help_link<'a>(label: &'a str, message: Message, scheme: Scheme) -> Element<'a
 
 fn about_page(scheme: Scheme) -> Element<'static, Message> {
     const SOURCE: &str = "https://gitlab.com/librewarelive/hippo-transcribe";
+    const LICENCE: &str = "https://www.gnu.org/licenses/old-licenses/lgpl-2.1.html";
     let mut page = column![text(
         "Private, offline speaker diarization and transcription. The name comes \
          from HIPAA; your recordings stay on this machine."
@@ -18281,7 +18282,12 @@ fn about_page(scheme: Scheme) -> Element<'static, Message> {
 
     let meta = column![
         report_meta_row("Version", env!("CARGO_PKG_VERSION"), scheme),
-        report_meta_row("License", "GPLv3", scheme),
+        row![
+            container(report_label("License", scheme)).width(Length::Fixed(88.0)),
+            link_button("LGPL-2.1".to_string(), LICENCE.to_string(), scheme),
+        ]
+        .spacing(theme::SPACE_SM)
+        .align_y(iced::Alignment::Center),
         row![
             container(report_label("Source", scheme)).width(Length::Fixed(88.0)),
             link_button(
