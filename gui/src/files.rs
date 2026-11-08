@@ -1,6 +1,5 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::SystemTime;
 
 /// Backup kept next to a transcript before it is rewritten in place.
 pub(crate) fn transcript_backup_path(path: &Path) -> PathBuf {
@@ -104,57 +103,35 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Make `path` older or newer than the files around it without sleeping.
-    fn set_modified(path: &Path, offset_secs: i64) {
-        let time = if offset_secs >= 0 {
-            SystemTime::now() + std::time::Duration::from_secs(offset_secs as u64)
-        } else {
-            SystemTime::now() - std::time::Duration::from_secs((-offset_secs) as u64)
-        };
-        std::fs::File::options()
-            .write(true)
-            .open(path)
-            .unwrap()
-            .set_modified(time)
-            .unwrap();
-    }
-
     #[test]
-    fn the_transcript_candidate_prefers_the_exact_name() {
+    fn only_an_exact_sibling_is_adopted() {
         let dir = scratch("candidate");
         let audio = dir.join("talk.mp3");
         std::fs::write(&audio, b"audio").unwrap();
         let exact = dir.join("talk.txt");
         std::fs::write(&exact, "[00:00] A: one\n").unwrap();
-        let pipeline = dir.join("talk-balanced-transcription-2speakers.txt");
-        std::fs::write(&pipeline, "[00:00] A: two\n").unwrap();
-        // The pipeline file is newer and still loses to the plain name.
-        set_modified(&exact, -60);
-        set_modified(&pipeline, 60);
+        // The app's own earlier output must not be adopted: re-adding this
+        // audio means the user wants a fresh run, not the old text restored.
+        std::fs::write(
+            dir.join("talk-balanced-transcription-2speakers.txt"),
+            "[00:00] A: two\n",
+        )
+        .unwrap();
 
         assert_eq!(
             find_transcripts(&[audio.clone()], None),
             vec![(audio.clone(), exact.clone())]
         );
 
-        // Without the plain copy, the newest pipeline-named file wins.
+        // With only the pipeline output, nothing is adopted and the add stays
+        // queued for a run.
         std::fs::remove_file(&exact).unwrap();
-        set_modified(&pipeline, -60);
-        let newer = dir.join("talk-fast-transcription-1speaker.txt");
-        std::fs::write(&newer, "[00:00] A: three\n").unwrap();
-        set_modified(&newer, 60);
-        assert_eq!(
-            find_transcripts(&[audio.clone()], None),
-            vec![(audio.clone(), newer.clone())]
-        );
+        assert!(find_transcripts(&[audio.clone()], None).is_empty());
 
-        // The save location is the fallback when the audio's own directory has
-        // nothing.
+        // The save location is still a fallback for an exact sidecar.
         let elsewhere = scratch("candidate-out");
         let moved = elsewhere.join("talk.txt");
         std::fs::write(&moved, "[00:00] A: four\n").unwrap();
-        std::fs::remove_file(&pipeline).unwrap();
-        std::fs::remove_file(&newer).unwrap();
         assert_eq!(
             find_transcripts(&[audio.clone()], Some(&elsewhere)),
             vec![(audio.clone(), moved)]
@@ -176,13 +153,10 @@ mod tests {
         // Only an empty plain copy and the app's own sidecars: no transcript.
         assert!(find_transcripts(&[audio.clone()], None).is_empty());
 
-        // A pipeline file with content is taken once the plain copy is empty.
+        // The pipeline's own output is not adopted either.
         let pipeline = dir.join("empty-balanced-transcription-2speakers.txt");
         std::fs::write(&pipeline, "[00:00] A: kept\n").unwrap();
-        assert_eq!(
-            find_transcripts(&[audio.clone()], None),
-            vec![(audio.clone(), pipeline)]
-        );
+        assert!(find_transcripts(&[audio.clone()], None).is_empty());
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -207,7 +181,6 @@ struct ScannedFile {
     name: String,
     path: PathBuf,
     size: u64,
-    modified: Option<SystemTime>,
 }
 
 /// One directory's files, read once per add.
@@ -232,7 +205,6 @@ impl DirScan {
                 name,
                 path: entry.path(),
                 size: metadata.len(),
-                modified: metadata.modified().ok(),
             });
         }
         Some(DirScan { files })
@@ -244,17 +216,20 @@ impl DirScan {
             .filter(|file| file.size > 0 && !is_edit_sidecar(&file.name))
     }
 
-    /// The transcript for `stem` in this directory: the exact `<stem>.txt`
-    /// first, then the newest pipeline-named sibling.
+    /// The transcript for `stem` in this directory: only the exact
+    /// `<stem>.txt` sidecar.
+    ///
+    /// The pipeline's own output (`<stem>-*transcription*.txt`) is deliberately
+    /// not adopted. Those files are what the app wrote on an earlier run, and
+    /// re-adding that audio means the user wants a fresh run in the queue, not
+    /// the old text restored as if nothing had been removed. An exact sidecar
+    /// is the name Save As defaults to and what an external tool is most likely
+    /// to write, so it still restores.
     fn candidate(&self, stem: &str) -> Option<PathBuf> {
         let stem = stem.to_lowercase();
         let exact = format!("{stem}.txt");
-        if let Some(file) = self.usable().find(|file| file.name == exact) {
-            return Some(file.path.clone());
-        }
         self.usable()
-            .filter(|file| is_transcription_of(&file.name, &stem))
-            .max_by(|a, b| a.modified.cmp(&b.modified).then_with(|| a.name.cmp(&b.name)))
+            .find(|file| file.name == exact)
             .map(|file| file.path.clone())
     }
 }
@@ -264,28 +239,14 @@ fn is_edit_sidecar(name: &str) -> bool {
     name.ends_with(".hippo-transcribe.bak") || name.ends_with("-unedited.txt")
 }
 
-/// Whether `name` is the pipeline's own output for `stem`:
-/// `<stem>-<preset>-transcription-<N>speakers.txt`.
-///
-/// Only the prefix and the marker are checked, so an audio file whose stem is a
-/// prefix of another's (`talk` and `talk-interview`) would match the longer
-/// one's output. Tightening that would mean guessing the preset list, which is
-/// the worse trade.
-fn is_transcription_of(name: &str, stem: &str) -> bool {
-    name.strip_prefix(stem)
-        .and_then(|rest| rest.strip_prefix('-'))
-        .is_some_and(|rest| rest.ends_with(".txt") && rest.contains("transcription"))
-}
-
 /// The transcript for each added audio file that already has one, as
 /// `(audio, transcript)`.
 ///
-/// The rule, applied to the audio's own directory first and then to the
-/// configured save location:
-///
-/// 1. `<stem>.txt`, the name Save As defaults to.
-/// 2. The most recently modified `<stem>-*transcription*.txt`, the pipeline's
-///    own naming.
+/// Only an exact `<stem>.txt` sidecar counts, in the audio's own directory
+/// first and then in the configured save location. The pipeline's own
+/// `<stem>-*transcription*.txt` output is not adopted: it is what an earlier
+/// run wrote, and re-adding that audio means the user wants it queued for a
+/// fresh run rather than silently restored into History.
 ///
 /// An exact `<stem>.txt` that is not one of the app's files is accepted as a
 /// transcript anyway: a sidecar with that name is indistinguishable from one

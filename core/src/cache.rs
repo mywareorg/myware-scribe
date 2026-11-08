@@ -149,6 +149,52 @@ pub fn write_segments(key: &str, segments: &[crate::asr::Segment]) {
     }
 }
 
+/// Version of the waveform sidecar. Bump when the bucket count or the RMS
+/// computation changes, so a cached strip is never drawn from stale maths.
+pub const WAVEFORM_VERSION: &str = "wave-v1";
+
+/// Cache key for one audio file's timeline peaks.
+pub fn waveform_key(hash: &str, buckets: usize) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(hash.as_bytes());
+    hasher.update(buckets.to_string().as_bytes());
+    hasher.update(WAVEFORM_VERSION.as_bytes());
+    format!("wave-{}", hex(&hasher.finalize()[..8]))
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct WaveformRecord {
+    duration: f64,
+    peaks: Vec<f32>,
+}
+
+/// Read the timeline peaks cached for `audio`, if the file is unchanged.
+pub fn read_waveform(audio: &Path, buckets: usize) -> Option<(f64, Vec<f32>)> {
+    let key = waveform_key(&audio_hash(audio)?, buckets);
+    let text = std::fs::read_to_string(cache_dir().join(format!("{key}.json"))).ok()?;
+    let record: WaveformRecord = serde_json::from_str(&text).ok()?;
+    Some((record.duration, record.peaks))
+}
+
+/// Store the timeline peaks for `audio`. The pipeline already has the peaks in
+/// hand after diarization, so this costs a hash and a write instead of the full
+/// decode a reopen would otherwise repeat.
+pub fn write_waveform(audio: &Path, buckets: usize, duration: f64, peaks: &[f32]) {
+    let Some(hash) = audio_hash(audio) else {
+        return;
+    };
+    let key = waveform_key(&hash, buckets);
+    let dir = cache_dir();
+    let _ = std::fs::create_dir_all(&dir);
+    let record = WaveformRecord {
+        duration,
+        peaks: peaks.to_vec(),
+    };
+    if let Ok(text) = serde_json::to_string(&record) {
+        let _ = std::fs::write(dir.join(format!("{key}.json")), text);
+    }
+}
+
 pub fn read(key: &str) -> Option<Vec<Turn>> {
     let path = cache_dir().join(format!("{key}.json"));
     let text = std::fs::read_to_string(path).ok()?;

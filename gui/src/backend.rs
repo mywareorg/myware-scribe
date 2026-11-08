@@ -231,9 +231,6 @@ pub fn probe_duration(path: &Path) -> Option<f64> {
     hippo_transcribe_core::audio::duration(path).ok()
 }
 
-/// Re-derived diarization turns and waveform for a completed item.
-pub type CompletedDetails = (Option<Vec<Turn>>, Option<(f64, Vec<f32>)>);
-
 /// Read a completed item's diarization turns back out of the cache.
 ///
 /// Keys on a hash of the file bytes rather than the decoded samples: a queue
@@ -256,17 +253,15 @@ pub fn load_turns(
         .and_then(|key| hippo_transcribe_core::cache::read(&key))
 }
 
-/// Re-derive a completed item's diarization turns (from the cache) and
-/// waveform (by probing the audio), used when a queue is restored at startup.
-pub fn load_completed(
-    path: PathBuf,
-    num_speakers: Option<i32>,
-    buckets: usize,
-    normalize: bool,
-) -> CompletedDetails {
-    let turns = load_turns(&path, num_speakers, normalize);
-    let probe = hippo_transcribe_core::audio::waveform(&path, buckets).ok();
-    (turns, probe)
+/// The waveform peaks for a transcript, from the cache when they were stored
+/// with the run. Only the first open of an older item decodes the audio.
+pub fn load_waveform(path: PathBuf, buckets: usize) -> Option<(f64, Vec<f32>)> {
+    if let Some(cached) = hippo_transcribe_core::cache::read_waveform(&path, buckets) {
+        return Some(cached);
+    }
+    let probe = hippo_transcribe_core::audio::waveform(&path, buckets).ok()?;
+    hippo_transcribe_core::cache::write_waveform(&path, buckets, probe.0, &probe.1);
+    Some(probe)
 }
 
 pub fn kill(pid: u32) {
@@ -548,14 +543,31 @@ fn read_stderr(stderr: Option<ChildStderr>) -> Vec<String> {
 
 // ---- briefing worker ----
 
-use hippo_briefing::BriefingLine;
+use hippo_briefing::{Briefing, BriefingLine};
 
 /// Progress from the briefing helper, in the order it happened.
 #[derive(Debug, Clone)]
 pub enum BriefingEvent {
     Stage { label: String, fraction: f32 },
+    /// The briefing accumulated so far, emitted after each transcript chunk so
+    /// the dialog can show results before the whole recording is read.
+    Part(Briefing),
     Done,
     Failed(String),
+}
+
+/// llama.cpp prints one debug line per graph tensor on every scheduler
+/// reserve. That fills the stderr tail the failure dialog shows, pushing the
+/// actual panic or abort message out of the buffer.
+fn is_llama_log_noise(line: &str) -> bool {
+    line.starts_with("llama_graph_n_input_tensors:")
+        || line.starts_with("sched_reserve:")
+        || line.starts_with("llama_model_loader:")
+        || line.starts_with("load_tensors:")
+        || line.starts_with("print_info:")
+        || line.starts_with("~llama_context:")
+        || line.starts_with("set_abort_callback:")
+        || line.starts_with("graph_reserve:")
 }
 
 /// Spawn `hippo-summarize` for `lines`.
@@ -608,6 +620,9 @@ pub fn spawn_briefing(
             let text = sink.clone();
             std::thread::spawn(move || {
                 for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+                    if is_llama_log_noise(&line) {
+                        continue;
+                    }
                     if let Ok(mut text) = text.lock() {
                         text.push_str(&line);
                         text.push('\n');
@@ -643,6 +658,18 @@ pub fn spawn_briefing(
                             queue.push_back(BriefingEvent::Stage { label, fraction });
                         }
                     }
+                    Some("part") => {
+                        if let Some(briefing) = value
+                            .get("briefing")
+                            .and_then(|briefing| {
+                                serde_json::from_value::<Briefing>(briefing.clone()).ok()
+                            })
+                        {
+                            if let Ok(mut queue) = output_events.lock() {
+                                queue.push_back(BriefingEvent::Part(briefing));
+                            }
+                        }
+                    }
                     Some("done") => {}
                     Some("error") => {
                         let message = value
@@ -669,13 +696,23 @@ pub fn spawn_briefing(
                     queue.push_back(BriefingEvent::Done);
                 }
             } else {
-                let detail = stderr
+                let detail = if status
                     .as_ref()
-                    .and_then(|text| text.lock().ok().map(|text| text.trim().to_string()))
-                    .filter(|text| !text.is_empty())
-                    .unwrap_or_else(|| {
-                        format!("the briefing helper exited with {status:?}")
-                    });
+                    .is_some_and(|status| status.code().is_none())
+                {
+                    // No exit code means a signal or the OS killed it. The
+                    // caller shows this instead of an empty log tail.
+                    "the briefing helper was terminated before it finished"
+                        .to_string()
+                } else {
+                    stderr
+                        .as_ref()
+                        .and_then(|text| text.lock().ok().map(|text| text.trim().to_string()))
+                        .filter(|text| !text.is_empty())
+                        .unwrap_or_else(|| {
+                            format!("the briefing helper exited with {status:?}")
+                        })
+                };
                 if let Ok(mut queue) = output_events.lock() {
                     queue.push_back(BriefingEvent::Failed(detail));
                 }

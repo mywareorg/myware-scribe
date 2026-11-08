@@ -302,8 +302,15 @@ location, and model storage.
 key points, decisions and action items, each citing the transcript lines it came
 from; **Save as Markdown** writes `<transcript>-briefing.md`. The first briefing
 downloads a 1.1 GB model once; generation runs on this machine and can be
-cancelled while it works. It is a derived document, not a record: the transcript
-stays the source of truth.
+cancelled while it works. Each chunk's results appear as they are read, and a
+finished briefing is cached beside the transcript as `<stem>-briefing.json` so
+reopening it costs nothing. It is a derived document, not a record: the
+transcript stays the source of truth.
+
+The briefing helper runs on the CPU by default. Built with
+`cargo build -p hippo-summarize --features vulkan` (or `metal`/`cuda`), set
+`HIPPO_BRIEFING_GPU_LAYERS` to the number of layers to offload; a CPU-only build
+ignores the variable.
 
 The Export picker writes the current transcript as plain text, SRT, WebVTT,
 JSON, Markdown, CSV, or a Word document. Subtitle formats use the exact line bounds stored in the
@@ -340,16 +347,18 @@ work left. History rows are grouped by day (Today, Yesterday, then the date) and
 show the file's duration, speaker count and finish time. Each row has a star and
 a remove button: a single click opens, a double-click runs the row's safe action
 (transcribe, resume or retry, never a retranscribe), and right-click opens a
-menu for reveal, copy, export, retranscribe, retry and remove. The footer of
+menu for copy, export, add to queue, reveal and retry. The footer of
 History, Recordings and Favorites runs the selected row again (Retry for a
-failed recording). Clear queue lives in the Queue tab. Removing an item never
-deletes the audio or transcript on disk. Click one to revisit that file's
-transcript, speaker timeline, waveform and playback. Renaming speakers or saving
-writes back to that file's `.txt`. Adding an audio file that already has a
-transcript loads it straight away instead of queueing a run: `<name>.txt` beside
-the audio, or the newest `<name>-<preset>-transcription-<N>speakers.txt` when
-there is no plain copy, looked up beside the audio first and then in the save
-location.
+failed recording). Clear queue lives in the Queue tab; Clear history lives in
+the History tab and drops the shared finished-item list (History, Favorites and
+Recordings) without touching files on disk. Removing an item never deletes the
+audio or transcript on disk. Click one to revisit that file's transcript,
+speaker timeline, waveform and playback. Renaming speakers or saving writes back
+to that file's `.txt`. Adding an audio file with an exact `<name>.txt` sidecar —
+beside the audio first, then in the save location — loads it straight away
+instead of queueing a run. The app's own
+`<name>-<preset>-transcription-<N>speakers.txt` output is not adopted, so
+re-adding audio the app has already transcribed queues it for a fresh run.
 
 The queue (statuses and output paths) and the transcript history (finish time,
 duration and speaker count) are restored on restart; timeline and waveform data

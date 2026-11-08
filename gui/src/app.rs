@@ -127,7 +127,7 @@ const ASPECT_INV: f32 = 3.0 / 4.0; // h/w
 
 const PANEL_GAP: f32 = 12.0;
 const OUTER_PADDING: f32 = 12.0;
-const LEFT_PANEL_WIDTH: f32 = 340.0;
+const LEFT_PANEL_WIDTH: f32 = 380.0;
 
 /// UI chrome never wraps; labels are shortened or ellipsized instead.
 const NO_WRAP: iced::widget::text::Wrapping = iced::widget::text::Wrapping::None;
@@ -198,6 +198,34 @@ const PANEL_ICON_DIAMETER: f32 = CONTROL_HEIGHT;
 const RECENT_ACTIONS_WIDTH: f32 = 42.0;
 /// Width held for the queue row's remove action so hover does not reflow it.
 const QUEUE_REMOVE_WIDTH: f32 = 19.0;
+
+/// The File pane's own padding and border, on each side.
+const PANE_PADDING: f32 = 12.0;
+const PANE_BORDER: f32 = 1.0;
+/// The width a File pane row actually spans: the pane less its padding and
+/// border, and less the scrollbar lane the list keeps free.
+const FILE_ROW_WIDTH: f32 =
+    LEFT_PANEL_WIDTH - 2.0 * (PANE_PADDING + PANE_BORDER) - SCROLLBAR_WIDTH;
+
+/// Horizontal padding inside a File pane row, per side.
+const ROW_PADDING_X: f32 = 8.0;
+/// Gap between a recent row's label and its reserved action slot.
+const RECENT_ROW_GAP: f32 = 6.0;
+/// Gap between a queue row's children.
+const QUEUE_ROW_GAP: f32 = 8.0;
+/// Fixed widths of the queue row's non-label children.
+const QUEUE_MARKER_WIDTH: f32 = 3.0;
+const QUEUE_BADGE_WIDTH: f32 = 26.0;
+const QUEUE_PROGRESS_WIDTH: f32 = 52.0;
+
+/// Share of the File pane a row's name may fill before it is ellipsized. The
+/// remainder is where the trailing slots live, so a name never crowds them out.
+const NAME_PANE_SHARE: f32 = 0.75;
+/// Average advance of the name font (`Noto Sans` at `theme::TEXT_SM`) as a
+/// fraction of the type size. Names are mostly lowercase words, digits and
+/// separators; a little over the real average keeps the character budget
+/// inside the pixel budget for unusually wide names.
+const NAME_ADVANCE_RATIO: f32 = 0.55;
 
 /// How close two presses on the same row must be to count as a double-click.
 const ROW_DOUBLE_CLICK: Duration = Duration::from_millis(400);
@@ -351,6 +379,10 @@ enum ItemStatus {
     /// from Pending so the row can say what happened and offer a resume.
     Interrupted,
     Running,
+    /// Finished, but still shown in the queue until the batch ends. Removing
+    /// rows one by one made it look as if queued work had been dropped, so the
+    /// whole batch now drains together.
+    Done,
     Failed(String),
 }
 
@@ -377,9 +409,9 @@ enum ItemState {
     Failed,
 }
 
-/// A finished transcript or recording, kept outside the queue. The queue only
-/// holds work that is still in flight; this is the durable history the UI
-/// browses, and the File panel's single item store.
+/// A finished transcript or recording, kept outside the queue. The queue holds
+/// work in flight plus rows that finished in the current batch; this is the
+/// durable history the UI browses, and the File panel's single item store.
 #[derive(Debug, Clone, Default)]
 struct RecentEntry {
     audio: Option<PathBuf>,
@@ -401,9 +433,11 @@ struct RecentEntry {
 /// finished output no longer share a list, so the pane has a four-tab switch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PaneTab {
-    #[default]
     Queue,
     Favorites,
+    /// The pane opens here: a launch shows what has already been transcribed,
+    /// and the add flow moves to Queue only when something needs a run.
+    #[default]
     History,
     Recordings,
 }
@@ -428,6 +462,40 @@ struct RowMenu {
     position: Point,
 }
 
+/// A row's full file details, captured when its Info popup opens.
+///
+/// Deliberately holds paths rather than an index: the lists shift under it
+/// while the popup is up, and the popup must keep describing the row it was
+/// opened on.
+#[derive(Debug, Clone)]
+struct FileInfo {
+    /// The row's file name, not its full path.
+    name: String,
+    /// "History entry", "Recording", "Favorite" or "Queue item".
+    kind: &'static str,
+    status: String,
+    /// Draw the status in the warning colour (failed items).
+    status_danger: bool,
+    duration: Option<f64>,
+    speakers: Option<u8>,
+    finished_at: Option<u64>,
+    audio: Option<PathBuf>,
+    transcript: Option<PathBuf>,
+    audio_present: bool,
+    transcript_present: bool,
+    /// Size and modification time of the primary file, read at capture time.
+    size: Option<u64>,
+    modified: Option<u64>,
+}
+
+impl FileInfo {
+    /// The file "Copy path" copies: the audio, or the transcript when there is
+    /// no audio.
+    fn primary_path(&self) -> Option<&Path> {
+        self.audio.as_deref().or(self.transcript.as_deref())
+    }
+}
+
 /// A short-lived tint marking a pane that something outside it just changed.
 /// It is an acknowledgement, not state: the tick clears it and nothing else
 /// remembers it.
@@ -439,9 +507,9 @@ struct PaneCue {
     at: Instant,
 }
 
-/// How long a cross-pane cue stays visible. Two or three ticks at 10 Hz: long
-/// enough to catch the eye, short enough not to read as a permanent state.
-const PANE_CUE: Duration = Duration::from_millis(420);
+/// How long a cross-pane cue stays visible. Two ticks at 10 Hz: a quick flash
+/// that catches the eye without reading as a permanent state.
+const PANE_CUE: Duration = Duration::from_millis(200);
 
 /// One add's progress toward its summary toast. A file may be queued for a run
 /// or, when a transcript is found beside it, restored into History. The toast
@@ -452,6 +520,12 @@ struct AddReport {
     /// Lookups still outstanding. `None` until the transcript scan reports, so
     /// "waiting to hear" is not confused with "settled at zero".
     pending: Option<usize>,
+    /// Paths this add created rows for, so the settled report can point the
+    /// pane at the queue row that still needs a run.
+    paths: Vec<PathBuf>,
+    /// The newest History row this add restored, so the settled report can
+    /// blink it.
+    newest: Option<usize>,
 }
 
 /// A transcript found beside one of the audio files just added.
@@ -471,8 +545,8 @@ pub(crate) struct AdoptedTranscript {
     duration: Option<f64>,
 }
 
-/// Persisted queue entry. Only work still in flight is written now; finished
-/// transcripts live in `RecentRecord`.
+/// Persisted queue entry. Work in flight and rows finished in the current
+/// batch are written; finished transcripts also live in `RecentRecord`.
 #[derive(Serialize, Deserialize)]
 struct QueueState {
     #[serde(default)]
@@ -684,6 +758,14 @@ enum BriefingState {
     Failed(String),
 }
 
+/// A briefing kept beside its transcript so reopening it costs nothing.
+#[derive(Serialize, Deserialize)]
+struct BriefingCache {
+    version: u32,
+    key: u64,
+    briefing: Briefing,
+}
+
 struct BriefingRun {
     events: Arc<Mutex<VecDeque<backend::BriefingEvent>>>,
     pid: Arc<AtomicU32>,
@@ -692,6 +774,9 @@ struct BriefingRun {
     source: Option<PathBuf>,
     stage: String,
     fraction: f32,
+    /// What the finished chunks have produced so far. Shown while the rest of
+    /// the recording is still being read, so the wait is visibly productive.
+    partial: Briefing,
     started: Instant,
 }
 
@@ -951,6 +1036,9 @@ pub enum Modal {
     Rename,
     Vocabulary,
     Briefing,
+    /// The File panel row's read-only details. Last in paint order: it only
+    /// appears when nothing else is open, since a context menu opens it.
+    Info,
 }
 
 #[derive(Debug, Clone)]
@@ -1164,6 +1252,12 @@ pub enum Message {
     PanelPointerMoved(Point),
     /// Open the context menu for a row, or for empty space with `None`.
     OpenRowMenu(PaneTab, Option<usize>),
+    /// Show the Info popup for a row, capturing its file details by value.
+    OpenInfo(PaneTab, usize),
+    /// Close the Info popup.
+    CloseInfo,
+    /// Copy the Info popup's primary path to the clipboard.
+    CopyInfoPath,
     /// The keyboard opened the context menu for the selected row.
     OpenRowMenuForSelection,
     /// The pointer entered a row menu item; true while it is Export, whose
@@ -1176,6 +1270,9 @@ pub enum Message {
     /// Recordings.
     SelectTab(PaneTab),
     ClearQueue,
+    /// Drop every finished item from History, Favorites and Recordings. Files
+    /// on disk are untouched.
+    ClearHistory,
     ItemDurationProbed(PathBuf, Option<f64>),
     ViewDetailsLoaded(PathBuf, Option<Vec<backend::Turn>>, Option<(f64, Vec<f32>)>),
     RetryItem(usize),
@@ -1415,9 +1512,6 @@ pub struct App {
     record: Option<RecordSession>,
     /// What the backend events in flight belong to.
     run_kind: RunKind,
-    /// A recording was requested while a batch was running. Start it once the
-    /// cancelled batch reports `AllDone`, and discard that batch's events.
-    record_after_batch: bool,
     /// Queue row chosen by the row menu's Transcribe action. The run starts
     /// only that item, not every pending row.
     queue_run_target: Option<usize>,
@@ -1579,11 +1673,13 @@ pub struct App {
     /// The recording that failed last, so the right pane can offer Retry until
     /// it is retried or removed.
     failed_recording: Option<usize>,
-    /// Which list the left pane shows. Not persisted: the queue is the
-    /// default every launch.
+    /// Which list the left pane shows. Not persisted: History is the default
+    /// every launch, and an add moves the pane to Queue when work is waiting.
     pane_tab: PaneTab,
     /// The File panel's context menu, if one is open.
     row_menu: Option<RowMenu>,
+    /// The row details the Info popup is showing, captured when it opened.
+    info_open: Option<FileInfo>,
     /// Last pointer position over the File panel, in panel coordinates, so a
     /// right-click can hang its menu at the pointer.
     panel_pointer: Option<Point>,
@@ -1627,6 +1723,10 @@ pub struct App {
     /// queue.
     batch_total: f32,
     batch_done: f32,
+    /// History entries for rows that finished in this batch, keyed by the
+    /// queue row's path. The row stays visible until the batch ends, so the
+    /// entry is held here rather than merged on the spot.
+    finished_rows: Vec<(PathBuf, RecentEntry)>,
     current: Option<usize>,
     current_index: Option<usize>,
     /// Index of the completed queue item currently shown, if any.
@@ -1791,7 +1891,6 @@ impl App {
             karaoke: settings.karaoke,
             record: None,
             run_kind: RunKind::Batch,
-            record_after_batch: false,
             queue_run_target: None,
             stop_after_run: false,
             #[cfg(test)]
@@ -1891,8 +1990,9 @@ impl App {
             recent_presence: Vec::new(),
             recent_audio_presence: Vec::new(),
             failed_recording: None,
-            pane_tab: PaneTab::Queue,
+            pane_tab: PaneTab::default(),
             row_menu: None,
+            info_open: None,
             panel_pointer: None,
             last_row_click: None,
             recent_hover: None,
@@ -1912,6 +2012,7 @@ impl App {
             batch_summary: Vec::new(),
             batch_total: 0.0,
             batch_done: 0.0,
+            finished_rows: Vec::new(),
             current: None,
             current_index: None,
             selected: None,
@@ -2259,6 +2360,7 @@ impl App {
                         ItemStatus::Pending => "pending",
                         ItemStatus::Interrupted => "interrupted",
                         ItemStatus::Running => "running",
+                        ItemStatus::Done => "done",
                         ItemStatus::Failed(_) => "failed",
                     }
                     .to_string(),
@@ -2537,49 +2639,6 @@ impl App {
         Task::none()
     }
 
-    /// Stop the running batch without transcribing the rest of the queue. The
-    /// in-flight row becomes resumable and pending rows stay pending. The
-    /// recording starts from `AllDone`, which is also when the batch's late
-    /// events stop being read.
-    fn skip_batch_for_recording(&mut self) {
-        for item in &mut self.queue {
-            if matches!(item.status, ItemStatus::Running) {
-                item.status = ItemStatus::Interrupted;
-            }
-        }
-        let pid = self.pid.load(Ordering::SeqCst);
-        if pid != 0 {
-            backend::kill(pid);
-        }
-        self.pid.store(0, Ordering::SeqCst);
-        self.cancelled.store(true, Ordering::SeqCst);
-        self.batch = false;
-        self.current = None;
-        self.current_index = None;
-        self.batch_paths.clear();
-        self.batch_summary.clear();
-        self.batch_total = 0.0;
-        self.batch_done = 0.0;
-        self.run_kind = RunKind::Batch;
-        self.record_after_batch = true;
-        self.queue_run_target = None;
-        self.stop_after_run = false;
-        self.status = Status::Cancelled;
-        self.stage = "cancelled".to_string();
-        self.stage_id = "cancelled".to_string();
-        self.progress = 0.0;
-        self.progress_shown = 0.0;
-        self.overall_shown = 0.0;
-        self.run_start = None;
-        self.elapsed_final = None;
-        self.eta_shown = None;
-        self.toast = Some((
-            "Stopping the queue to record".to_string(),
-            Instant::now(),
-        ));
-        self.save_queue();
-    }
-
     /// R1b2: transcribe the recording the session just stored.
     ///
     /// The capture is already a `Ready` history item with no transcript. This
@@ -2749,6 +2808,96 @@ impl App {
         }
     }
 
+    /// Move every finished row into History and drop those rows from the
+    /// queue. Called once the batch settles, so the queue drains as one list
+    /// instead of losing rows while the user is still watching it.
+    fn reap_finished_rows(&mut self) {
+        if self.finished_rows.is_empty()
+            && !self
+                .queue
+                .iter()
+                .any(|item| matches!(item.status, ItemStatus::Done))
+        {
+            return;
+        }
+        let entries = std::mem::take(&mut self.finished_rows);
+        let mut newest = None;
+        for (_, entry) in entries {
+            newest = Some(self.merge_recent(entry));
+        }
+        // Several files can finish inside the same second; the sort then falls
+        // back to path and would not put the last one on top. Move it there so
+        // the Focus below and the visible top row agree.
+        if let Some(index) = newest {
+            if index != 0 && index < self.recent.len() {
+                let entry = self.recent.remove(index);
+                self.recent.insert(0, entry);
+                self.refresh_recent_presence();
+                newest = Some(0);
+            }
+        }
+        let selected_row = self
+            .selected
+            .and_then(|index| self.queue.get(index))
+            .map(|item| (item.path.clone(), matches!(item.status, ItemStatus::Done)));
+        self.queue
+            .retain(|item| !matches!(item.status, ItemStatus::Done));
+        match selected_row {
+            // The row the user was reading just moved to History. Fall back to
+            // the live transcript rather than leaving a dead selection.
+            Some((_, true)) => {
+                self.return_to_live();
+                self.selected = None;
+            }
+            // A pending row's index shifts when finished rows are dropped;
+            // look it up again by path.
+            Some((path, false)) => {
+                self.selected = self.queue.iter().position(|item| item.path == path);
+            }
+            None => self.selected = None,
+        }
+        self.current = None;
+        self.current_index = None;
+        self.queue_hover = None;
+        self.queue_run_target = None;
+        self.queue_drag = None;
+        // A menu opened on a queue row points at an index that just shifted.
+        self.row_menu = None;
+        self.export_submenu = false;
+        self.invalidate_derived();
+        if let Some(index) = newest {
+            // The rows did not disappear; they moved to History. Point at
+            // them once the batch settles.
+            self.cue_pane(PaneTab::History, Some(index));
+        }
+    }
+
+    /// Drop every finished item from the File panel's lists. Files on disk are
+    /// not touched: History is a view over transcripts the user already has.
+    fn clear_history(&mut self) {
+        // A history document on screen belongs to the list being cleared; its
+        // open editor is committed before the view goes away.
+        if self
+            .selected_view
+            .as_ref()
+            .is_some_and(|view| view.finished)
+        {
+            self.return_to_live();
+        }
+        self.recent.clear();
+        self.favorite_order.clear();
+        self.failed_recording = None;
+        self.selected_recent = None;
+        self.recent_hover = None;
+        self.row_menu = None;
+        self.export_submenu = false;
+        self.favorite_drag = None;
+        self.favorite_hover = None;
+        self.recent_presence.clear();
+        self.recent_audio_presence.clear();
+        self.save_queue();
+    }
+
     /// Remove a queue row while keeping every stored index pointing at the
     /// same item. A preview pinned to the removed row is dropped, because its
     /// source is gone from the queue.
@@ -2757,7 +2906,11 @@ impl App {
             return;
         }
         let preview = self.selected == Some(index) && self.selected_view.is_some();
+        let removed_path = self.queue[index].path.clone();
         self.queue.remove(index);
+        // A finished row that the user removes must not come back when the
+        // batch is reaped.
+        self.finished_rows.retain(|(path, _)| path != &removed_path);
         let remap = |stored: &mut Option<usize>| {
             if let Some(value) = *stored {
                 *stored = match value.cmp(&index) {
@@ -2827,13 +2980,6 @@ impl App {
 
     fn shown_turns(&self) -> &[backend::Turn] {
         self.document_turns()
-    }
-
-    fn shown_peaks(&self) -> &[f32] {
-        match &self.selected_view {
-            Some(view) => &view.peaks,
-            None => &self.peaks,
-        }
     }
 
     fn shown_peaks_arc(&self) -> Arc<Vec<f32>> {
@@ -3085,6 +3231,16 @@ impl App {
         output: Option<PathBuf>,
         finished: bool,
     ) -> Task<Message> {
+        // The transcript's own timestamps give a duration even when the
+        // history record never stored one, so the speaker band can draw at
+        // once instead of waiting for the audio probe.
+        let duration = duration.or_else(|| {
+            lines
+                .iter()
+                .rev()
+                .find_map(|line| line.start)
+                .map(|start| start + 2.0)
+        });
         if turns.is_empty() {
             turns = lines
                 .iter()
@@ -3149,24 +3305,22 @@ impl App {
             .as_ref()
             .is_some_and(|view| view.turns.is_empty());
         if let Some(audio) = audio {
+            // The waveform probe decodes the whole file; the turns are only a
+            // cache read. Run them as separate tasks so the speaker band and
+            // the waveform never wait on each other.
             if needs_probe {
+                let path = audio.clone();
+                let source = source.clone();
                 tasks.push(Task::perform(
-                    {
-                        let normalize = self.normalize;
-                        async move {
-                            backend::load_completed(audio, num_speakers, TIMELINE_BUCKETS, normalize)
-                        }
-                    },
-                    move |(turns, probe)| {
-                        Message::ViewDetailsLoaded(source.clone(), turns, probe)
-                    },
+                    async move { backend::load_waveform(path, TIMELINE_BUCKETS) },
+                    move |probe| Message::ViewDetailsLoaded(source.clone(), None, probe),
                 ));
-            } else if needs_turns {
+            }
+            if needs_turns {
+                let normalize = self.normalize;
+                let source = source.clone();
                 tasks.push(Task::perform(
-                    {
-                        let normalize = self.normalize;
-                        async move { backend::load_turns(&audio, num_speakers, normalize) }
-                    },
+                    async move { backend::load_turns(&audio, num_speakers, normalize) },
                     move |turns| Message::ViewDetailsLoaded(source.clone(), turns, None),
                 ));
             }
@@ -3965,17 +4119,19 @@ impl App {
         self.record.is_some()
     }
 
-    /// Record is unavailable while a recording workflow is already under way.
-    /// A batch is different: pressing Record stops it and leaves the queue for
-    /// later, so the recording is the only thing transcribed.
+    /// Record is unavailable while any transcription or recording is under
+    /// way. A running file is not preempted: the recorder waits until it is
+    /// done rather than stopping the queue.
     fn record_blocked(&self) -> bool {
-        self.record_lock() || self.run_kind == RunKind::Recording
+        self.record_lock()
+            || self.run_kind == RunKind::Recording
+            || matches!(self.status, Status::Running)
     }
 
     /// Starting a transcription while a recording workflow is active would
     /// compete for the microphone and the pane, so it waits for the workflow.
     fn transcribe_blocked(&self) -> bool {
-        self.record.is_some() || self.run_kind == RunKind::Recording || self.record_after_batch
+        self.record.is_some() || self.run_kind == RunKind::Recording
     }
 
     /// Recordings use their own preset: Speed when the license allows it,
@@ -4546,7 +4702,7 @@ impl App {
                             self.toast = Some(("Already in the queue".to_string(), Instant::now()));
                             return Task::none();
                         }
-                        self.begin_add_report(added.len());
+                        self.begin_add_report(&added);
                         return self.added_tasks(added);
                     }
                     _ => {}
@@ -5462,24 +5618,13 @@ impl App {
                 Task::none()
             }
             Message::StartRecording => {
-                if self.record_after_batch {
-                    self.toast = Some((
-                        "The recorder starts when the queue stops".to_string(),
-                        Instant::now(),
-                    ));
-                    return Task::none();
-                }
                 if self.record_blocked() {
-                    self.toast = Some((
-                        "A recording is already in progress".to_string(),
-                        Instant::now(),
-                    ));
-                    return Task::none();
-                }
-                // A batch is the only other run. Drop it and its queued work;
-                // the recording is transcribed on its own.
-                if matches!(self.status, Status::Running) {
-                    self.skip_batch_for_recording();
+                    let message = if matches!(self.status, Status::Running) {
+                        "Finish the current transcription before recording"
+                    } else {
+                        "A recording is already in progress"
+                    };
+                    self.toast = Some((message.to_string(), Instant::now()));
                     return Task::none();
                 }
                 self.start_recording_capture()
@@ -5561,7 +5706,7 @@ impl App {
                         self.toast = Some(("Already in the queue".to_string(), Instant::now()));
                         return Task::none();
                     }
-                    self.begin_add_report(added.len());
+                    self.begin_add_report(&added);
                     return self.added_tasks(added);
                 }
                 Task::none()
@@ -5590,7 +5735,7 @@ impl App {
                         self.toast = Some(("Already in the queue".to_string(), Instant::now()));
                         return Task::none();
                     }
-                    self.begin_add_report(added.len());
+                    self.begin_add_report(&added);
                     return self.added_tasks(added);
                 }
                 Task::none()
@@ -5628,7 +5773,7 @@ impl App {
                 // list, so leave the queue alone and drop the hit. The file is
                 // still queued, and the report counts it there.
                 if matches!(self.status, Status::Running) {
-                    self.add_report_settled(false);
+                    self.add_report_settled(None);
                     return Task::none();
                 }
                 // The pending row exists only because the add created it.
@@ -5644,7 +5789,7 @@ impl App {
                 if already.is_some() {
                     // The file is in History either way, which is what the
                     // summary is counting; no per-file toast needed.
-                    self.add_report_settled(true);
+                    self.add_report_settled(already);
                     self.save_queue();
                     return Task::none();
                 }
@@ -5660,7 +5805,7 @@ impl App {
                 ..Default::default()
                 });
                 self.save_queue();
-                self.add_report_settled(true);
+                self.add_report_settled(Some(index));
                 // An adopted transcript arrived in History from an add made
                 // somewhere else; mark the row so the change is not silent.
                 self.cue_pane(PaneTab::History, Some(index));
@@ -5683,7 +5828,7 @@ impl App {
             }
             Message::TranscriptAdoptionMissed => {
                 // Nothing was restored: the file stays queued for a run.
-                self.add_report_settled(false);
+                self.add_report_settled(None);
                 Task::none()
             }
             Message::ItemDurationProbed(path, seconds) => {
@@ -5853,6 +5998,19 @@ impl App {
                 self.open_row_menu(tab, index, anchor);
                 Task::none()
             }
+            Message::OpenInfo(tab, index) => {
+                self.info_open = self.capture_file_info(tab, index);
+                Task::none()
+            }
+            Message::CloseInfo => self.close_modal(Modal::Info),
+            Message::CopyInfoPath => {
+                let Some(path) = self.info_open.as_ref().and_then(FileInfo::primary_path) else {
+                    return Task::none();
+                };
+                let path = path.display().to_string();
+                self.toast = Some(("Copied path".to_string(), Instant::now()));
+                iced::clipboard::write(path)
+            }
             Message::OpenRowMenuForSelection => {
                 let tab = self.pane_tab;
                 let index = self.selected_row();
@@ -5872,6 +6030,12 @@ impl App {
                 Task::none()
             }
             Message::RecentHover(index) => {
+                // A dialog or menu owns the pointer: a row under it must not
+                // light up as the pointer crosses it. Leaving is always allowed
+                // through, or a hover set before it opened could never clear.
+                if index.is_some() && self.pointer_blocked() {
+                    return Task::none();
+                }
                 // While a favorite is being dragged, the row's enter names the
                 // row the drop marker should sit above. An exit is ignored: it
                 // can arrive after the next row's enter in the same update, and
@@ -5900,6 +6064,12 @@ impl App {
                 }
                 Task::none()
             }
+            Message::ClearHistory => {
+                if !matches!(self.status, Status::Running) && !self.record_lock() {
+                    self.clear_history();
+                }
+                Task::none()
+            }
             Message::ClearQueue => {
                 if !matches!(self.status, Status::Running) {
                     // A finished transcript from History is not queue state:
@@ -5915,6 +6085,7 @@ impl App {
                         // rows.
                         self.commit_inline_edit(false);
                         self.queue.clear();
+                        self.finished_rows.clear();
                         self.batch_paths.clear();
                         self.batch_summary.clear();
                         self.batch_total = 0.0;
@@ -5943,6 +6114,7 @@ impl App {
                     // writing to.
                     self.commit_inline_edit(false);
                     self.queue.clear();
+                    self.finished_rows.clear();
                     self.batch_paths.clear();
                     self.batch_summary.clear();
                     self.batch_total = 0.0;
@@ -6691,10 +6863,67 @@ impl App {
         }
     }
 
+    /// Where a transcript's cached briefing lives: beside the transcript, under
+    /// a distinct name so saving the Markdown never collides with it.
+    fn briefing_cache_path(source: Option<&Path>) -> Option<PathBuf> {
+        let source = source?;
+        let stem = source.file_stem()?.to_str()?;
+        Some(source.with_file_name(format!("{stem}-briefing.json")))
+    }
+
+    /// Invalidate the cache when the lines, the model or the prompt change.
+    /// A hash is enough: it only decides whether a local file can be reused.
+    fn briefing_cache_key(lines: &[BriefingLine], model: &Path) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        hippo_briefing::PROMPT_VERSION.hash(&mut hasher);
+        model.hash(&mut hasher);
+        for line in lines {
+            line.start.to_bits().hash(&mut hasher);
+            line.end.map(f32::to_bits).hash(&mut hasher);
+            line.speaker.hash(&mut hasher);
+            line.text.hash(&mut hasher);
+        }
+        hasher.finish()
+    }
+
+    fn load_briefing_cache(
+        source: Option<&Path>,
+        lines: &[BriefingLine],
+        model: &Path,
+    ) -> Option<Briefing> {
+        let path = Self::briefing_cache_path(source)?;
+        let text = std::fs::read_to_string(path).ok()?;
+        let cache: BriefingCache = serde_json::from_str(&text).ok()?;
+        (cache.version == hippo_briefing::PROMPT_VERSION
+            && cache.key == Self::briefing_cache_key(lines, model))
+        .then_some(cache.briefing)
+    }
+
+    fn store_briefing_cache(
+        source: Option<&Path>,
+        lines: &[BriefingLine],
+        model: &Path,
+        briefing: &Briefing,
+    ) {
+        let Some(path) = Self::briefing_cache_path(source) else {
+            return;
+        };
+        let cache = BriefingCache {
+            version: hippo_briefing::PROMPT_VERSION,
+            key: Self::briefing_cache_key(lines, model),
+            briefing: briefing.clone(),
+        };
+        if let Ok(text) = serde_json::to_string(&cache) {
+            let _ = write_atomic(&path, &text);
+        }
+    }
+
     /// Open the briefing for the document on screen.
     ///
     /// The transcript is the input; no audio is re-read. A missing model opens
-    /// the download prompt instead of failing.
+    /// the download prompt instead of failing. A cached briefing for the same
+    /// lines and model is shown immediately.
     fn open_briefing(&mut self) {
         self.commit_inline_edit(false);
         let source = self.shown_output().map(Path::to_path_buf);
@@ -6719,6 +6948,17 @@ impl App {
             self.briefing = Some(BriefingState::NeedsModel);
             return;
         }
+        let model = models::briefing_model();
+        if let Some(briefing) =
+            Self::load_briefing_cache(source.as_deref(), &lines, &model)
+        {
+            self.briefing = Some(BriefingState::Ready {
+                briefing,
+                lines,
+                source,
+            });
+            return;
+        }
         self.spawn_briefing(lines, source);
     }
 
@@ -6740,6 +6980,7 @@ impl App {
                     source,
                     stage: "Starting".to_string(),
                     fraction: 0.0,
+                    partial: Briefing::default(),
                     started: Instant::now(),
                 }));
             }
@@ -6765,6 +7006,9 @@ impl App {
                         run.stage = label;
                         run.fraction = fraction.clamp(0.0, 1.0);
                     }
+                    backend::BriefingEvent::Part(briefing) => {
+                        run.partial = briefing;
+                    }
                     backend::BriefingEvent::Done => terminal = Some(Ok(())),
                     backend::BriefingEvent::Failed(message) => terminal = Some(Err(message)),
                 }
@@ -6785,11 +7029,19 @@ impl App {
                     serde_json::from_str::<Briefing>(&text)
                         .map_err(|error| format!("invalid briefing: {error}"))
                 }) {
-                Ok(briefing) => BriefingState::Ready {
-                    briefing,
-                    lines: run.lines,
-                    source: run.source,
-                },
+                Ok(briefing) => {
+                    Self::store_briefing_cache(
+                        run.source.as_deref(),
+                        &run.lines,
+                        &models::briefing_model(),
+                        &briefing,
+                    );
+                    BriefingState::Ready {
+                        briefing,
+                        lines: run.lines,
+                        source: run.source,
+                    }
+                }
                 Err(message) => BriefingState::Failed(message),
             },
             Err(message) => BriefingState::Failed(message),
@@ -6973,6 +7225,10 @@ impl App {
             return;
         }
         self.header_menu = None;
+        // The row under the pointer keeps the selection tint, not a hover
+        // tint: the menu already owns the pointer.
+        self.recent_hover = None;
+        self.queue_hover = None;
         self.row_menu = Some(RowMenu {
             tab,
             index,
@@ -6993,6 +7249,92 @@ impl App {
                 }
             }
         }
+    }
+
+    /// Capture a row's file details for the Info popup. The lists can shift
+    /// while it is open, so every value is read now and the index is dropped.
+    fn capture_file_info(&self, tab: PaneTab, index: usize) -> Option<FileInfo> {
+        let mut info = if tab == PaneTab::Queue {
+            let item = self.queue.get(index)?;
+            let status = match &item.status {
+                ItemStatus::Pending => "Pending".to_string(),
+                ItemStatus::Interrupted => "Interrupted".to_string(),
+                ItemStatus::Running => "Running".to_string(),
+                ItemStatus::Done => "Done".to_string(),
+                ItemStatus::Failed(message) => format!("Failed \u{00b7} {message}"),
+            };
+            let name = item
+                .path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| item.path.display().to_string());
+            FileInfo {
+                name,
+                kind: "Queue item",
+                status_danger: matches!(item.status, ItemStatus::Failed(_)),
+                status,
+                duration: item.duration,
+                speakers: None,
+                finished_at: None,
+                audio: item.audio.clone(),
+                transcript: item.transcript.clone(),
+                audio_present: false,
+                transcript_present: false,
+                size: None,
+                modified: None,
+            }
+        } else {
+            let entry = self.recent.get(index)?;
+            let message = entry
+                .message
+                .clone()
+                .filter(|message| !message.trim().is_empty());
+            let status = match entry.state {
+                ItemState::Ready => "Ready".to_string(),
+                ItemState::Failed => match message {
+                    Some(message) => format!("Failed \u{00b7} {message}"),
+                    None => "Failed".to_string(),
+                },
+            };
+            let kind = match tab {
+                PaneTab::Favorites => "Favorite",
+                PaneTab::Recordings => "Recording",
+                _ if entry.recording => "Recording",
+                _ => "History entry",
+            };
+            FileInfo {
+                name: recent_title(entry),
+                kind,
+                status,
+                status_danger: entry.state == ItemState::Failed,
+                duration: entry.duration,
+                speakers: entry.speakers,
+                finished_at: (entry.finished_at > 0).then_some(entry.finished_at),
+                audio: entry.audio.clone(),
+                transcript: entry.transcript.clone(),
+                audio_present: false,
+                transcript_present: false,
+                size: None,
+                modified: None,
+            }
+        };
+
+        // The disk reads happen once, here, so the popup never touches the
+        // filesystem while it is being laid out.
+        info.audio_present = info.audio.as_deref().is_some_and(|path| path.is_file());
+        info.transcript_present = info
+            .transcript
+            .as_deref()
+            .is_some_and(|path| path.is_file());
+        if let Some(path) = info.primary_path().map(Path::to_path_buf) {
+            if let Ok(metadata) = std::fs::metadata(&path) {
+                if metadata.is_file() {
+                    info.size = Some(metadata.len());
+                }
+            }
+            info.modified = file_unix_secs(&path);
+        }
+        Some(info)
     }
 
     /// The row a keyboard menu request applies to: the selection in the
@@ -7080,6 +7422,9 @@ impl App {
         match item.status {
             ItemStatus::Running => self.view_item(index),
             ItemStatus::Pending => self.update(Message::TranscribeQueueItem(index)),
+            // A finished row has nothing to activate: it leaves the queue when
+            // the batch settles.
+            ItemStatus::Done => Task::none(),
             ItemStatus::Interrupted | ItemStatus::Failed(_) => {
                 self.update(Message::RetryItem(index))
             }
@@ -7126,7 +7471,7 @@ impl App {
     }
 
     /// Add a history row's audio to the queue without leaving the current tab
-    /// or opening the run options. The context menu offers this as Retranscribe
+    /// or opening the run options. The context menu offers this as Add to queue
     /// so several files can be staged before a run.
     fn enqueue_recent_from_menu(&mut self, index: usize) -> Task<Message> {
         if self.transcribe_blocked() {
@@ -7216,11 +7561,13 @@ impl App {
 
     /// Start tracking one add. Its toast waits for the transcript lookups, so
     /// the counts describe what actually landed rather than the first guess.
-    fn begin_add_report(&mut self, queued: usize) {
+    fn begin_add_report(&mut self, added: &[PathBuf]) {
         self.add_report = Some(AddReport {
-            queued,
+            queued: added.len(),
             restored: 0,
             pending: None,
+            paths: added.to_vec(),
+            newest: None,
         });
     }
 
@@ -7233,16 +7580,17 @@ impl App {
         self.settle_add_report();
     }
 
-    /// One lookup settled. `restored` says the file moved into History, so it
-    /// is no longer queue work.
-    fn add_report_settled(&mut self, restored: bool) {
+    /// One lookup settled. `restored` is the History row the file became, or
+    /// `None` when it stays queued for a run.
+    fn add_report_settled(&mut self, restored: Option<usize>) {
         if let Some(report) = self.add_report.as_mut() {
             if let Some(pending) = report.pending.as_mut() {
                 *pending = pending.saturating_sub(1);
             }
-            if restored {
+            if let Some(index) = restored {
                 report.restored += 1;
                 report.queued = report.queued.saturating_sub(1);
+                report.newest = Some(index);
             }
         }
         self.settle_add_report();
@@ -7258,9 +7606,27 @@ impl App {
             return;
         }
         let (restored, queued) = (report.restored, report.queued);
+        let newest = report.newest;
+        let first_queued = report.paths.iter().find_map(|path| {
+            self.queue.iter().position(|item| {
+                item.path == *path
+                    && matches!(item.status, ItemStatus::Pending | ItemStatus::Interrupted)
+            })
+        });
         self.add_report = None;
         if restored + queued > 0 {
             self.toast = Some((add_summary(restored, queued), Instant::now()));
+        }
+        // Leave the pane where the next action is: queued work in the Queue,
+        // otherwise the transcripts the add restored in History.
+        if queued > 0 {
+            if let Some(index) = first_queued {
+                self.pane_tab = PaneTab::Queue;
+                self.cue_pane(PaneTab::Queue, Some(index));
+            }
+        } else if restored > 0 {
+            self.pane_tab = PaneTab::History;
+            self.cue_pane(PaneTab::History, newest);
         }
     }
 
@@ -7317,16 +7683,13 @@ impl App {
             added.push(path);
         }
         if !added.is_empty() {
-            // An add is queue work: show the queue even when it came from the
-            // History tab's footer.
-            self.pane_tab = PaneTab::Queue;
+            // The pane moves once the transcript lookups settle: to Queue when
+            // a file still needs a run, to History when they were all restored.
             self.recent_hover = None;
             if was_empty {
                 self.feature_slide = 0;
                 self.feature_slide_at = Instant::now();
             }
-            // The rows just pushed are the tail of the queue; mark the first.
-            self.cue_pane(PaneTab::Queue, Some(self.queue.len() - added.len()));
             self.save_queue();
         }
         added
@@ -8028,13 +8391,26 @@ impl App {
         let scheme = *scheme;
         let action = self.recent_footer_action(tab);
         let enabled = action.message.is_some();
+        // The Queue's Transcribe is the green primary; History's Retranscribe
+        // is the same action for a finished file, so it reads the same way.
+        let green = tab == PaneTab::History;
         let button = action_text(action.label)
             .on_press_maybe(action.message)
             .style(move |theme, status| {
-                if enabled {
-                    pill_button_secondary(theme, status)
-                } else {
+                if !enabled {
                     greyed_button(scheme)(theme, status)
+                } else if green {
+                    color_button_outlined(
+                        scheme.green,
+                        if theme::is_dark_scheme(&scheme) {
+                            Color::WHITE
+                        } else {
+                            scheme.on_accent
+                        },
+                        scheme,
+                    )(theme, status)
+                } else {
+                    pill_button_secondary(theme, status)
                 }
             });
         let button = self.tip(button, action.tooltip, &scheme);
@@ -8060,12 +8436,14 @@ impl App {
         );
         if stopping {
             ("Stop", true, "Stop recording")
-        } else if self.record_blocked() {
+        } else if self.record_lock() || self.run_kind == RunKind::Recording {
             ("Record", false, "Finish the current recording before recording.")
-        } else if self.record_after_batch {
-            ("Record", false, "The recorder starts when the queue stops.")
         } else if matches!(self.status, Status::Running) {
-            ("Record", true, "Stop the queue and record")
+            (
+                "Record",
+                false,
+                "Finish the current transcription before recording.",
+            )
         } else {
             ("Record", true, "Record from the microphone")
         }
@@ -9224,33 +9602,6 @@ impl App {
                 .ok()
                 .and_then(|mut queue| queue.pop_front());
             let Some(event) = event else { break };
-            // A batch was stopped to make room for a recording. Ignore
-            // everything it still emits, including a late File/Done, until its
-            // AllDone proves the backend is gone.
-            if self.record_after_batch {
-                if matches!(event, Event::AllDone) {
-                    self.record_after_batch = false;
-                    Self::clear_gpu_guard();
-                    self.gpu_retry_pending = false;
-                    self.completion_pending = false;
-                    self.run_kind = RunKind::Batch;
-                    self.batch = false;
-                    self.current = None;
-                    self.current_index = None;
-                    self.status = Status::Idle;
-                    self.stage = "idle".to_string();
-                    self.stage_id = "idle".to_string();
-                    self.progress = 0.0;
-                    self.progress_shown = 0.0;
-                    self.overall_shown = 0.0;
-                    self.run_start = None;
-                    self.elapsed_final = None;
-                    self.eta_shown = None;
-                    self.save_queue();
-                    tasks.push(Task::done(Message::StartRecording));
-                }
-                continue;
-            }
             match event {
                 Event::Stage {
                     stage,
@@ -9423,8 +9774,30 @@ impl App {
                 }
                 Event::Waveform { audio, peaks } => {
                     // Emitted once diarization has identified the speakers.
-                    self.peaks_for = Some(PathBuf::from(audio));
-                    self.peaks = Arc::new(peaks);
+                    self.peaks_for = Some(PathBuf::from(&audio));
+                    self.peaks = Arc::new(peaks.clone());
+                    // Persist the peaks so reopening this transcript never
+                    // decodes the whole file again. Hashing the file is disk
+                    // work, so it stays off the UI thread.
+                    if let Some(duration) = self.timeline_duration {
+                        let path = PathBuf::from(audio);
+                        // Key on the count actually emitted, so a change in the
+                        // pipeline's bucket count misses instead of serving a
+                        // strip with the wrong resolution.
+                        let buckets = peaks.len();
+                        let peaks = peaks;
+                        tasks.push(Task::perform(
+                            async move {
+                                hippo_transcribe_core::cache::write_waveform(
+                                    &path,
+                                    buckets,
+                                    duration as f64,
+                                    &peaks,
+                                );
+                            },
+                            |_| Message::Noop,
+                        ));
+                    }
                 }
                 Event::Line {
                     start,
@@ -9514,25 +9887,32 @@ impl App {
                             ),
                             None => ("file".to_string(), duration, None),
                         };
-                        // Capture what the summary and progress bar need before
-                        // the row leaves the queue.
+                        // Capture what the summary and progress bar need. The
+                        // row stays in the queue, so nothing has to be read
+                        // before it disappears.
                         self.batch_done += measured.unwrap_or(1.0) as f32;
                         self.batch_summary.push((label.clone(), stats));
-                        // The row never reads as Done: it goes straight into
-                        // the history. The live buffer already holds the text.
-                        self.remove_queue_row(index);
-                        let history_index = self.merge_recent(RecentEntry {
-                            audio,
-                            transcript: Some(transcript),
-                            finished_at: unix_secs(),
-                            duration: measured,
-                            speakers,
-                            ..Default::default()
-                        });
-                        // The row left the Queue tab for History while the user
-                        // may still be looking at the queue: blink the tab and
-                        // the new row.
-                        self.cue_pane(PaneTab::History, Some(history_index));
+                        // Keep the row visible as Done and hold its history
+                        // entry until the whole batch drains. Reaping it here
+                        // made completed queue items seem to vanish mid-run.
+                        let row_path = self.queue.get(index).map(|item| item.path.clone());
+                        if let Some(item) = self.queue.get_mut(index) {
+                            item.status = ItemStatus::Done;
+                            item.transcript = Some(transcript.clone());
+                        }
+                        if let Some(row_path) = row_path {
+                            self.finished_rows.push((
+                                row_path,
+                                RecentEntry {
+                                    audio,
+                                    transcript: Some(transcript),
+                                    finished_at: unix_secs(),
+                                    duration: measured,
+                                    speakers,
+                                    ..Default::default()
+                                },
+                            ));
+                        }
                         self.toast = Some((format!("Finished {label}"), Instant::now()));
                     }
                     self.current_index = None;
@@ -9637,13 +10017,28 @@ impl App {
                     // manual Transcribe. A row-menu Transcribe is deliberately
                     // one row and leaves the rest of the queue alone.
                     let stop_after = std::mem::take(&mut self.stop_after_run);
-                    if !stop_after
+                    let follow_up = !stop_after
                         && self.can(license::Feature::Batch)
                         && self
                             .queue
                             .iter()
-                            .any(|item| matches!(item.status, ItemStatus::Pending))
-                    {
+                            .any(|item| matches!(item.status, ItemStatus::Pending));
+                    if !follow_up {
+                        // The batch is over: rows that stayed visible as Done
+                        // throughout now move to History together.
+                        self.reap_finished_rows();
+                        self.save_queue();
+                        // The queue is done and the last finished file is at
+                        // the top of History. Put the File pane there, with
+                        // that row focused, instead of leaving it on an empty
+                        // queue.
+                        if self.has_results() && !self.recent.is_empty() {
+                            self.pane_tab = PaneTab::History;
+                            self.selected_recent = Some(0);
+                            self.recent_hover = None;
+                        }
+                    }
+                    if follow_up {
                         self.begin_batch(true);
                     } else if self.has_results() {
                         self.status = Status::Done;
@@ -10101,6 +10496,7 @@ impl App {
                 .id(console_id())
                 // Log lines wrap to the full width, so the rail needs a lane of
                 // its own here too.
+                .direction(app_scroll_direction())
                 .spacing(theme::SPACE_SM)
                 .height(Length::Fill)
                 .width(Length::Fill),
@@ -11626,6 +12022,7 @@ impl App {
             }
             let list = mouse_area(
                 scrollable(rows)
+                    .direction(app_scroll_direction())
                     .width(Length::Fill)
                     .height(Length::Fill)
                     .style(visible_scrollbar_style),
@@ -11754,6 +12151,7 @@ impl App {
             }
             mouse_area(
                 scrollable(rows)
+                    .direction(app_scroll_direction())
                     .width(Length::Fill)
                     .height(Length::Fill)
                     .style(visible_scrollbar_style),
@@ -11773,7 +12171,33 @@ impl App {
         );
         let footer = self.recent_footer(PaneTab::History, &scheme, count_text);
 
-        column![body, horizontal_rule(1), footer]
+        // Quiet, like the Queue's Clear: a small text action under the list.
+        let clear = self.tip(
+            action(
+                row![
+                    icon(ICON_TRASH, 12.0),
+                    text("Clear history")
+                        .size(theme::TEXT_XS)
+                        .wrapping(NO_WRAP),
+                ]
+                .spacing(4)
+                .align_y(iced::Alignment::Center),
+            )
+            .on_press_maybe(
+                (!matches!(self.status, Status::Running)
+                    && !self.record_lock()
+                    && !self.recent.is_empty())
+                .then_some(Message::ClearHistory),
+            )
+            .style(pill_button_secondary),
+            "Clear History, Favorites and Recordings (files on disk are kept)",
+            &scheme,
+        );
+        let clear_row = row![horizontal_space(), clear]
+            .align_y(iced::Alignment::Center)
+            .width(Length::Fill);
+
+        column![body, clear_row, horizontal_rule(1), footer]
             .spacing(12)
             .height(Length::Fill)
             .into()
@@ -11869,6 +12293,7 @@ impl App {
         }
         let list = mouse_area(
             scrollable(rows)
+                .direction(app_scroll_direction())
                 .width(Length::Fill)
                 .height(Length::Fill)
                 .style(visible_scrollbar_style),
@@ -12006,7 +12431,8 @@ impl App {
     }
 
     /// One recent row: the file name, its meta line and the star/remove
-    /// actions. Its output path is the tooltip, not a row line.
+    /// actions. Full paths live in the context menu's Info popup, not in a row
+    /// tooltip.
     fn recent_row(
         &self,
         index: usize,
@@ -12021,7 +12447,7 @@ impl App {
         // Only a row with its transcript on disk opens; audio-only rows are a
         // danger meta and nothing else.
         let openable = entry.state == ItemState::Ready && transcript_present;
-        let name = ellipsize_middle(&recent_title(entry), 24);
+        let name = ellipsize_middle(&recent_title(entry), recent_name_budget());
         let (meta, meta_danger) = self.recent_row_meta(index, tab);
         let meta_color = if meta_danger {
             scheme.danger
@@ -12085,19 +12511,6 @@ impl App {
         ]
         .spacing(1)
         .width(Length::Fill);
-        let hint = if entry.recording && !audio_present {
-            entry
-                .audio
-                .as_deref()
-                .map(|path| format!("Recording file missing: {}", path.display()))
-                .unwrap_or_else(|| "Recording file missing".to_string())
-        } else {
-            recent_tooltip(entry, transcript_present)
-        };
-        // The output path lives here rather than in the row: at this width it
-        // would crowd out the file name. The actions carry their own tips, so
-        // the path tip stops short of them.
-        let label = self.tip(label, hint, &scheme);
 
         // The star and X both keep a reserved slot, so a favorite is visible
         // at a glance and the name never reflows when they appear.
@@ -12313,6 +12726,21 @@ impl App {
                     .separated(),
                 );
             }
+            if tab == PaneTab::History {
+                rows.push(
+                    row(
+                        "Clear history",
+                        !running && !self.recent.is_empty(),
+                        Some(if running {
+                            "Stop the run before clearing history."
+                        } else {
+                            "Nothing in History."
+                        }),
+                        Message::ClearHistory,
+                    )
+                    .separated(),
+                );
+            }
             return rows;
         };
 
@@ -12321,7 +12749,7 @@ impl App {
                 return Vec::new();
             };
             let audio = item.audio.as_deref();
-            return match item.status {
+            let mut rows = match item.status {
                 ItemStatus::Running => vec![row(
                     "Show live transcript",
                     true,
@@ -12376,6 +12804,12 @@ impl App {
                     )
                     .separated(),
                 ],
+                ItemStatus::Done => vec![row(
+                    "Reveal audio",
+                    audio.is_some(),
+                    audio.is_none().then_some("No audio file."),
+                    Message::RevealQueueAudio(index),
+                )],
                 ItemStatus::Failed(_) => vec![
                     row(
                         "Retry",
@@ -12398,6 +12832,10 @@ impl App {
                     .separated(),
                 ],
             };
+            // The row's paths are too long for the row, so the menu carries
+            // them in the Info popup instead.
+            rows.push(row("Info", true, None, Message::OpenInfo(tab, index)).separated());
+            return rows;
         }
 
         let Some(entry) = self.recent.get(index) else {
@@ -12432,8 +12870,8 @@ impl App {
             None
         };
         // A failed recording is retried through the recording workflow; every
-        // other row's Retranscribe now stages it in the queue without opening
-        // the run options.
+        // other row stages its audio in the queue without opening the run
+        // options.
         let retranscribe = if retry_recording {
             row(
                 "Retry recording",
@@ -12444,9 +12882,9 @@ impl App {
             .separated()
         } else {
             row(
-                "Retranscribe",
+                "Add to queue",
                 queue_enabled,
-                (!queue_enabled).then_some(queue_hint.unwrap_or("Retranscribe is unavailable.")),
+                (!queue_enabled).then_some(queue_hint.unwrap_or("Add to queue is unavailable.")),
                 Message::EnqueueRecent(index),
             )
             .separated()
@@ -12485,15 +12923,13 @@ impl App {
             },
             Message::OpenExportSubmenu,
         );
-        let remove = danger("Remove item", !locked, None, Message::RemoveRecent(index));
-
-        match tab {
+        let mut rows = match tab {
             PaneTab::Favorites => vec![
+                copy_text,
                 export,
                 retranscribe,
                 reveal_transcript,
                 reveal_audio,
-                copy_text,
                 row(
                     "Unfavorite",
                     true,
@@ -12501,25 +12937,24 @@ impl App {
                     Message::ToggleFavorite(index),
                 )
                 .separated(),
-                remove,
             ],
             PaneTab::Recordings => vec![
+                copy_text,
                 export,
                 retranscribe,
                 reveal_audio,
                 reveal_transcript,
-                copy_text,
-                remove.separated(),
             ],
             _ => vec![
+                copy_text,
                 export,
                 retranscribe,
                 reveal_transcript,
                 reveal_audio,
-                copy_text,
-                remove.separated(),
             ],
-        }
+        };
+        rows.push(row("Info", true, None, Message::OpenInfo(tab, index)).separated());
+        rows
     }
 
     /// One queue row: status, two-line label, optional progress and remove.
@@ -12541,12 +12976,10 @@ impl App {
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_else(|| item.path.display().to_string());
-        let name_limit = if matches!(item.status, ItemStatus::Running) {
-            22
-        } else {
-            30
-        };
-        let name = ellipsize_middle(&full_name, name_limit);
+        let name = ellipsize_middle(
+            &full_name,
+            queue_name_budget(matches!(item.status, ItemStatus::Running)),
+        );
         let duration = item
             .duration
             .map(format_secs)
@@ -12564,6 +12997,7 @@ impl App {
                 ),
                 scheme.muted,
             ),
+            ItemStatus::Done => (format!("{duration} \u{00b7} Done"), scheme.muted),
             ItemStatus::Failed(message) => (
                 format!("{duration} \u{00b7} {}", ellipsize(message, 22)),
                 scheme.danger,
@@ -12579,6 +13013,9 @@ impl App {
             }
             ItemStatus::Running => {
                 queue_status_badge(ICON_HOURGLASS, 14.0, scheme.track, scheme.text)
+            }
+            ItemStatus::Done => {
+                queue_status_badge(ICON_CHECK, 14.0, scheme.track, scheme.green)
             }
             ItemStatus::Failed(_) => {
                 queue_status_badge(ICON_X, 15.0, scheme.danger, scheme.on_accent)
@@ -12978,6 +13415,7 @@ impl App {
         scrollable(col)
             .id(transcript_id())
             .on_scroll(Message::TranscriptScrolled)
+            .direction(app_scroll_direction())
             .height(Length::Fill)
             .width(Length::Fill)
             .style(scrollbar_style)
@@ -13801,10 +14239,12 @@ impl App {
         .into()
     }
 
-    /// Waveform/speaker timeline strip (greyed out until audio is probed).
+    /// Waveform/speaker timeline strip. The speaker band comes from the
+    /// transcript's own turns, so it is drawn as soon as the duration is known;
+    /// the waveform fills in when the probe (or its cache) arrives.
     fn timeline_element(&self, scheme: &Scheme) -> Element<'_, Message> {
         let duration = self.shown_duration().unwrap_or(0.0);
-        let enabled = duration > 0.0 && !self.shown_peaks().is_empty();
+        let enabled = duration > 0.0;
         let locked = !self.can(license::Feature::Playback);
         let program = Timeline {
             peaks: self.shown_peaks_arc(),
@@ -13820,7 +14260,15 @@ impl App {
             } else {
                 scheme.timeline_bg
             },
-            wave: if locked { scheme.muted } else { scheme.green },
+            // Dark mode reads the waveform as the recording's energy, not its
+            // success, so it draws in the warning red; light mode keeps green.
+            wave: if locked {
+                scheme.muted
+            } else if theme::is_dark_scheme(scheme) {
+                scheme.danger
+            } else {
+                scheme.green
+            },
             playhead_color: if locked { scheme.muted } else { scheme.ink },
             enabled,
             zoom: self.waveform_zoom,
@@ -14150,6 +14598,10 @@ impl App {
             Some(Modal::Vocabulary)
         } else if self.briefing.is_some() {
             Some(Modal::Briefing)
+        } else if self.info_open.is_some() {
+            // Lowest priority: the Info popup only ever comes from a context
+            // menu, which cannot open while another dialog is up.
+            Some(Modal::Info)
         } else {
             None
         }
@@ -14199,6 +14651,7 @@ impl App {
             Modal::RunSetup => self.run_setup_open = false,
             Modal::Rename => self.rename_open = false,
             Modal::Vocabulary => self.vocabulary_open = false,
+            Modal::Info => self.info_open = None,
             Modal::Briefing => {
                 if let Some(BriefingState::Running(run)) = self.briefing.take() {
                     backend::kill(run.pid.load(Ordering::SeqCst));
@@ -14241,15 +14694,15 @@ impl App {
     }
 
     /// True while a transient menu owns the pointer: one of the transcript
-    /// header's menus, or a pick-list dropdown that reports itself open (the
-    /// line editor's speaker picker).
+    /// header's menus, a pick-list dropdown that reports itself open (the line
+    /// editor's speaker picker), or the File panel's context menu.
     ///
     /// Kept apart from [`Self::popup_open`] because a menu is not modal. It owns
     /// the pointer, so nothing under it may light up or take a press, but it
     /// leaves the keyboard and the tooltips alone: a menu's own buttons carry
     /// tooltips, and those must keep working while it is open.
     fn menu_open(&self) -> bool {
-        self.header_menu.is_some()
+        self.header_menu.is_some() || self.row_menu.is_some()
     }
 
     /// True while nothing under the pointer may react: a dialog is up, or a menu
@@ -14916,6 +15369,126 @@ impl App {
         )
     }
 
+    /// The File panel row's details: the full paths, whether they are on disk,
+    /// and the sizes and times behind them.
+    fn info_dialog(&self, scheme: &Scheme) -> Element<'_, Message> {
+        let scheme = *scheme;
+        let Some(info) = &self.info_open else {
+            return container(horizontal_space()).into();
+        };
+        let status_color = if info.status_danger {
+            scheme.danger
+        } else {
+            scheme.text
+        };
+        let value = |content: String| {
+            text(content)
+                .size(theme::TEXT_XS)
+                .wrapping(NO_WRAP)
+                .color(scheme.text)
+        };
+
+        let mut fields = column![info_row("File", value(info.name.clone()), scheme)]
+            .spacing(theme::SPACE_SM)
+            .width(Length::Fill);
+        fields = fields
+            .push(info_row("Kind", value(info.kind.to_string()), scheme))
+            .push(info_row(
+                "Status",
+                text(info.status.clone())
+                    .size(theme::TEXT_XS)
+                    .wrapping(NO_WRAP)
+                    .color(status_color),
+                scheme,
+            ))
+            .push(info_row(
+                "Duration",
+                value(
+                    info.duration
+                        .map(format_secs)
+                        .unwrap_or_else(|| "\u{2014}".to_string()),
+                ),
+                scheme,
+            ))
+            .push(info_row(
+                "Speakers",
+                value(
+                    info.speakers
+                        .map(|speakers| speakers.to_string())
+                        .unwrap_or_else(|| "\u{2014}".to_string()),
+                ),
+                scheme,
+            ))
+            .push(info_row(
+                "Finished",
+                value(
+                    info.finished_at
+                        .map(full_datetime)
+                        .unwrap_or_else(|| "\u{2014}".to_string()),
+                ),
+                scheme,
+            ))
+            .push(info_row(
+                "Audio path",
+                info_path_value(info.audio.as_deref(), info.audio_present, scheme),
+                scheme,
+            ))
+            .push(info_row(
+                "Transcript path",
+                info_path_value(info.transcript.as_deref(), info.transcript_present, scheme),
+                scheme,
+            ))
+            .push(info_row(
+                "Size",
+                value(
+                    info.size
+                        .map(format_bytes)
+                        .unwrap_or_else(|| "\u{2014}".to_string()),
+                ),
+                scheme,
+            ))
+            .push(info_row(
+                "Modified",
+                value(
+                    info.modified
+                        .map(full_datetime)
+                        .unwrap_or_else(|| "\u{2014}".to_string()),
+                ),
+                scheme,
+            ));
+
+        let mut body = column![
+            text("File info").size(20).color(scheme.text),
+            fields,
+        ]
+        .spacing(theme::SPACE_LG)
+        .width(Length::Fill);
+
+        let mut footer = row![horizontal_space()]
+            .spacing(theme::SPACE_MD)
+            .align_y(iced::Alignment::Center);
+        if info.primary_path().is_some() {
+            footer = footer.push(
+                action_text("Copy path")
+                    .on_press(Message::CopyInfoPath)
+                    .style(pill_button_secondary),
+            );
+        }
+        footer = footer.push(
+            action_text("Close")
+                .on_press(Message::CloseInfo)
+                .style(color_button(scheme.blue, scheme.on_accent)),
+        );
+        body = body.push(container(footer).padding(iced::Padding {
+            top: theme::SPACE_MD,
+            right: 0.0,
+            bottom: 0.0,
+            left: 0.0,
+        }));
+
+        modal_card(body, 560.0, scheme)
+    }
+
     /// The speaker rename form: one field per speaker, saved as a batch.
     fn rename_dialog(&self, scheme: &Scheme) -> Element<'_, Message> {
         let scheme = *scheme;
@@ -14956,6 +15529,61 @@ impl App {
             .align_x(iced::Alignment::End),
         );
         modal_card(col, 380.0, scheme)
+    }
+
+    /// The overview and cited items of a briefing, shared by the live partial
+    /// view and the finished one so the two never diverge.
+    fn briefing_items(
+        &self,
+        briefing: &Briefing,
+        lines: &[BriefingLine],
+        scheme: &Scheme,
+        height: f32,
+    ) -> Element<'static, Message> {
+        let scheme = *scheme;
+        let mut content = column![].spacing(theme::SPACE_MD).width(Length::Fill);
+        if !briefing.overview.trim().is_empty() {
+            content = content.push(
+                text(briefing.overview.clone())
+                    .size(theme::TEXT_SM)
+                    .color(scheme.text),
+            );
+        }
+        for (heading, items) in [
+            ("Key points", &briefing.points),
+            ("Decisions", &briefing.decisions),
+            ("Action items", &briefing.actions),
+        ] {
+            if items.is_empty() {
+                continue;
+            }
+            content = content.push(
+                text(heading.to_string()).size(theme::TEXT_SM).font(Font {
+                    weight: font::Weight::Bold,
+                    ..Font::DEFAULT
+                }),
+            );
+            for item in items {
+                let cite = hippo_briefing::citation(item, lines).unwrap_or_default();
+                content = content.push(
+                    row![
+                        text("\u{2022}").size(theme::TEXT_SM).color(scheme.muted),
+                        text(item.text.clone())
+                            .size(theme::TEXT_SM)
+                            .width(Length::Fill),
+                        text(cite).size(theme::TEXT_XS).color(scheme.muted),
+                    ]
+                    .spacing(theme::SPACE_SM)
+                    .align_y(iced::Alignment::Start),
+                );
+            }
+        }
+        scrollable(content)
+            .direction(app_scroll_direction())
+            .height(Length::Fixed(height))
+            .width(Length::Fill)
+            .style(visible_scrollbar_style)
+            .into()
     }
 
     fn briefing_dialog(&self, scheme: &Scheme) -> Element<'_, Message> {
@@ -15048,12 +15676,26 @@ impl App {
                         ))
                         .size(theme::TEXT_XS)
                         .color(scheme.muted),
-                    )
-                    .push(right_aligned(row![
-                        action_text("Cancel")
-                            .on_press(Message::CloseBriefing)
-                            .style(pill_button_secondary),
-                    ]));
+                    );
+                // Chunks already read are shown as they land, in the same rows
+                // the finished dialog uses, so the wait is visibly productive.
+                if !run.partial.is_empty() {
+                    body = body
+                        .push(
+                            text("So far")
+                                .size(theme::TEXT_SM)
+                                .font(Font {
+                                    weight: font::Weight::Bold,
+                                    ..Font::DEFAULT
+                                }),
+                        )
+                        .push(self.briefing_items(&run.partial, &run.lines, &scheme, 220.0));
+                }
+                body = body.push(right_aligned(row![
+                    action_text("Cancel")
+                        .on_press(Message::CloseBriefing)
+                        .style(pill_button_secondary),
+                ]));
             }
             Some(BriefingState::Failed(message)) => {
                 body = body
@@ -15073,50 +15715,8 @@ impl App {
                     ));
             }
             Some(BriefingState::Ready { briefing, lines, .. }) => {
-                let mut content = column![].spacing(theme::SPACE_MD).width(Length::Fill);
-                if !briefing.overview.trim().is_empty() {
-                    content = content.push(
-                        text(briefing.overview.clone())
-                            .size(theme::TEXT_SM)
-                            .color(scheme.text),
-                    );
-                }
-                for (heading, items) in [
-                    ("Key points", &briefing.points),
-                    ("Decisions", &briefing.decisions),
-                    ("Action items", &briefing.actions),
-                ] {
-                    if items.is_empty() {
-                        continue;
-                    }
-                    content = content.push(
-                        text(heading.to_string()).size(theme::TEXT_SM).font(Font {
-                            weight: font::Weight::Bold,
-                            ..Font::DEFAULT
-                        }),
-                    );
-                    for item in items {
-                        let cite = hippo_briefing::citation(item, lines).unwrap_or_default();
-                        content = content.push(
-                            row![
-                                text("\u{2022}").size(theme::TEXT_SM).color(scheme.muted),
-                                text(item.text.clone())
-                                    .size(theme::TEXT_SM)
-                                    .width(Length::Fill),
-                                text(cite).size(theme::TEXT_XS).color(scheme.muted),
-                            ]
-                            .spacing(theme::SPACE_SM)
-                            .align_y(iced::Alignment::Start),
-                        );
-                    }
-                }
                 body = body
-                    .push(
-                        scrollable(content)
-                            .height(Length::Fixed(360.0))
-                            .width(Length::Fill)
-                            .style(visible_scrollbar_style),
-                    )
+                    .push(self.briefing_items(briefing, lines, &scheme, 360.0))
                     .push(right_aligned(
                         row![
                             action_text("Save as Markdown")
@@ -15546,6 +16146,7 @@ impl App {
         // `spacing` embeds the rail and reserves its lane, so the right-hand
         // column of controls cannot end up underneath it.
         let scroll = scrollable(body)
+            .direction(app_scroll_direction())
             .spacing(theme::SPACE_SM)
             .style(visible_scrollbar_style)
             .width(Length::Fill)
@@ -16223,8 +16824,12 @@ impl App {
             Some(Modal::Rename) => self.rename_dialog(&scheme),
             Some(Modal::Vocabulary) => self.vocabulary_dialog(&scheme),
             Some(Modal::Briefing) => self.briefing_dialog(&scheme),
+            Some(Modal::Info) => self.info_dialog(&scheme),
         };
-        modal_overlay(base, dialog, scheme)
+        // The Info popup is read-only and transient: its scrim dismisses it,
+        // unlike the dialogs that hold a decision or a completion chain.
+        let dismiss = matches!(self.open_modal(), Some(Modal::Info)).then_some(Message::CloseInfo);
+        modal_overlay(base, dialog, scheme, dismiss)
     }
 }
 
@@ -18010,6 +18615,7 @@ fn report_sheet<'a>(
         left: 20.0,
     });
     let scroll = scrollable(body)
+        .direction(app_scroll_direction())
         .style(visible_scrollbar_style)
         .width(Length::Fill)
         .height(Length::Fixed(body_height));
@@ -18088,6 +18694,56 @@ fn report_metric_row<'a>(label: &'a str, value: String, scheme: Scheme) -> Eleme
     ]
     .spacing(theme::SPACE_LG)
     .align_y(iced::Alignment::Center)
+    .width(Length::Fill)
+    .into()
+}
+
+/// One label/value line in the Info popup. The label keeps a fixed column so
+/// every value starts on the same left edge.
+fn info_row<'a>(
+    label: &'static str,
+    value: impl Into<Element<'a, Message>>,
+    scheme: Scheme,
+) -> Element<'a, Message> {
+    row![
+        text(label)
+            .size(theme::TEXT_XS)
+            .wrapping(NO_WRAP)
+            .color(scheme.muted)
+            .width(Length::Fixed(104.0)),
+        value.into(),
+    ]
+    .spacing(theme::SPACE_MD)
+    .align_y(iced::Alignment::Start)
+    .width(Length::Fill)
+    .into()
+}
+
+/// A full path and whether it is on disk. Paths wrap rather than ellipsize:
+/// the whole path is what the popup exists to show.
+fn info_path_value<'a>(
+    path: Option<&Path>,
+    present: bool,
+    scheme: Scheme,
+) -> Element<'a, Message> {
+    let Some(path) = path else {
+        return text("None")
+            .size(theme::TEXT_XS)
+            .color(scheme.muted)
+            .into();
+    };
+    column![
+        text(path.display().to_string())
+            .size(theme::TEXT_XS)
+            .wrapping(iced::widget::text::Wrapping::WordOrGlyph)
+            .color(scheme.text)
+            .width(Length::Fill),
+        text(if present { "On disk" } else { "Missing on disk" })
+            .size(theme::TEXT_2XS)
+            .wrapping(NO_WRAP)
+            .color(if present { scheme.muted } else { scheme.danger }),
+    ]
+    .spacing(2)
     .width(Length::Fill)
     .into()
 }
@@ -18565,9 +19221,11 @@ fn modal_overlay<'a>(
     base: impl Into<Element<'a, Message>>,
     dialog: impl Into<Element<'a, Message>>,
     scheme: Scheme,
+    dismiss: Option<Message>,
 ) -> Element<'a, Message> {
     let base = base.into();
     let dialog = dialog.into();
+    let on_scrim = dismiss.clone().unwrap_or(Message::Noop);
     let backdrop = mouse_area(
         container(horizontal_space())
             .width(Length::Fill)
@@ -18580,8 +19238,8 @@ fn modal_overlay<'a>(
     // `Idle` keeps the arrow cursor over the scrim instead of inheriting the
     // text or pointer cursor of whatever sits underneath.
     .interaction(mouse::Interaction::Idle)
-    .on_press(Message::Noop)
-    .on_right_press(Message::Noop)
+    .on_press(on_scrim.clone())
+    .on_right_press(on_scrim)
     .on_middle_press(Message::Noop)
     // The stack already withholds the wheel from layers under an area that
     // reports an interaction, but capturing it here says so outright: a
@@ -18663,26 +19321,6 @@ fn recent_reveal_dir(entry: &RecentEntry) -> Option<PathBuf> {
         .and_then(|path| path.parent())
         .filter(|parent| !parent.as_os_str().is_empty())
         .map(Path::to_path_buf)
-}
-
-/// The full path a history row stands for, shown on hover because the row
-/// itself is too narrow for it.
-fn recent_tooltip(entry: &RecentEntry, transcript_present: bool) -> String {
-    if transcript_present {
-        return entry
-            .transcript
-            .as_deref()
-            .map(|path| path.display().to_string())
-            .unwrap_or_default();
-    }
-    if let Some(transcript) = &entry.transcript {
-        return format!("Transcript missing: {}", transcript.display());
-    }
-    entry
-        .audio
-        .as_deref()
-        .map(|path| format!("No transcript: {}", path.display()))
-        .unwrap_or_else(|| "No output file".to_string())
 }
 
 /// The compact action at the right end of a recent tab's footer. `message` is
@@ -18771,6 +19409,21 @@ fn clock_time(unix: u64) -> String {
     }
 }
 
+/// A full local date and time, e.g. "Nov 8 2026, 14:05".
+fn full_datetime(unix: u64) -> String {
+    match local_datetime(unix) {
+        Some(when) => format!(
+            "{} {} {}, {:02}:{:02}",
+            month_short(when.month()),
+            when.day(),
+            when.year(),
+            when.hour(),
+            when.minute()
+        ),
+        None => "Unknown".to_string(),
+    }
+}
+
 fn local_datetime(unix: u64) -> Option<time::OffsetDateTime> {
     let utc = time::OffsetDateTime::from_unix_timestamp(unix as i64).ok()?;
     Some(utc.to_offset(local_offset()))
@@ -18818,6 +19471,7 @@ fn closes_row_menu(message: &Message) -> bool {
             | Message::ExportRecentAs(_, _)
             | Message::TranscribeQueueItem(_)
             | Message::OpenQueueRow(_)
+            | Message::OpenInfo(_, _)
             | Message::RemoveItem(_)
             | Message::RetryItem(_)
             | Message::RetryRecording(_)
@@ -18825,6 +19479,7 @@ fn closes_row_menu(message: &Message) -> bool {
             | Message::AddFiles
             | Message::AddFolder
             | Message::ClearQueue
+            | Message::ClearHistory
     )
 }
 
@@ -19087,6 +19742,25 @@ fn rename_id(index: usize) -> text_input::Id {
     text_input::Id::new(format!("rename-{index}"))
 }
 
+/// Scrollbar thickness shared by every scrollable in the app.
+///
+/// iced defaults both the lane and the scroller to 10 px, which reads as a
+/// panel edge in a UI this dense. Six pixels keeps the scroller a quiet pill
+/// while leaving the lane a sliver of gutter.
+const SCROLLBAR_WIDTH: f32 = 6.0;
+
+/// The one scrollbar geometry every scrollable in the app uses.
+fn app_scrollbar() -> scrollable::Scrollbar {
+    scrollable::Scrollbar::new()
+        .width(SCROLLBAR_WIDTH)
+        .scroller_width(SCROLLBAR_WIDTH)
+}
+
+/// Vertical direction carrying [`app_scrollbar`], for `Scrollable::direction`.
+fn app_scroll_direction() -> scrollable::Direction {
+    scrollable::Direction::Vertical(app_scrollbar())
+}
+
 fn scrollbar_style(theme: &iced::Theme, status: scrollable::Status) -> scrollable::Style {
     let mut style = scrollable::default(theme, status);
     let visible = matches!(
@@ -19094,11 +19768,17 @@ fn scrollbar_style(theme: &iced::Theme, status: scrollable::Status) -> scrollabl
         scrollable::Status::Hovered { .. } | scrollable::Status::Dragged { .. }
     );
     let ink = theme.palette().text;
-    style.vertical_rail.scroller.color = if visible {
-        Color { a: 0.5, ..ink }
-    } else {
-        Color::TRANSPARENT
-    };
+    for rail in [&mut style.vertical_rail, &mut style.horizontal_rail] {
+        // The lane is a gutter, not a panel: no fill, just the pill floating in it.
+        rail.background = None;
+        rail.border = iced::border::rounded(SCROLLBAR_WIDTH / 2.0);
+        rail.scroller.border = iced::border::rounded(SCROLLBAR_WIDTH / 2.0);
+        rail.scroller.color = if visible {
+            Color { a: 0.5, ..ink }
+        } else {
+            Color::TRANSPARENT
+        };
+    }
     style
 }
 
@@ -19113,12 +19793,49 @@ fn visible_scrollbar_style(theme: &iced::Theme, status: scrollable::Status) -> s
         scrollable::Status::Hovered { .. } | scrollable::Status::Dragged { .. }
     );
     let ink = theme.palette().text;
-    style.vertical_rail.scroller.color = if active {
-        Color { a: 0.55, ..ink }
-    } else {
-        Color { a: 0.28, ..ink }
-    };
+    for rail in [&mut style.vertical_rail, &mut style.horizontal_rail] {
+        // The lane is a gutter, not a panel: no fill, just the pill floating in it.
+        rail.background = None;
+        rail.border = iced::border::rounded(SCROLLBAR_WIDTH / 2.0);
+        rail.scroller.border = iced::border::rounded(SCROLLBAR_WIDTH / 2.0);
+        rail.scroller.color = if active {
+            Color { a: 0.55, ..ink }
+        } else {
+            Color { a: 0.28, ..ink }
+        };
+    }
     style
+}
+
+/// Turn a pixel budget into a character budget for `ellipsize_middle`, using
+/// the average advance of the name font. A real glyph measurement needs the
+/// text renderer, which is not available where the rows are built.
+fn name_char_budget(pixels: f32) -> usize {
+    let pixels = pixels.min(LEFT_PANEL_WIDTH * NAME_PANE_SHARE).max(0.0);
+    let advance = theme::TEXT_SM * NAME_ADVANCE_RATIO;
+    ((pixels / advance).floor() as usize).max(6)
+}
+
+/// Character budget for a recent row's name: the row's span less its padding,
+/// the gap and the slot the star and X always hold.
+fn recent_name_budget() -> usize {
+    let spare = FILE_ROW_WIDTH - 2.0 * ROW_PADDING_X - RECENT_ROW_GAP - RECENT_ACTIONS_WIDTH;
+    name_char_budget(spare)
+}
+
+/// Character budget for a queue row's name. A running row also carries the
+/// progress bar, so its name gets that much less room.
+fn queue_name_budget(running: bool) -> usize {
+    let gaps = if running { 4.0 } else { 3.0 };
+    let mut reserved = 2.0 * ROW_PADDING_X
+        + QUEUE_MARKER_WIDTH
+        + QUEUE_BADGE_WIDTH
+        + QUEUE_REMOVE_WIDTH
+        + gaps * QUEUE_ROW_GAP;
+    if running {
+        reserved += QUEUE_PROGRESS_WIDTH;
+    }
+    name_char_budget(FILE_ROW_WIDTH - reserved)
 }
 
 /// A speaker label filled with the same colour as its timeline swatch.
@@ -21799,11 +22516,37 @@ mod tests {
     }
 
     #[test]
-    fn pane_starts_on_the_queue_tab() {
+    fn pane_starts_on_the_history_tab() {
         let _guard = env_lock();
         let _config = ConfigEnv::new("pane-default");
         let app = pro_app();
-        assert_eq!(app.pane_tab, PaneTab::Queue);
+        assert_eq!(app.pane_tab, PaneTab::History);
+    }
+
+    #[test]
+    fn clear_history_drops_finished_items_and_keeps_the_queue() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("clear-history");
+        let mut app = pro_app();
+        app.recent.push(RecentEntry {
+            audio: Some(PathBuf::from("/media/talk.mp3")),
+            transcript: Some(PathBuf::from("/media/talk.txt")),
+            finished_at: 5,
+            favorite: true,
+            ..Default::default()
+        });
+        app.favorite_order.push("/media/talk.mp3".to_string());
+        app.queue.push(queue_item(PathBuf::from("/media/next.mp3")));
+
+        let _ = app.update(Message::ClearHistory);
+
+        assert!(app.recent.is_empty());
+        assert!(app.favorite_order.is_empty());
+        assert_eq!(app.queue.len(), 1, "queue work is not history");
+        // The cleared list is persisted, not just dropped in memory.
+        let (_, _, recent, favorites) = App::load_queue_and_batch();
+        assert!(recent.is_empty());
+        assert!(favorites.is_empty());
     }
 
     #[test]
@@ -21859,14 +22602,39 @@ mod tests {
     }
 
     #[test]
-    fn adding_files_selects_the_queue_tab() {
+    fn adding_a_file_that_needs_a_run_selects_the_queue_tab() {
         let _guard = env_lock();
         let _config = ConfigEnv::new("pane-add-files");
         let mut app = pro_app();
         app.pane_tab = PaneTab::History;
         let added = app.add_paths(vec![PathBuf::from("talk.mp3")]);
         assert_eq!(added.len(), 1);
+        // The pane moves once the transcript scan says nothing was restored.
+        app.begin_add_report(&added);
+        app.add_report_found(0);
         assert_eq!(app.pane_tab, PaneTab::Queue);
+        assert!(app.row_cue_active(PaneTab::Queue, 0));
+    }
+
+    #[test]
+    fn adding_a_file_with_a_transcript_selects_history() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("pane-add-restored");
+        let mut app = pro_app();
+        app.pane_tab = PaneTab::Queue;
+        let added = app.add_paths(vec![PathBuf::from("talk.mp3")]);
+        app.begin_add_report(&added);
+        app.add_report_found(1);
+        // The adoption removes the queue row and adds the History entry.
+        app.queue.clear();
+        app.recent.push(RecentEntry {
+            transcript: Some(PathBuf::from("talk.txt")),
+            finished_at: 1,
+            ..Default::default()
+        });
+        app.add_report_settled(Some(0));
+        assert_eq!(app.pane_tab, PaneTab::History);
+        assert!(app.row_cue_active(PaneTab::History, 0));
     }
 
     #[test]
@@ -21992,26 +22760,6 @@ mod tests {
         // the file manager.
         let _ = app.update(Message::RevealRecent(0));
         let _ = app.update(Message::RevealRecent(9));
-    }
-
-    #[test]
-    fn tooltip_names_the_history_output_path() {
-        let entry = RecentEntry {
-            audio: Some(PathBuf::from("/audio/talk.mp3")),
-            transcript: Some(PathBuf::from("/out/talk.txt")),
-            finished_at: 5,
-            duration: None,
-            speakers: None,
-        ..Default::default()
-        };
-        assert_eq!(recent_tooltip(&entry, true), "/out/talk.txt");
-        assert!(recent_tooltip(&entry, false).starts_with("Transcript missing"));
-
-        let audio_only = RecentEntry {
-            transcript: None,
-            ..entry
-        };
-        assert!(recent_tooltip(&audio_only, false).contains("/audio/talk.mp3"));
     }
 
     #[test]
@@ -24104,7 +24852,7 @@ mod tests {
 
     /// Every dialog, so a variant added to `Modal` cannot go untested: the
     /// escape and render passes below each walk this list.
-    const ALL_MODALS: [Modal; 9] = [
+    const ALL_MODALS: [Modal; 10] = [
         Modal::Reset,
         Modal::Summary,
         Modal::DeleteLine,
@@ -24114,6 +24862,7 @@ mod tests {
         Modal::Help,
         Modal::RunSetup,
         Modal::Rename,
+        Modal::Info,
     ];
 
     /// Raise one dialog the way the app would.
@@ -24139,6 +24888,16 @@ mod tests {
                 let _ = app.open_vocabulary();
             }
             Modal::Briefing => app.briefing = Some(BriefingState::NeedsModel),
+            Modal::Info => {
+                app.recent.push(RecentEntry {
+                    audio: Some(PathBuf::from("/media/talk.mp3")),
+                    transcript: Some(PathBuf::from("/media/talk.txt")),
+                    finished_at: 5,
+                    ..Default::default()
+                });
+                let index = app.recent.len() - 1;
+                app.info_open = app.capture_file_info(PaneTab::History, index);
+            }
         }
     }
 
@@ -25188,9 +25947,9 @@ mod tests {
     }
 
     #[test]
-    fn recording_stops_a_running_batch_and_leaves_the_queue() {
+    fn recording_is_blocked_while_a_file_is_transcribed() {
         let _guard = env_lock();
-        let _config = ConfigEnv::new("record-batch-preempt");
+        let _config = ConfigEnv::new("record-batch-blocked");
 
         let mut app = pro_app();
         app.queue.push(queue_item(PathBuf::from("/media/a.mp3")));
@@ -25199,14 +25958,20 @@ mod tests {
         app.status = Status::Running;
         app.run_kind = RunKind::Batch;
 
-        assert!(!app.record_blocked(), "a batch can be preempted");
+        assert!(app.record_blocked(), "a running file blocks recording");
         let _ = app.update(Message::StartRecording);
 
-        assert!(app.record_after_batch);
-        assert!(app.record.is_none(), "the recorder waits for AllDone");
-        assert!(matches!(app.status, Status::Cancelled));
-        assert!(matches!(app.queue[0].status, ItemStatus::Interrupted));
+        assert!(app.record.is_none(), "no recording session may start");
+        assert!(
+            matches!(app.status, Status::Running),
+            "the transcription must keep running"
+        );
+        assert!(matches!(app.queue[0].status, ItemStatus::Running));
         assert!(matches!(app.queue[1].status, ItemStatus::Pending));
+        assert_eq!(
+            app.toast.as_ref().map(|(message, _)| message.as_str()),
+            Some("Finish the current transcription before recording")
+        );
     }
 
     #[test]
@@ -25241,6 +26006,7 @@ mod tests {
         });
         app.queue.push(queue_item(PathBuf::from("/media/talk.mp3")));
         app.record = Some(countdown_session());
+        app.pane_tab = PaneTab::Queue;
 
         let _ = app.update(Message::SelectTab(PaneTab::History));
         assert_eq!(app.pane_tab, PaneTab::Queue);
@@ -26087,6 +26853,7 @@ mod tests {
         app.batch_total = 2.0;
         app.status = Status::Running;
         app.batch = true;
+        app.pane_tab = PaneTab::Queue;
 
         for (audio, txt) in &files {
             let event = Event::File {
@@ -26101,11 +26868,17 @@ mod tests {
                 },
             });
             let _ = app.update(Message::Tick);
+            // The finished row stays visible until the whole batch drains, so
+            // the queue never looks like work was dropped mid-run.
+            let row = app
+                .queue
+                .iter()
+                .find(|item| item.audio.as_deref() == Some(audio.as_path()))
+                .expect("a finished row must stay in the queue");
+            assert!(matches!(row.status, ItemStatus::Done));
             assert!(
-                !app.queue
-                    .iter()
-                    .any(|item| item.audio.as_deref() == Some(audio.as_path())),
-                "a finished row stayed in the queue"
+                app.recent.is_empty(),
+                "history is filled only when the batch ends"
             );
         }
         app.events.lock().unwrap().push_back(Event::AllDone);
@@ -26113,6 +26886,10 @@ mod tests {
 
         assert!(app.queue.is_empty());
         assert_eq!(app.recent.len(), 2);
+        // The pane lands on History with the last finished transcript on top
+        // and focused, instead of staying on an empty queue.
+        assert_eq!(app.pane_tab, PaneTab::History);
+        assert_eq!(app.selected_recent, Some(0));
         assert_eq!(
             app.stats_lines()
                 .iter()
@@ -26164,6 +26941,12 @@ mod tests {
         let _ = app.update(Message::Tick);
 
         assert!(app.current_index.is_none());
+        // The row stays until the batch ends; only then does it move on.
+        assert!(matches!(app.queue[0].status, ItemStatus::Done));
+        assert!(app.recent.is_empty());
+
+        app.events.lock().unwrap().push_back(Event::AllDone);
+        let _ = app.update(Message::Tick);
         assert!(app.queue.is_empty());
         assert_eq!(app.recent.len(), 1);
 
@@ -26171,7 +26954,7 @@ mod tests {
     }
 
     #[test]
-    fn no_done_rows_remain_after_done() {
+    fn done_rows_stay_until_the_batch_ends() {
         let _guard = env_lock();
         let _config = ConfigEnv::new("no-done-rows");
         let media = temp_dir("no-done-rows-media");
@@ -26198,13 +26981,19 @@ mod tests {
         });
         let _ = app.update(Message::Tick);
 
-        // The finished item is history: no queue row is left behind at all.
-        assert!(
-            app.queue
-                .iter()
-                .all(|item| item.audio.as_deref() != Some(audio.as_path())),
-            "a finished row stayed in the queue"
-        );
+        // The finished row stays visible as Done; it only moves to History
+        // when the batch ends, so queued work never seems to vanish.
+        let row = app
+            .queue
+            .iter()
+            .find(|item| item.audio.as_deref() == Some(audio.as_path()))
+            .expect("a finished row must stay in the queue");
+        assert!(matches!(row.status, ItemStatus::Done));
+        assert!(app.recent.is_empty());
+
+        app.events.lock().unwrap().push_back(Event::AllDone);
+        let _ = app.update(Message::Tick);
+        assert!(app.queue.is_empty());
         assert_eq!(app.recent.len(), 1);
         assert_eq!(app.recent[0].audio.as_deref(), Some(audio.as_path()));
         assert_eq!(
@@ -26332,6 +27121,34 @@ mod tests {
         let unicode = "日本語のインタビュー録音ファイル";
         assert!(ellipsize(unicode, 8).chars().count() <= 8);
         assert!(ellipsize(unicode, 8).ends_with('\u{2026}'));
+    }
+
+    #[test]
+    fn file_row_names_fill_three_quarters_of_the_pane() {
+        // A name that already fits the row is left alone.
+        for name in ["team-standup.mp3", "standup-notes.mp3"] {
+            assert_eq!(ellipsize_middle(name, recent_name_budget()), name);
+            assert_eq!(ellipsize_middle(name, queue_name_budget(true)), name);
+        }
+
+        let long = "an-interview-recording-with-a-very-long-name-and-more-notes.mp3";
+        let budget = recent_name_budget();
+        let shortened = ellipsize_middle(long, budget);
+        assert!(shortened.chars().count() <= budget);
+        assert!(shortened.contains('\u{2026}'));
+        assert!(shortened.ends_with(".mp3"));
+
+        // The elided name fills most of the room the pane gives it: close to
+        // three quarters of the pane, not the old fixed 24 characters.
+        let width = shortened.chars().count() as f32 * theme::TEXT_SM * NAME_ADVANCE_RATIO;
+        assert!(width > LEFT_PANEL_WIDTH * NAME_PANE_SHARE * 0.9);
+        assert!(budget > 24);
+
+        // The queue reserves the progress bar while running, so its budget is
+        // smaller there but still above the old fixed limits.
+        assert!(queue_name_budget(true) > 22);
+        assert!(queue_name_budget(false) > 30);
+        assert!(queue_name_budget(false) > queue_name_budget(true));
     }
 
     #[test]
@@ -28433,17 +29250,17 @@ mod tests {
         app.refresh_recent_presence();
         let scheme = app.scheme();
 
-        // History: Retranscribe stages the file (no setup dialog), reveal, copy,
-        // export and remove. Open, Add to queue and Copy transcript path are
-        // gone; the row's own press still opens it.
+        // History: Copy text and Export lead, then the separator and the
+        // actions that move the row. Removing an item is not offered here.
         let rows = app.row_menu_rows(PaneTab::History, Some(0), &scheme);
-        assert_eq!(rows[0].label, "Export as\u{2026}");
+        assert_eq!(rows[0].label, "Copy text");
+        assert_eq!(rows[1].label, "Export as\u{2026}");
+        assert!(rows[2].separator_before);
         assert!(!rows.iter().any(|row| row.label == "Copy path"));
         assert!(!rows.iter().any(|row| row.label == "Open"));
-        assert!(!rows.iter().any(|row| row.label == "Add to queue"));
         assert!(!rows.iter().any(|row| row.label == "Copy transcript path"));
         assert!(matches!(
-            menu_entry(&rows, "Retranscribe").action,
+            menu_entry(&rows, "Add to queue").action,
             Some(Message::EnqueueRecent(0))
         ));
         assert!(matches!(
@@ -28462,10 +29279,14 @@ mod tests {
             menu_entry(&rows, "Export as\u{2026}").action,
             Some(Message::OpenExportSubmenu)
         ));
-        assert!(matches!(
-            menu_entry(&rows, "Remove item").action,
-            Some(Message::RemoveRecent(0))
-        ));
+        assert!(!rows.iter().any(|row| row.label == "Remove item"));
+
+        // Info sits at the bottom, separated, and carries the row it was
+        // opened on rather than a live index.
+        let info = rows.last().expect("no Info row");
+        assert_eq!(info.label, "Info");
+        assert!(info.separator_before);
+        assert!(matches!(info.action, Some(Message::OpenInfo(PaneTab::History, 0))));
 
         // Queue: pending rows offer Transcribe; a running row offers only the
         // live transcript and no removal.
@@ -28478,11 +29299,16 @@ mod tests {
         assert!(!rows.iter().any(|row| row.label == "Copy path"));
         assert!(rows.iter().any(|row| row.label == "Remove"));
         assert!(rows.iter().any(|row| row.separator_before));
+        let info = rows.last().expect("no Info row");
+        assert_eq!(info.label, "Info");
+        assert!(info.separator_before);
+        assert!(matches!(info.action, Some(Message::OpenInfo(PaneTab::Queue, 0))));
 
         app.queue[0].status = ItemStatus::Running;
         let rows = app.row_menu_rows(PaneTab::Queue, Some(0), &scheme);
-        assert_eq!(rows.len(), 1);
+        assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].label, "Show live transcript");
+        assert_eq!(rows[1].label, "Info");
         assert!(!rows.iter().any(|row| row.label == "Remove"));
 
         // Empty space: Clear queue belongs to Queue only.
@@ -28492,6 +29318,46 @@ mod tests {
         assert!(!history_empty.iter().any(|row| row.label == "Clear queue"));
         assert!(history_empty.iter().any(|row| row.label == "Add files"));
         assert!(history_empty.iter().any(|row| row.label == "Add folder"));
+
+        let _ = std::fs::remove_dir_all(&media);
+    }
+
+    #[test]
+    fn info_from_a_history_row_captures_its_paths() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("row-info");
+        let media = temp_dir("row-info-media");
+        let audio = media.join("talk.mp3");
+        std::fs::write(&audio, b"audio").unwrap();
+        let transcript = media.join("talk.txt");
+        std::fs::write(&transcript, "[00:00] SPEAKER 1: hi\n").unwrap();
+
+        let mut app = pro_app();
+        app.recent.push(RecentEntry {
+            audio: Some(audio.clone()),
+            transcript: Some(transcript.clone()),
+            finished_at: unix_secs(),
+            duration: Some(8.0),
+            speakers: Some(1),
+            ..Default::default()
+        });
+        app.refresh_recent_presence();
+
+        let _ = app.update(Message::OpenInfo(PaneTab::History, 0));
+        assert_eq!(app.open_modal(), Some(Modal::Info));
+        let info = app.info_open.as_ref().expect("no Info captured");
+        assert_eq!(info.audio.as_deref(), Some(audio.as_path()));
+        assert_eq!(info.transcript.as_deref(), Some(transcript.as_path()));
+        assert!(info.audio_present);
+        assert!(info.transcript_present);
+        assert_eq!(info.duration, Some(8.0));
+        assert_eq!(info.speakers, Some(1));
+
+        // The dialog builds, and its own action closes it through `close_modal`.
+        let _ = app.view();
+        let _ = app.update(Message::CloseInfo);
+        assert!(app.info_open.is_none());
+        assert_eq!(app.open_modal(), None);
 
         let _ = std::fs::remove_dir_all(&media);
     }
@@ -28629,19 +29495,23 @@ mod tests {
         let _config = ConfigEnv::new("add-report");
 
         let mut app = pro_app();
-        app.begin_add_report(2);
+        app.begin_add_report(&[PathBuf::from("a.mp3"), PathBuf::from("b.mp3")]);
         // Nothing is shown before the scan answers: the count is still a guess.
         assert!(app.toast.is_none());
         app.add_report_found(1);
         assert!(app.toast.is_none(), "a lookup is still outstanding");
-        app.add_report_settled(true);
+        app.add_report_settled(Some(0));
         assert_eq!(
             app.toast.as_ref().map(|(text, _)| text.as_str()),
             Some("1 item restored, 1 item queued")
         );
 
         // No transcript anywhere: one clause, shown as soon as the scan says so.
-        app.begin_add_report(3);
+        app.begin_add_report(&[
+            PathBuf::from("c.mp3"),
+            PathBuf::from("d.mp3"),
+            PathBuf::from("e.mp3"),
+        ]);
         app.add_report_found(0);
         assert_eq!(
             app.toast.as_ref().map(|(text, _)| text.as_str()),
@@ -28649,9 +29519,9 @@ mod tests {
         );
 
         // A lookup that finds nothing readable leaves the file queued.
-        app.begin_add_report(1);
+        app.begin_add_report(&[PathBuf::from("f.mp3")]);
         app.add_report_found(1);
-        app.add_report_settled(false);
+        app.add_report_settled(None);
         assert_eq!(
             app.toast.as_ref().map(|(text, _)| text.as_str()),
             Some("1 item queued")
@@ -28801,7 +29671,11 @@ mod tests {
         app.status = Status::Running;
         assert_eq!(
             app.record_button_state(),
-            ("Record", true, "Stop the queue and record")
+            (
+                "Record",
+                false,
+                "Finish the current transcription before recording."
+            )
         );
 
         app.record = Some(RecordSession {
@@ -28849,6 +29723,36 @@ mod tests {
 
         let _ = app.update(Message::Escape);
         assert!(app.row_menu.is_none());
+    }
+
+    #[test]
+    fn an_open_row_menu_blocks_hover_beneath_it() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("row-menu-hover-block");
+        let mut app = pro_app();
+        for name in ["a.txt", "b.txt"] {
+            app.recent.push(RecentEntry {
+                transcript: Some(PathBuf::from(name)),
+                finished_at: 1,
+                ..Default::default()
+            });
+        }
+        let _ = app.update(Message::OpenRowMenu(PaneTab::History, Some(0)));
+        assert!(app.row_menu.is_some());
+
+        // Moving over another row while the menu is up must not tint it.
+        let _ = app.update(Message::RecentHover(Some(1)));
+        assert_eq!(app.recent_hover, None);
+
+        // The queue is blocked for the same reason.
+        app.queue.push(pending_queue_item("q.mp3"));
+        let _ = app.update(Message::QueueHover(Some(0)));
+        assert_eq!(app.queue_hover, None);
+
+        // Once the menu closes, hover works again.
+        let _ = app.update(Message::CloseRowMenu);
+        let _ = app.update(Message::RecentHover(Some(1)));
+        assert_eq!(app.recent_hover, Some(1));
     }
 
     #[test]
