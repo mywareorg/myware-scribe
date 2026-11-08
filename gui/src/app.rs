@@ -9097,11 +9097,21 @@ impl App {
                         // The item is history, not a queue row. Leave the batch
                         // summary and per-file toast alone: there is no batch.
                         let item = self.record.as_ref().and_then(|session| session.item);
+                        let transcript_for_view = transcript.clone();
                         if let Some(item) = item {
                             self.mark_item_ready(item, transcript, duration, Some(1));
                         }
                         self.record = None;
                         self.status = Status::Done;
+                        // Show the finished take as soon as it lands: select its
+                        // row and open its transcript instead of leaving the
+                        // pane on the generic live buffer.
+                        if let Some(item) = item {
+                            tasks.push(self.open_recent(
+                                item,
+                                Some((self.transcript.clone(), Some(transcript_for_view))),
+                            ));
+                        }
                         self.toast = Some(("Recording saved".to_string(), Instant::now()));
                     } else if let Some(index) = self.current.take() {
                         let speakers = stats
@@ -23720,6 +23730,7 @@ mod tests {
         app.run_kind = RunKind::Recording;
         app.status = Status::Running;
         app.timeline_duration = Some(3.0);
+        app.pane_tab = PaneTab::Recordings;
 
         app.events.lock().unwrap().push_back(Event::Done {
             txt: txt.display().to_string(),
@@ -23742,6 +23753,14 @@ mod tests {
             app.batch_summary.is_empty(),
             "a recording must not enter the batch summary"
         );
+        assert_eq!(app.selected_recent, Some(0));
+        let view = app
+            .selected_view
+            .as_ref()
+            .expect("the finished recording must be focused");
+        assert_eq!(view.source, txt);
+        assert_eq!(view.transcript, "[00:00] SPEAKER 1: hello\n");
+        assert_eq!(app.pane_tab, PaneTab::Recordings);
 
         let _ = std::fs::remove_dir_all(&dir);
     }
