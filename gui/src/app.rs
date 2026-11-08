@@ -196,6 +196,8 @@ const PANEL_ICON_DIAMETER: f32 = CONTROL_HEIGHT;
 /// glyph with 4 px padding, plus their 2 px gap. Reserved in both states so a
 /// name never reflows when the remove icon fades in.
 const RECENT_ACTIONS_WIDTH: f32 = 42.0;
+/// Width held for the queue row's remove action so hover does not reflow it.
+const QUEUE_REMOVE_WIDTH: f32 = 19.0;
 
 /// How close two presses on the same row must be to count as a double-click.
 const ROW_DOUBLE_CLICK: Duration = Duration::from_millis(400);
@@ -12103,11 +12105,17 @@ impl App {
             remove_label,
             &scheme,
         );
-        let mut actions = row![star].spacing(2).align_y(iced::Alignment::Center);
-        // Both actions keep their places whether or not the row is hovered, so
-        // the star never moves out from under the pointer.
-        actions = actions.push(remove);
-        let actions = container(actions)
+        // The action slot keeps its width so the name never reflows, but the
+        // star and X only appear while the row is under the pointer.
+        let actions_content: Element<Message> = if hovered {
+            row![star, remove]
+                .spacing(2)
+                .align_y(iced::Alignment::Center)
+                .into()
+        } else {
+            horizontal_space().into()
+        };
+        let actions = container(actions_content)
             .width(Length::Fixed(RECENT_ACTIONS_WIDTH))
             .align_x(iced::Alignment::End);
 
@@ -12625,15 +12633,23 @@ impl App {
             );
         }
 
-        content = content.push(
+        // Keep the X's slot so hovering does not reflow the row, but only draw
+        // the button while the pointer is on this row.
+        let remove: Element<Message> = if self.queue_hover == Some(index) {
             self.tip(
                 action(icon(ICON_X, 11.0))
                     .on_press_maybe(can_remove.then_some(Message::RemoveItem(index)))
                     .style(subtle_icon_button),
                 "Remove from queue",
                 &scheme,
-            ),
-        );
+            )
+            .into()
+        } else {
+            container(horizontal_space())
+                .width(Length::Fixed(QUEUE_REMOVE_WIDTH))
+                .into()
+        };
+        content = content.push(remove);
 
         let row_tint = Color {
             a: 0.12,
