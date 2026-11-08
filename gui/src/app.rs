@@ -3353,6 +3353,27 @@ impl App {
         !self.batch_summary.is_empty()
     }
 
+    /// File name shown on the player island: the open view's audio, the live
+    /// run's current file, or a neutral fallback when nothing is on screen.
+    fn shown_item_name(&self) -> String {
+        if let Some(view) = &self.selected_view {
+            return view
+                .audio
+                .as_ref()
+                .or(Some(&view.source))
+                .and_then(|path| path.file_name())
+                .and_then(|name| name.to_str())
+                .unwrap_or("transcript")
+                .to_string();
+        }
+        if matches!(self.status, Status::Running) {
+            return self
+                .current_file_name()
+                .unwrap_or_else(|| "Live transcript".to_string());
+        }
+        "Transcript".to_string()
+    }
+
     /// Audio file name of the item currently being transcribed.
     fn current_file_name(&self) -> Option<String> {
         if !matches!(self.status, Status::Running) {
@@ -14573,16 +14594,9 @@ impl App {
 
         // How wide the identity block may grow before the filename has to be
         // cut: everything the menus leave, less the badge.
-        let (name_budget, meta_budget) = header_identity_budgets(self.window_size.width);
+        let (_, meta_budget) = header_identity_budgets(self.window_size.width);
 
-        let (glyph, tint, title, meta) = if let Some(view) = &self.selected_view {
-            let name = view
-                .audio
-                .as_ref()
-                .or(Some(&view.source))
-                .and_then(|path| path.file_name())
-                .and_then(|name| name.to_str())
-                .unwrap_or("transcript");
+        let (glyph, tint, meta) = if let Some(view) = &self.selected_view {
             let mut meta = Vec::new();
             if let Some(duration) = view.duration.filter(|duration| *duration > 0.0) {
                 meta.push(format_secs(duration as f64));
@@ -14593,20 +14607,13 @@ impl App {
             {
                 meta.push("read-only".to_string());
             }
-            (ICON_FILE_TEXT, scheme.blue, name.to_string(), meta.join(" \u{00b7} "))
+            (ICON_FILE_TEXT, scheme.blue, meta.join(" \u{00b7} "))
         } else if running {
-            (
-                ICON_MIC,
-                scheme.green,
-                self.current_file_name()
-                    .unwrap_or_else(|| "Live transcript".to_string()),
-                "Transcribing now".to_string(),
-            )
+            (ICON_MIC, scheme.green, "Transcribing now".to_string())
         } else {
             (
                 ICON_FILE_TEXT,
                 scheme.blue,
-                "Transcript".to_string(),
                 if self.only_one_speaker() {
                     "Only one speaker detected".to_string()
                 } else {
@@ -14642,13 +14649,12 @@ impl App {
         } else {
             meta
         };
-        // Both lines are capped to the same pixel width, so neither can reach
-        // past the card's padding: the filename gets the whole budget, the meta
-        // gets the same width in its smaller size. `ellipsize_middle` keeps the
-        // tail, which is what preserves "Save As to keep" when the meta is cut.
-        let title = ellipsize_middle(&title, name_budget);
+        // The file name moved to the player island; this block keeps the meta
+        // line (duration, read-only state, edit state) under the badge.
+        // `ellipsize_middle` keeps the tail, which is what preserves
+        // "Save As to keep" when the meta is cut.
         let meta = ellipsize_middle(&meta, meta_budget);
-        let mut label = column![text(title).size(13).wrapping(NO_WRAP)].spacing(1);
+        let mut label = column![].spacing(1);
         if !meta.is_empty() {
             label = label.push(
                 text(meta)
@@ -14679,9 +14685,9 @@ impl App {
         // The identity sits one row gap after View, and the elastic space takes
         // whatever is left: the menus and the label block keep their own widths,
         // so only the space changes with the window.
-        // The file's identity is the shortcut back to the list it came from.
-        // It sits immediately after View, so it reads as the file the menus
-        // act on; clicking it shows History.
+        // Only the badge and meta line remain here; the file name moved to the
+        // player island. Clicking the identity still shows the list it came
+        // from, so it stays a shortcut back to History.
         let identity = mouse_area(
             row![badge, label]
                 .spacing(HEADER_BADGE_GAP)
@@ -15293,7 +15299,7 @@ impl App {
         spans
     }
 
-    /// Playback controls: play/pause, time, and a speed selector.
+    /// Playback controls: play/pause, time, speed selector and the file name.
     fn player_element(&self, scheme: &Scheme) -> Element<'_, Message> {
         let duration = self.shown_duration().unwrap_or(0.0).max(0.0);
         let locked = !self.can(license::Feature::Playback);
@@ -15418,10 +15424,23 @@ impl App {
             .into()
         };
 
-        row![skip_back, play_button, skip_forward, time, speed]
-            .spacing(6)
-            .align_y(iced::Alignment::Center)
-            .into()
+        let file_name = ellipsize_middle(&self.shown_item_name(), 36);
+        row![
+            skip_back,
+            play_button,
+            skip_forward,
+            time,
+            speed,
+            horizontal_space(),
+            text(file_name)
+                .size(11)
+                .wrapping(NO_WRAP)
+                .color(scheme.muted),
+        ]
+        .spacing(6)
+        .align_y(iced::Alignment::Center)
+        .width(Length::Fill)
+        .into()
     }
 
     /// The Find controls: the field, previous/next and the match count. The row
@@ -17609,10 +17628,11 @@ impl App {
             // that row so the card is two lines rather than three.
             container(
                 column![
-                    self.scrubber_element(&scheme),
-                    row![self.player_element(&scheme), horizontal_space(), caret]
+                    row![self.scrubber_element(&scheme), caret]
                         .spacing(theme::SPACE_SM)
-                        .align_y(iced::Alignment::Center),
+                        .align_y(iced::Alignment::Center)
+                        .width(Length::Fill),
+                    self.player_element(&scheme),
                 ]
                 .spacing(theme::SPACE_MD)
                 .width(Length::Fill),
