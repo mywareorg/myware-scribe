@@ -32,6 +32,7 @@ pub const RADIUS_LG: f32 = 16.0;
 pub const CONTROL_PADDING: [u16; 2] = [3, 5];
 
 /// Type scale.
+pub const TEXT_2XS: f32 = 11.0;
 pub const TEXT_XS: f32 = 12.0;
 pub const TEXT_SM: f32 = 13.0;
 pub const TEXT_MD: f32 = 14.0;

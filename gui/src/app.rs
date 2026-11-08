@@ -603,24 +603,6 @@ const REVEAL_INTERVAL_S: f32 = 0.15;
 const REVEAL_CATCHUP_S: f32 = 0.04;
 const REVEAL_BACKLOG: usize = 8;
 
-/// The upgrade prompt after a Free run opens on roughly one run in five.
-const UPSELL_SHOW_MOD: u64 = 5;
-
-/// Roll the per-completion nudge, so Free users see the paywall occasionally
-/// rather than after every run. FNV-1a spreads the clock seed evenly.
-fn upsell_roll() -> bool {
-    let seed = SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|elapsed| elapsed.as_nanos())
-        .unwrap_or(0);
-    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for byte in seed.to_le_bytes() {
-        hash ^= byte as u64;
-        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-    }
-    hash % UPSELL_SHOW_MOD == 0
-}
-
 /// Calibration result and selection for one preset.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct GpuProfile {
@@ -901,7 +883,10 @@ struct ModelDownload {
 }
 
 /// One line in the completion summary: a file name (styled prominently) or
-/// ordinary statistics text.
+/// ordinary statistics text. Used by the tests that pin the aggregate figures;
+/// the dialog itself now builds the typed report directly.
+#[cfg(test)]
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 enum SummaryLine {
     File(String),
@@ -1082,6 +1067,12 @@ pub enum Message {
     SeekBy(f32),
     SeekByChecked(f32, bool),
     CopyTranscript,
+    /// Copy the completion summary as plain text.
+    CopySummary,
+    /// Close the summary and show the one completed file it covers.
+    OpenSummaryTranscript,
+    /// Open an http(s) address in the system browser.
+    OpenUrl(String),
     SaveTranscriptAs,
     SaveTranscriptAsPicked(Option<PathBuf>),
     RevealOutput,
@@ -5314,6 +5305,10 @@ impl App {
                 } else {
                     self.help_open = Some(kind);
                     self.toast = None;
+                    return scrollable::snap_to(
+                        help_scroll_id(kind),
+                        scrollable::RelativeOffset { x: 0.0, y: 0.0 },
+                    );
                 }
                 Task::none()
             }
@@ -6151,6 +6146,31 @@ impl App {
                 }
                 self.toast = Some(("Copied transcript".to_string(), Instant::now()));
                 iced::clipboard::write(self.shown_transcript().to_string())
+            }
+            Message::CopySummary => {
+                let text = self.summary_text();
+                if text.is_empty() {
+                    return Task::none();
+                }
+                self.toast = Some(("Copied summary".to_string(), Instant::now()));
+                iced::clipboard::write(text)
+            }
+            Message::OpenSummaryTranscript => {
+                let target = self.summary_target();
+                // Closing through `close_modal` keeps the completion chain
+                // (tips, then rename) exactly as the Close button leaves it.
+                let chain = self.close_modal(Modal::Summary);
+                let open = match target {
+                    Some(index) => self.open_recent(index, None),
+                    None => Task::none(),
+                };
+                Task::batch([chain, open])
+            }
+            Message::OpenUrl(url) => {
+                if url.starts_with("https://") || url.starts_with("http://") {
+                    open_url(&url);
+                }
+                Task::none()
             }
             Message::RevealOutput => {
                 self.header_menu = None;
@@ -7357,19 +7377,8 @@ impl App {
             return false;
         }
         let generated = self.batch_summary.len();
-        // Free finishes on the summary; roughly one run in five also opens the
-        // upgrade prompt, so it stays a nudge instead of a nag.
-        if self.shows(license::Audience::FreeOnly) && upsell_roll() {
-            self.summary_open = false;
-            self.pending_rename = false;
-            self.pending_tips = false;
-            self.paywall_open = true;
-            self.toast = None;
-            if self.notifications {
-                notify("Hippo Transcribe", "Finished \u{00b7} saved locally");
-            }
-            return true;
-        }
+        // The report always appears after a run. The paywall is reached from
+        // the Pro controls, not instead of the result the user just waited for.
         self.summary_open = true;
         // The tips explain editing, so they follow the same gate as the rename
         // that shares this chain: no editing, no card.
@@ -9717,6 +9726,45 @@ impl App {
         (headers, rows)
     }
 
+    /// The one completed file a single-file summary covers, when it can be
+    /// found in History. Batch summaries have no single target.
+    fn summary_target(&self) -> Option<usize> {
+        let [run] = self.batch_summary.as_slice() else {
+            return None;
+        };
+        self.recent
+            .iter()
+            .position(|entry| recent_title(entry) == run.0)
+    }
+
+    /// The completion summary as plain text, for the Copy action.
+    fn summary_text(&self) -> String {
+        let runs = self.batch_runs();
+        if runs.is_empty() {
+            return String::new();
+        }
+        let audio: f64 = runs.iter().map(|(_, stats)| stats.audio_seconds).sum();
+        let run: f64 = runs.iter().map(|(_, stats)| stats.run_seconds).sum();
+        let speed = if run > 0.0 { audio / run } else { 0.0 };
+        let mut out = String::from("Summary\n");
+        out.push_str(&format!(
+            "{} file{} \u{00b7} {} audio \u{00b7} {} run \u{00b7} {speed:.1}\u{00d7} realtime\n",
+            runs.len(),
+            if runs.len() == 1 { "" } else { "s" },
+            human_duration(audio),
+            human_duration(run),
+        ));
+        for (name, stats) in runs {
+            out.push_str(&format!("\n{name}\n"));
+            for line in Self::single_stats_lines(stats) {
+                out.push_str(line.trim_start());
+                out.push('\n');
+            }
+        }
+        out
+    }
+
+    #[cfg(test)]
     fn stats_lines(&self) -> Vec<SummaryLine> {
         let mut lines: Vec<SummaryLine> = Vec::new();
         let runs = self.batch_runs();
@@ -14565,102 +14613,188 @@ impl App {
     /// had several files.
     fn summary_dialog(&self, scheme: &Scheme) -> Element<'_, Message> {
         let scheme = *scheme;
-        let lines = self.stats_lines();
-        // Same typography and section treatment as the About dialog: a
-        // 20 px title, muted body copy, section labels and dividers.
-        enum Block {
-            Section(String, Vec<String>),
-            Table(Vec<String>, Vec<Vec<String>>),
-        }
-        let mut blocks: Vec<Block> = Vec::new();
-        for line in &lines {
-            match line {
-                SummaryLine::File(name) => {
-                    blocks.push(Block::Section(name.clone(), Vec::new()))
+        let runs = self.batch_runs();
+        let audio: f64 = runs.iter().map(|(_, stats)| stats.audio_seconds).sum();
+        let run: f64 = runs.iter().map(|(_, stats)| stats.run_seconds).sum();
+        let speed = if run > 0.0 { audio / run } else { 0.0 };
+        let target = self.summary_target();
+
+        let mut body = column![].spacing(theme::SPACE_XL).width(Length::Fill);
+        let mut height = 58.0;
+        if runs.is_empty() {
+            body = body.push(
+                text("No completed run yet.")
+                    .size(theme::TEXT_SM)
+                    .color(scheme.muted),
+            );
+            height = 40.0;
+        } else {
+            body = body.push(report_kpi_strip(
+                &[
+                    ("Audio length", human_duration(audio)),
+                    ("Run time", human_duration(run)),
+                    ("Speed", format!("{speed:.1}\u{00d7}")),
+                ],
+                scheme,
+            ));
+            if runs.len() > 1 {
+                let (headers, rows) = Self::aggregate_table(runs);
+                body = body.push(report_table(
+                    &headers,
+                    &rows,
+                    &[
+                        iced::Alignment::Start,
+                        iced::Alignment::End,
+                        iced::Alignment::End,
+                        iced::Alignment::End,
+                        iced::Alignment::End,
+                        iced::Alignment::End,
+                    ],
+                    true,
+                    scheme,
+                ));
+                height += 22.0 + (rows.len() as f32) * 25.0 + theme::SPACE_LG;
+            }
+            for (name, stats) in runs {
+                let speakers = match stats.num_speakers {
+                    Some(count) => count.to_string(),
+                    None => stats.speakers.to_string(),
+                };
+                let speed = if stats.run_seconds > 0.0 {
+                    stats.audio_seconds / stats.run_seconds
+                } else {
+                    0.0
+                };
+                let mut section = column![].spacing(theme::SPACE_XS).width(Length::Fill);
+                section = section.push(
+                    text(name.as_str())
+                        .size(theme::TEXT_MD)
+                        .font(Font {
+                            weight: font::Weight::Medium,
+                            ..Font::DEFAULT
+                        })
+                        .wrapping(NO_WRAP),
+                );
+                section = section.push(
+                    text(format!("{} \u{00b7} {speakers} speakers", stats.preset))
+                        .size(theme::TEXT_2XS)
+                        .color(scheme.muted),
+                );
+                let mut metrics = column![].spacing(theme::SPACE_XS);
+                for (label, value) in [
+                    ("Audio length", human_duration(stats.audio_seconds)),
+                    ("Run time", human_duration(stats.run_seconds)),
+                    ("Speed", format!("{speed:.1}\u{00d7} realtime")),
+                    ("Speakers", speakers),
+                ] {
+                    metrics = metrics.push(report_metric_row(label, value, scheme));
                 }
-                SummaryLine::Body(text_line) => match blocks.last_mut() {
-                    Some(Block::Section(_, rows)) => rows.push(text_line.clone()),
-                    Some(Block::Table(..)) | None => {
-                        blocks.push(Block::Section(String::new(), vec![text_line.clone()]))
-                    }
-                },
-                SummaryLine::Table(headers, rows) => {
-                    blocks.push(Block::Table(headers.clone(), rows.clone()))
+                section = section.push(container(metrics).padding(iced::Padding {
+                    top: theme::SPACE_MD,
+                    right: 0.0,
+                    bottom: 0.0,
+                    left: 0.0,
+                }));
+                height += 20.0 + 14.0 + 8.0 + 4.0 * 20.0 + theme::SPACE_LG;
+                if !stats.speaker_stats.is_empty() {
+                    let mut sorted: Vec<(&String, &backend::SpeakerStat)> =
+                        stats.speaker_stats.iter().collect();
+                    sorted.sort_by(|a, b| {
+                        b.1.seconds
+                            .partial_cmp(&a.1.seconds)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    });
+                    let rows: Vec<Vec<String>> = sorted
+                        .into_iter()
+                        .map(|(speaker, stat)| {
+                            vec![
+                                speaker.clone(),
+                                format_secs(stat.seconds as f64),
+                                stat.segments.to_string(),
+                                stat.words.to_string(),
+                            ]
+                        })
+                        .collect();
+                    section = section.push(
+                        container(report_table(
+                            &[
+                                "Speaker".to_string(),
+                                "Time".to_string(),
+                                "Segments".to_string(),
+                                "Words".to_string(),
+                            ],
+                            &rows,
+                            &[
+                                iced::Alignment::Start,
+                                iced::Alignment::End,
+                                iced::Alignment::End,
+                                iced::Alignment::End,
+                            ],
+                            false,
+                            scheme,
+                        ))
+                        .padding(iced::Padding {
+                            top: theme::SPACE_MD,
+                            right: 0.0,
+                            bottom: 0.0,
+                            left: 0.0,
+                        }),
+                    );
+                    height += theme::SPACE_MD + 22.0 + rows.len() as f32 * 25.0;
                 }
+                body = body.push(section);
+                height += theme::SPACE_LG;
             }
         }
-
-        let mut body = column![text("Summary").size(20)].spacing(8);
-        for (index, block) in blocks.iter().enumerate() {
-            if index > 0 {
-                body = body.push(settings_divider(scheme));
-            }
-            match block {
-                Block::Section(name, rows) => {
-                    let mut section = column![].spacing(4);
-                    if !name.is_empty() {
-                        // Owned string: the dialog outlives the local list.
-                        section = section.push(
-                            text(name.clone())
-                                .size(11)
-                                .wrapping(NO_WRAP)
-                                .font(Font {
-                                    weight: font::Weight::Bold,
-                                    ..Font::DEFAULT
-                                })
-                                .color(scheme.muted),
-                        );
-                    }
-                    for row in rows {
-                        section = section.push(
-                            text(row.clone()).size(theme::TEXT_SM).color(scheme.muted),
-                        );
-                    }
-                    body = body.push(section);
-                }
-                Block::Table(headers, rows) => {
-                    body = body.push(summary_table(headers, rows, scheme));
-                }
-            }
-        }
-
-        // Cap the scrollable height so long queues stay usable.
-        let cap = (self.window_size.height * 0.8).max(300.0);
-        let table_rows: f32 = blocks
-            .iter()
-            .map(|block| match block {
-                Block::Table(_, rows) => rows.len() as f32 + 1.0,
-                Block::Section(..) => 0.0,
-            })
-            .sum();
-        let estimated =
-            (lines.len() as f32 + blocks.len() as f32 + table_rows + 1.0) * 22.0 + 24.0;
-        let height = estimated.min(cap);
-
-        let scroll = scrollable(body)
-            .id(summary_id())
-            .spacing(theme::SPACE_SM)
-            .style(visible_scrollbar_style)
-            .width(Length::Fill)
-            .height(Length::Fixed(height));
-
-        let col = column![
-            container(scroll).width(Length::Fill),
-            container(
-                row![action_text("Close")
-                    .on_press(Message::CloseSummary)
-                    .style(color_button(scheme.blue, scheme.on_accent))]
-                .spacing(8),
-            )
-            .width(Length::Fill)
-            .align_x(iced::Alignment::End),
+        let mut footer = row![
+            action_text("Copy summary")
+                .on_press(Message::CopySummary)
+                .style(pill_button_secondary),
         ]
-        .spacing(8);
+        .spacing(theme::SPACE_MD)
+        .align_y(iced::Alignment::Center);
+        match target {
+            Some(_) => {
+                footer = footer
+                    .push(
+                        action_text("Open transcript")
+                            .on_press(Message::OpenSummaryTranscript)
+                            .style(color_button(scheme.blue, scheme.on_accent)),
+                    )
+                    .push(
+                        action_text("Done")
+                            .on_press(Message::CloseSummary)
+                            .style(pill_button_secondary),
+                    );
+            }
+            None => {
+                footer = footer.push(
+                    action_text("Done")
+                        .on_press(Message::CloseSummary)
+                        .style(color_button(scheme.blue, scheme.on_accent)),
+                );
+            }
+        }
 
-        // The tabulation needs six columns; the plain per-file summary
-        // does not.
-        let wide = blocks.iter().any(|block| matches!(block, Block::Table(..)));
-        modal_card(col, if wide { 520.0 } else { 460.0 }, scheme)
+        let meta = format!(
+            "{} file{} \u{00b7} {} audio \u{00b7} {} run",
+            runs.len(),
+            if runs.len() == 1 { "" } else { "s" },
+            human_duration(audio),
+            human_duration(run),
+        );
+        report_sheet(
+            "Run complete",
+            "Summary",
+            Some(meta),
+            if runs.len() > 1 { 620.0 } else { 560.0 },
+            self.window_size.height,
+            Some(summary_id()),
+            height,
+            body.into(),
+            footer.into(),
+            scheme,
+        )
     }
 
     /// The delete confirmation, previewing the line that is about to go.
@@ -14730,189 +14864,20 @@ impl App {
         let Some(kind) = self.help_open else {
             return container(horizontal_space()).into();
         };
-        let mut col = column![text(kind.label()).size(20)].spacing(8);
-        match kind {
-            HelpKind::Shortcuts => {
-                // Key in a fixed-width column so the descriptions line up. 140
-                // leaves the longest description room to sit on one line in the
-                // 460 px card.
-                const KEY_WIDTH: f32 = 140.0;
-                for (key, description) in [
-                    ("Ctrl+O", "Add files"),
-                    ("Ctrl+S", "Save transcript as"),
-                    ("Ctrl+,", "Settings"),
-                    ("Ctrl+F", "Find"),
-                    ("Ctrl+Enter", "Transcribe"),
-                    ("Ctrl + / - / 0", "Transcript font zoom"),
-                    ("Space", "Play / pause"),
-                    ("Left / Right", "Seek \u{00b1}5 s"),
-                    ("Up / Down", "Move through the transcript"),
-                    ("F", "Follow the active line"),
-                    (
-                        "T / S / J / K / C",
-                        "Timestamps / SMS / Join / Karaoke / Confidence",
-                    ),
-                    ("Alt+Enter", "Edit the active line"),
-                    ("Alt+Up / Alt+Down", "Join the edited line up / down"),
-                    ("Ctrl+Shift+K", "Split the edited line at cursor"),
-                    ("Ctrl+Z", "Undo typing in the line field"),
-                    // Enter means one thing in the search and another in the
-                    // editor, so each context gets its own row rather than one
-                    // line standing for both.
-                    ("Enter", "Search: next match"),
-                    ("Shift+Enter", "Search: previous match"),
-                    ("Enter", "Line editor: save"),
-                    ("Esc", "Cancel the editor or dismiss"),
-                    ("Tab", "Rename dialog: next field"),
-                ] {
-                    col = col.push(
-                        row![
-                            text(key)
-                                .size(theme::TEXT_SM)
-                                .width(Length::Fixed(KEY_WIDTH)),
-                            text(description).size(theme::TEXT_SM).color(scheme.muted),
-                        ]
-                        .spacing(12),
-                    );
-                }
-            }
-            HelpKind::About => {
-                col =
-                    col.push(
-                        column![
-                        text(format!("Hippo Transcribe {}", env!("CARGO_PKG_VERSION")))
-                            .size(theme::TEXT_MD)
-                            .font(Font {
-                                weight: font::Weight::Medium,
-                                ..Font::DEFAULT
-                            }),
-                        text("Private, offline speaker diarization + transcription.")
-                            .size(theme::TEXT_SM)
-                            .color(scheme.muted),
-                        text("The name comes from HIPAA. Your recordings stay on this machine.")
-                            .size(theme::TEXT_SM)
-                            .color(scheme.muted),
-                        text("Diarization: pyannote segmentation + wespeaker (sherpa-onnx).")
-                            .size(theme::TEXT_SM)
-                            .color(scheme.muted),
-                        text("Transcription: whisper.cpp.")
-                            .size(theme::TEXT_SM)
-                            .color(scheme.muted),
-                        text("Runs offline once the models are downloaded.")
-                            .size(theme::TEXT_SM)
-                            .color(scheme.muted),
-                    ]
-                        .spacing(4),
-                    );
-                col = col.push(settings_divider(scheme));
-                col = col.push(
-                    column![
-                        settings_section_label("Privacy", scheme),
-                        text("No cloud. No account. No telemetry.")
-                            .size(theme::TEXT_SM)
-                            .color(scheme.text),
-                        text("Audio and transcripts stay on this device.")
-                            .size(theme::TEXT_SM)
-                            .color(scheme.muted),
-                        text("Once models are installed the free tier makes no network requests.")
-                            .size(theme::TEXT_SM)
-                            .color(scheme.muted),
-                    ]
-                    .spacing(4),
-                );
-                col = col.push(settings_divider(scheme));
-                col = col.push(
-                    column![
-                        settings_section_label("License", scheme),
-                        text("Free software, licensed under GPLv3.").size(theme::TEXT_MD),
-                        text("Copyright (C) 2026 Sean Wu.")
-                            .size(theme::TEXT_SM)
-                            .color(scheme.muted),
-                        text("Source: https://gitlab.com/librewarelive/hippo-transcribe")
-                            .size(theme::TEXT_SM)
-                            .color(scheme.muted),
-                        text("Provided without warranty; see the license for details.")
-                            .size(theme::TEXT_SM)
-                            .color(scheme.muted),
-                        settings_section_label("Models", scheme),
-                        text("pyannote (MIT), wespeaker (CC BY 4.0), Whisper (MIT), Qwen2.5 (Apache-2.0).")
-                            .size(theme::TEXT_SM)
-                            .color(scheme.muted),
-                        text("Help → Licenses has the full notices.")
-                            .size(theme::TEXT_SM)
-                            .color(scheme.muted),
-                    ]
-                    .spacing(4),
-                );
-            }
+        let (body, height, width): (Element<'_, Message>, f32, f32) = match kind {
+            HelpKind::About => (about_page(scheme), 330.0, 560.0),
+            HelpKind::Shortcuts => (shortcuts_page(scheme), 600.0, 560.0),
             HelpKind::Licenses => {
-                let mut notices = column![].spacing(4).width(Length::Fill);
-                for line in LICENSES_TEXT.lines() {
-                    let line = line.trim_end();
-                    if line.is_empty() {
-                        notices = notices.push(container(horizontal_space()).height(Length::Fixed(6.0)));
-                    } else if let Some(heading) = line.strip_prefix("## ") {
-                        notices = notices.push(
-                            text(heading.to_string())
-                                .size(theme::TEXT_SM)
-                                .font(Font {
-                                    weight: font::Weight::Bold,
-                                    ..Font::DEFAULT
-                                }),
-                        );
-                    } else if let Some(heading) = line.strip_prefix("# ") {
-                        notices = notices.push(
-                            text(heading.to_string()).size(theme::TEXT_MD).font(Font {
-                                weight: font::Weight::Bold,
-                                ..Font::DEFAULT
-                            }),
-                        );
-                    } else {
-                        notices = notices.push(
-                            text(line.to_string())
-                                .size(theme::TEXT_XS)
-                                .color(scheme.muted),
-                        );
-                    }
-                }
-                col = col.push(
-                    scrollable(notices)
-                        .height(Length::Fixed(340.0))
-                        .width(Length::Fill)
-                        .style(visible_scrollbar_style),
-                );
+                let lines = LICENSES_TEXT.lines().count() as f32;
+                (licences_page(scheme), lines * 21.0 + 200.0, 640.0)
             }
-            HelpKind::EditingTips => {
-                for (title, detail) in [
-                    ("Double-click Speaker", "Enter editing mode"),
-                    ("Right-Click Speaker", "Change Speaker"),
-                    ("Edit >> Rename Speakers", "Bulk rename speakers"),
-                ] {
-                    col = col.push(
-                        column![
-                            text(title).size(theme::TEXT_MD).font(Font {
-                                weight: font::Weight::Bold,
-                                ..Font::DEFAULT
-                            }),
-                            text(detail).size(theme::TEXT_SM).color(scheme.muted),
-                        ]
-                        .spacing(2),
-                    );
-                }
-                col = col.push(settings_divider(scheme));
-            }
-            HelpKind::Console | HelpKind::Settings => {}
-        }
-        // The tips carry their own switch, and it shares the row with Close.
-        // Only the box is pressable: the words beside it are a label, not a
-        // second way to hit the same toggle.
-        let mut footer = row![].spacing(8).align_y(iced::Alignment::Center);
-        footer = footer.push(
-            action_text("Close")
-                .on_press(Message::CloseHelp)
-                .style(color_button(scheme.blue, scheme.on_accent)),
-        );
-        footer = footer.push(horizontal_space());
+            HelpKind::EditingTips => (editing_tips_page(scheme), 230.0, 560.0),
+            HelpKind::Console | HelpKind::Settings => (horizontal_space().into(), 40.0, 560.0),
+        };
+
+        let mut footer = row![]
+            .spacing(theme::SPACE_MD)
+            .align_y(iced::Alignment::Center);
         if kind == HelpKind::EditingTips {
             footer = footer.push(
                 action(tips_check(!self.editing_tips, scheme))
@@ -14922,13 +14887,30 @@ impl App {
             );
             footer = footer.push(
                 text("Don't show these tips again")
-                    .size(theme::TEXT_XS)
+                    .size(theme::TEXT_2XS)
                     .wrapping(NO_WRAP)
                     .color(scheme.muted),
             );
+            footer = footer.push(horizontal_space());
         }
-        col = col.push(container(footer).width(Length::Fill));
-        modal_card(col, 460.0, scheme)
+        footer = footer.push(
+            action_text("Done")
+                .on_press(Message::CloseHelp)
+                .style(color_button(scheme.blue, scheme.on_accent)),
+        );
+
+        report_sheet(
+            "Help",
+            kind.label(),
+            (kind == HelpKind::Licenses).then(|| "Third-party notices".to_string()),
+            width,
+            self.window_size.height,
+            Some(help_scroll_id(kind)),
+            height,
+            body,
+            footer.into(),
+            scheme,
+        )
     }
 
     /// The speaker rename form: one field per speaker, saved as a batch.
@@ -17942,78 +17924,628 @@ fn settings_divider<'a>(scheme: Scheme) -> Element<'a, Message> {
         .into()
 }
 
-/// A fixed-column table for the cross-run summary: bold muted header, one
-/// right-aligned row per file, then a separated total row.
-fn summary_table(
+/// The surface shared by the Summary and Help dialogs: no built-in padding, so
+/// each sheet can draw full-width header and footer rules.
+fn report_card<'a>(
+    content: impl Into<Element<'a, Message>>,
+    width: f32,
+    scheme: Scheme,
+) -> Element<'a, Message> {
+    container(content)
+        .width(Length::Fixed(width))
+        .style(move |_theme| container::Style {
+            background: Some(scheme.dialog_bg.into()),
+            text_color: Some(scheme.text),
+            border: if theme::is_dark_scheme(&scheme) {
+                iced::border::Border {
+                    color: scheme.border,
+                    width: 1.0,
+                    radius: 16.0.into(),
+                }
+            } else {
+                iced::border::rounded(16.0)
+            },
+            shadow: dialog_shadow(),
+            ..container::Style::default()
+        })
+        .into()
+}
+
+/// One report sheet: header (eyebrow, title, optional meta), a scrolling body
+/// between hairlines, and a right-aligned footer.
+///
+/// Height is driven by the body estimate and capped at 80% of the window; only
+/// the body scrolls, so the title and actions stay put.
+#[allow(clippy::too_many_arguments)]
+fn report_sheet<'a>(
+    eyebrow: &'a str,
+    title: &'a str,
+    meta: Option<String>,
+    width: f32,
+    window_height: f32,
+    id: Option<scrollable::Id>,
+    body_height: f32,
+    body: Element<'a, Message>,
+    footer: Element<'a, Message>,
+    scheme: Scheme,
+) -> Element<'a, Message> {
+    let header_height = 20.0
+        + theme::TEXT_2XS * LINE_HEIGHT_FACTOR
+        + theme::SPACE_XS
+        + theme::TEXT_LG * LINE_HEIGHT_FACTOR
+        + 16.0
+        + if meta.is_some() {
+            theme::SPACE_XS + theme::TEXT_2XS * LINE_HEIGHT_FACTOR
+        } else {
+            0.0
+        };
+    let footer_height = theme::SPACE_LG * 2.0 + CONTROL_HEIGHT;
+    let max_body =
+        (window_height * 0.8 - header_height - footer_height - 2.0 - theme::SPACE_LG * 2.0)
+            .max(160.0);
+    let body_height = body_height.clamp(80.0, max_body);
+
+    let mut header = column![
+        text(eyebrow)
+            .size(theme::TEXT_2XS)
+            .font(Font {
+                weight: font::Weight::Medium,
+                ..Font::DEFAULT
+            })
+            .color(scheme.muted),
+        text(title).size(theme::TEXT_LG),
+    ]
+    .spacing(theme::SPACE_XS);
+    if let Some(meta) = meta {
+        header = header.push(text(meta).size(theme::TEXT_2XS).color(scheme.muted));
+    }
+
+    let body = container(body).width(Length::Fill).padding(iced::Padding {
+        top: 0.0,
+        right: 20.0,
+        bottom: 0.0,
+        left: 20.0,
+    });
+    let scroll = scrollable(body)
+        .style(visible_scrollbar_style)
+        .width(Length::Fill)
+        .height(Length::Fixed(body_height));
+    let scroll = match id {
+        Some(id) => scroll.id(id),
+        None => scroll,
+    };
+
+    let card = column![
+        container(header)
+            .width(Length::Fill)
+            .padding(iced::Padding {
+                top: 20.0,
+                right: 20.0,
+                bottom: 16.0,
+                left: 20.0,
+            }),
+        settings_divider(scheme),
+        container(scroll)
+            .width(Length::Fill)
+            .padding(iced::Padding {
+                top: theme::SPACE_LG,
+                right: 0.0,
+                bottom: theme::SPACE_LG,
+                left: 0.0,
+            }),
+        settings_divider(scheme),
+        container(footer)
+            .width(Length::Fill)
+            .align_x(iced::Alignment::End)
+            .padding(iced::Padding {
+                top: theme::SPACE_LG,
+                right: 20.0,
+                bottom: theme::SPACE_LG,
+                left: 20.0,
+            }),
+    ]
+    .spacing(0);
+
+    report_card(card, width, scheme)
+}
+
+fn report_section<'a>(label: &'a str, scheme: Scheme) -> Element<'a, Message> {
+    text(label)
+        .size(theme::TEXT_MD)
+        .font(Font {
+            weight: font::Weight::Medium,
+            ..Font::DEFAULT
+        })
+        .color(scheme.text)
+        .into()
+}
+
+fn report_label<'a>(label: &'a str, scheme: Scheme) -> Element<'a, Message> {
+    text(label)
+        .size(theme::TEXT_2XS)
+        .font(Font {
+            weight: font::Weight::Medium,
+            ..Font::DEFAULT
+        })
+        .wrapping(NO_WRAP)
+        .color(scheme.muted)
+        .into()
+}
+
+fn report_metric_row<'a>(label: &'a str, value: String, scheme: Scheme) -> Element<'a, Message> {
+    row![
+        text(label)
+            .size(theme::TEXT_SM)
+            .color(scheme.muted)
+            .width(Length::Fill),
+        text(value)
+            .size(theme::TEXT_SM)
+            .wrapping(NO_WRAP)
+            .color(scheme.text),
+    ]
+    .spacing(theme::SPACE_LG)
+    .align_y(iced::Alignment::Center)
+    .width(Length::Fill)
+    .into()
+}
+
+fn report_kpi_strip(items: &[(&'static str, String)], scheme: Scheme) -> Element<'static, Message> {
+    let mut strip = row![]
+        .spacing(theme::SPACE_XL)
+        .align_y(iced::Alignment::Center)
+        .width(Length::Fill);
+    for (index, (label, value)) in items.iter().enumerate() {
+        if index > 0 {
+            strip = strip.push(
+                container(horizontal_space())
+                    .width(Length::Fixed(1.0))
+                    .height(Length::Fixed(28.0))
+                    .style(move |_theme| container::Style {
+                        background: Some(scheme.border.into()),
+                        ..container::Style::default()
+                    }),
+            );
+        }
+        strip = strip.push(
+            column![
+                text(value.clone()).size(theme::TEXT_MD).font(Font {
+                    weight: font::Weight::Medium,
+                    ..Font::DEFAULT
+                }),
+                text(*label).size(theme::TEXT_2XS).color(scheme.muted),
+            ]
+            .spacing(theme::SPACE_2XS)
+            .width(Length::Fill),
+        );
+    }
+    strip.into()
+}
+
+/// A fixed-column report table with numeric end-alignment and an optional total
+/// row separated by a rule.
+fn report_table(
     headers: &[String],
     rows: &[Vec<String>],
+    aligns: &[iced::Alignment],
+    total_last: bool,
     scheme: Scheme,
 ) -> Element<'static, Message> {
-    // The name column absorbs the remaining width; every numeric column has a
-    // fixed width so the figures line up without a monospace font.
     let column_width = |index: usize| -> Length {
-        match index {
-            0 => Length::Fill,
-            3 => Length::Fixed(44.0),
-            4 => Length::Fixed(30.0),
-            5 => Length::Fixed(42.0),
-            _ => Length::Fixed(56.0),
+        if index == 0 {
+            Length::Fill
+        } else {
+            Length::Fixed(62.0)
         }
     };
-    let mut table = column![].spacing(3);
-    let header = headers
-        .iter()
-        .enumerate()
-        .fold(row![].spacing(6), |line, (index, cell)| {
-            let label = text(cell.clone())
-                .size(10)
-                .wrapping(NO_WRAP)
-                .width(column_width(index))
-                .align_x(if index == 0 {
-                    iced::Alignment::Start
-                } else {
-                    iced::Alignment::End
-                })
-                .font(Font {
-                    weight: font::Weight::Bold,
-                    ..Font::DEFAULT
-                })
-                .color(scheme.muted);
-            line.push(label)
-        });
-    table = table.push(header);
-    let total_index = rows.len().saturating_sub(1);
-    for (index, cells) in rows.iter().enumerate() {
-        if index == total_index && rows.len() > 1 {
-            table = table.push(settings_divider(scheme));
-        }
-        let is_total = index == total_index && rows.len() > 1;
-        let line = cells
+    let align_of = |index: usize| -> iced::Alignment {
+        aligns.get(index).copied().unwrap_or(iced::Alignment::Start)
+    };
+    let mut table = column![].spacing(theme::SPACE_XS).width(Length::Fill);
+    let header =
+        headers
             .iter()
             .enumerate()
-            .fold(row![].spacing(6), |line, (column, cell)| {
-                let width = column_width(column);
+            .fold(row![].spacing(theme::SPACE_SM), |line, (index, cell)| {
+                line.push(
+                    text(cell.clone())
+                        .size(theme::TEXT_2XS)
+                        .wrapping(NO_WRAP)
+                        .width(column_width(index))
+                        .align_x(align_of(index))
+                        .font(Font {
+                            weight: font::Weight::Medium,
+                            ..Font::DEFAULT
+                        })
+                        .color(scheme.muted),
+                )
+            });
+    table = table.push(header);
+    table = table.push(settings_divider(scheme));
+    let total_index = rows.len().saturating_sub(1);
+    for (index, cells) in rows.iter().enumerate() {
+        let is_total = total_last && index == total_index && rows.len() > 1;
+        if is_total {
+            table = table.push(settings_divider(scheme));
+        }
+        let line = cells.iter().enumerate().fold(
+            row![].spacing(theme::SPACE_SM),
+            |line, (column, cell)| {
                 let mut label = text(cell.clone())
                     .size(theme::TEXT_SM)
                     .wrapping(NO_WRAP)
-                    .width(width)
-                    .align_x(if column == 0 {
-                        iced::Alignment::Start
-                    } else {
-                        iced::Alignment::End
-                    })
+                    .width(column_width(column))
+                    .align_x(align_of(column))
                     .color(if is_total { scheme.text } else { scheme.muted });
                 if is_total {
                     label = label.font(Font {
-                        weight: font::Weight::Bold,
+                        weight: font::Weight::Medium,
                         ..Font::DEFAULT
                     });
                 }
                 line.push(label)
-            });
+            },
+        );
         table = table.push(line);
+        if index + 1 < rows.len() && !(total_last && index + 2 == rows.len()) {
+            table = table.push(settings_divider(scheme));
+        }
     }
     table.into()
+}
+
+fn report_meta_row<'a>(label: &'a str, value: &'a str, scheme: Scheme) -> Element<'a, Message> {
+    row![
+        container(report_label(label, scheme)).width(Length::Fixed(88.0)),
+        text(value)
+            .size(theme::TEXT_SM)
+            .wrapping(NO_WRAP)
+            .color(scheme.text),
+    ]
+    .spacing(theme::SPACE_SM)
+    .align_y(iced::Alignment::Center)
+    .width(Length::Fill)
+    .into()
+}
+
+fn keycap<'a>(label: &'a str, scheme: Scheme) -> Element<'a, Message> {
+    container(
+        text(label)
+            .size(theme::TEXT_XS)
+            .wrapping(NO_WRAP)
+            .color(scheme.text),
+    )
+    .width(Length::Fixed(132.0))
+    .align_x(iced::Alignment::Center)
+    .padding([theme::SPACE_XS as u16, theme::SPACE_SM as u16])
+    .style(move |_theme| container::Style {
+        background: Some(scheme.field_bg.into()),
+        border: iced::border::Border {
+            color: scheme.border,
+            width: 1.0,
+            radius: 4.0.into(),
+        },
+        ..container::Style::default()
+    })
+    .into()
+}
+
+fn shortcut_row<'a>(key: &'a str, description: &'a str, scheme: Scheme) -> Element<'a, Message> {
+    row![
+        keycap(key, scheme),
+        text(description)
+            .size(theme::TEXT_SM)
+            .wrapping(iced::widget::text::Wrapping::WordOrGlyph)
+            .width(Length::Fill)
+            .color(scheme.muted),
+    ]
+    .spacing(theme::SPACE_LG)
+    .align_y(iced::Alignment::Center)
+    .width(Length::Fill)
+    .into()
+}
+
+fn link_button(label: String, url: String, scheme: Scheme) -> Element<'static, Message> {
+    mouse_area(
+        text(label)
+            .size(theme::TEXT_SM)
+            .wrapping(iced::widget::text::Wrapping::WordOrGlyph)
+            .color(scheme.blue),
+    )
+    .interaction(mouse::Interaction::Pointer)
+    .on_press(Message::OpenUrl(url))
+    .into()
+}
+
+fn help_link<'a>(label: &'a str, message: Message, scheme: Scheme) -> Element<'a, Message> {
+    mouse_area(
+        text(label)
+            .size(theme::TEXT_SM)
+            .wrapping(NO_WRAP)
+            .color(scheme.blue),
+    )
+    .interaction(mouse::Interaction::Pointer)
+    .on_press(message)
+    .into()
+}
+
+fn about_page(scheme: Scheme) -> Element<'static, Message> {
+    const SOURCE: &str = "https://gitlab.com/librewarelive/hippo-transcribe";
+    let mut page = column![text(
+        "Private, offline speaker diarization and transcription. The name comes \
+         from HIPAA; your recordings stay on this machine."
+    )
+    .size(theme::TEXT_MD)
+    .color(scheme.text)]
+    .spacing(theme::SPACE_XL)
+    .width(Length::Fill);
+
+    let meta = column![
+        report_meta_row("Version", env!("CARGO_PKG_VERSION"), scheme),
+        report_meta_row("License", "GPLv3", scheme),
+        row![
+            container(report_label("Source", scheme)).width(Length::Fixed(88.0)),
+            link_button(
+                "gitlab.com/librewarelive/hippo-transcribe".to_string(),
+                SOURCE.to_string(),
+                scheme,
+            ),
+        ]
+        .spacing(theme::SPACE_SM)
+        .align_y(iced::Alignment::Center),
+    ]
+    .spacing(theme::SPACE_XS);
+    page = page.push(meta);
+    page = page.push(settings_divider(scheme));
+    page = page.push(
+        column![
+            report_section("Privacy", scheme),
+            text("No cloud. No account. No telemetry.")
+                .size(theme::TEXT_SM)
+                .color(scheme.text),
+            text("Audio and transcripts stay on this device.")
+                .size(theme::TEXT_SM)
+                .color(scheme.muted),
+            text("Once models are installed the free tier makes no network requests.")
+                .size(theme::TEXT_SM)
+                .color(scheme.muted),
+        ]
+        .spacing(theme::SPACE_XS),
+    );
+    page = page.push(
+        column![
+            text("Diarization: pyannote segmentation + wespeaker (sherpa-onnx). Transcription: whisper.cpp.")
+                .size(theme::TEXT_SM)
+                .color(scheme.muted),
+            help_link(
+                "Third-party notices \u{2192}",
+                Message::HelpChoice(HelpKind::Licenses),
+                scheme,
+            ),
+        ]
+        .spacing(theme::SPACE_XS),
+    );
+    page.into()
+}
+
+fn shortcuts_page(scheme: Scheme) -> Element<'static, Message> {
+    let groups: &[(&str, &[(&str, &str)])] = &[
+        (
+            "Files & Run",
+            &[
+                ("Ctrl+O", "Add files"),
+                ("Ctrl+Enter", "Transcribe"),
+                ("Ctrl+S", "Save transcript as"),
+                ("Ctrl+,", "Settings"),
+            ],
+        ),
+        (
+            "Transcript & Editing",
+            &[
+                ("Alt+Enter", "Edit the active line"),
+                ("Alt+Up / Alt+Down", "Join the edited line up / down"),
+                ("Ctrl+Shift+K", "Split the edited line at cursor"),
+                ("Ctrl+Z", "Undo typing in the line field"),
+                ("Up / Down", "Move through the transcript"),
+                ("F", "Follow the active line"),
+                ("Enter", "Line editor: save"),
+                (
+                    "T / S / J / K / C",
+                    "Timestamps / SMS / Join / Karaoke / Confidence",
+                ),
+                ("Ctrl + / - / 0", "Transcript font zoom"),
+            ],
+        ),
+        (
+            "Playback",
+            &[
+                ("Space", "Play / pause"),
+                ("Left / Right", "Seek \u{00b1}5 s"),
+            ],
+        ),
+        (
+            "Search & Dialogs",
+            &[
+                ("Ctrl+F", "Find"),
+                ("Enter", "Search: next match"),
+                ("Shift+Enter", "Search: previous match"),
+                ("Esc", "Cancel the editor or dismiss"),
+                ("Tab", "Rename dialog: next field"),
+            ],
+        ),
+    ];
+    let mut page = column![].spacing(theme::SPACE_XL).width(Length::Fill);
+    for (index, (title, rows)) in groups.iter().enumerate() {
+        if index > 0 {
+            page = page.push(settings_divider(scheme));
+        }
+        let mut group = column![report_section(title, scheme)].spacing(theme::SPACE_XS);
+        for (key, description) in *rows {
+            group = group.push(shortcut_row(key, description, scheme));
+        }
+        page = page.push(group);
+    }
+    page.into()
+}
+
+fn editing_tips_page(scheme: Scheme) -> Element<'static, Message> {
+    let mut page = column![].spacing(theme::SPACE_LG).width(Length::Fill);
+    for (index, (title, detail)) in [
+        ("Double-click Speaker", "Enter editing mode"),
+        ("Right-click Speaker", "Change Speaker"),
+        ("Edit \u{2192} Rename Speakers", "Bulk rename speakers"),
+    ]
+    .iter()
+    .enumerate()
+    {
+        let badge = container(
+            text((index + 1).to_string())
+                .size(theme::TEXT_2XS)
+                .color(scheme.text),
+        )
+        .width(Length::Fixed(22.0))
+        .height(Length::Fixed(22.0))
+        .center_x(Length::Fixed(22.0))
+        .center_y(Length::Fixed(22.0))
+        .style(move |_theme| container::Style {
+            background: Some(scheme.track.into()),
+            border: iced::border::rounded(11.0),
+            ..container::Style::default()
+        });
+        page = page.push(
+            row![
+                badge,
+                column![
+                    text(*title).size(theme::TEXT_MD).font(Font {
+                        weight: font::Weight::Medium,
+                        ..Font::DEFAULT
+                    }),
+                    text(*detail).size(theme::TEXT_SM).color(scheme.muted),
+                ]
+                .spacing(theme::SPACE_2XS),
+            ]
+            .spacing(theme::SPACE_LG)
+            .align_y(iced::Alignment::Start)
+            .width(Length::Fill),
+        );
+    }
+    page.into()
+}
+
+/// Strip the light Markdown the notices file uses. The wording itself is kept
+/// verbatim; only the emphasis markers and bullet prefix are removed.
+fn markdown_plain(line: &str) -> String {
+    line.replace("**", "").replace('`', "")
+}
+
+/// Split a notices line into prose and the http(s) addresses inside it.
+fn split_urls(line: &str) -> (String, Vec<String>) {
+    let mut prose = String::new();
+    let mut urls = Vec::new();
+    let mut rest = line;
+    while let Some(start) = [rest.find("http://"), rest.find("https://")]
+        .into_iter()
+        .flatten()
+        .min()
+    {
+        prose.push_str(&rest[..start]);
+        let after = &rest[start..];
+        let end = after
+            .find(|c: char| c.is_whitespace())
+            .unwrap_or(after.len());
+        let url = after[..end].trim_end_matches([',', ';', '.']).to_string();
+        if !url.is_empty() {
+            urls.push(url);
+        }
+        rest = &after[end..];
+    }
+    prose.push_str(rest);
+    let prose = prose
+        .replace(" ,", ",")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .replace(", ,", ",");
+    (
+        prose
+            .trim_end_matches([' ', ',', '\u{2014}', ':'])
+            .to_string(),
+        urls,
+    )
+}
+
+fn licence_entry(raw: &str, bullet: bool, scheme: Scheme) -> Element<'static, Message> {
+    let (prose, urls) = split_urls(raw);
+    let prose = markdown_plain(&prose);
+    let mut entry = column![].spacing(theme::SPACE_XS).width(Length::Fill);
+    if !prose.is_empty() {
+        let mut line = row![]
+            .spacing(theme::SPACE_MD)
+            .align_y(iced::Alignment::Start);
+        if bullet {
+            line = line.push(text("\u{2022}").size(theme::TEXT_SM).color(scheme.muted));
+        }
+        line = line.push(
+            text(prose)
+                .size(theme::TEXT_SM)
+                .wrapping(iced::widget::text::Wrapping::WordOrGlyph)
+                .width(Length::Fill)
+                .color(scheme.text),
+        );
+        entry = entry.push(line);
+    }
+    for url in urls {
+        entry = entry.push(container(link_button(url.clone(), url, scheme)).padding(
+            iced::Padding {
+                top: 0.0,
+                right: 0.0,
+                bottom: 0.0,
+                left: if bullet { 18.0 } else { 0.0 },
+            },
+        ));
+    }
+    entry.into()
+}
+
+fn licences_page(scheme: Scheme) -> Element<'static, Message> {
+    let lines: Vec<&str> = LICENSES_TEXT.lines().collect();
+    let mut page = column![].spacing(theme::SPACE_MD).width(Length::Fill);
+    let mut index = 0;
+    while index < lines.len() {
+        let line = lines[index].trim_end();
+        if line.is_empty() {
+            index += 1;
+            continue;
+        }
+        if line.starts_with("# ") {
+            index += 1;
+            continue;
+        }
+        if let Some(heading) = line.strip_prefix("## ") {
+            page = page.push(
+                container(report_section(heading, scheme)).padding(iced::Padding {
+                    top: theme::SPACE_MD,
+                    right: 0.0,
+                    bottom: 0.0,
+                    left: 0.0,
+                }),
+            );
+            index += 1;
+            continue;
+        }
+        let bullet = line.starts_with("- ");
+        let mut parts = vec![line.trim_start_matches("- ").to_string()];
+        index += 1;
+        while index < lines.len() {
+            let next = lines[index].trim_end();
+            if next.is_empty() || next.starts_with("- ") || next.starts_with('#') {
+                break;
+            }
+            parts.push(next.trim().to_string());
+            index += 1;
+        }
+        page = page.push(licence_entry(&parts.join(" "), bullet, scheme));
+    }
+    page.into()
 }
 
 /// Layer `dialog` over `base` behind a dimming backdrop that swallows pointer
@@ -18529,6 +19061,17 @@ fn console_id() -> scrollable::Id {
 
 fn summary_id() -> scrollable::Id {
     scrollable::Id::new("summary")
+}
+
+fn help_scroll_id(kind: HelpKind) -> scrollable::Id {
+    scrollable::Id::new(match kind {
+        HelpKind::About => "help-about",
+        HelpKind::Licenses => "help-licenses",
+        HelpKind::Shortcuts => "help-shortcuts",
+        HelpKind::EditingTips => "help-tips",
+        HelpKind::Console => "help-console",
+        HelpKind::Settings => "help-settings",
+    })
 }
 
 fn rename_id(index: usize) -> text_input::Id {
@@ -23695,6 +24238,19 @@ mod tests {
     }
 
     #[test]
+    fn a_free_completion_opens_the_summary_not_the_paywall() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("completion-summary-free");
+        let mut app = App::new();
+        app.notifications = false;
+        app.batch_summary = vec![("talk.mp3".to_string(), backend::Stats::default())];
+
+        assert!(app.present_completion());
+        assert!(app.summary_open);
+        assert!(!app.paywall_open);
+    }
+
+    #[test]
     fn the_tips_are_still_reachable_from_the_help_menu_when_suppressed() {
         let _guard = env_lock();
         let _config = ConfigEnv::new("tips-help");
@@ -28038,6 +28594,42 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&media);
+    }
+
+    #[test]
+    fn licence_lines_split_into_clickable_urls() {
+        let (prose, urls) = split_urls(
+            "Whisper GGML models. MIT. Source: ggerganov/whisper.cpp, \
+             https://huggingface.co/ggerganov/whisper.cpp",
+        );
+        assert_eq!(
+            urls,
+            vec!["https://huggingface.co/ggerganov/whisper.cpp".to_string()]
+        );
+        assert!(prose.contains("Whisper GGML models"));
+        assert!(!prose.contains("https://"));
+
+        // A line with two links keeps both, and trailing commas are not part of
+        // the address the browser is asked to open.
+        let (_, urls) = split_urls(
+            "WeSpeaker, https://github.com/wenet-e2e/wespeaker, converted by \
+             https://github.com/k2-fsa/sherpa-onnx",
+        );
+        assert_eq!(
+            urls,
+            vec![
+                "https://github.com/wenet-e2e/wespeaker".to_string(),
+                "https://github.com/k2-fsa/sherpa-onnx".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn licence_emphasis_markers_are_not_printed() {
+        assert_eq!(
+            markdown_plain("**WeSpeaker CAM++** (`wespeaker_en_voxceleb`)"),
+            "WeSpeaker CAM++ (wespeaker_en_voxceleb)"
+        );
     }
 
     #[test]

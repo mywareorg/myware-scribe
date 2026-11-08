@@ -327,6 +327,25 @@ pub(crate) fn find_transcripts(
     found
 }
 
+/// Open an http(s) URL with the platform's default browser.
+pub(crate) fn open_url(url: &str) {
+    #[cfg(target_os = "linux")]
+    {
+        let _ = std::process::Command::new("xdg-open").arg(url).spawn();
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = std::process::Command::new("open").arg(url).spawn();
+    }
+    #[cfg(target_os = "windows")]
+    {
+        // `start` needs an empty title argument before the URL.
+        let _ = std::process::Command::new("cmd")
+            .args(["/C", "start", "", url])
+            .spawn();
+    }
+}
+
 /// Open a file or folder with the platform's default handler.
 pub(crate) fn open_path(path: &Path) {
     #[cfg(target_os = "linux")]
