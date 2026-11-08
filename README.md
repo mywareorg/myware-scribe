@@ -340,9 +340,10 @@ work left. History rows are grouped by day (Today, Yesterday, then the date) and
 show the file's duration, speaker count and finish time. Each row has a star and
 a remove button: a single click opens, a double-click runs the row's safe action
 (transcribe, resume or retry, never a retranscribe), and right-click opens a
-menu for reveal, copy, export, retranscribe, retry and remove. Clear queue lives
-in the Queue tab. Removing an item never deletes the audio or transcript on
-disk. Click one to revisit that file's
+menu for reveal, copy, export, retranscribe, retry and remove. The footer of
+History, Recordings and Favorites runs the selected row again (Retry for a
+failed recording). Clear queue lives in the Queue tab. Removing an item never
+deletes the audio or transcript on disk. Click one to revisit that file's
 transcript, speaker timeline, waveform and playback. Renaming speakers or saving
 writes back to that file's `.txt`. Adding an audio file that already has a
 transcript loads it straight away instead of queueing a run: `<name>.txt` beside

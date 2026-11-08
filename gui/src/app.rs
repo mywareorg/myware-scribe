@@ -3713,6 +3713,9 @@ impl App {
     /// something is actually animating or draining a background queue.
     fn needs_ticks(&self) -> bool {
         matches!(self.status, Status::Running)
+            // `Event::Done` settles the recording before `AllDone`, so the
+            // run kind is what keeps the clock alive long enough to drain it.
+            || self.run_kind == RunKind::Recording
             || self.record.is_some()
             || self.player.as_ref().is_some_and(Player::is_playing)
             || self.toast.is_some()
@@ -7443,6 +7446,152 @@ impl App {
             .collect()
     }
 
+    /// The general action the current tab's footer offers for its selection.
+    /// Every recent tab has one; Queue keeps its full-width run button.
+    fn recent_footer_action(&self, tab: PaneTab) -> FooterAction {
+        let blocked = self.record_lock() || matches!(self.status, Status::Running);
+        let blocked_tip = "Finish the current run first.";
+        let retranscribe = |index: usize, audio: bool| FooterAction {
+            label: "Retranscribe",
+            message: (!blocked && audio).then_some(Message::RetranscribeRecent(index)),
+            tooltip: if !audio {
+                "The audio file is missing"
+            } else if blocked {
+                blocked_tip
+            } else {
+                "Transcribe this transcript again"
+            },
+        };
+        let retry = |index: usize, audio: bool| FooterAction {
+            label: "Retry",
+            message: (!blocked && audio).then_some(Message::RetryRecording(index)),
+            tooltip: if !audio {
+                "The audio file is missing"
+            } else if blocked {
+                blocked_tip
+            } else {
+                "Retry transcribing this recording"
+            },
+        };
+
+        match tab {
+            PaneTab::History => {
+                let valid = self.selected_recent.filter(|index| {
+                    self.recent
+                        .get(*index)
+                        .is_some_and(|entry| entry.transcript.is_some() && entry.audio.is_some())
+                });
+                match valid {
+                    Some(index) => retranscribe(index, self.recent_audio_present(index)),
+                    None => FooterAction {
+                        label: "Retranscribe",
+                        message: None,
+                        tooltip: "Select a transcript to transcribe it again",
+                    },
+                }
+            }
+            PaneTab::Recordings => {
+                let Some(index) = self
+                    .selected_recent
+                    .filter(|index| self.recent.get(*index).is_some_and(|entry| entry.recording))
+                else {
+                    return FooterAction {
+                        label: "Retranscribe",
+                        message: None,
+                        tooltip: "Select a recording",
+                    };
+                };
+                let Some(entry) = self.recent.get(index) else {
+                    return FooterAction {
+                        label: "Retranscribe",
+                        message: None,
+                        tooltip: "Select a recording",
+                    };
+                };
+                if entry.state == ItemState::Failed {
+                    return retry(index, self.recent_audio_present(index));
+                }
+                if entry.state == ItemState::Ready && entry.transcript.is_some() {
+                    return retranscribe(index, self.recent_audio_present(index));
+                }
+                FooterAction {
+                    label: "Retranscribe",
+                    message: None,
+                    tooltip: "Select a recording",
+                }
+            }
+            PaneTab::Favorites => {
+                let Some(index) = self
+                    .selected_recent
+                    .filter(|index| self.recent.get(*index).is_some_and(|entry| entry.favorite))
+                else {
+                    return FooterAction {
+                        label: "Retranscribe",
+                        message: None,
+                        tooltip: "Select a favorite",
+                    };
+                };
+                let Some(entry) = self.recent.get(index) else {
+                    return FooterAction {
+                        label: "Retranscribe",
+                        message: None,
+                        tooltip: "Select a favorite",
+                    };
+                };
+                if entry.recording && entry.state == ItemState::Failed {
+                    return retry(index, self.recent_audio_present(index));
+                }
+                if entry.transcript.is_some() {
+                    return retranscribe(index, self.recent_audio_present(index));
+                }
+                FooterAction {
+                    label: "Retranscribe",
+                    message: None,
+                    tooltip: "Select a favorite",
+                }
+            }
+            // Queue owns its full-width run button instead.
+            PaneTab::Queue => FooterAction {
+                label: "Retranscribe",
+                message: None,
+                tooltip: "Select a transcript to transcribe it again",
+            },
+        }
+    }
+
+    /// A recent tab's footer: the item count on the left, the tab's general
+    /// action on the right, quiet when it has nothing to act on.
+    fn recent_footer(
+        &self,
+        tab: PaneTab,
+        scheme: &Scheme,
+        count_text: String,
+    ) -> Element<'_, Message> {
+        let scheme = *scheme;
+        let action = self.recent_footer_action(tab);
+        let enabled = action.message.is_some();
+        let button = action_text(action.label)
+            .on_press_maybe(action.message)
+            .style(move |theme, status| {
+                if enabled {
+                    pill_button_secondary(theme, status)
+                } else {
+                    greyed_button(scheme)(theme, status)
+                }
+            });
+        let button = self.tip(button, action.tooltip, &scheme);
+        row![
+            text(count_text)
+                .size(theme::TEXT_XS)
+                .wrapping(NO_WRAP)
+                .color(scheme.muted),
+            horizontal_space(),
+            button,
+        ]
+        .align_y(iced::Alignment::Center)
+        .into()
+    }
+
     /// The top Record button: its label, whether it takes presses, and the
     /// tooltip that explains the state. Stop is the one enabled press while a
     /// capture runs; Preparing/Transcribing leave it disabled.
@@ -11031,14 +11180,7 @@ impl App {
                 "transcripts"
             }
         );
-        let footer = row![
-            horizontal_space(),
-            text(count_text)
-                .size(theme::TEXT_XS)
-                .wrapping(NO_WRAP)
-                .color(scheme.muted),
-        ]
-        .align_y(iced::Alignment::Center);
+        let footer = self.recent_footer(PaneTab::History, &scheme, count_text);
 
         column![body, horizontal_rule(1), footer]
             .spacing(12)
@@ -11059,17 +11201,14 @@ impl App {
         }
         let body = self.recent_list(indices, PaneTab::Favorites, &scheme, false);
         let count = self.recent.iter().filter(|entry| entry.favorite).count();
-        let footer = row![
-            horizontal_space(),
-            text(format!(
+        let footer = self.recent_footer(
+            PaneTab::Favorites,
+            &scheme,
+            format!(
                 "{count} {}",
                 if count == 1 { "favorite" } else { "favorites" }
-            ))
-            .size(theme::TEXT_XS)
-            .wrapping(NO_WRAP)
-            .color(scheme.muted),
-        ]
-        .align_y(iced::Alignment::Center);
+            ),
+        );
         column![body, horizontal_rule(1), footer]
             .spacing(12)
             .height(Length::Fill)
@@ -11087,17 +11226,14 @@ impl App {
         }
         let count = indices.len();
         let body = self.recent_list(indices, PaneTab::Recordings, &scheme, linked);
-        let footer = row![
-            horizontal_space(),
-            text(format!(
+        let footer = self.recent_footer(
+            PaneTab::Recordings,
+            &scheme,
+            format!(
                 "{count} {}",
                 if count == 1 { "recording" } else { "recordings" }
-            ))
-            .size(theme::TEXT_XS)
-            .wrapping(NO_WRAP)
-            .color(scheme.muted),
-        ]
-        .align_y(iced::Alignment::Center);
+            ),
+        );
         column![body, horizontal_rule(1), footer]
             .spacing(12)
             .height(Length::Fill)
@@ -17305,6 +17441,15 @@ fn recent_tooltip(entry: &RecentEntry, transcript_present: bool) -> String {
         .as_deref()
         .map(|path| format!("No transcript: {}", path.display()))
         .unwrap_or_else(|| "No output file".to_string())
+}
+
+/// The compact action at the right end of a recent tab's footer. `message` is
+/// `None` whenever the action is disabled; `tooltip` says why.
+#[derive(Debug, Clone)]
+struct FooterAction {
+    label: &'static str,
+    message: Option<Message>,
+    tooltip: &'static str,
 }
 
 /// A day heading above a run of history rows.
@@ -27421,6 +27566,227 @@ mod tests {
             let _ = app.queue_panel(&scheme, LEFT_PANEL_WIDTH);
             let _ = app.recording_surface_element(&scheme);
         }
+    }
+
+    #[test]
+    fn history_footer_action_follows_the_selection() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("footer-history");
+        let media = temp_dir("footer-history-media");
+        let audio = media.join("talk.mp3");
+        std::fs::write(&audio, b"audio").unwrap();
+        let transcript = media.join("talk.txt");
+        std::fs::write(&transcript, "[00:00] SPEAKER 1: hi\n").unwrap();
+
+        let mut app = pro_app();
+        app.recent.push(RecentEntry {
+            audio: Some(audio),
+            transcript: Some(transcript),
+            finished_at: 5,
+            ..Default::default()
+        });
+
+        let action = app.recent_footer_action(PaneTab::History);
+        assert_eq!(action.label, "Retranscribe");
+        assert!(action.message.is_none());
+        assert_eq!(
+            action.tooltip,
+            "Select a transcript to transcribe it again"
+        );
+
+        app.selected_recent = Some(0);
+        let action = app.recent_footer_action(PaneTab::History);
+        assert_eq!(action.label, "Retranscribe");
+        assert!(matches!(
+            action.message,
+            Some(Message::RetranscribeRecent(0))
+        ));
+        assert_eq!(action.tooltip, "Transcribe this transcript again");
+
+        // A selected transcript with no audio cannot be rerun.
+        app.recent[0].audio = None;
+        let action = app.recent_footer_action(PaneTab::History);
+        assert!(action.message.is_none());
+        assert_eq!(
+            action.tooltip,
+            "Select a transcript to transcribe it again"
+        );
+
+        let _ = std::fs::remove_dir_all(&media);
+    }
+
+    #[test]
+    fn recordings_footer_action_retries_and_retranscribes() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("footer-recordings");
+        let media = temp_dir("footer-recordings-media");
+        let failed_wav = media.join("failed.wav");
+        std::fs::write(&failed_wav, b"audio").unwrap();
+        let ready_wav = media.join("ready.wav");
+        std::fs::write(&ready_wav, b"audio").unwrap();
+        let transcript = media.join("ready.txt");
+        std::fs::write(&transcript, "[00:00] SPEAKER 1: hi\n").unwrap();
+
+        let mut app = pro_app();
+        app.recent = vec![
+            RecentEntry {
+                audio: Some(failed_wav),
+                recording: true,
+                state: ItemState::Failed,
+                message: Some("cancelled".to_string()),
+                finished_at: 20,
+                ..Default::default()
+            },
+            RecentEntry {
+                audio: Some(ready_wav),
+                transcript: Some(transcript),
+                recording: true,
+                state: ItemState::Ready,
+                finished_at: 10,
+                ..Default::default()
+            },
+        ];
+
+        let action = app.recent_footer_action(PaneTab::Recordings);
+        assert_eq!(action.label, "Retranscribe");
+        assert!(action.message.is_none());
+        assert_eq!(action.tooltip, "Select a recording");
+
+        // Failed take: Retry.
+        app.selected_recent = Some(0);
+        let action = app.recent_footer_action(PaneTab::Recordings);
+        assert_eq!(action.label, "Retry");
+        assert!(matches!(action.message, Some(Message::RetryRecording(0))));
+        assert_eq!(action.tooltip, "Retry transcribing this recording");
+
+        // A missing WAV keeps the label but disables the action.
+        app.recent[0].audio = Some(media.join("gone.wav"));
+        let action = app.recent_footer_action(PaneTab::Recordings);
+        assert_eq!(action.label, "Retry");
+        assert!(action.message.is_none());
+        assert_eq!(action.tooltip, "The audio file is missing");
+
+        // Ready with a transcript: Retranscribe.
+        app.selected_recent = Some(1);
+        let action = app.recent_footer_action(PaneTab::Recordings);
+        assert_eq!(action.label, "Retranscribe");
+        assert!(matches!(
+            action.message,
+            Some(Message::RetranscribeRecent(1))
+        ));
+
+        // A selected row that is not a recording does not qualify.
+        app.recent.push(RecentEntry {
+            audio: Some(media.join("talk.mp3")),
+            transcript: Some(media.join("talk.txt")),
+            state: ItemState::Ready,
+            finished_at: 5,
+            ..Default::default()
+        });
+        app.selected_recent = Some(2);
+        let action = app.recent_footer_action(PaneTab::Recordings);
+        assert!(action.message.is_none());
+        assert_eq!(action.tooltip, "Select a recording");
+
+        let _ = std::fs::remove_dir_all(&media);
+    }
+
+    #[test]
+    fn favorites_footer_action_uses_what_the_item_supports() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("footer-favorites");
+        let media = temp_dir("footer-favorites-media");
+        let failed_wav = media.join("failed.wav");
+        std::fs::write(&failed_wav, b"audio").unwrap();
+        let audio = media.join("talk.mp3");
+        std::fs::write(&audio, b"audio").unwrap();
+        let transcript = media.join("talk.txt");
+        std::fs::write(&transcript, "[00:00] SPEAKER 1: hi\n").unwrap();
+
+        let mut app = pro_app();
+        app.recent = vec![
+            RecentEntry {
+                audio: Some(failed_wav),
+                recording: true,
+                state: ItemState::Failed,
+                favorite: true,
+                finished_at: 20,
+                ..Default::default()
+            },
+            RecentEntry {
+                audio: Some(audio),
+                transcript: Some(transcript),
+                favorite: true,
+                finished_at: 10,
+                ..Default::default()
+            },
+        ];
+
+        let action = app.recent_footer_action(PaneTab::Favorites);
+        assert_eq!(action.label, "Retranscribe");
+        assert!(action.message.is_none());
+        assert_eq!(action.tooltip, "Select a favorite");
+
+        app.selected_recent = Some(0);
+        let action = app.recent_footer_action(PaneTab::Favorites);
+        assert_eq!(action.label, "Retry");
+        assert!(matches!(action.message, Some(Message::RetryRecording(0))));
+
+        app.selected_recent = Some(1);
+        let action = app.recent_footer_action(PaneTab::Favorites);
+        assert_eq!(action.label, "Retranscribe");
+        assert!(matches!(
+            action.message,
+            Some(Message::RetranscribeRecent(1))
+        ));
+
+        // A selected non-favorite is not the Favorites tab's selection.
+        app.recent[1].favorite = false;
+        let action = app.recent_footer_action(PaneTab::Favorites);
+        assert!(action.message.is_none());
+        assert_eq!(action.tooltip, "Select a favorite");
+
+        let _ = std::fs::remove_dir_all(&media);
+    }
+
+    #[test]
+    fn footer_action_is_blocked_by_a_run_or_a_recording_lock() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("footer-blocked");
+        let media = temp_dir("footer-blocked-media");
+        let wav = media.join("take.wav");
+        std::fs::write(&wav, b"audio").unwrap();
+
+        let mut app = pro_app();
+        app.recent.push(RecentEntry {
+            audio: Some(wav),
+            recording: true,
+            state: ItemState::Failed,
+            finished_at: 5,
+            ..Default::default()
+        });
+        app.selected_recent = Some(0);
+
+        // A recording workflow owns the pane.
+        app.record = Some(RecordSession {
+            phase: RecordPhase::Preparing,
+            recorder: None,
+            countdown_ends: None,
+            item: Some(0),
+            captured: 0.0,
+        });
+        let action = app.recent_footer_action(PaneTab::Recordings);
+        assert!(action.message.is_none());
+        assert_eq!(action.tooltip, "Finish the current run first.");
+
+        // A batch run disables it too.
+        app.record = None;
+        app.status = Status::Running;
+        let action = app.recent_footer_action(PaneTab::Recordings);
+        assert!(action.message.is_none());
+        assert_eq!(action.tooltip, "Finish the current run first.");
+
+        let _ = std::fs::remove_dir_all(&media);
     }
 
     #[test]
