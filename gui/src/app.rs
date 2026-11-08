@@ -8227,17 +8227,26 @@ impl App {
         }
     }
 
-    /// Queue a history entry for a fresh run and open its options. The File
-    /// panel footer offers this as its general action; double-click never
-    /// reaches it, and the context menu now stages the file instead.
+    /// Queue a history entry for a fresh run and start it. The File panel
+    /// footer offers this as its general action; double-click never reaches
+    /// it, and the context menu stages the file with Add to queue instead.
     fn retranscribe_recent(&mut self, index: usize) -> Task<Message> {
         if matches!(self.status, Status::Running) || self.transcribe_blocked() {
             return Task::none();
         }
+        // A rerun should use the settings that produced the transcript, not
+        // whichever preset happened to be selected last.
+        self.apply_entry_settings(index);
         if self.enqueue_recent(index).is_none() {
             return Task::none();
         }
-        self.update(Message::OpenRunSetup)
+        // Retranscribe is a run, not a request to open settings and wait for a
+        // second press. `start` finds the row this just made pending; clear any
+        // setup left open so the queue is not hidden behind a stale dialog.
+        self.run_setup_open = false;
+        self.queue_run_target = None;
+        self.start();
+        Task::none()
     }
 
     /// Add a history row's audio to the queue without leaving the current tab
@@ -28712,6 +28721,16 @@ mod tests {
         assert!(matches!(app.queue[0].status, ItemStatus::Pending));
         assert_eq!(app.queue[0].audio.as_deref(), Some(audio.as_path()));
         assert_eq!(app.selected, Some(0));
+
+        // The footer's Retranscribe is a run, not a request to open settings:
+        // it starts the row it just queued instead of stopping at the dialog.
+        app.queue.clear();
+        app.status = Status::Idle;
+        app.run_setup_open = false;
+        let _ = app.update(Message::RetranscribeRecent(index));
+        assert!(!app.run_setup_open, "Retranscribe stopped at run setup");
+        assert_eq!(app.queue.len(), 1);
+        assert!(matches!(app.queue[0].status, ItemStatus::Pending));
 
         let _ = std::fs::remove_dir_all(&media);
     }
