@@ -250,19 +250,20 @@ const ICON_ONLY_SIZE: f32 = 15.0;
 /// too, which is why it takes the app's standard small space.
 const HEADER_GAP: f32 = theme::SPACE_SM;
 
-/// Height of the header's identity block when it carries a meta line: the 13 px
-/// title, its 1 px gap and the 11 px meta, at iced's 1.3 line height.
-const HEADER_LABEL_HEIGHT: f32 = 13.0 * 1.3 + 1.0 + 11.0 * 1.3;
+/// Height of the header row's menu buttons, which now set the row height: the
+/// default 16 px label at iced's 1.3 line height plus their 5 px top/bottom
+/// padding.
+const HEADER_ROW_HEIGHT: f32 = 16.0 * 1.3 + 10.0;
 
 /// Gap the header's slot leaves under the header's rule.
 const HEADER_SLOT_GAP: f32 = theme::SPACE_SM;
 
 /// Where the transcript header menus' top edge sits inside the card: the
-/// header's gap above and below its controls, the identity block, the gap to the
-/// rule, the rule itself and the slot's gap. Their width is not fixed: each menu
-/// is as wide as its own widest row.
+/// header's gap above and below its controls, the row itself, the gap to the
+/// rule, the rule and the slot's gap. Their width is not fixed: each menu is as
+/// wide as its own widest row.
 const VIEW_MENU_TOP: f32 =
-    HEADER_GAP * 3.0 + HEADER_LABEL_HEIGHT + 1.0 + HEADER_SLOT_GAP;
+    HEADER_GAP * 3.0 + HEADER_ROW_HEIGHT + 1.0 + HEADER_SLOT_GAP;
 
 /// Width of a header menu row's leading check slot. Fixed, so every label in a
 /// menu starts on the same left edge whether its row is checked or not.
@@ -288,14 +289,8 @@ const HEADER_TOAST_MAX_WIDTH: f32 = 360.0;
 /// this is named rather than written into both.
 const HEADER_PAD_X: f32 = 8.0;
 
-/// The header's identity badge and the gap between it and the label. The
-/// filename's budget is measured past both.
+/// The player's file badge.
 const HEADER_BADGE_WIDTH: f32 = 26.0;
-const HEADER_BADGE_GAP: f32 = 8.0;
-
-/// Fewest characters the filename is cut down to. Below this a middle ellipsis
-/// leaves two characters either side of it, which no longer names the file.
-const MIN_NAME_CHARS: usize = 8;
 
 /// Fixed widths of the header's menu buttons. A menu is anchored by adding the
 /// widths of the buttons to its left, so these must be the widths the buttons
@@ -3351,6 +3346,41 @@ impl App {
     /// True when this batch finished at least one transcript.
     fn has_results(&self) -> bool {
         !self.batch_summary.is_empty()
+    }
+
+    /// Secondary line for the player's file identity: duration, read-only
+    /// state, or what the current run is doing.
+    fn shown_item_meta(&self) -> String {
+        if let Some(view) = &self.selected_view {
+            let mut meta = Vec::new();
+            if let Some(duration) = view.duration.filter(|duration| *duration > 0.0) {
+                meta.push(format_secs(duration as f64));
+            }
+            if view.output.is_none() && self.view_error.is_none() && view.finished {
+                meta.push("read-only".to_string());
+            }
+            let mut meta = meta.join(" \u{00b7} ");
+            if self.modified {
+                let prefix = if meta.is_empty() {
+                    String::new()
+                } else {
+                    format!("{meta} \u{00b7} ")
+                };
+                meta = format!(
+                    "{prefix}{} \u{00b7} Save As to keep",
+                    if self.join_lines { "Joined" } else { "Modified" }
+                );
+            }
+            return meta;
+        }
+        if matches!(self.status, Status::Running) {
+            return "Transcribing now".to_string();
+        }
+        if self.only_one_speaker() {
+            "Only one speaker detected".to_string()
+        } else {
+            String::new()
+        }
     }
 
     /// File name shown on the player island: the open view's audio, the live
@@ -14603,87 +14633,10 @@ impl App {
             return None;
         }
 
-        // How wide the identity block may grow before the filename has to be
-        // cut: everything the menus leave, less the badge.
-        let (_, meta_budget) = header_identity_budgets(self.window_size.width);
-
-        let (glyph, tint, meta) = if let Some(view) = &self.selected_view {
-            let mut meta = Vec::new();
-            if let Some(duration) = view.duration.filter(|duration| *duration > 0.0) {
-                meta.push(format_secs(duration as f64));
-            }
-            if view.output.is_none()
-                && self.view_error.is_none()
-                && view.finished
-            {
-                meta.push("read-only".to_string());
-            }
-            (ICON_FILE_TEXT, scheme.blue, meta.join(" \u{00b7} "))
-        } else if running {
-            (ICON_MIC, scheme.green, "Transcribing now".to_string())
-        } else {
-            (
-                ICON_FILE_TEXT,
-                scheme.blue,
-                if self.only_one_speaker() {
-                    "Only one speaker detected".to_string()
-                } else {
-                    String::new()
-                },
-            )
-        };
-
-        let badge = container(icon_colored(glyph, 13.0, tint))
-            .width(Length::Fixed(HEADER_BADGE_WIDTH))
-            .height(Length::Fixed(HEADER_BADGE_WIDTH))
-            .center_x(Length::Fixed(HEADER_BADGE_WIDTH))
-            .center_y(Length::Fixed(HEADER_BADGE_WIDTH))
-            .style(move |_theme| container::Style {
-                background: Some(Color { a: 0.16, ..tint }.into()),
-                border: iced::border::rounded(13.0),
-                ..container::Style::default()
-            });
-        let meta = if self.modified {
-            let prefix = if meta.is_empty() {
-                String::new()
-            } else {
-                format!("{meta} \u{00b7} ")
-            };
-            format!(
-                "{prefix}{} \u{00b7} Save As to keep",
-                if self.join_lines {
-                    "Joined"
-                } else {
-                    "Modified"
-                }
-            )
-        } else {
-            meta
-        };
-        // The file name moved to the player island; this block keeps the meta
-        // line (duration, read-only state, edit state) under the badge.
-        // `ellipsize_middle` keeps the tail, which is what preserves
-        // "Save As to keep" when the meta is cut.
-        let meta = ellipsize_middle(&meta, meta_budget);
-        let mut label = column![].spacing(1);
-        if !meta.is_empty() {
-            label = label.push(
-                text(meta)
-                    .size(11)
-                    .wrapping(NO_WRAP)
-                    .color(if self.modified {
-                        scheme.text
-                    } else {
-                        scheme.muted
-                    }),
-            );
-        }
-
-        // The header starts with the card's own menus, left to right File, Edit
-        // and View, immediately followed by the file's own identity. Each menu
-        // hangs from its own button's left edge; the offset helpers add the
-        // fixed button widths to its left. Help belongs to the app header, not
-        // to this card, so it is not here.
+        // The header is the card's own menus, left to right File, Edit and
+        // View. Each menu hangs from its own button's left edge; the offset
+        // helpers add the fixed button widths to its left. Help belongs to the
+        // app header, not to this card, so it is not here.
         let menus: Element<Message> = row![
             self.header_menu_button("File", HeaderMenu::File),
             self.header_menu_button("Edit", HeaderMenu::Edit),
@@ -14693,27 +14646,13 @@ impl App {
         .align_y(iced::Alignment::Center)
         .into();
 
-        // The identity sits one row gap after View, and the elastic space takes
-        // whatever is left: the menus and the label block keep their own widths,
-        // so only the space changes with the window.
-        // Only the badge and meta line remain here; the file name moved to the
-        // player island. Clicking the identity still shows the list it came
-        // from, so it stays a shortcut back to History.
-        let identity = mouse_area(
-            row![badge, label]
-                .spacing(HEADER_BADGE_GAP)
-                .align_y(iced::Alignment::Center),
-        )
-        .interaction(mouse::Interaction::Pointer)
-        .on_press(Message::SelectTab(PaneTab::History));
+        // The file's identity now lives on the player island; this header is
+        // only the transcript's own menus, with the rest of the row left for
+        // the reading controls the caller adds.
         let header = container(
-            row![
-                menus,
-                identity,
-                horizontal_space(),
-            ]
-            .spacing(HEADER_GAP)
-            .align_y(iced::Alignment::Center),
+            row![menus, horizontal_space()]
+                .spacing(HEADER_GAP)
+                .align_y(iced::Alignment::Center),
         )
         .width(Length::Fill)
         .padding([HEADER_GAP as u16, HEADER_PAD_X as u16]);
@@ -15435,23 +15374,55 @@ impl App {
             .into()
         };
 
-        let file_name = ellipsize_middle(&self.shown_item_name(), 36);
-        row![
+        // The file's identity moved here from the transcript header: icon,
+        // duration/state and name sit together at the right of the transport.
+        let (glyph, tint) = if self.selected_view.is_some() {
+            (ICON_FILE_TEXT, scheme.blue)
+        } else if matches!(self.status, Status::Running) {
+            (ICON_MIC, scheme.green)
+        } else {
+            (ICON_FILE_TEXT, scheme.blue)
+        };
+        let badge = container(icon_colored(glyph, 13.0, tint))
+            .width(Length::Fixed(HEADER_BADGE_WIDTH))
+            .height(Length::Fixed(HEADER_BADGE_WIDTH))
+            .center_x(Length::Fixed(HEADER_BADGE_WIDTH))
+            .center_y(Length::Fixed(HEADER_BADGE_WIDTH))
+            .style(move |_theme| container::Style {
+                background: Some(Color { a: 0.16, ..tint }.into()),
+                border: iced::border::rounded(13.0),
+                ..container::Style::default()
+            });
+        let meta = ellipsize_middle(&self.shown_item_meta(), 20);
+        let file_name = ellipsize_middle(&self.shown_item_name(), 26);
+        let mut controls = row![
             skip_back,
             play_button,
             skip_forward,
             time,
             speed,
             horizontal_space(),
-            text(file_name)
-                .size(11)
-                .wrapping(NO_WRAP)
-                .color(scheme.muted),
+            badge,
         ]
         .spacing(6)
         .align_y(iced::Alignment::Center)
-        .width(Length::Fill)
-        .into()
+        .width(Length::Fill);
+        if !meta.is_empty() {
+            controls = controls.push(
+                text(meta)
+                    .size(11)
+                    .wrapping(NO_WRAP)
+                    .color(scheme.muted),
+            );
+        }
+        controls
+            .push(
+                text(file_name)
+                    .size(11)
+                    .wrapping(NO_WRAP)
+                    .color(scheme.muted),
+            )
+            .into()
     }
 
     /// The Find controls: the field, previous/next and the match count. The row
@@ -17609,13 +17580,12 @@ impl App {
         // the player instead.
         //
         // Expanded, the waveform carries the disclosure caret on its right, then
-        // the transport row. Collapsed, the waveform becomes the thin scrubber
-        // above the same transport row, and the caret ends that row so the card
-        // is two lines rather than three.
+        // the transport row. Collapsed, the waveform becomes the thin scrubber,
+        // the caret stays on its right, and the transport row follows.
         let collapse = if self.player_collapsed {
-            ICON_CARET_UP
-        } else {
             ICON_CARET_DOWN
+        } else {
+            ICON_CARET_UP
         };
         // The same caret in both states. The triangle alone: no fill, no border,
         // no shadow, and `subtle_icon_button` only washes it when the pointer is
@@ -17634,9 +17604,8 @@ impl App {
         );
 
         let player_box = if self.player_collapsed {
-            // Collapsed: the scrubber takes the waveform's place above the
-            // transport row, keeping the expanded order, and the caret ends
-            // that row so the card is two lines rather than three.
+            // Collapsed: the scrubber takes the waveform's place, with the
+            // caret still at its right, and the transport row follows.
             container(
                 column![
                     row![self.scrubber_element(&scheme), caret]
@@ -21930,41 +21899,6 @@ fn estimated_text_width(text: &str, size: f32) -> f32 {
     text.chars().count() as f32 * size * 0.625
 }
 
-/// Character budgets for the header's two identity lines, from the window width.
-///
-/// The filename must not be cut until it comes `HEADER_PAD_X` from the card's
-/// right edge, so the block's width is the card minus both paddings, the four
-/// menu buttons and their gaps, the row gap, the badge and the gap after it. The
-/// row's elastic space is not subtracted: it is what gives way first.
-///
-/// The result is in characters, not pixels. The view is built without a
-/// renderer, so the width can only be divided by the same per-character estimate
-/// the rest of the app relies on ([`estimated_text_width`]). That estimate is
-/// generous — about a tenth wide on a wide system sans, more on a narrow one —
-/// so the cut lands a few characters early instead of overflowing. A
-/// pixel-exact cut would need a measured layout, which this does not have.
-fn header_identity_budgets(window_width: f32) -> (usize, usize) {
-    let menus = FILE_BUTTON_WIDTH
-        + EDIT_BUTTON_WIDTH
-        + VIEW_BUTTON_WIDTH
-        + HELP_BUTTON_WIDTH
-        + theme::SPACE_SM * 3.0;
-    let card = window_width - OUTER_PADDING * 2.0 - LEFT_PANEL_WIDTH - PANEL_GAP;
-    let available = card
-        - HEADER_PAD_X * 2.0
-        - menus
-        - HEADER_GAP
-        - HEADER_BADGE_WIDTH
-        - HEADER_BADGE_GAP;
-    let budget = |size: f32| {
-        (available / estimated_text_width("x", size))
-            .floor()
-            .max(MIN_NAME_CHARS as f32) as usize
-    };
-    // 13 px filename, 11 px meta: the same width in two type sizes.
-    (budget(13.0), budget(11.0))
-}
-
 /// One row of a transcript header menu. The label, trailing key, check state and
 /// action are one value, so the card's body and the width it is sized to cannot
 /// disagree — the duplication the old parallel `rows` arrays allowed.
@@ -25437,23 +25371,6 @@ mod tests {
                 "{ratio:.2}:1 is a filled button, not a wash"
             );
         }
-    }
-
-    #[test]
-    fn the_filename_budget_follows_the_window_width() {
-        // 1024 is the app's minimum: a 648 px card leaves the identity block
-        // 256 px, which is 31 characters at 13 px and 37 at 11 px.
-        let (name, meta) = header_identity_budgets(1024.0);
-        assert_eq!(name, 31);
-        assert_eq!(meta, 37);
-
-        // A wide window gives the whole name back; the fixed 20 characters this
-        // replaced would have cut it anyway.
-        assert_eq!(header_identity_budgets(1600.0).0, 102);
-
-        // Never negative or unreadable, even below the app's minimum width.
-        assert_eq!(header_identity_budgets(300.0).0, MIN_NAME_CHARS);
-        assert_eq!(header_identity_budgets(0.0).1, MIN_NAME_CHARS);
     }
 
     #[test]
