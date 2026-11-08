@@ -11556,7 +11556,7 @@ impl App {
                 if favorite { ICON_STAR_FILL } else { ICON_STAR },
                 12.0,
                 if favorite {
-                    scheme.speaker_colors[3]
+                    scheme.star
                 } else {
                     scheme.muted
                 },
