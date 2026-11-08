@@ -11236,7 +11236,7 @@ impl App {
         let has_history = !self.recent.is_empty();
         if showing {
             (
-                "Nothing in flight",
+                "Add new files here to transcribe",
                 (if has_history {
                     "The file on screen is in History. Add audio to transcribe something new."
                 } else {
@@ -12795,12 +12795,20 @@ impl App {
         // The identity sits one row gap after View, and the elastic space takes
         // whatever is left: the menus and the label block keep their own widths,
         // so only the space changes with the window.
+        // The file's identity is the shortcut back to the list it came from.
+        // It sits immediately after View, so it reads as the file the menus
+        // act on; clicking it shows History.
+        let identity = mouse_area(
+            row![badge, label]
+                .spacing(HEADER_BADGE_GAP)
+                .align_y(iced::Alignment::Center),
+        )
+        .interaction(mouse::Interaction::Pointer)
+        .on_press(Message::SelectTab(PaneTab::History));
         let header = container(
             row![
                 menus,
-                row![badge, label]
-                    .spacing(HEADER_BADGE_GAP)
-                    .align_y(iced::Alignment::Center),
+                identity,
                 horizontal_space(),
             ]
             .spacing(HEADER_GAP)
@@ -20715,7 +20723,10 @@ mod tests {
 
         // Nothing in flight, but a transcript is still on screen.
         app.transcript = "hello\n".to_string();
-        assert_eq!(app.queue_empty_copy().0, "Nothing in flight");
+        assert_eq!(
+            app.queue_empty_copy().0,
+            "Add new files here to transcribe"
+        );
         assert!(!app.queue_empty_copy().1.contains("History"));
 
         // With history the copy points at the other tab.
@@ -20728,7 +20739,7 @@ mod tests {
         ..Default::default()
         });
         let (title, line) = app.queue_empty_copy();
-        assert_eq!(title, "Nothing in flight");
+        assert_eq!(title, "Add new files here to transcribe");
         assert!(line.contains("History"), "{line}");
 
         // A queue with no transcript on screen keeps the add pitch.
