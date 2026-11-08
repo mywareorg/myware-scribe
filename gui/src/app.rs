@@ -1060,6 +1060,8 @@ pub enum Message {
     /// Show the run options (save location, preset, speakers, acceleration)
     /// before starting.
     OpenRunSetup,
+    /// Show the run options for one queued row and start only that row.
+    TranscribeQueueItem(usize),
     ConfirmRunSetup,
     CloseRunSetup,
     ToggleJoinLines,
@@ -1432,6 +1434,12 @@ pub struct App {
     /// A recording was requested while a batch was running. Start it once the
     /// cancelled batch reports `AllDone`, and discard that batch's events.
     record_after_batch: bool,
+    /// Queue row chosen by the row menu's Transcribe action. The run starts
+    /// only that item, not every pending row.
+    queue_run_target: Option<usize>,
+    /// The run was started for one queue row, so `AllDone` must not chain the
+    /// rest of the queue as a follow-up pass.
+    stop_after_run: bool,
     /// Tests only: never start a real model download or backend process, so a
     /// transition can be exercised without the network or a child process.
     #[cfg(test)]
@@ -1800,6 +1808,8 @@ impl App {
             record: None,
             run_kind: RunKind::Batch,
             record_after_batch: false,
+            queue_run_target: None,
+            stop_after_run: false,
             #[cfg(test)]
             recording_test_no_spawn: true,
             #[cfg(test)]
@@ -2568,6 +2578,8 @@ impl App {
         self.batch_done = 0.0;
         self.run_kind = RunKind::Batch;
         self.record_after_batch = true;
+        self.queue_run_target = None;
+        self.stop_after_run = false;
         self.status = Status::Cancelled;
         self.stage = "cancelled".to_string();
         self.stage_id = "cancelled".to_string();
@@ -4364,22 +4376,27 @@ impl App {
                 Task::none()
             }
             Message::OpenRunSetup => {
-                if !matches!(self.status, Status::Running)
-                    && !self.transcribe_blocked()
-                    && (!self.queue.is_empty() || self.retranscribe_target().is_some())
-                {
-                    self.header_menu = None;
-                    self.run_setup_open = true;
+                self.open_run_setup(None);
+                Task::none()
+            }
+            Message::TranscribeQueueItem(index) => {
+                let pending = self.queue.get(index).is_some_and(|item| {
+                    matches!(item.status, ItemStatus::Pending | ItemStatus::Interrupted)
+                });
+                if pending {
+                    self.open_run_setup(Some(index));
                 }
                 Task::none()
             }
             Message::CloseRunSetup => {
                 self.run_setup_open = false;
+                self.queue_run_target = None;
                 Task::none()
             }
             Message::ConfirmRunSetup => {
                 self.run_setup_open = false;
                 if self.transcribe_blocked() {
+                    self.queue_run_target = None;
                     return Task::none();
                 }
                 self.start();
@@ -7046,7 +7063,7 @@ impl App {
         };
         match item.status {
             ItemStatus::Running => self.view_item(index),
-            ItemStatus::Pending => self.update(Message::OpenRunSetup),
+            ItemStatus::Pending => self.update(Message::TranscribeQueueItem(index)),
             ItemStatus::Interrupted | ItemStatus::Failed(_) => {
                 self.update(Message::RetryItem(index))
             }
@@ -7525,6 +7542,23 @@ impl App {
         row_index
     }
 
+    /// Open the run options. `target` names one queued row to start on its
+    /// own; `None` is the footer's normal "start the pending queue" path.
+    fn open_run_setup(&mut self, target: Option<usize>) {
+        if matches!(self.status, Status::Running) || self.transcribe_blocked() {
+            return;
+        }
+        if self.queue.is_empty() && self.retranscribe_target().is_none() {
+            return;
+        }
+        self.header_menu = None;
+        if let Some(index) = target {
+            self.selected = Some(index);
+        }
+        self.queue_run_target = target;
+        self.run_setup_open = true;
+    }
+
     fn start(&mut self) {
         if self.transcribe_blocked() {
             return;
@@ -7609,6 +7643,8 @@ impl App {
         self.gpu_retry_pending = false;
         self.run_kind = RunKind::Batch;
         if !self.models_ready() {
+            self.queue_run_target = None;
+            self.stop_after_run = false;
             self.status = Status::Error("transcription models are missing".to_string());
             self.toast = Some((
                 "Download the transcription models before starting".to_string(),
@@ -7617,6 +7653,14 @@ impl App {
             return;
         }
         let preserve = preserve_view && self.keep_pinned_view();
+        // A row-menu Transcribe names one row: start that row only and do not
+        // let the follow-up pass pick up the rest of the queue.
+        let targeted = if preserve_view {
+            None
+        } else {
+            self.queue_run_target.take()
+        };
+        self.stop_after_run = targeted.is_some();
         let pending: Vec<usize> = self
             .queue
             .iter()
@@ -7626,7 +7670,15 @@ impl App {
             .collect();
         // Free runs exactly one file per press: the selected pending item, or
         // the first pending item when nothing is selected. The rest stay queued.
-        let inputs: Vec<PathBuf> = if self.can(license::Feature::Batch) {
+        let inputs: Vec<PathBuf> = if let Some(index) = targeted {
+            self.queue
+                .get(index)
+                .filter(|item| {
+                    matches!(item.status, ItemStatus::Pending | ItemStatus::Interrupted)
+                })
+                .map(|item| vec![item.path.clone()])
+                .unwrap_or_default()
+        } else if self.can(license::Feature::Batch) {
             pending
                 .iter()
                 .map(|index| self.queue[*index].path.clone())
@@ -7641,7 +7693,15 @@ impl App {
                 .unwrap_or_default()
         };
         if inputs.is_empty() {
-            self.status = Status::Error("add at least one file".to_string());
+            self.stop_after_run = false;
+            if targeted.is_some() {
+                self.toast = Some((
+                    "That file is no longer in the queue".to_string(),
+                    Instant::now(),
+                ));
+            } else {
+                self.status = Status::Error("add at least one file".to_string());
+            }
             return;
         }
 
@@ -8412,6 +8472,8 @@ impl App {
             return;
         };
         self.run_kind = RunKind::Batch;
+        self.queue_run_target = None;
+        self.stop_after_run = false;
         if let Some(recorder) = session.recorder {
             recorder.cancel();
         }
@@ -8439,6 +8501,8 @@ impl App {
     fn cancel(&mut self) {
         self.gpu_retry_pending = false;
         self.run_kind = RunKind::Batch;
+        self.queue_run_target = None;
+        self.stop_after_run = false;
         let pid = self.pid.load(Ordering::SeqCst);
         if pid != 0 {
             backend::kill(pid);
@@ -9561,8 +9625,11 @@ impl App {
                     self.save_queue();
                     // Pro chains a follow-up pass for files queued during the
                     // run. The free tier stops after one item and waits for a
-                    // manual Transcribe.
-                    if self.can(license::Feature::Batch)
+                    // manual Transcribe. A row-menu Transcribe is deliberately
+                    // one row and leaves the rest of the queue alone.
+                    let stop_after = std::mem::take(&mut self.stop_after_run);
+                    if !stop_after
+                        && self.can(license::Feature::Batch)
                         && self
                             .queue
                             .iter()
@@ -12215,7 +12282,7 @@ impl App {
                         "Transcribe",
                         !running,
                         running.then_some("Finish the current run first."),
-                        Message::OpenRunSetup,
+                        Message::TranscribeQueueItem(index),
                     ),
                     row(
                         "Reveal audio",
@@ -18219,6 +18286,7 @@ fn closes_row_menu(message: &Message) -> bool {
             | Message::RetranscribeRecent(_)
             | Message::EnqueueRecent(_)
             | Message::ExportRecentAs(_, _)
+            | Message::TranscribeQueueItem(_)
             | Message::OpenQueueRow(_)
             | Message::RemoveItem(_)
             | Message::RetryItem(_)
@@ -23494,6 +23562,26 @@ mod tests {
         let _ = std::fs::remove_dir_all(&media);
     }
 
+    #[test]
+    fn the_queue_row_transcribe_targets_that_row() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("queue-row-target");
+        let mut app = pro_app();
+        app.queue.push(queue_item(PathBuf::from("/media/a.mp3")));
+        app.queue.push(queue_item(PathBuf::from("/media/b.mp3")));
+
+        let _ = app.update(Message::TranscribeQueueItem(1));
+        assert!(app.run_setup_open);
+        assert_eq!(app.queue_run_target, Some(1));
+        assert_eq!(app.selected, Some(1));
+
+        // Closing the options drops the one-row target; the footer's next
+        // Transcribe starts the pending queue normally.
+        let _ = app.update(Message::CloseRunSetup);
+        assert!(!app.run_setup_open);
+        assert_eq!(app.queue_run_target, None);
+    }
+
     /// Every dialog, so a variant added to `Modal` cannot go untested: the
     /// escape and render passes below each walk this list.
     const ALL_MODALS: [Modal; 9] = [
@@ -27852,7 +27940,7 @@ mod tests {
         let rows = app.row_menu_rows(PaneTab::Queue, Some(0), &scheme);
         assert!(matches!(
             menu_entry(&rows, "Transcribe").action,
-            Some(Message::OpenRunSetup)
+            Some(Message::TranscribeQueueItem(0))
         ));
         assert!(!rows.iter().any(|row| row.label == "Copy path"));
         assert!(rows.iter().any(|row| row.label == "Remove"));
