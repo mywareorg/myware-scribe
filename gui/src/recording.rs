@@ -441,9 +441,9 @@ const FLOOR_BLOCKS: usize = 32;
 /// neither latches "clipping" nor seeds the noise floor.
 const WARMUP_SECONDS: f32 = 0.15;
 
-/// The floor before anything has been heard. A single quiet block replaces one
-/// slot, so the guess is corrected within a quarter second of a pause; it only
-/// matters if recording starts mid-sentence.
+/// The floor before the first block has been measured. It applies only to the
+/// first quarter second of the stream; the first measured block replaces it, so
+/// a room louder than this seed does not pin the bar at full for eight seconds.
 const FLOOR_SEED_DB: f32 = -55.0;
 
 /// Digital silence has no meaningful floor; keep the reference out of `-inf`.
@@ -467,6 +467,9 @@ const CLIP_HOLD_SECONDS: f32 = 2.0;
 struct LevelEngine {
     warmup: f32,
     floor: [f32; FLOOR_BLOCKS],
+    /// Number of slots that hold a real measurement. The seed fills the rest
+    /// only until the first block arrives.
+    floor_filled: usize,
     slot: usize,
     block_seconds: f32,
     block_peak: f32,
@@ -482,6 +485,7 @@ impl Default for LevelEngine {
         Self {
             warmup: 0.0,
             floor: [FLOOR_SEED_DB; FLOOR_BLOCKS],
+            floor_filled: 0,
             slot: 0,
             block_seconds: 0.0,
             block_peak: 0.0,
@@ -516,7 +520,13 @@ impl LevelEngine {
             let block_db = decibels(self.block_peak).clamp(FLOOR_MIN_DB, 0.0);
             self.floor[self.slot] = block_db;
             self.slot = (self.slot + 1) % FLOOR_BLOCKS;
-            self.floor_db = self.floor.iter().copied().fold(f32::INFINITY, f32::min);
+            self.floor_filled = (self.floor_filled + 1).min(FLOOR_BLOCKS);
+            // Ignore the unmeasured seed slots: a room louder than the seed
+            // must not read as full scale until eight seconds have passed.
+            self.floor_db = self.floor[..self.floor_filled]
+                .iter()
+                .copied()
+                .fold(f32::INFINITY, f32::min);
             self.block_seconds = 0.0;
             self.block_peak = 0.0;
         }
@@ -727,6 +737,22 @@ mod tests {
         let speech = feed(&mut engine, -20.0, 0.3, 0.01);
         assert!(speech.level > 0.7, "{speech:?}");
         assert!(speech.level > room.level + 0.5);
+    }
+
+    #[test]
+    fn a_loud_room_settles_the_floor_on_the_first_block() {
+        let mut engine = LevelEngine::default();
+
+        // A room at -40 dBFS is louder than the seed. Keeping the seed in the
+        // rolling minimum pinned the bar near full for eight seconds, until
+        // every slot had been replaced; the first block now sets the floor.
+        let room = feed(&mut engine, -40.0, 1.0, 0.01);
+        assert!(engine.floor_db > -41.0, "{}", engine.floor_db);
+        assert!(room.level < 0.1, "{room:?}");
+
+        // Speech twenty decibels above that room reads mid-scale immediately.
+        let speech = feed(&mut engine, -20.0, 0.3, 0.01);
+        assert!((0.45..0.55).contains(&speech.level), "{speech:?}");
     }
 
     #[test]
