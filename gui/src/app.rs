@@ -747,6 +747,16 @@ enum Status {
     Error(String),
 }
 
+/// Which lifecycle the backend events belong to. The recording session can end
+/// at `Done` while `AllDone` is still to arrive, so completion must be routed
+/// by what kind of run this was, not by whether a session still exists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum RunKind {
+    #[default]
+    Batch,
+    Recording,
+}
+
 /// Where the recording workflow is. The recorder owns the WAV while the
 /// session exists; `Preparing`/`Transcribing` continue after the file is
 /// finished and the item is in the history.
@@ -755,7 +765,6 @@ enum RecordPhase {
     Countdown,
     Capturing,
     Preparing,
-    #[allow(dead_code)] // R1b2 moves the session here once transcription starts.
     Transcribing,
 }
 
@@ -1063,6 +1072,10 @@ pub enum Message {
     ItemDurationProbed(PathBuf, Option<f64>),
     ViewDetailsLoaded(PathBuf, Option<Vec<backend::Turn>>, Option<(f64, Vec<f32>)>),
     RetryItem(usize),
+    /// Start the ASR-only transcription for a recording that failed or was
+    /// interrupted, putting the session back into `Preparing`.
+    #[allow(dead_code)] // The File panel wires the retry row action.
+    RetryRecording(usize),
     QueueDragStart(usize),
     QueueDrop(usize),
     QueueHover(Option<usize>),
@@ -1287,6 +1300,15 @@ pub struct App {
     /// The recording workflow, if any. While it exists it holds the workflow
     /// lock; see [`App::record_lock`].
     record: Option<RecordSession>,
+    /// What the backend events in flight belong to.
+    run_kind: RunKind,
+    /// Tests only: never start a real model download or backend process, so a
+    /// transition can be exercised without the network or a child process.
+    #[cfg(test)]
+    recording_test_no_spawn: bool,
+    /// Tests only: override the recording model check.
+    #[cfg(test)]
+    recording_models_ready_override: Option<bool>,
     /// Lift quiet recordings before transcription.
     normalize: bool,
     /// Highlight words as playback reaches them.
@@ -1616,6 +1638,11 @@ impl App {
             normalize: settings.normalize,
             karaoke: settings.karaoke,
             record: None,
+            run_kind: RunKind::Batch,
+            #[cfg(test)]
+            recording_test_no_spawn: true,
+            #[cfg(test)]
+            recording_models_ready_override: None,
             briefing: None,
             karaoke_line: None,
             karaoke_source: None,
@@ -2155,7 +2182,6 @@ impl App {
 
     /// Record why an item failed. A failed recording has no transcript to
     /// show, but keeps its message for the retry affordance.
-    #[allow(dead_code)] // The recording session calls this in R1b.
     fn mark_item_failed(&mut self, index: usize, message: String) {
         let Some(entry) = self.recent.get_mut(index) else {
             return;
@@ -2168,7 +2194,6 @@ impl App {
 
     /// Finish an item at `index`, or append one when the index has no entry
     /// yet. Clears any previous failure so the row shows its output.
-    #[allow(dead_code)] // The recording session calls this in R1b.
     fn mark_item_ready(
         &mut self,
         index: usize,
@@ -2220,15 +2245,124 @@ impl App {
 
     /// R1b2: transcribe the recording the session just stored.
     ///
-    /// R1b1 leaves this seam empty on purpose: the item exists, the session is
-    /// in `Preparing`, and nothing has been sent to the backend. The next phase
-    /// must use `recording_preset()`, `recording_models_ready()` and the
-    /// ASR-only (`--single-speaker`) path, then move the session to
-    /// `Transcribing` and fill the item through `mark_item_ready` /
-    /// `mark_item_failed`.
+    /// The capture is already a `Ready` history item with no transcript. This
+    /// starts the ASR-only run for its audio, fetching the preset's models
+    /// first when they are missing. `Preparing` while that download runs; the
+    /// `DownloadEvent::Finished` handler calls back into here.
     fn start_recording_transcription(&mut self) -> Task<Message> {
-        // TODO(R1b2): start the ASR-only run for the session item.
+        let Some(item) = self.record.as_ref().and_then(|session| session.item) else {
+            return Task::none();
+        };
+        let Some(path) = self
+            .recent
+            .get(item)
+            .and_then(|entry| entry.audio.clone())
+        else {
+            self.record = None;
+            self.mark_item_failed(item, "the recording file is missing".to_string());
+            self.status = Status::Error("the recording file is missing".to_string());
+            return Task::none();
+        };
+        if !self.recording_models_ready() {
+            if let Some(session) = self.record.as_mut() {
+                session.phase = RecordPhase::Preparing;
+            }
+            if self.model_download.is_none() {
+                #[cfg(test)]
+                if self.recording_test_no_spawn {
+                    return Task::none();
+                }
+                let required = download::required_for(self.recording_preset().arg(), false);
+                self.start_model_download_for(required);
+            }
+            return Task::none();
+        }
+
+        let (preset, num_speakers, diarized, single_speaker) = self.recording_run_args();
+        let use_gpu = self.gpu_selected();
+        if let Some(session) = self.record.as_mut() {
+            session.phase = RecordPhase::Transcribing;
+        }
+        self.run_kind = RunKind::Recording;
+        self.pid.store(0, Ordering::SeqCst);
+        self.cancelled.store(false, Ordering::SeqCst);
+        self.status = Status::Running;
+        self.stage = "starting".to_string();
+        self.stage_id = "starting".to_string();
+        self.progress = 0.0;
+        self.progress_shown = 0.0;
+        self.overall_shown = 0.0;
+        self.run_start = Some(Instant::now());
+        self.elapsed_final = None;
+        self.eta_shown = None;
+        self.work_done = 0.0;
+        self.work_total = 0.0;
+        self.diarize_fraction = 0.0;
+        self.eta_samples.clear();
+        self.eta_throughput = None;
+        self.eta_pending = 0;
+        self.current = None;
+        self.current_index = None;
+        self.batch = false;
+        self.save_queue();
+
+        #[cfg(test)]
+        if self.recording_test_no_spawn {
+            return Task::none();
+        }
+
+        backend::spawn(
+            vec![path],
+            None,
+            preset.arg(),
+            num_speakers,
+            self.language.clone(),
+            use_gpu,
+            true, // diarization cache is always on
+            diarized,
+            single_speaker,
+            self.normalize,
+            self.events.clone(),
+            self.pid.clone(),
+            self.cancelled.clone(),
+        );
         Task::none()
+    }
+
+    /// Retry an ASR-only recording run from its stored audio. A session may
+    /// not already exist, and a batch may not be running.
+    fn retry_recording(&mut self, index: usize) -> Task<Message> {
+        if self.record.is_some()
+            || self.run_kind == RunKind::Recording
+            || matches!(self.status, Status::Running)
+        {
+            return Task::none();
+        }
+        let Some(entry) = self.recent.get_mut(index) else {
+            return Task::none();
+        };
+        let retryable = entry.recording
+            && match entry.state {
+                ItemState::Failed => true,
+                // An interrupted run can leave the item Ready but empty.
+                ItemState::Ready => entry.transcript.is_none(),
+            };
+        if !retryable {
+            return Task::none();
+        }
+        entry.state = ItemState::Ready;
+        entry.message = None;
+        let captured = entry.duration.unwrap_or(0.0) as f32;
+        self.status = Status::Idle;
+        self.record = Some(RecordSession {
+            phase: RecordPhase::Preparing,
+            recorder: None,
+            countdown_ends: None,
+            item: Some(index),
+            captured,
+        });
+        self.save_queue();
+        self.start_recording_transcription()
     }
 
     /// Drop a recent entry and persist the shortened history. If the pane is
@@ -3413,14 +3547,29 @@ impl App {
                     self.model_download = None;
                     self.model_cancel.store(false, Ordering::SeqCst);
                     self.refresh_models();
+                    let preparing = self
+                        .record
+                        .as_ref()
+                        .is_some_and(|session| session.phase == RecordPhase::Preparing);
                     if ok {
                         self.toast = Some(("Models downloaded".to_string(), Instant::now()));
+                        if preparing {
+                            let _ = self.start_recording_transcription();
+                        }
                     } else {
                         if self.model_error.is_none() {
                             self.model_error =
                                 Some("One or more model files could not be downloaded".to_string());
                         }
                         self.toast = Some(("Model download failed".to_string(), Instant::now()));
+                        if preparing {
+                            let item = self.record.take().and_then(|session| session.item);
+                            if let Some(item) = item {
+                                self.mark_item_failed(item, "model download failed".to_string());
+                            }
+                            self.status =
+                                Status::Error("model download failed".to_string());
+                        }
                     }
                 }
             }
@@ -3451,18 +3600,19 @@ impl App {
     /// Record is unavailable while a batch is transcribing, and while a
     /// recording workflow is already under way.
     fn record_blocked(&self) -> bool {
-        matches!(self.status, Status::Running) || self.record_lock()
+        matches!(self.status, Status::Running)
+            || self.record_lock()
+            || self.run_kind == RunKind::Recording
     }
 
     /// Starting a transcription while a recording workflow is active would
     /// compete for the microphone and the pane, so it waits for the workflow.
     fn transcribe_blocked(&self) -> bool {
-        self.record.is_some()
+        self.record.is_some() || self.run_kind == RunKind::Recording
     }
 
     /// Recordings use their own preset: Speed when the license allows it,
     /// otherwise Balanced. The user's batch preset is deliberately untouched.
-    #[allow(dead_code)] // R1b2 starts the transcription run.
     fn recording_preset(&self) -> Preset {
         if self.can(license::Feature::SpeedPreset) {
             Preset::Speed
@@ -3471,10 +3621,19 @@ impl App {
         }
     }
 
+    /// The spawn arguments a recording's ASR-only run always uses: one speaker
+    /// known up front, no diarization, and the single turn labelled.
+    fn recording_run_args(&self) -> (Preset, Option<i32>, bool, bool) {
+        (self.recording_preset(), Some(1), false, true)
+    }
+
     /// Recordings are ASR-only, so only the preset's models are required; no
     /// diarization models are downloaded or checked.
-    #[allow(dead_code)] // R1b2 starts the transcription run.
     fn recording_models_ready(&self) -> bool {
+        #[cfg(test)]
+        if let Some(ready) = self.recording_models_ready_override {
+            return ready;
+        }
         download::ready_for(self.recording_preset().arg(), false)
     }
 
@@ -4114,6 +4273,7 @@ impl App {
                 }
                 Task::none()
             }
+            Message::RetryRecording(index) => self.retry_recording(index),
             Message::QueueDragStart(index) => {
                 if self.pointer_blocked() || index >= self.queue.len() {
                     return Task::none();
@@ -5248,7 +5408,7 @@ impl App {
                     .as_ref()
                     .is_some_and(|session| session.item == Some(index))
                 {
-                    self.cancel_recording();
+                    self.cancel_recording(true);
                 }
                 self.remove_recent(index);
                 Task::none()
@@ -5685,7 +5845,7 @@ impl App {
             }
             Message::Cancel => {
                 if self.record.is_some() {
-                    self.cancel_recording();
+                    self.cancel_recording(false);
                 } else {
                     self.cancel();
                 }
@@ -6622,6 +6782,7 @@ impl App {
     /// automatic follow-up pass; explicit starts always return to live.
     fn begin_batch(&mut self, preserve_view: bool) {
         self.gpu_retry_pending = false;
+        self.run_kind = RunKind::Batch;
         if !self.models_ready() {
             self.status = Status::Error("transcription models are missing".to_string());
             self.toast = Some((
@@ -6826,21 +6987,41 @@ impl App {
     }
 
     /// Abandon the recording workflow. A capture still in progress is stopped
-    /// and its WAV removed; a capture already stored as a history item stays
-    /// there. R1b2 kills the preparation/transcription run from here.
-    fn cancel_recording(&mut self) {
+    /// and its WAV removed; a capture already stored as a history item is
+    /// marked failed unless the caller is removing that row. A transcription
+    /// already running is killed.
+    fn cancel_recording(&mut self, removing_item: bool) {
         let Some(session) = self.record.take() else {
             return;
         };
+        self.run_kind = RunKind::Batch;
         if let Some(recorder) = session.recorder {
             recorder.cancel();
         }
-        // TODO(R1b2): kill the transcription run for this session's item.
-        self.status = Status::Idle;
+        if session.phase == RecordPhase::Transcribing {
+            let pid = self.pid.load(Ordering::SeqCst);
+            if pid != 0 {
+                backend::kill(pid);
+            }
+            self.pid.store(0, Ordering::SeqCst);
+            self.cancelled.store(true, Ordering::SeqCst);
+        }
+        let failed_item = if removing_item { None } else { session.item };
+        if let Some(item) = failed_item {
+            self.mark_item_failed(item, "cancelled".to_string());
+        }
+        self.stage = "cancelled".to_string();
+        self.stage_id = "cancelled".to_string();
+        self.status = if failed_item.is_some() {
+            Status::Cancelled
+        } else {
+            Status::Idle
+        };
     }
 
     fn cancel(&mut self) {
         self.gpu_retry_pending = false;
+        self.run_kind = RunKind::Batch;
         let pid = self.pid.load(Ordering::SeqCst);
         if pid != 0 {
             backend::kill(pid);
@@ -7634,16 +7815,23 @@ impl App {
                 }
                 Event::File { audio } => {
                     let path = PathBuf::from(audio);
+                    let recording = self.run_kind == RunKind::Recording;
                     // Keep a completed view (and its audio) alive when the user
                     // is listening to it; otherwise return to the live file.
                     let keep_view = self.keep_pinned_view() || self.keeps_finished_view();
-                    self.current = self.find_queue_index(&path);
-                    self.current_index = self.current;
-                    if let Some(index) = self.current {
-                        self.queue[index].status = ItemStatus::Running;
-                        // Persist at once: a crash before the file finishes must
-                        // restore as Interrupted, not as still-queued.
-                        self.save_queue();
+                    if recording {
+                        // A recording has no queue row; the item is history.
+                        self.current = None;
+                        self.current_index = None;
+                    } else {
+                        self.current = self.find_queue_index(&path);
+                        self.current_index = self.current;
+                        if let Some(index) = self.current {
+                            self.queue[index].status = ItemStatus::Running;
+                            // Persist at once: a crash before the file finishes
+                            // must restore as Interrupted, not as still-queued.
+                            self.save_queue();
+                        }
                     }
                     if !keep_view {
                         // The edited document is about to leave the screen.
@@ -7699,7 +7887,14 @@ impl App {
                         self.playhead = 0.0;
                     }
                     self.timeline_duration = Some(duration);
-                    if let Some(index) = self.current {
+                    if self.run_kind == RunKind::Recording {
+                        let item = self.record.as_ref().and_then(|session| session.item);
+                        if let Some(item) = item {
+                            if let Some(entry) = self.recent.get_mut(item) {
+                                entry.duration = Some(duration as f64);
+                            }
+                        }
+                    } else if let Some(index) = self.current {
                         if let Some(item) = self.queue.get_mut(index) {
                             item.duration = Some(duration as f64);
                         }
@@ -7762,11 +7957,21 @@ impl App {
                     self.output_txt = Some(PathBuf::from(&txt));
                     let transcript = PathBuf::from(&txt);
                     let duration = self.timeline_duration.map(|seconds| seconds as f64);
-                    let speakers = stats
-                        .num_speakers
-                        .and_then(|count| u8::try_from(count).ok())
-                        .filter(|count| *count > 0);
-                    if let Some(index) = self.current.take() {
+                    if self.run_kind == RunKind::Recording {
+                        // The item is history, not a queue row. Leave the batch
+                        // summary and per-file toast alone: there is no batch.
+                        let item = self.record.as_ref().and_then(|session| session.item);
+                        if let Some(item) = item {
+                            self.mark_item_ready(item, transcript, duration, Some(1));
+                        }
+                        self.record = None;
+                        self.status = Status::Done;
+                        self.toast = Some(("Recording saved".to_string(), Instant::now()));
+                    } else if let Some(index) = self.current.take() {
+                        let speakers = stats
+                            .num_speakers
+                            .and_then(|count| u8::try_from(count).ok())
+                            .filter(|count| *count > 0);
                         let (label, measured, audio) = match self.queue.get(index) {
                             Some(item) => (
                                 item.audio
@@ -7803,35 +8008,72 @@ impl App {
                     self.save_queue();
                 }
                 Event::Error { message } => {
-                    let was_gpu = self.gpu_selected();
-                    self.disable_gpu_after_failure(&message);
-                    self.gpu_retry_pending = was_gpu;
-                    self.stage = "error".to_string();
-                    self.stage_id = "error".to_string();
-                    let had_current = self.current.is_some();
-                    if let Some(index) = self.current.take() {
-                        self.queue[index].status = ItemStatus::Failed(message.clone());
-                    }
-                    self.current_index = None;
-                    if self.batch {
-                        // A process-level failure mid-file leaves the rest
-                        // unprocessed; mark them failed. A preflight failure
-                        // (no file started, e.g. a missing model) keeps the
-                        // queue pending so it can be retried after fixing it.
-                        if had_current {
-                            for item in self.queue.iter_mut() {
-                                if matches!(item.status, ItemStatus::Pending | ItemStatus::Running)
-                                {
-                                    item.status = ItemStatus::Failed(message.clone());
+                    if self.run_kind == RunKind::Recording {
+                        // No queue rows and no GPU retry pass: the recording item
+                        // is history, and this failure belongs to it alone.
+                        let item = self.record.take().and_then(|session| session.item);
+                        if let Some(item) = item {
+                            self.mark_item_failed(item, message.clone());
+                        }
+                        self.current = None;
+                        self.current_index = None;
+                        self.stage = "error".to_string();
+                        self.stage_id = "error".to_string();
+                        self.status = Status::Error(message.clone());
+                        self.toast =
+                            Some((format!("Recording failed: {message}"), Instant::now()));
+                        self.save_queue();
+                    } else {
+                        let was_gpu = self.gpu_selected();
+                        self.disable_gpu_after_failure(&message);
+                        self.gpu_retry_pending = was_gpu;
+                        self.stage = "error".to_string();
+                        self.stage_id = "error".to_string();
+                        let had_current = self.current.is_some();
+                        if let Some(index) = self.current.take() {
+                            self.queue[index].status = ItemStatus::Failed(message.clone());
+                        }
+                        self.current_index = None;
+                        if self.batch {
+                            // A process-level failure mid-file leaves the rest
+                            // unprocessed; mark them failed. A preflight failure
+                            // (no file started, e.g. a missing model) keeps the
+                            // queue pending so it can be retried after fixing it.
+                            if had_current {
+                                for item in self.queue.iter_mut() {
+                                    if matches!(
+                                        item.status,
+                                        ItemStatus::Pending | ItemStatus::Running
+                                    ) {
+                                        item.status = ItemStatus::Failed(message.clone());
+                                    }
                                 }
                             }
+                            self.batch = false;
                         }
-                        self.batch = false;
+                        self.status = Status::Error(message);
                     }
-                    self.status = Status::Error(message);
                 }
                 Event::AllDone => {
                     Self::clear_gpu_guard();
+                    if self.run_kind == RunKind::Recording {
+                        // The recording's completion was settled at `Done` (or
+                        // `Error`/cancel). There is no batch summary, no
+                        // follow-up pass, and no CPU retry.
+                        self.record = None;
+                        self.run_kind = RunKind::Batch;
+                        self.batch = false;
+                        self.current = None;
+                        self.current_index = None;
+                        self.eta_shown = None;
+                        self.elapsed_final =
+                            self.run_start.map(|start| start.elapsed().as_secs_f64());
+                        if matches!(self.status, Status::Running) {
+                            self.status = Status::Idle;
+                        }
+                        self.save_queue();
+                        return Task::batch(tasks);
+                    }
                     let retry_on_cpu = std::mem::take(&mut self.gpu_retry_pending);
                     if retry_on_cpu
                         && self
@@ -21381,6 +21623,253 @@ mod tests {
         }
     }
 
+    fn transcribing_session(item: usize) -> RecordSession {
+        RecordSession {
+            phase: RecordPhase::Transcribing,
+            recorder: None,
+            countdown_ends: None,
+            item: Some(item),
+            captured: 0.0,
+        }
+    }
+
+    fn recording_item(audio: PathBuf) -> RecentEntry {
+        RecentEntry {
+            audio: Some(audio),
+            duration: Some(2.0),
+            speakers: Some(1),
+            recording: true,
+            state: ItemState::Ready,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn recording_run_args_use_speed_for_pro_and_balanced_for_free() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("recording-run-args");
+
+        let free = App::new();
+        assert_eq!(
+            free.recording_run_args(),
+            (Preset::Balanced, Some(1), false, true)
+        );
+
+        let pro = pro_app();
+        assert_eq!(
+            pro.recording_run_args(),
+            (Preset::Speed, Some(1), false, true)
+        );
+    }
+
+    #[test]
+    fn recording_done_marks_the_item_ready_and_unlocks() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("recording-done");
+        let dir = temp_dir("recording-done-media");
+        let audio = dir.join("take.wav");
+        std::fs::write(&audio, b"audio").unwrap();
+        let txt = dir.join("take.txt");
+        std::fs::write(&txt, "[00:00] SPEAKER 1: hello\n").unwrap();
+
+        let mut app = pro_app();
+        app.recent.push(recording_item(audio));
+        app.record = Some(transcribing_session(0));
+        app.run_kind = RunKind::Recording;
+        app.status = Status::Running;
+        app.timeline_duration = Some(3.0);
+
+        app.events.lock().unwrap().push_back(Event::Done {
+            txt: txt.display().to_string(),
+            stats: backend::Stats::default(),
+        });
+        let _ = app.update(Message::Tick);
+
+        assert!(app.record.is_none(), "the session must be released");
+        assert!(matches!(app.status, Status::Done));
+        assert_eq!(
+            app.run_kind,
+            RunKind::Recording,
+            "AllDone has not arrived yet"
+        );
+        let entry = &app.recent[0];
+        assert_eq!(entry.state, ItemState::Ready);
+        assert_eq!(entry.transcript.as_deref(), Some(txt.as_path()));
+        assert_eq!(entry.duration, Some(3.0));
+        assert!(
+            app.batch_summary.is_empty(),
+            "a recording must not enter the batch summary"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn recording_error_marks_the_item_failed_and_unlocks() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("recording-error");
+        let dir = temp_dir("recording-error-media");
+        let audio = dir.join("take.wav");
+        std::fs::write(&audio, b"audio").unwrap();
+
+        let mut app = pro_app();
+        app.recent.push(recording_item(audio));
+        app.record = Some(transcribing_session(0));
+        app.run_kind = RunKind::Recording;
+        app.status = Status::Running;
+
+        app.events.lock().unwrap().push_back(Event::Error {
+            message: "backend exploded".to_string(),
+        });
+        let _ = app.update(Message::Tick);
+
+        assert!(app.record.is_none());
+        assert_eq!(app.recent[0].state, ItemState::Failed);
+        assert_eq!(
+            app.recent[0].message.as_deref(),
+            Some("backend exploded")
+        );
+        assert!(app.recent[0].transcript.is_none());
+        assert!(matches!(&app.status, Status::Error(message) if message == "backend exploded"));
+        assert!(!app.batch, "a recording failure must not fail queue rows");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn retry_recording_reenters_the_session() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("recording-retry");
+
+        let mut app = pro_app();
+        app.recent.push(RecentEntry {
+            audio: Some(PathBuf::from("/media/rec.wav")),
+            recording: true,
+            state: ItemState::Failed,
+            message: Some("cancelled".to_string()),
+            ..Default::default()
+        });
+        app.status = Status::Error("cancelled".to_string());
+        // Keep the start in `Preparing` without touching the network.
+        app.recording_models_ready_override = Some(false);
+
+        let _ = app.update(Message::RetryRecording(0));
+
+        let session = app.record.as_ref().expect("a retrying session");
+        assert_eq!(session.phase, RecordPhase::Preparing);
+        assert_eq!(session.item, Some(0));
+        assert_eq!(app.recent[0].state, ItemState::Ready);
+        assert_eq!(app.recent[0].message, None);
+        assert!(matches!(app.status, Status::Idle));
+    }
+
+    #[test]
+    fn cancel_marks_the_recording_failed_and_unlocks() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("recording-cancel");
+        let dir = temp_dir("recording-cancel-media");
+        let audio = dir.join("take.wav");
+        std::fs::write(&audio, b"audio").unwrap();
+
+        let mut app = pro_app();
+        app.recent.push(recording_item(audio));
+        app.record = Some(transcribing_session(0));
+        app.run_kind = RunKind::Recording;
+        app.status = Status::Running;
+
+        let _ = app.update(Message::Cancel);
+
+        assert!(app.record.is_none());
+        assert_eq!(app.run_kind, RunKind::Batch);
+        assert_eq!(app.recent[0].state, ItemState::Failed);
+        assert_eq!(app.recent[0].message.as_deref(), Some("cancelled"));
+        assert!(matches!(app.status, Status::Cancelled));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn removing_the_session_item_cancels_and_removes_it() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("recording-remove");
+        let dir = temp_dir("recording-remove-media");
+        let audio = dir.join("take.wav");
+        std::fs::write(&audio, b"audio").unwrap();
+
+        let mut app = pro_app();
+        app.recent.push(recording_item(audio));
+        app.record = Some(transcribing_session(0));
+        app.run_kind = RunKind::Recording;
+        app.status = Status::Running;
+
+        let _ = app.update(Message::RemoveRecent(0));
+
+        assert!(app.record.is_none());
+        assert!(app.recent.is_empty(), "a removed recording must not stay as Failed");
+        assert!(matches!(app.status, Status::Idle));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn download_completion_starts_a_preparing_recording() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("recording-download-start");
+        let dir = temp_dir("recording-download-start-media");
+        let audio = dir.join("take.wav");
+        std::fs::write(&audio, b"audio").unwrap();
+
+        let mut app = pro_app();
+        app.recent.push(recording_item(audio));
+        app.record = Some(RecordSession {
+            phase: RecordPhase::Preparing,
+            recorder: None,
+            countdown_ends: None,
+            item: Some(0),
+            captured: 0.0,
+        });
+        app.model_download = Some(ModelDownload {
+            label: "models".to_string(),
+            done: 0,
+            total: None,
+        });
+        // Pretend the files arrived; the test seam stops before a spawn.
+        app.recording_models_ready_override = Some(true);
+
+        app.model_events
+            .lock()
+            .unwrap()
+            .push_back(DownloadEvent::Finished { ok: true });
+        let _ = app.update(Message::Tick);
+
+        assert!(app.model_download.is_none());
+        let session = app.record.as_ref().expect("the session survives");
+        assert_eq!(session.phase, RecordPhase::Transcribing);
+        assert!(matches!(app.status, Status::Running));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn all_done_after_a_recording_does_not_open_the_batch_summary() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("recording-all-done");
+
+        let mut app = pro_app();
+        app.run_kind = RunKind::Recording;
+        app.status = Status::Done;
+        app.summary_open = false;
+
+        app.events.lock().unwrap().push_back(Event::AllDone);
+        let _ = app.update(Message::Tick);
+
+        assert_eq!(app.run_kind, RunKind::Batch);
+        assert!(matches!(app.status, Status::Done));
+        assert!(app.record.is_none());
+        assert!(!app.summary_open, "a recording must not present a batch summary");
+        assert!(app.batch_summary.is_empty());
+    }
+
     fn queue_item(path: PathBuf) -> QueueItem {
         QueueItem {
             path: path.clone(),
@@ -21489,6 +21978,8 @@ mod tests {
         wav.finish().unwrap();
 
         let mut app = pro_app();
+        // Keep the start in `Preparing` without downloading or spawning.
+        app.recording_models_ready_override = Some(false);
         app.record = Some(RecordSession {
             phase: RecordPhase::Capturing,
             recorder: Some(crate::recording::test_recorder(path.clone(), Some(2.0))),
