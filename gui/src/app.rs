@@ -9516,7 +9516,7 @@ impl App {
                         // The row never reads as Done: it goes straight into
                         // the history. The live buffer already holds the text.
                         self.remove_queue_row(index);
-                        self.merge_recent(RecentEntry {
+                        let history_index = self.merge_recent(RecentEntry {
                             audio,
                             transcript: Some(transcript),
                             finished_at: unix_secs(),
@@ -9524,6 +9524,10 @@ impl App {
                             speakers,
                             ..Default::default()
                         });
+                        // The row left the Queue tab for History while the user
+                        // may still be looking at the queue: blink the tab and
+                        // the new row.
+                        self.cue_pane(PaneTab::History, Some(history_index));
                         self.toast = Some((format!("Finished {label}"), Instant::now()));
                     }
                     self.current_index = None;
@@ -25598,6 +25602,11 @@ mod tests {
         // The live transcript the run streamed in stays on screen.
         assert!(!app.lines.is_empty());
         assert!(app.output_txt.is_some());
+        let cue = app
+            .pane_cue
+            .expect("the finished queue row should blink History");
+        assert_eq!(cue.tab, PaneTab::History);
+        assert!(cue.row.is_some_and(|index| index < app.recent.len()));
 
         let _ = std::fs::remove_dir_all(&media);
     }
