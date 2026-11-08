@@ -280,12 +280,16 @@ the Store does not resolve an add-on for an app that is not yet published.
 
 ## GUI
 
-Run `hippo-transcribe` with no arguments. Add files/folders to the queue, or drag audio
-files and folders anywhere into the window, then choose a preset and speaker
-count and press Transcribe. **Record** in the queue toolbar captures from the
-microphone (48 kHz mono WAV, written beside your transcripts or to the save
-location), shows a level meter, and starts transcribing as soon as you stop;
-recording is available during a run and in the free tier. The microphone is
+Run `hippo-transcribe` with no arguments. The File panel on the left holds the
+queue and the finished transcripts. Add files/folders from its action row, or
+drag audio files and folders anywhere into the window, then choose a preset and
+speaker count and press Transcribe. **Record** captures from the microphone
+(48 kHz mono WAV, written beside your transcripts or to the save location): a
+1.5 s countdown starts the take, the meter and stop control live in the
+transcription pane, and stopping transcribes it immediately with no setup —
+Speed on Pro, Balanced on free, one speaker. Recording is available in the free
+tier, but not while a transcription is running; the button greys out and says
+why. A recording workflow locks the panel until it finishes. The microphone is
 chosen in Settings. The Help menu holds the appearance choices (Light,
 Dark, System; System follows the desktop and is the default) and the header
 theme button cycles them. Files added while a run is active join the queue and
@@ -328,11 +332,17 @@ merge it with the next line, or split it at the playhead. Line deletion asks for
 confirmation. Saves are written atomically and keep a
 `<transcript>.hippo-transcribe.bak` backup beside the source file.
 
-Finished files move to the **Transcripts** tab of the left pane; the **Queue** tab
-keeps only work that is still pending, running, failed or interrupted. History
-rows are grouped by day (Today, Yesterday, then the date) and show the file's
-duration, speaker count and finish time. Hover a row to reveal its output in the
-file manager or remove it from the list. Click one to revisit that file's
+Finished files move to the **History** tab of the File panel; the **Queue** tab
+keeps only work that is still pending, running, failed or interrupted.
+**Favorites** is a flat starred list (Pro); **Recordings** lists every take,
+including a failed one with Retry. Only the Queue carries a count, and only of
+work left. History rows are grouped by day (Today, Yesterday, then the date) and
+show the file's duration, speaker count and finish time. Each row has a star and
+a remove button: a single click opens, a double-click runs the row's safe action
+(transcribe, resume or retry, never a retranscribe), and right-click opens a
+menu for reveal, copy, export, retranscribe, retry and remove. Clear queue lives
+in the Queue tab. Removing an item never deletes the audio or transcript on
+disk. Click one to revisit that file's
 transcript, speaker timeline, waveform and playback. Renaming speakers or saving
 writes back to that file's `.txt`. Adding an audio file that already has a
 transcript loads it straight away instead of queueing a run: `<name>.txt` beside

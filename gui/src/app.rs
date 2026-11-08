@@ -5660,9 +5660,9 @@ impl App {
             }
             Message::ClearQueue => {
                 if !matches!(self.status, Status::Running) {
-                    // A finished transcript from Transcripts is not queue
-                    // state: clearing the queue must not blank the document
-                    // the user is reading.
+                    // A finished transcript from History is not queue state:
+                    // clearing the queue must not blank the document the user
+                    // is reading.
                     if self
                         .selected_view
                         .as_ref()
@@ -20195,8 +20195,8 @@ mod tests {
             ..Default::default()
         });
 
-        // The Queue and Transcripts tabs share this store, so the same
-        // removal message clears the item wherever it was opened from.
+        // Queue, Favorites, History and Recordings share this store, so the
+        // same removal message clears the item wherever it was opened from.
         app.pane_tab = PaneTab::Queue;
         let _ = app.update(Message::RemoveRecent(0));
         assert!(app.recent.is_empty());
