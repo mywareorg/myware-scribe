@@ -13832,13 +13832,24 @@ impl App {
             },
             Message::OpenExportSubmenu,
         );
+        // A panel with one row is not a choice. Read the count so the row can
+        // say why it is unavailable instead of opening a one-item list.
+        let version_count = entry
+            .manifest
+            .as_deref()
+            .map(PathBuf::from)
+            .and_then(|path| hippo_transcribe_core::versions::read(&path))
+            .map(|manifest| manifest.versions.len())
+            .unwrap_or(0);
+        let version_hint = match version_count {
+            0 => Some("No versions recorded for this item."),
+            1 => Some("Only 1 version exists"),
+            _ => None,
+        };
         let select_version = row(
             "Select version\u{2026}",
-            entry.manifest.is_some(),
-            entry
-                .manifest
-                .is_none()
-                .then_some("No versions recorded for this item."),
+            version_count > 1,
+            version_hint,
             Message::OpenVersions(tab, index),
         );
         let mut rows = match tab {
@@ -30886,6 +30897,44 @@ mod tests {
         let retry = menu_entry(&rows, "Retry recording");
         assert!(!retry.enabled);
         assert!(retry.hint.as_deref().is_some_and(|hint| hint.contains("missing")));
+
+        let _ = std::fs::remove_dir_all(&media);
+    }
+
+    #[test]
+    fn select_version_is_disabled_with_one_version() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("version-menu-one");
+        let media = temp_dir("version-menu-one-media");
+        let audio = media.join("talk.mp3");
+        std::fs::write(&audio, b"audio").unwrap();
+        let transcript = media.join("one-ts.txt");
+        std::fs::write(&transcript, "[00:00] A: one\n").unwrap();
+        let manifest_path = media.join("talk-hash.hippo.json");
+        let manifest = serde_json::json!({
+            "schema_version": 1,
+            "asset": { "id": "a1", "audio": "talk.mp3" },
+            "current": "v1",
+            "versions": [{
+                "id": "v1", "settings_key": "k1", "preset": "accuracy",
+                "created_at": 1, "transcript": "one-ts.txt", "plain": "one.txt",
+                "origin": "run"
+            }]
+        });
+        std::fs::write(&manifest_path, manifest.to_string()).unwrap();
+
+        let mut app = pro_app();
+        app.recent.push(RecentEntry {
+            audio: Some(audio),
+            transcript: Some(transcript),
+            manifest: Some(manifest_path.display().to_string()),
+            ..Default::default()
+        });
+        app.refresh_recent_presence();
+        let rows = app.row_menu_rows(PaneTab::History, Some(0), &app.scheme());
+        let select = menu_entry(&rows, "Select version\u{2026}");
+        assert!(!select.enabled, "one version is not a choice");
+        assert_eq!(select.hint.as_deref(), Some("Only 1 version exists"));
 
         let _ = std::fs::remove_dir_all(&media);
     }
