@@ -67,6 +67,7 @@ pub fn entries() -> Vec<Entry> {
         "settings",
         crate::license::config_dir().map(|dir| dir.join("settings.json")),
     ));
+    rows.push(entry("vocabulary", crate::vocabulary::describe_path()));
     for model in crate::download::status() {
         let state = if model.present() {
             format!("{} KiB ({})", model.bytes / 1024, model.source)

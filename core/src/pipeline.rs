@@ -63,6 +63,21 @@ pub fn route(num_speakers: Option<i32>) -> PipelineMode {
     }
 }
 
+/// The one turn an ASR-only run transcribes. A caller that explicitly knows
+/// the recording is one voice can ask for a label on it; the default stays
+/// unlabelled so an ordinary ASR-only run keeps its text-only output.
+fn asr_only_turns(duration: f32, single_speaker: bool) -> Vec<Turn> {
+    vec![Turn {
+        start: 0.0,
+        end: duration,
+        speaker: if single_speaker {
+            "SPEAKER 1".to_string()
+        } else {
+            String::new()
+        },
+    }]
+}
+
 #[derive(Debug, Clone)]
 pub struct PipelineOptions {
     pub inputs: Vec<PathBuf>,
@@ -74,15 +89,102 @@ pub struct PipelineOptions {
     /// BCP-47-ish Whisper language code, or `None` for auto-detection.
     pub language: Option<String>,
     pub mode: PipelineMode,
+    /// Label the single ASR-only turn as `SPEAKER 1` instead of leaving it
+    /// unlabelled. Only meaningful when `mode` does not diarize.
+    pub single_speaker: bool,
+    /// Lift quiet recordings to a workable level before ASR and diarization.
+    pub normalize: bool,
     pub cancel: Option<Arc<AtomicBool>>,
 }
 
 #[derive(Debug, Clone)]
 struct Line {
     start: f32,
+    end: f32,
     speaker: String,
     text: String,
     confidence: f32,
+    /// Word times, when the decoder produced token timestamps.
+    words: Vec<crate::sidecar::Word>,
+}
+
+/// Group token pieces into words for the sidecar.
+///
+/// Whisper pieces start a new word when they begin with whitespace; punctuation
+/// and sub-word pieces are appended. Times come from the first and last piece,
+/// so a word's span includes its punctuation without inventing gaps.
+fn words_from_tokens(tokens: &[(f32, f32, String)]) -> Vec<crate::sidecar::Word> {
+    let mut words: Vec<crate::sidecar::Word> = Vec::new();
+    for (start, end, text) in tokens {
+        if text.trim().is_empty() {
+            continue;
+        }
+        let begins = text.starts_with(char::is_whitespace) || words.is_empty();
+        if begins {
+            words.push(crate::sidecar::Word {
+                start: *start,
+                end: *end,
+                text: text.trim_start().to_string(),
+            });
+        } else if let Some(word) = words.last_mut() {
+            word.text.push_str(text);
+            word.end = *end;
+        }
+    }
+    for word in &mut words {
+        word.text = word.text.trim().to_string();
+    }
+    words.retain(|word| !word.text.is_empty());
+    words
+}
+
+/// Absolute word times for one segment inside a clip.
+fn segment_words(segment: &Segment, offset: f32) -> Vec<crate::sidecar::Word> {
+    let tokens: Vec<(f32, f32, String)> = segment
+        .tokens
+        .iter()
+        .map(|token| (offset + token.start, offset + token.end, token.text.clone()))
+        .collect();
+    words_from_tokens(&tokens)
+}
+
+/// How often the in-progress transcript is parked beside the audio.
+const CHECKPOINT_INTERVAL: Duration = Duration::from_secs(2);
+
+/// The parked transcript for a file whose run is still going.
+///
+/// Public so the viewer can clean it up when a row is removed or skipped, and
+/// so a resume can report that text was recovered.
+///
+/// Hidden, beside the audio, so a crash leaves the text where the next run
+/// knows to look and the user never sees it in the output folder.
+pub fn checkpoint_path(input: &Path) -> PathBuf {
+    let name = input
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "transcript".to_string());
+    input.with_file_name(format!(".{name}.hippo-transcribe.partial"))
+}
+
+/// Write the lines produced so far through a temporary file, so a kill during
+/// the write cannot leave half a line behind.
+fn write_checkpoint(path: &Path, lines: &[Line], use_hours: bool) {
+    let text = lines
+        .iter()
+        .map(|line| {
+            let stamp = format_timestamp(line.start, use_hours);
+            if line.speaker.is_empty() {
+                format!("[{stamp}] {}", line.text)
+            } else {
+                format!("[{stamp}] {}: {}", line.speaker, line.text)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let temporary = path.with_extension("partial.tmp");
+    if std::fs::write(&temporary, text).is_ok() {
+        let _ = std::fs::rename(&temporary, path);
+    }
 }
 
 /// Merge near-adjacent same-speaker turns and drop ultra-short fragments.
@@ -341,6 +443,7 @@ fn segment_lines(
     segment: &Segment,
     turns: &[Turn],
     stats: &mut SplitStats,
+    vocabulary: &crate::vocabulary::Vocabulary,
 ) -> Vec<Line> {
     stats.segments += 1;
     let speaker_for = |turn: Option<usize>| {
@@ -350,13 +453,15 @@ fn segment_lines(
     };
     let whole = || Line {
         start: clip.start + segment.start,
+        end: clip.start + segment.end,
         speaker: speaker_for(attribute_turn(
             clip,
             clip.start + segment.start,
             clip.start + segment.end,
         )),
-        text: segment.text.clone(),
+        text: vocabulary.apply(&segment.text),
         confidence: segment.confidence,
+        words: segment_words(segment, clip.start),
     };
 
     if segment.tokens.len() < 2 {
@@ -364,18 +469,27 @@ fn segment_lines(
         return vec![whole()];
     }
 
-    let mut groups: Vec<(Option<usize>, String, f32, f32, usize)> = Vec::new();
+    let mut groups: Vec<(Option<usize>, String, f32, f32, usize, Vec<(f32, f32, String)>)> =
+        Vec::new();
     for token in &segment.tokens {
         let start = clip.start + token.start;
         let end = clip.start + token.end;
         let turn = attribute_token(clip, start, end);
         match groups.last_mut() {
-            Some((last_turn, text, _, last_end, count)) if *last_turn == turn => {
+            Some((last_turn, text, _, last_end, count, tokens)) if *last_turn == turn => {
                 text.push_str(&token.text);
                 *last_end = end;
                 *count += 1;
+                tokens.push((start, end, token.text.clone()));
             }
-            _ => groups.push((turn, token.text.clone(), start, end, 1)),
+            _ => groups.push((
+                turn,
+                token.text.clone(),
+                start,
+                end,
+                1,
+                vec![(start, end, token.text.clone())],
+            )),
         }
     }
 
@@ -383,7 +497,7 @@ fn segment_lines(
     // speaker change. Judge that by duration, not word count: one word that
     // takes half a second ("What?") is a real interjection, one that barely
     // covers a moment is an artefact.
-    let mut runs: Vec<Option<usize>> = groups.iter().map(|(turn, _, _, _, _)| *turn).collect();
+    let mut runs: Vec<Option<usize>> = groups.iter().map(|(turn, _, _, _, _, _)| *turn).collect();
     runs.dedup();
     if runs.len() > 1 {
         stats.multi_turn += 1;
@@ -393,7 +507,7 @@ fn segment_lines(
     }
     let fragment = groups
         .iter()
-        .any(|(_, _, start, end, count)| *count < 2 && end - start < MIN_GROUP_S);
+        .any(|(_, _, start, end, count, _)| *count < 2 && end - start < MIN_GROUP_S);
     if fragment {
         stats.collapsed += 1;
         return vec![whole()];
@@ -402,13 +516,15 @@ fn segment_lines(
 
     groups
         .into_iter()
-        .filter_map(|(turn, text, start, _, _)| {
-            let text = text.trim().to_string();
+        .filter_map(|(turn, text, start, end, _, tokens)| {
+            let text = vocabulary.apply(text.trim());
             (!text.is_empty()).then(|| Line {
                 start,
+                end,
                 speaker: speaker_for(turn),
                 text,
                 confidence: segment.confidence,
+                words: words_from_tokens(&tokens),
             })
         })
         .collect()
@@ -451,6 +567,7 @@ fn run_asr_pool(
     best_of: i32,
     audio_hash: Option<&String>,
     model_name: &str,
+    preprocess: &str,
     cancelled: &dyn Fn() -> bool,
     counters: &AsrCounters,
     mut on_result: impl FnMut(usize, Result<Vec<Segment>, String>),
@@ -484,6 +601,8 @@ fn run_asr_pool(
                         best_of,
                         fast,
                         token_timestamps,
+                        transcriber.prompt(),
+                        preprocess,
                     )
                 });
                 let result = match key.as_ref().and_then(|key| cache::read_segments(key)) {
@@ -875,7 +994,10 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
     let whisper = models::whisper_model(&opts.preset);
     // The salt carries the turn geometry as well as the model pair: a cached
     // single pass must not be served to a blockwise run.
-    let diarizer = diarize::cache_salt();
+    let preprocess = audio::preprocess_tag(opts.normalize);
+    // Normalized audio is different audio: the tag keeps its diarization turns
+    // and ASR clips out of the cache of a raw run, and vice versa.
+    let diarizer = format!("{}-{}", diarize::cache_salt(), preprocess);
     let diarized = opts.mode.diarizes();
 
     emit(Event::Stage {
@@ -891,8 +1013,14 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
         }
     }
 
+    let vocabulary = crate::vocabulary::Vocabulary::load();
+    let prompt = vocabulary.prompt(crate::vocabulary::PROMPT_BUDGET);
+    if let Some(prompt) = &prompt {
+        crate::logging::info(format!("vocabulary: {} character prompt", prompt.len()));
+    }
+
     let load_started = Instant::now();
-    let transcriber = match Transcriber::load(&whisper) {
+    let mut transcriber = match Transcriber::load(&whisper) {
         Ok(transcriber) => Some(transcriber),
         Err(message) => {
             // Fail before diarization/processing: never write an empty
@@ -916,6 +1044,9 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
             return;
         }
     };
+    if let Some(transcriber) = &mut transcriber {
+        transcriber.set_prompt(prompt);
+    }
 
     if let Some(transcriber) = &transcriber {
         crate::logging::info(format!("ASR backend: {}", transcriber.backend().label()));
@@ -1033,14 +1164,22 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
                 prefetched = Some(std::thread::spawn(move || audio::decode(&next)));
             }
         }
-        let (samples, rate) = match decoded {
+        let (mut samples, rate) = match decoded {
             Ok(value) => value,
             Err(message) => {
                 fail(emit, message);
                 continue;
             }
         };
+        if opts.normalize {
+            let gain = audio::normalize_loudness(&mut samples, rate);
+            if (gain - 1.0).abs() > 0.01 {
+                crate::logging::info(format!("loudness: gain {gain:.2}x"));
+            }
+        }
         let duration = samples.len() as f64 / rate as f64;
+        let checkpoint = checkpoint_path(&input);
+        let checkpoint_hours = duration >= 3600.0;
         let decoded_at = Instant::now();
         let samples = Arc::new(samples);
         emit(Event::Meta {
@@ -1112,11 +1251,9 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
 
         let job = if !diarized {
             // ASR-only mode: no speaker turns, no sherpa models, no cache.
-            DiarizeJob::Ready(vec![Turn {
-                start: 0.0,
-                end: duration as f32,
-                speaker: String::new(),
-            }])
+            // An explicit single-speaker request labels the lone turn even
+            // though diarization never ran.
+            DiarizeJob::Ready(asr_only_turns(duration as f32, opts.single_speaker))
         } else if opts.num_speakers == Some(1) {
             // One speaker: skip diarization entirely and transcribe the file as
             // a single turn.
@@ -1284,6 +1421,7 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
                 best_of,
                 audio_hash.as_ref(),
                 &model_name,
+                preprocess,
                 &is_cancelled,
                 &counters,
                 |index, result| {
@@ -1376,7 +1514,13 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
                 match results[index].take() {
                     Some(Ok(segments)) => {
                         for segment in segments {
-                            lines.extend(segment_lines(&clip, &segment, &turns, &mut split_stats));
+                            lines.extend(segment_lines(
+                                &clip,
+                                &segment,
+                                &turns,
+                                &mut split_stats,
+                                &vocabulary,
+                            ));
                         }
                     }
                     Some(Err(message)) => emit(Event::Log { message }),
@@ -1481,6 +1625,7 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
                 let mut pending: BTreeMap<usize, Result<Vec<Segment>, String>> = BTreeMap::new();
                 let mut buffer: Vec<Line> = Vec::new();
                 let mut next_emit = 0usize;
+                let mut last_checkpoint: Option<Instant> = None;
 
                 run_asr_pool(
                     &spans,
@@ -1494,6 +1639,7 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
                     best_of,
                     audio_hash.as_ref(),
                     &model_name,
+                    preprocess,
                     &is_cancelled,
                     &counters,
                     |index, result| {
@@ -1515,6 +1661,7 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
                                             &segment,
                                             &turns,
                                             &mut split_stats,
+                                            &vocabulary,
                                         ));
                                     }
                                 }
@@ -1540,6 +1687,12 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
                                     confidence: line.confidence,
                                 });
                                 lines.push(line);
+                            }
+                            if last_checkpoint
+                                .is_none_or(|at: Instant| at.elapsed() >= CHECKPOINT_INTERVAL)
+                            {
+                                write_checkpoint(&checkpoint, &lines, checkpoint_hours);
+                                last_checkpoint = Some(Instant::now());
                             }
                         }
 
@@ -1642,38 +1795,39 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
             });
         }
 
-        // Sidecar with per-line confidence, so the viewer can still mark
-        // uncertain utterances after a restart. Line order matches `txt_ts`.
+        // Sidecar with per-line confidence and bounds, so the viewer, exports
+        // and summaries all read the same record. Line order matches `txt_ts`.
         let json_path = ts_path.with_extension("json");
-        let json_lines: Vec<serde_json::Value> = lines
-            .iter()
-            .map(|line| {
-                serde_json::json!({
-                    "time": format_timestamp(line.start, use_hours),
-                    "speaker": line.speaker,
-                    "text": line.text,
-                    "start": line.start,
-                    "confidence": line.confidence,
+        let sidecar = crate::sidecar::Sidecar::new(
+            lines
+                .iter()
+                .map(|line| crate::sidecar::Line {
+                    time: format_timestamp(line.start, use_hours),
+                    speaker: line.speaker.clone(),
+                    text: line.text.clone(),
+                    start: Some(line.start),
+                    confidence: Some(line.confidence),
+                    end: Some(line.end),
+                    words: line.words.clone(),
+                    ..crate::sidecar::Line::default()
                 })
-            })
-            .collect();
-        let json_root = serde_json::json!({
-            "lines": json_lines,
-            "turns": turns,
-            "duration": duration,
-        });
-        match serde_json::to_string_pretty(&json_root) {
-            Ok(text) => {
-                if let Err(error) = std::fs::write(&json_path, text) {
-                    emit(Event::Log {
-                        message: format!("could not write {}: {error}", json_path.display()),
-                    });
-                }
-            }
-            Err(error) => emit(Event::Log {
-                message: format!("could not encode {}: {error}", json_path.display()),
-            }),
+                .collect(),
+            turns.clone(),
+            crate::sidecar::Meta {
+                audio: Some(input.display().to_string()),
+                duration: Some(duration as f32),
+                preset: Some(opts.preset.clone()),
+                language: opts.language.clone(),
+                model: None,
+            },
+        );
+        if let Err(error) = crate::sidecar::write_at(&json_path, &sidecar) {
+            emit(Event::Log {
+                message: format!("could not write {}: {error}", json_path.display()),
+            });
         }
+        // The real transcript exists now; the parked copy is no longer needed.
+        let _ = std::fs::remove_file(&checkpoint);
 
         let mut speaker_stats: HashMap<String, SpeakerStat> = HashMap::new();
         for line in &lines {
@@ -1797,6 +1951,53 @@ mod tests {
     }
 
     #[test]
+    fn asr_only_with_single_speaker_labels_lines() {
+        let segment = Segment {
+            start: 0.0,
+            end: 2.0,
+            text: "hello".to_string(),
+            confidence: 0.0,
+            tokens: Vec::new(),
+        };
+        let clip = |turns: &[Turn]| Clip {
+            turns: turns
+                .iter()
+                .enumerate()
+                .map(|(index, turn)| (index, turn.start, turn.end))
+                .collect(),
+            start: 0.0,
+            from: 0,
+            to: 32_000,
+        };
+        let vocabulary = crate::vocabulary::Vocabulary::default();
+
+        let labelled = asr_only_turns(2.0, true);
+        let mut stats = SplitStats::default();
+        let lines = segment_lines(
+            &clip(&labelled),
+            &segment,
+            &labelled,
+            &mut stats,
+            &vocabulary,
+        );
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].speaker, "SPEAKER 1");
+
+        // Without the option, the ASR-only path still has no label.
+        let unlabelled = asr_only_turns(2.0, false);
+        let mut stats = SplitStats::default();
+        let lines = segment_lines(
+            &clip(&unlabelled),
+            &segment,
+            &unlabelled,
+            &mut stats,
+            &vocabulary,
+        );
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].speaker, "");
+    }
+
+    #[test]
     fn overlapping_short_turns_do_not_skip_the_rest_of_a_long_turn() {
         let turns = vec![
             Turn {
@@ -1883,7 +2084,13 @@ mod tests {
             ],
         };
         let mut stats = SplitStats::default();
-        let lines = segment_lines(&clip, &segment, &turns, &mut stats);
+        let lines = segment_lines(
+            &clip,
+            &segment,
+            &turns,
+            &mut stats,
+            &crate::vocabulary::Vocabulary::default(),
+        );
         assert_eq!(lines.len(), 2);
         assert_eq!(lines[0].speaker, "SPEAKER 1");
         assert_eq!(lines[0].text, "hello there");
@@ -1899,7 +2106,13 @@ mod tests {
         short.tokens[2].start = 0.95;
         short.tokens[2].end = 1.0;
         let mut stats = SplitStats::default();
-        let lines = segment_lines(&clip, &short, &turns, &mut stats);
+        let lines = segment_lines(
+            &clip,
+            &short,
+            &turns,
+            &mut stats,
+            &crate::vocabulary::Vocabulary::default(),
+        );
         assert_eq!(lines.len(), 1);
         assert_eq!(stats.collapsed, 1);
 
@@ -1909,11 +2122,75 @@ mod tests {
         spoken.tokens[2].end = 1.75;
         spoken.tokens.truncate(3);
         let mut stats = SplitStats::default();
-        let lines = segment_lines(&clip, &spoken, &turns, &mut stats);
+        let lines = segment_lines(
+            &clip,
+            &spoken,
+            &turns,
+            &mut stats,
+            &crate::vocabulary::Vocabulary::default(),
+        );
         assert_eq!(lines.len(), 2);
         assert_eq!(lines[1].speaker, "SPEAKER 2");
         assert_eq!(lines[1].text, "general");
         assert_eq!(stats.collapsed, 0);
+    }
+
+    #[test]
+    fn vocabulary_replacements_reach_the_transcript_text() {
+        let turns = vec![Turn {
+            start: 0.0,
+            end: 2.0,
+            speaker: "SPEAKER 1".to_string(),
+        }];
+        let clip = Clip {
+            turns: vec![(0, 0.0, 2.0)],
+            start: 0.0,
+            from: 0,
+            to: 32_000,
+        };
+        let segment = Segment {
+            start: 0.0,
+            end: 2.0,
+            text: "we use pie torch".to_string(),
+            confidence: 0.0,
+            tokens: Vec::new(),
+        };
+        let vocabulary = crate::vocabulary::Vocabulary::from_fields("", "pie torch = PyTorch");
+        let mut stats = SplitStats::default();
+
+        let lines = segment_lines(&clip, &segment, &turns, &mut stats, &vocabulary);
+
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].text, "we use PyTorch");
+    }
+
+    #[test]
+    fn token_pieces_group_into_words() {
+        let tokens = vec![
+            (0.0, 0.4, " Hello".to_string()),
+            (0.4, 0.9, " there".to_string()),
+            (0.9, 1.0, ",".to_string()),
+            (1.1, 1.5, " gen".to_string()),
+            (1.5, 1.8, "eral".to_string()),
+        ];
+        let words = words_from_tokens(&tokens);
+        assert_eq!(words.len(), 3);
+        assert_eq!(words[0].text, "Hello");
+        assert_eq!(words[0].start, 0.0);
+        assert_eq!(words[1].text, "there,");
+        assert_eq!(words[1].end, 1.0);
+        assert_eq!(words[2].text, "general");
+        assert_eq!(words[2].end, 1.8);
+    }
+
+    #[test]
+    fn the_parked_transcript_sits_beside_the_audio() {
+        let path = checkpoint_path(Path::new("/tmp/interview.mp3"));
+        assert_eq!(
+            path.file_name().and_then(|name| name.to_str()),
+            Some(".interview.mp3.hippo-transcribe.partial")
+        );
+        assert_eq!(path.parent(), Some(Path::new("/tmp")));
     }
 
     #[test]

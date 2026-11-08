@@ -18,6 +18,11 @@ if not exist "%SRC%\hippo-transcribe.exe" (
   exit /b 1
 )
 
+if not exist "%SRC%\hippo-summarize.exe" (
+  echo [!] hippo-summarize.exe is missing from the release folder.
+  exit /b 1
+)
+
 if not exist "%SRC%\sherpa-onnx-c-api.dll" (
   echo [!] sherpa-onnx-c-api.dll is missing from the release folder.
   exit /b 1
@@ -42,6 +47,7 @@ echo Installing Hippo Transcribe to "%INSTALL_DIR%"
 if exist "%INSTALL_DIR%" rmdir /s /q "%INSTALL_DIR%"
 mkdir "%INSTALL_DIR%" >nul
 copy /y "%SRC%\hippo-transcribe.exe" "%INSTALL_DIR%\hippo-transcribe.exe" >nul
+copy /y "%SRC%\hippo-summarize.exe" "%INSTALL_DIR%\hippo-summarize.exe" >nul
 rem Copy every DLL: sherpa-onnx, ONNX Runtime, and the Visual C++ runtime.
 for %%f in ("%SRC%\*.dll") do copy /y "%%~f" "%INSTALL_DIR%\" >nul
 if exist "%SRC%\sample-short.mp3" (

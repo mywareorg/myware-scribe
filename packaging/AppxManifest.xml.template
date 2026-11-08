@@ -63,5 +63,8 @@
 
   <Capabilities>
     <rescap:Capability Name="runFullTrust" />
+    <!-- Recording reads the microphone. A packaged app without this is
+         silently given silence rather than an error. -->
+    <DeviceCapability Name="microphone" />
   </Capabilities>
 </Package>

@@ -4,8 +4,10 @@ pub mod asr;
 pub mod audio;
 pub mod benchmark;
 pub mod cache;
+pub mod codec;
 pub mod cli;
 pub mod diarize;
+pub mod docx;
 pub mod download;
 pub mod event;
 pub mod export;
@@ -14,6 +16,9 @@ pub mod logging;
 pub mod models;
 pub mod paths;
 pub mod pipeline;
+pub mod playback;
+pub mod sidecar;
+pub mod vocabulary;
 
 #[cfg(windows)]
 mod sherpa_dynamic;

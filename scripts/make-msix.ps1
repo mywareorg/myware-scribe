@@ -93,6 +93,9 @@ New-Item -ItemType Directory -Path $layout -Force | Out-Null
 # executable links the DLL CRT, and the certification machine has no
 # redistributable installed.
 Copy-Item (Join-Path $Stage "hippo-transcribe.exe") $layout
+# The briefing runs in its own process so llama.cpp's ggml never meets
+# whisper.cpp's inside one binary.
+Copy-Item (Join-Path $Stage "hippo-summarize.exe") $layout
 $runtimeDlls = @("sherpa-onnx-c-api.dll", "onnxruntime.dll", "vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll")
 if (Test-Path -LiteralPath (Join-Path $Stage "vcomp140.dll")) {
     $runtimeDlls += "vcomp140.dll"
@@ -114,13 +117,22 @@ if (-not (Test-Path $sample)) {
 }
 Copy-Item $sample $layout
 
-# Ship the models inside the package. The core looks for <exe>\models before the
-# per-user folder, so a bundled copy needs no download at all: nothing depends
-# on where the packaged process's AppData is redirected to.
+# Third-party notices: model weights and runtimes are redistributed here, and
+# the Store package has no README for a user to find.
+$notices = Join-Path $Stage "LICENSES.md"
+if (-not (Test-Path $notices)) {
+    $notices = Join-Path $root "LICENSES.md"
+}
+Copy-Item $notices $layout
+
+# Optionally ship the models inside the package. The core looks for <exe>\models
+# before the per-user folder, so a bundled copy needs no download at all. The
+# Store build leaves them out and downloads them once on first run, which keeps
+# the package and its updates small.
 if (-not $NoModels) {
     $modelsSource = Join-Path $Stage "models"
     if (-not (Test-Path $modelsSource)) {
-        throw "No models in $Stage. Build without -SkipModels, or pass -NoModels for a slim package."
+        throw "No models in $Stage. Pack with -NoModels for the Store package, or build with -BundleModels."
     }
     $modelsTarget = Join-Path $layout "models"
     New-Item -ItemType Directory -Path $modelsTarget -Force | Out-Null
@@ -206,10 +218,10 @@ if ($absent.Count -gt 0) {
     throw ("The package is missing " + $absent.Count + " file(s) from the layout: " + ($absent -join ", "))
 }
 $required = @(
-    "hippo-transcribe.exe", "AppxManifest.xml", "resources.pri",
+    "hippo-transcribe.exe", "hippo-summarize.exe", "AppxManifest.xml", "resources.pri",
     "sherpa-onnx-c-api.dll", "onnxruntime.dll",
     "vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll",
-    "sample-short.mp3", "Assets\StoreLogo.png"
+    "sample-short.mp3", "LICENSES.md", "Assets\StoreLogo.png"
 )
 foreach ($file in $required) {
     if ($packed -notcontains $file) {

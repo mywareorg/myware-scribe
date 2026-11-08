@@ -19,9 +19,10 @@ counts in mind, they are the limits the form enforces.
 
     Drop in an audio or video file and it produces a transcript labelled by
     speaker, with timestamps you can turn off. Everything runs on your own
-    computer: every transcription model ships inside the app, so it works with
-    the network disconnected from the first launch. There is no account to
-    create and no usage data to opt out of.
+    computer. The transcription models download once on first launch — a few
+    hundred megabytes — and after that the app works with the network
+    disconnected. There is no account to create and no usage data to opt out
+    of.
 
     It is built for the recordings people actually have: interviews, panel
     discussions, lectures, calls recorded on a phone. Speech recognition and
@@ -41,19 +42,21 @@ counts in mind, they are the limits the form enforces.
     - No telemetry and no network use during transcription. (1.1 adds a Store
       licence check when Pro can actually be purchased.)
 
-    The models are included in the package, so the first run needs no internet
-    connection and no additional download. Long recordings take time on a CPU;
-    expect roughly the length of the recording again for an hour of audio.
+    The first run downloads the model files once, with progress in the app;
+    after that transcription needs no internet connection. Long recordings take
+    time on a CPU; expect roughly the length of the recording again for an hour
+    of audio.
 
     The free version handles any number of files, one speaker at a time, with
     the Balanced model. Pro adds the Speed and Accuracy models, speaker labels,
-    batch runs, transcript editing and playback scrubbing; it arrives in 1.1,
+    batch runs, transcript editing, playback scrubbing and a briefing that
+    summarises a finished transcript with cited action items; it arrives in 1.1,
     and until then the 7-day trial inside the app shows what it adds.
 
 ## Feature bullets
 
     - Speaker-labelled transcripts from interviews, meetings and notes
-    - Runs offline out of the box; the models ship inside the app
+    - Works offline once the models have downloaded
     - No account, no sign-in, no telemetry
     - Automatic language detection, or pin a language
     - Timestamps on or off, per export
@@ -85,31 +88,29 @@ counts in mind, they are the limits the form enforces.
 
 - Support contact: the address registered in Partner Center.
 - Website: optional, leave blank.
-- Privacy policy URL: `https://librewarelive.gitlab.io/hippo-transcribe/` (live; serves the generated privacy page)
+- Privacy policy URL: `https://hippo-transcribe-1f7a72.gitlab.io/` (live; serves the generated privacy page)
   (the `pages` job in `.gitlab-ci.yml` publishes `PRIVACY.md` there on every push
   to `main`; confirm Pages is enabled for the project).
 - Copyright: `(c) 2026 Sean Wu`.
 
 ## Screenshot shot list
 
-Capture on the Windows build machine at 1920x1080, window maximised, no personal
-file names in the queue, one shot in the dark theme. The Store needs at least
-one image and accepts up to ten, each at least 1366x768.
+Capture on the Windows build machine at native 1920x1080 with 100% display
+scaling, the window maximised, and the app installed from the candidate MSIX.
+Use a clean queue and neutral file names, no personal paths, and one shot in the
+dark theme. The Store needs at least one image and accepts up to ten, each at
+least 1366x768. Do not upscale partial-window captures.
 
 The eight files in `packaging/screenshots/` are the listing set, in order:
 
-1. `01-drop.png` — a finished transcript with the queue, player and speaker bar.
+1. `01-queue-transcript.png` — a finished multi-speaker transcript with the queue, player and speaker bar.
 2. `02-running.png` — a run in progress: stage label, progress, elapsed time.
-3. `03-transcript.png` — a finished multi-speaker transcript with labels and timestamps.
-4. `04-summary.png` — the completion summary.
-5. `05-speakers.png` — speaker labels and renaming.
-6. `06-settings.png` — Settings: storage, models and the Diagnostics row.
-7. `07-sms.png` — the SMS/text-message output mode.
+3. `03-karaoke.png` — word-level timestamps and the karaoke band on the active line.
+4. `04-record.png` — the Record dialog and microphone meter.
+5. `05-export.png` — the export format picker, or the saved Word document.
+6. `06-briefing.png` — a briefing with cited action items.
+7. `07-settings.png` — Settings: storage, models and the Diagnostics row.
 8. `08-dark.png` — the dark theme.
-
-They were captured as partial window shots, so each was scaled with Lanczos to
-clear the 1366x768 minimum (factor `max(1366/width, 768/height)`, aspect
-preserved). Replace them with full-screen 1920x1080 captures when convenient.
 
 ## Before submitting
 
@@ -132,9 +133,11 @@ preserved). Replace them with full-screen 1920x1080 captures when convenient.
 
 ## Notes on wording
 
-`docs/brand.md` bans absolute offline claims. "Runs offline out of the box" is
-accurate now that the models ship in the package: transcription makes no network
-requests, and the Store licence check happens only when someone buys or restores
-Pro. Do not
-use "never phones home", "100% offline" or "HIPAA compliant" anywhere in the
-listing; the privacy policy says "HIPAA inspired" instead.
+`docs/brand.md` bans absolute offline claims. "Works offline once the models
+have downloaded" is accurate: the first launch fetches the model files, and
+transcription itself makes no network requests. Mention the one-time download
+wherever offline use is described, so the Store listing cannot be read as
+promising an offline install. The Store licence check happens only when someone
+buys or restores Pro. Do not use "never phones home", "100% offline" or
+"HIPAA compliant" anywhere in the listing; the privacy policy says "HIPAA
+inspired" instead.

@@ -32,6 +32,7 @@ pub const RADIUS_LG: f32 = 16.0;
 pub const CONTROL_PADDING: [u16; 2] = [3, 5];
 
 /// Type scale.
+pub const TEXT_2XS: f32 = 11.0;
 pub const TEXT_XS: f32 = 12.0;
 pub const TEXT_SM: f32 = 13.0;
 pub const TEXT_MD: f32 = 14.0;
@@ -235,6 +236,9 @@ pub struct Scheme {
     pub on_accent: Color,
     /// Speaker palette (first four are the flag/neutral accents).
     pub speaker_colors: [Color; 10],
+    /// Favorite star. Independent of the speaker palette because the dark
+    /// palette's amber is too dim to read as a filled favorite.
+    pub star: Color,
     pub sms0: Color,
     pub sms1: Color,
     /// Tints.
@@ -281,6 +285,7 @@ impl Scheme {
                 Color::from_rgb(167.0 / 255.0, 139.0 / 255.0, 250.0 / 255.0), // violet 400
                 Color::from_rgb(232.0 / 255.0, 121.0 / 255.0, 249.0 / 255.0), // fuchsia 400
             ],
+            star: Color::from_rgb(251.0 / 255.0, 191.0 / 255.0, 36.0 / 255.0), // amber 400
             sms0: Color::from_rgb(96.0 / 255.0, 165.0 / 255.0, 250.0 / 255.0),
             sms1: Color::from_rgb(251.0 / 255.0, 113.0 / 255.0, 133.0 / 255.0),
             warn_tint: Color::from_rgba(0.529, 0.867, 1.0, 0.35),
@@ -317,8 +322,8 @@ impl Scheme {
             muted: Color::from_rgb(0.659, 0.659, 0.659), // Gray 40  #a8a8a8
             on_accent: Color::from_rgb(0.086, 0.086, 0.086), // Gray 100
             speaker_colors: [
-                Color::from_rgb(29.0 / 255.0, 78.0 / 255.0, 216.0 / 255.0), // blue 700
-                Color::from_rgb(190.0 / 255.0, 18.0 / 255.0, 60.0 / 255.0), // rose 700
+                Color::from_rgb(21.0 / 255.0, 128.0 / 255.0, 61.0 / 255.0), // green 700
+                Color::from_rgb(126.0 / 255.0, 34.0 / 255.0, 206.0 / 255.0), // purple 700
                 Color::from_rgb(194.0 / 255.0, 65.0 / 255.0, 12.0 / 255.0), // orange 700
                 Color::from_rgb(146.0 / 255.0, 64.0 / 255.0, 14.0 / 255.0), // amber 800
                 Color::from_rgb(63.0 / 255.0, 98.0 / 255.0, 18.0 / 255.0),  // lime 800
@@ -328,8 +333,11 @@ impl Scheme {
                 Color::from_rgb(109.0 / 255.0, 40.0 / 255.0, 217.0 / 255.0), // violet 700
                 Color::from_rgb(162.0 / 255.0, 28.0 / 255.0, 175.0 / 255.0), // fuchsia 700
             ],
-            sms0: Color::from_rgb(29.0 / 255.0, 78.0 / 255.0, 216.0 / 255.0),
-            sms1: Color::from_rgb(190.0 / 255.0, 18.0 / 255.0, 60.0 / 255.0),
+            // A brighter yellow than the amber ramp: that ramp is too close to
+            // the dark panel's warm greys to read as a filled star.
+            star: Color::from_rgb(1.0, 212.0 / 255.0, 59.0 / 255.0),
+            sms0: Color::from_rgb(21.0 / 255.0, 128.0 / 255.0, 61.0 / 255.0),
+            sms1: Color::from_rgb(126.0 / 255.0, 34.0 / 255.0, 206.0 / 255.0),
             warn_tint: Color::from_rgba(0.471, 0.663, 1.0, 0.18),
             search_hl: Color::from_rgba(0.945, 0.761, 0.106, 0.35),
             search_active: Color::from_rgba(0.945, 0.761, 0.106, 0.65),
@@ -358,5 +366,23 @@ mod tests {
     fn is_dark_follows_the_resolved_palette() {
         assert!(is_dark(&AppTheme::Dark.iced()));
         assert!(!is_dark(&AppTheme::Light.iced()));
+    }
+
+    #[test]
+    fn the_dark_transcript_starts_green_and_purple() {
+        let dark = Scheme::dark();
+        let green = dark.speaker_colors[0];
+        let purple = dark.speaker_colors[1];
+        assert!(green.g > green.r && green.g > green.b);
+        assert!(purple.r > purple.g && purple.b > purple.g);
+    }
+
+    #[test]
+    fn the_favorite_star_stays_bright_in_both_palettes() {
+        let luminance = |color: Color| 0.2126 * color.r + 0.7152 * color.g + 0.0722 * color.b;
+        assert!(luminance(Scheme::light().star) > 0.55);
+        // The dark panel needs a brighter fill than the amber ramp gives it;
+        // this pins the yellow-20 value rather than the old yellow-30 one.
+        assert!(luminance(Scheme::dark().star) > 0.78);
     }
 }

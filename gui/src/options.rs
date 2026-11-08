@@ -219,6 +219,7 @@ impl fmt::Display for Speed {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum HelpKind {
     About,
+    Licenses,
     Shortcuts,
     /// What the transcript lets you edit, and how. Also shown at the end of a
     /// run until the reader turns it off.
@@ -231,6 +232,7 @@ impl HelpKind {
     pub(crate) fn label(self) -> &'static str {
         match self {
             HelpKind::About => "About",
+            HelpKind::Licenses => "Licenses",
             HelpKind::Shortcuts => "Shortcuts",
             HelpKind::EditingTips => "Editing Tips",
             HelpKind::Console => "Console",

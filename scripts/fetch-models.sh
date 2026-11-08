@@ -53,12 +53,12 @@ if [ -z "${dest:-}" ]; then
 fi
 mkdir -p "$dest"
 
-# id<TAB>relative file<TAB>size<TAB>sha256<TAB>first mirror
+# id<TAB>relative file<TAB>size<TAB>sha256<TAB>space-separated mirrors
 rows="$(
     if command -v jq >/dev/null 2>&1; then
         jq -r --argjson all "$include_all" '
             .models[] | select($all == 1 or .bundled) |
-            [.id, .file, (.size|tostring), .sha256, .mirrors[0]] | @tsv
+            [.id, .file, (.size|tostring), .sha256, (.mirrors | join(" "))] | @tsv
         ' "$manifest"
     else
         python3 - "$manifest" "$include_all" <<'PY'
@@ -69,7 +69,7 @@ for model in manifest["models"]:
     if not include_all and not model.get("bundled"):
         continue
     print("\t".join([model["id"], model["file"], str(model["size"]),
-                     model["sha256"], model["mirrors"][0]]))
+                     model["sha256"], " ".join(model["mirrors"])]))
 PY
     fi
 )"
@@ -88,7 +88,7 @@ sha256_of() {
 
 ok=0
 failed=0
-while IFS=$'\t' read -r id file size sha upstream; do
+while IFS=$'\t' read -r id file size sha mirror_list; do
     [ -n "$id" ] || continue
     target="$dest/$file"
 
@@ -108,7 +108,10 @@ while IFS=$'\t' read -r id file size sha upstream; do
     if [ -n "$mirror" ]; then
         urls+=("${mirror%/}/$(basename "$file")")
     fi
-    urls+=("$upstream")
+    # mirrors is a space-separated list; no URL contains a space.
+    for url in $mirror_list; do
+        urls+=("$url")
+    done
 
     downloaded=0
     for url in "${urls[@]}"; do

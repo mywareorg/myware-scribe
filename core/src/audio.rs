@@ -5,14 +5,119 @@ use std::time::{Duration, Instant};
 
 use rubato::Resampler;
 use symphonia::core::audio::SampleBuffer;
-use symphonia::core::codecs::{DecoderOptions, CODEC_TYPE_NULL};
+use symphonia::core::codecs::{CodecParameters, Decoder, DecoderOptions, CODEC_TYPE_NULL};
 use symphonia::core::errors::Error as SymphoniaError;
 use symphonia::core::formats::FormatOptions;
+use symphonia::core::formats::FormatReader;
 use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
 
 pub const SAMPLE_RATE: u32 = 16000;
+
+/// Format options shared by every open.
+///
+/// Gapless trims encoder delay and padding, so a line's start is the line's
+/// actual start rather than its start plus a codec's priming samples.
+pub(crate) fn format_options() -> FormatOptions {
+    FormatOptions {
+        enable_gapless: true,
+        ..FormatOptions::default()
+    }
+}
+
+/// Open the first track this build can actually decode.
+///
+/// A container can list a track whose codec has no decoder (AC-3 in an MKV, for
+/// instance) ahead of one that plays. Taking the first non-null track would
+/// then fail a file that is perfectly transcribable, so each candidate is
+/// tried in order.
+pub(crate) fn open_track(
+    format: &dyn FormatReader,
+) -> Result<(u32, CodecParameters, Box<dyn Decoder>), String> {
+    for track in format.tracks() {
+        if track.codec_params.codec == CODEC_TYPE_NULL {
+            continue;
+        }
+        if let Ok(decoder) =
+            crate::codec::registry().make(&track.codec_params, &DecoderOptions::default())
+        {
+            return Ok((track.id, track.codec_params.clone(), decoder));
+        }
+    }
+    Err("no audio track".to_string())
+}
+
+/// Version of the loudness normalizer. It is part of every cache key: audio
+/// normalized by a different version is different audio.
+pub const NORMALIZE_VERSION: &str = "norm-v1";
+
+/// Target RMS for speech frames, about -20 dBFS.
+const TARGET_RMS: f32 = 0.1;
+/// Peak ceiling, about -1 dBFS, so the gain cannot clip.
+const PEAK_CEILING: f32 = 0.891;
+/// Frames quieter than this are treated as room noise, not speech, and do not
+/// pull the measurement down.
+const FRAME_FLOOR: f32 = 1e-3;
+
+/// Deterministic loudness normalization in place. Returns the applied gain.
+///
+/// One global gain rather than per-frame compression: the pipeline only needs
+/// quiet recordings lifted to a workable level, and a constant gain cannot
+/// pump between words or change the relative level of two speakers.
+pub fn normalize_loudness(samples: &mut [f32], rate: u32) -> f32 {
+    if samples.is_empty() || rate == 0 {
+        return 1.0;
+    }
+    let window = (rate as usize / 50).max(1); // 20 ms
+    let mut sum_sq = 0.0f64;
+    let mut frames = 0usize;
+    let mut peak = 0.0f32;
+    let mut frame_rms = Vec::new();
+    for chunk in samples.chunks(window) {
+        let mut sq = 0.0f64;
+        for sample in chunk {
+            let value = *sample as f64;
+            sq += value * value;
+            peak = peak.max(sample.abs());
+        }
+        let rms = (sq / chunk.len() as f64).sqrt() as f32;
+        frame_rms.push(rms);
+    }
+    for rms in frame_rms {
+        if rms > FRAME_FLOOR {
+            sum_sq += (rms as f64) * (rms as f64);
+            frames += 1;
+        }
+    }
+    if frames == 0 || peak <= f32::EPSILON {
+        return 1.0;
+    }
+    let rms = (sum_sq / frames as f64).sqrt() as f32;
+    if rms <= FRAME_FLOOR {
+        return 1.0;
+    }
+    let mut gain = (TARGET_RMS / rms).clamp(0.5, 8.0);
+    if peak * gain > PEAK_CEILING {
+        gain = PEAK_CEILING / peak;
+    }
+    if (gain - 1.0).abs() < 0.01 {
+        return 1.0;
+    }
+    for sample in samples.iter_mut() {
+        *sample = (*sample * gain).clamp(-1.0, 1.0);
+    }
+    gain
+}
+
+/// The preprocessing tag that belongs in cache keys.
+pub fn preprocess_tag(normalize: bool) -> &'static str {
+    if normalize {
+        NORMALIZE_VERSION
+    } else {
+        "raw-v1"
+    }
+}
 
 /// Minimum spacing between two progress callbacks.
 const REPORT_INTERVAL: Duration = Duration::from_millis(100);
@@ -44,29 +149,20 @@ pub fn decode_with_progress(
         .format(
             &hint,
             mss,
-            &FormatOptions::default(),
+            &format_options(),
             &MetadataOptions::default(),
         )
         .map_err(|e| format!("probe {}: {e}", path.display()))?;
     let mut format = probed.format;
 
-    let track = format
-        .tracks()
-        .iter()
-        .find(|t| t.codec_params.codec != CODEC_TYPE_NULL)
-        .ok_or_else(|| "no audio track".to_string())?;
-    let track_id = track.id;
+    let (track_id, params, mut decoder) = open_track(format.as_ref())?;
 
-    let mut decoder = symphonia::default::get_codecs()
-        .make(&track.codec_params, &DecoderOptions::default())
-        .map_err(|e| format!("decoder: {e}"))?;
-
-    let mut sample_rate = track.codec_params.sample_rate.unwrap_or(0);
+    let mut sample_rate = params.sample_rate.unwrap_or(0);
     // Container frame count drives decode progress; absent for some streams.
-    let total_frames = track.codec_params.n_frames;
+    let total_frames = params.n_frames;
     // Pre-allocate from container metadata: avoiding repeated growth copies is
     // a measurable win on hour-long files.
-    let mut mono: Vec<f32> = Vec::with_capacity(track.codec_params.n_frames.unwrap_or(0) as usize);
+    let mut mono: Vec<f32> = Vec::with_capacity(total_frames.unwrap_or(0) as usize);
     // Reuse one conversion buffer across packets instead of allocating per
     // packet (a one-hour MP3 is ~140k packets).
     let mut sample_buffer: Option<SampleBuffer<f32>> = None;
@@ -192,24 +288,15 @@ pub fn waveform(path: &Path, buckets: usize) -> Result<(f64, Vec<f32>), String> 
         .format(
             &hint,
             mss,
-            &FormatOptions::default(),
+            &format_options(),
             &MetadataOptions::default(),
         )
         .map_err(|e| format!("probe {}: {e}", path.display()))?;
     let mut format = probed.format;
 
-    let track = format
-        .tracks()
-        .iter()
-        .find(|t| t.codec_params.codec != CODEC_TYPE_NULL)
-        .ok_or_else(|| "no audio track".to_string())?;
-    let track_id = track.id;
+    let (track_id, params, mut decoder) = open_track(format.as_ref())?;
 
-    let mut decoder = symphonia::default::get_codecs()
-        .make(&track.codec_params, &DecoderOptions::default())
-        .map_err(|e| format!("decoder: {e}"))?;
-
-    let mut sample_rate = track.codec_params.sample_rate.unwrap_or(0);
+    let mut sample_rate = params.sample_rate.unwrap_or(0);
     let mut total_frames: u64 = 0;
     let mut chunk_frames: usize = 0;
     let mut chunk_sq: f64 = 0.0;
@@ -352,7 +439,7 @@ pub fn duration_fast(path: &Path) -> Option<f64> {
         .format(
             &hint,
             mss,
-            &FormatOptions::default(),
+            &format_options(),
             &MetadataOptions::default(),
         )
         .ok()?;
@@ -444,4 +531,40 @@ mod tests {
         );
         assert_eq!(fractions.last().copied(), Some(1.0));
     }
+
+    fn tone(amplitude: f32, rate: u32, seconds: f32) -> Vec<f32> {
+        let frames = (rate as f32 * seconds) as usize;
+        (0..frames)
+            .map(|index| {
+                amplitude
+                    * (2.0 * std::f32::consts::PI * 440.0 * index as f32 / rate as f32).sin()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_quiet_recording_is_lifted() {
+        let mut samples = tone(0.02, 16_000, 1.0);
+        let gain = normalize_loudness(&mut samples, 16_000);
+        assert!(gain > 2.0);
+        let peak = samples.iter().fold(0.0f32, |peak, sample| peak.max(sample.abs()));
+        assert!(peak <= 0.9001, "peak {peak} exceeds the ceiling");
+    }
+
+    #[test]
+    fn a_loud_recording_is_not_pushed_over_the_ceiling() {
+        let mut samples = tone(0.95, 16_000, 1.0);
+        let gain = normalize_loudness(&mut samples, 16_000);
+        assert!(gain <= 1.0);
+        let peak = samples.iter().fold(0.0f32, |peak, sample| peak.max(sample.abs()));
+        assert!(peak <= 0.9001, "peak {peak} exceeds the ceiling");
+    }
+
+    #[test]
+    fn silence_is_left_alone() {
+        let mut samples = vec![0.0f32; 16_000];
+        assert_eq!(normalize_loudness(&mut samples, 16_000), 1.0);
+        assert!(samples.iter().all(|sample| *sample == 0.0));
+    }
+
 }

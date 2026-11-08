@@ -1,6 +1,6 @@
 [package]
 name = "hippo-transcribe-core"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2021"
 description = "Private, offline speaker diarization and transcription."
 repository = "https://gitlab.com/librewarelive/hippo-transcribe"
@@ -18,7 +18,9 @@ coreml = ["whisper-rs/coreml"]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
+zip = { version = "2", default-features = false, features = ["deflate"] }
 symphonia = { version = "0.5", features = ["all"] }
+symphonia-adapter-libopus = "0.2.9"
 rubato = "0.15"
 whisper-rs = "0.16"
 num_cpus = "1"

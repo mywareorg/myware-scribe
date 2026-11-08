@@ -65,6 +65,19 @@
         "https://gitlab.com/api/v4/projects/librewarelive%2Fhippo-transcribe-models/packages/generic/hippo-models/1.0.0/ggml-large-v3-turbo-q5_0.bin",
         "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-large-v3-turbo-q5_0.bin"
       ]
+    },
+    {
+      "id": "briefing",
+      "file": "qwen2.5-1.5b-instruct-q4_k_m.gguf",
+      "size": 1117320736,
+      "sha256": "6a1a2eb6d15622bf3c96857206351ba97e1af16c30d7a74ee38970e434e9407e",
+      "license": "Apache-2.0",
+      "source": "Qwen2.5-1.5B-Instruct GGUF Q4_K_M (Qwen)",
+      "bundled": false,
+      "mirrors": [
+        "https://gitlab.com/api/v4/projects/librewarelive%2Fhippo-transcribe-models/packages/generic/hippo-models/1.0.0/qwen2.5-1.5b-instruct-q4_k_m.gguf",
+        "https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/91cad51170dc346986eccefdc2dd33a9da36ead9/qwen2.5-1.5b-instruct-q4_k_m.gguf"
+      ]
     }
   ]
 }

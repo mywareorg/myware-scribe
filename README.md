@@ -56,10 +56,12 @@ powershell -ExecutionPolicy Bypass -File .\scripts\build-windows.ps1
 ```
 
 It enters the Visual Studio developer environment, runs the release tests,
-builds, then stages the executable together with the sherpa-onnx and Visual C++
+builds both executables (`hippo-transcribe` and the briefing worker
+`hippo-summarize`), then stages them together with the sherpa-onnx and Visual C++
 runtime DLLs and the bundled model set from `models.lock.json`, and writes a
-release folder and zip under `dist\`. Use
-`-SkipModels` to stage only the executable and DLLs.
+release folder and zip under `dist\`. Use `-SkipModels` to stage only the
+executable and DLLs. With `-Msix` the package leaves the models out (the Store
+build downloads them on first run); `-BundleModels` packs them in anyway.
 
 The app loads `sherpa-onnx-c-api.dll` and `onnxruntime.dll` from beside
 `hippo-transcribe.exe` at runtime; no native library is linked into the executable. Only
@@ -116,7 +118,7 @@ Models are non-gated and installed into `%LOCALAPPDATA%\hippo-transcribe\models`
 and confirming a Pro purchase are the only reasons the app uses the network; the
 transcription pipeline itself never does.
 
-Download everything at once (also what `deploy.bat` runs on Windows):
+Download everything at once:
 
 ```bash
 hippo-transcribe --cli models download --verify
@@ -130,11 +132,17 @@ a model it does not use.
 
 Every preset uses a multilingual model:
 
-- `ggml-tiny-q5_1.bin` (speed) — bundled with release packages
+- `ggml-tiny-q5_1.bin` (speed) — shipped with portable releases; Store installs download it
 - `ggml-small-q5_1.bin` (balanced) — downloaded on demand
 - `ggml-large-v3-turbo-q5_0.bin` (accuracy) — downloaded on demand
 - `sherpa-onnx-pyannote-segmentation-3-0/model.onnx`
 - `wespeaker_en_voxceleb_CAM++_LM.onnx`
+
+The briefing uses a separate model, downloaded the first time someone asks for
+one rather than with any preset:
+
+- `qwen2.5-1.5b-instruct-q4_k_m.gguf` — Qwen2.5-1.5B-Instruct, Apache-2.0,
+  1.1 GB
 
 `models.lock.json` is the single source of truth for file names, sizes,
 SHA-256 hashes, licenses and mirrors. The application compiles it in, and
@@ -146,8 +154,10 @@ serves `<file>`), the public GitLab package mirror
 (`librewarelive/hippo-transcribe-models`), then the pinned upstream Hugging Face
 / k2-fsa URLs as fallbacks.
 
-Release packages ship a `models/` directory beside the executable. It is
-read-only and used as-is; downloads always go to the writable models directory.
+Portable release packages ship a `models/` directory beside the executable. It
+is read-only and used as-is; downloads always go to the writable models
+directory. Store packages leave the models out and download them on first run,
+so the package and its updates stay small.
 
 Overrides: `HIPPO_TRANSCRIBE_MODELS_DIR` (root),
 `HIPPO_TRANSCRIBE_MODEL_MIRROR` (extra download mirror),
@@ -252,7 +262,7 @@ over a corpus for backend and preset comparisons.
 The free tier is the full-length pipeline: the balanced model, one speaker,
 unlimited files, no minutes and no account. Copy, save and search are included.
 Pro adds the Speed and Accuracy presets, speaker diarization (speaker labels),
-batch transcription, transcript editing and audio playback.
+batch transcription, transcript editing, audio playback and the briefing.
 
 Pro is a one-time purchase on both stores. A 7-day trial is available once per
 install. Entitlement state lives in `license.json` beside the settings and is
@@ -270,20 +280,51 @@ the Store does not resolve an add-on for an app that is not yet published.
 
 ## GUI
 
-Run `hippo-transcribe` with no arguments. Add files/folders to the queue, or drag audio
-files and folders anywhere into the window, then choose a preset and speaker
-count and press Transcribe. The Help menu holds the appearance choices (Light,
+Run `hippo-transcribe` with no arguments. The File panel on the left holds the
+queue and the finished transcripts. Add files/folders from its action row, or
+drag audio files and folders anywhere into the window, then choose a preset and
+speaker count and press Transcribe. **Record** captures from the microphone
+(48 kHz mono WAV, written beside your transcripts or to the save location): a
+1.5 s countdown starts the take, the meter and stop control live in the
+transcription pane, and stopping transcribes it immediately with no setup —
+Speed on Pro, Balanced on free, one speaker. Recording is available in the free
+tier. Pressing Record while a batch is transcribing stops the batch, leaves the
+queued files for later, and records the take on its own. A recording workflow
+locks the panel until it finishes. The microphone is chosen in Settings. The Help menu holds the appearance choices (Light,
 Dark, System; System follows the desktop and is the default) and the header
 theme button cycles them. Files added while a run is active join the queue and
 are processed in a follow-up pass automatically. The gear button (or `Ctrl+,`)
 opens Settings for transcript text size, preset, speaker count, language,
-playback speed, follow mode, notifications, save location, and model storage.
+loudness normalization, playback speed, follow mode, notifications, save
+location, and model storage.
 
-The Export picker writes the current transcript as plain text, SRT, WebVTT, or
-JSON. Failed queue items can be retried, and pending items can be reordered.
+**File → Briefing** (Pro) reads the finished transcript and writes an overview,
+key points, decisions and action items, each citing the transcript lines it came
+from; **Save as Markdown** writes `<transcript>-briefing.md`. The first briefing
+downloads a 1.1 GB model once; generation runs on this machine and can be
+cancelled while it works. It is a derived document, not a record: the transcript
+stays the source of truth.
+
+The Export picker writes the current transcript as plain text, SRT, WebVTT,
+JSON, Markdown, CSV, or a Word document. Subtitle formats use the exact line bounds stored in the
+transcript's sidecar; long lines are split at word boundaries when the decoder
+produced word times, and a transcript without timestamps is refused rather than
+exported at zero. Failed queue items can be retried, and pending items can be
+reordered.
+
+Word times are stored in the sidecar. While audio plays, the words already
+spoken on the active line are banded and the current word underlined
+(View → Karaoke, key `k`; Pro). The Speed preset decodes without
+token timestamps, so those transcripts — and any produced before this change —
+export line-level cues instead.
 Keyboard: Up/Down moves through the transcript, Alt+Enter edits the active line,
 Space toggles playback, and Left/Right seek ±5 seconds while no text field has
 focus. Editing and playback keys require Pro.
+
+The Edit and Help menus both open Custom Vocabulary, where names, acronyms and
+jargon can be listed for the decoder and misheard words can be paired with their
+correct spelling. Terms apply to the next run; replacements are applied to the
+transcript text afterwards.
 
 Transcript search supports a speaker filter, match case (`Aa`) and whole-word
 (`W`) matching. Right-click a line to edit it; the editor can copy the line,
@@ -291,25 +332,41 @@ merge it with the next line, or split it at the playhead. Line deletion asks for
 confirmation. Saves are written atomically and keep a
 `<transcript>.hippo-transcribe.bak` backup beside the source file.
 
-Completed rows stay in the queue: click one to revisit that file's transcript,
-speaker timeline, waveform and playback. Renaming speakers or saving writes back
-to that file's `.txt`. Adding an audio file that already has a transcript loads
-it straight away instead of queueing a run: `<name>.txt` beside the audio, or
-the newest `<name>-<preset>-transcription-<N>speakers.txt` when there is no
-plain copy, looked up beside the audio first and then in the save location.
+Finished files move to the **History** tab of the File panel; the **Queue** tab
+keeps only work that is still pending, running, failed or interrupted.
+**Favorites** is a flat starred list (Pro); **Recordings** lists every take,
+including a failed one with Retry. Only the Queue carries a count, and only of
+work left. History rows are grouped by day (Today, Yesterday, then the date) and
+show the file's duration, speaker count and finish time. Each row has a star and
+a remove button: a single click opens, a double-click runs the row's safe action
+(transcribe, resume or retry, never a retranscribe), and right-click opens a
+menu for reveal, copy, export, retranscribe, retry and remove. The footer of
+History, Recordings and Favorites runs the selected row again (Retry for a
+failed recording). Clear queue lives in the Queue tab. Removing an item never
+deletes the audio or transcript on disk. Click one to revisit that file's
+transcript, speaker timeline, waveform and playback. Renaming speakers or saving
+writes back to that file's `.txt`. Adding an audio file that already has a
+transcript loads it straight away instead of queueing a run: `<name>.txt` beside
+the audio, or the newest `<name>-<preset>-transcription-<N>speakers.txt` when
+there is no plain copy, looked up beside the audio first and then in the save
+location.
 
-The queue (statuses, output paths and per-file statistics) is restored on
-restart; timeline and waveform data is re-derived on demand from the
-diarization cache.
+The queue (statuses and output paths) and the transcript history (finish time,
+duration and speaker count) are restored on restart; timeline and waveform data
+is re-derived on demand from the diarization cache. A file whose run was
+interrupted comes back as **Interrupted** with Resume and per-file Skip in its
+row. Resuming reuses the cached ASR clips for that file but recomputes its
+diarization, so the speaker timeline is rebuilt from scratch; the button reads
+Resume until nothing is left to continue.
 
 ## Deploy (Windows)
 
 `deploy.bat` (shipped beside `hippo-transcribe.exe`) installs the exe to
 `%LOCALAPPDATA%\Programs\hippo-transcribe`, creates a Start Menu shortcut named
-`Hippo Transcribe`, adds it to the user `PATH`, and downloads the models with the
-built-in `curl.exe` (progress shows in the console). Then open a new terminal and
-run `hippo-transcribe`. `undeploy.bat` removes the install and shortcut
-(`/keepmodels` keeps the models).
+`Hippo Transcribe`, adds it to the user `PATH`, and reports whether the bundled
+models are present. The app downloads any missing models on first launch. Then
+open a new terminal and run `hippo-transcribe`. `undeploy.bat` removes the
+install and shortcut (`/keepmodels` keeps the models).
 
 ## Logs
 
@@ -347,3 +404,7 @@ see LICENSE for details.
 - The Windows bundle redistributes **sherpa-onnx** (Apache-2.0) and **ONNX Runtime** (MIT) DLLs, plus the **Microsoft Visual C++ runtime** (`vcruntime140.dll`, `vcruntime140_1.dll`, `msvcp140.dll`), which ship beside the executable so the app runs without the redistributable installed.
 - The GUI bundles **Bootstrap Icons** (`gui/assets/bootstrap-icons.ttf`), MIT.
 - Other components retain their own licenses (MIT/Apache/etc.).
+
+The full third-party notices are in `LICENSES.md`, shown in **Help → Licenses**
+and shipped inside the Store package (the package has no README to fall back
+on).
