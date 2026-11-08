@@ -801,6 +801,25 @@ enum RecordPhase {
     Transcribing,
 }
 
+/// The right-pane surface the recording workflow takes over. `Transcribing`
+/// is not a takeover: the live transcript stays and only the chrome mutes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RecordSurface {
+    Countdown,
+    Capturing,
+    Preparing,
+    Transcribing,
+}
+
+/// The large countdown's state. `numeral` is the 3 → 2 → 1 digit and
+/// `fraction` is how much of the ring is left to drain.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct CountdownView {
+    numeral: u8,
+    remaining: Duration,
+    fraction: f32,
+}
+
 /// The one recording workflow, if any. A session holds the workflow lock: it
 /// is both the reason to keep ticking and the thing that disables navigation
 /// and a second run.
@@ -1518,6 +1537,9 @@ pub struct App {
     recent_presence: Vec<bool>,
     /// Parallel to `recent`: whether each entry's audio file still exists.
     recent_audio_presence: Vec<bool>,
+    /// The recording that failed last, so the right pane can offer Retry until
+    /// it is retried or removed.
+    failed_recording: Option<usize>,
     /// Which list the left pane shows. Not persisted: the queue is the
     /// default every launch.
     pane_tab: PaneTab,
@@ -1808,6 +1830,7 @@ impl App {
             recent,
             recent_presence: Vec::new(),
             recent_audio_presence: Vec::new(),
+            failed_recording: None,
             pane_tab: PaneTab::Queue,
             row_menu: None,
             panel_pointer: None,
@@ -2280,6 +2303,10 @@ impl App {
         entry.state = ItemState::Failed;
         entry.message = Some(message);
         entry.transcript = None;
+        let recording = entry.recording;
+        if recording {
+            self.failed_recording = Some(index);
+        }
         self.save_queue();
     }
 
@@ -2311,6 +2338,9 @@ impl App {
                     ..Default::default()
                 });
             }
+        }
+        if self.failed_recording == Some(index) {
+            self.failed_recording = None;
         }
         self.refresh_recent_presence();
         self.save_queue();
@@ -2444,7 +2474,10 @@ impl App {
         entry.state = ItemState::Ready;
         entry.message = None;
         let captured = entry.duration.unwrap_or(0.0) as f32;
+        self.commit_inline_edit(false);
+        self.close_find();
         self.status = Status::Idle;
+        self.failed_recording = None;
         self.record = Some(RecordSession {
             phase: RecordPhase::Preparing,
             recorder: None,
@@ -2471,6 +2504,13 @@ impl App {
         }
         if index < self.recent_audio_presence.len() {
             self.recent_audio_presence.remove(index);
+        }
+        if let Some(failed) = self.failed_recording {
+            self.failed_recording = match failed.cmp(&index) {
+                std::cmp::Ordering::Equal => None,
+                std::cmp::Ordering::Greater => Some(failed - 1),
+                std::cmp::Ordering::Less => Some(failed),
+            };
         }
         if let Some(selected) = self.selected_recent.as_mut() {
             match (*selected).cmp(&index) {
@@ -3756,13 +3796,7 @@ impl App {
     }
 
     pub fn subscription(&self) -> Subscription<Message> {
-        // Karaoke word boundaries are finer than a 100 ms step; only tighten
-        // the clock while it is actually moving.
-        let tick_ms = if self.karaoke && self.player.as_ref().is_some_and(Player::is_playing) {
-            50
-        } else {
-            100
-        };
+        let tick_ms = self.tick_millis();
         let tick = if self.needs_ticks() {
             iced::time::every(Duration::from_millis(tick_ms)).map(|_| Message::Tick)
         } else {
@@ -5188,6 +5222,7 @@ impl App {
                         // from its first countdown tick.
                         self.pane_tab = PaneTab::Recordings;
                         self.recent_hover = None;
+                        self.failed_recording = None;
                         self.toast = Some((
                             "Recording starts in a moment".to_string(),
                             Instant::now(),
@@ -7431,6 +7466,381 @@ impl App {
             entry.recording
                 && (entry.state == ItemState::Failed || entry.transcript.is_none())
         })
+    }
+
+    /// Which right-pane surface the workflow owns, if any.
+    fn record_surface(&self) -> Option<RecordSurface> {
+        self.record.as_ref().map(|session| match session.phase {
+            RecordPhase::Countdown => RecordSurface::Countdown,
+            RecordPhase::Capturing => RecordSurface::Capturing,
+            RecordPhase::Preparing => RecordSurface::Preparing,
+            RecordPhase::Transcribing => RecordSurface::Transcribing,
+        })
+    }
+
+    /// True while the session replaces the whole transcript area: the take is
+    /// being counted in, captured, or prepared. Transcribing keeps the live
+    /// transcript instead.
+    fn record_takeover(&self) -> bool {
+        matches!(
+            self.record_surface(),
+            Some(RecordSurface::Countdown | RecordSurface::Capturing | RecordSurface::Preparing)
+        )
+    }
+
+    /// The countdown's numerals and ring while one is running. The 1.5 s
+    /// count is split into three half-second steps.
+    fn countdown_view(&self, now: Instant) -> Option<CountdownView> {
+        let session = self.record.as_ref()?;
+        if session.phase != RecordPhase::Countdown {
+            return None;
+        }
+        let ends = session.countdown_ends?;
+        let remaining = ends.saturating_duration_since(now);
+        let seconds = remaining.as_secs_f32();
+        let numeral = ((seconds / 0.5).ceil() as u8).clamp(1, 3);
+        let fraction = (seconds / COUNTDOWN.as_secs_f32()).clamp(0.0, 1.0);
+        Some(CountdownView {
+            numeral,
+            remaining,
+            fraction,
+        })
+    }
+
+    /// The model download's label and fraction while preparing. No download
+    /// (or no known total) means the surface shows its indeterminate state.
+    fn preparing_progress(&self) -> (Option<String>, Option<f32>) {
+        let Some(state) = &self.model_download else {
+            return (None, None);
+        };
+        let fraction = state
+            .total
+            .filter(|total| *total > 0)
+            .map(|total| (state.done as f32 / total as f32).clamp(0.0, 1.0));
+        (Some(state.label.clone()), fraction)
+    }
+
+    /// Tick interval while a recording session runs: 50 ms through the
+    /// countdown and capture so the ring and meter move smoothly, otherwise
+    /// the app's normal cadence.
+    fn tick_millis(&self) -> u64 {
+        if matches!(
+            self.record_surface(),
+            Some(RecordSurface::Countdown | RecordSurface::Capturing)
+        ) {
+            50
+        } else if self.karaoke && self.player.as_ref().is_some_and(Player::is_playing) {
+            50
+        } else {
+            100
+        }
+    }
+
+    /// The message the big stop control sends: only the take phases have one.
+    fn recording_stop_message(&self) -> Option<Message> {
+        matches!(
+            self.record_surface(),
+            Some(RecordSurface::Countdown | RecordSurface::Capturing)
+        )
+        .then_some(Message::StopRecording)
+    }
+
+    /// Whether a recent row is washed out because the workflow owns another
+    /// item. The session's own row stays legible.
+    fn recording_row_dimmed(&self, tab: PaneTab, index: usize, locked: bool) -> bool {
+        let active = self.record.as_ref().and_then(|session| session.item);
+        active != Some(index) && (locked || (tab == PaneTab::Recordings && self.record_lock()))
+    }
+
+    /// The active session's history item failed and is awaiting a retry.
+    fn failed_recording_item(&self) -> Option<usize> {
+        let index = self.failed_recording?;
+        if self.record.is_some() || self.pane_tab != PaneTab::Recordings {
+            return None;
+        }
+        self.recent
+            .get(index)
+            .filter(|entry| entry.state == ItemState::Failed)
+            .map(|_| index)
+    }
+
+    /// The controls above the transcript mute while a session streams its
+    /// transcription: the transcript stays readable, but the player, menus and
+    /// search affordances do not.
+    fn transport_muted(&self) -> bool {
+        matches!(self.record_surface(), Some(RecordSurface::Transcribing))
+    }
+
+    /// The compact status that replaces the run readout while a recording is
+    /// being transcribed.
+    fn transcribing_status(&self, scheme: &Scheme) -> Element<'_, Message> {
+        let scheme = *scheme;
+        container(
+            row![
+                icon_colored(ICON_MIC, 14.0, scheme.green),
+                text("Transcribing\u{2026}")
+                    .size(theme::TEXT_SM)
+                    .color(scheme.text),
+                horizontal_space(),
+                action_text("Cancel")
+                    .on_press(Message::Cancel)
+                    .style(pill_button_secondary),
+            ]
+            .spacing(theme::SPACE_SM)
+            .align_y(iced::Alignment::Center),
+        )
+        .width(Length::Fill)
+        .padding([6, 10])
+        .style(move |_theme| container::Style {
+            background: Some(scheme.field_bg.into()),
+            border: iced::border::Border {
+                color: scheme.border,
+                width: 1.0,
+                radius: 12.0.into(),
+            },
+            ..container::Style::default()
+        })
+        .into()
+    }
+
+    /// The right pane while a session owns it: countdown, capture or model
+    /// preparation. Transcribing is handled by the normal transcript path.
+    fn recording_surface_element(&self, scheme: &Scheme) -> Element<'_, Message> {
+        match self.record_surface() {
+            Some(RecordSurface::Countdown) => self.countdown_surface(scheme),
+            Some(RecordSurface::Capturing) => self.capturing_surface(scheme),
+            Some(RecordSurface::Preparing) => self.preparing_surface(scheme),
+            _ => horizontal_space().into(),
+        }
+    }
+
+    fn countdown_surface(&self, scheme: &Scheme) -> Element<'_, Message> {
+        let scheme = *scheme;
+        let Some(view) = self.countdown_view(Instant::now()) else {
+            return horizontal_space().into();
+        };
+        let ring = stack![
+            canvas(CountdownRing {
+                fraction: view.fraction,
+                track: theme::mix(scheme.bar_track, scheme.text, 0.08),
+                accent: scheme.danger,
+            })
+            .width(Length::Fixed(200.0))
+            .height(Length::Fixed(200.0)),
+            container(
+                text(view.numeral.to_string())
+                    .size(72)
+                    .font(Font {
+                        weight: font::Weight::Bold,
+                        ..Font::DEFAULT
+                    })
+                    .color(scheme.ink),
+            )
+            .center(Length::Fill),
+        ]
+        .width(Length::Fixed(200.0))
+        .height(Length::Fixed(200.0));
+
+        container(
+            column![
+                ring,
+                text("Recording starts")
+                    .size(theme::TEXT_MD)
+                    .color(scheme.muted),
+                self.stop_control(scheme, 76.0, "Cancel recording"),
+            ]
+            .spacing(theme::SPACE_LG)
+            .align_x(iced::Alignment::Center),
+        )
+        .center(Length::Fill)
+        .into()
+    }
+
+    fn capturing_surface(&self, scheme: &Scheme) -> Element<'_, Message> {
+        let scheme = *scheme;
+        let session = self.record.as_ref();
+        let captured = session.map(|session| session.captured).unwrap_or(0.0);
+        let reading = session
+            .and_then(|session| session.recorder.as_ref())
+            .map(|recorder| recorder.meter())
+            .unwrap_or_default();
+        let clipping = reading.clipping;
+        let label = if clipping { "Clipping" } else { "Recording" };
+        let meter = canvas(RecordingMeter {
+            level: reading.level,
+            peak: reading.peak,
+            track: theme::mix(scheme.bar_track, scheme.text, 0.08),
+            fill: if clipping {
+                theme::lighten(scheme.danger, 0.35)
+            } else {
+                scheme.danger
+            },
+            hold: Color {
+                a: 0.65,
+                ..scheme.text
+            },
+        })
+        .width(Length::Fixed(380.0))
+        .height(Length::Fixed(24.0));
+
+        container(
+            column![
+                text(label)
+                    .size(42)
+                    .font(Font {
+                        weight: font::Weight::Bold,
+                        ..Font::DEFAULT
+                    })
+                    .color(if clipping { scheme.danger } else { scheme.text }),
+                text(format_secs(captured as f64))
+                    .size(32)
+                    .color(scheme.text),
+                meter,
+                self.stop_control(scheme, 76.0, "Stop recording"),
+            ]
+            .spacing(theme::SPACE_LG)
+            .align_x(iced::Alignment::Center),
+        )
+        .center(Length::Fill)
+        .into()
+    }
+
+    fn preparing_surface(&self, scheme: &Scheme) -> Element<'_, Message> {
+        let scheme = *scheme;
+        let (label, fraction) = self.preparing_progress();
+        let mut body = column![
+            text("Preparing model\u{2026}")
+                .size(28)
+                .font(Font {
+                    weight: font::Weight::Bold,
+                    ..Font::DEFAULT
+                })
+                .color(scheme.ink),
+        ]
+        .spacing(theme::SPACE_SM)
+        .align_x(iced::Alignment::Center);
+
+        if let Some(label) = label {
+            body = body.push(
+                text(format!("Downloading {label}"))
+                    .size(theme::TEXT_SM)
+                    .color(scheme.muted),
+            );
+            if let Some(state) = &self.model_download {
+                let transfer = match state.total {
+                    Some(total) if total > 0 => {
+                        format!("{} of {}", format_bytes(state.done), format_bytes(total))
+                    }
+                    _ => format!("{} downloaded", format_bytes(state.done)),
+                };
+                body = body.push(text(transfer).size(theme::TEXT_XS).color(scheme.muted));
+            }
+        } else {
+            body = body.push(
+                text("Getting the transcription model ready.")
+                    .size(theme::TEXT_SM)
+                    .color(scheme.muted),
+            );
+        }
+
+        let bar: Element<Message> = match fraction {
+            Some(fraction) => progress_bar(0.0..=1.0, fraction)
+                .width(Length::Fixed(320.0))
+                .height(Length::Fixed(10.0))
+                .style(move |_theme| progress_bar::Style {
+                    background: scheme.bar_track.into(),
+                    bar: scheme.green.into(),
+                    border: iced::border::rounded(5.0),
+                })
+                .into(),
+            None => canvas(IndeterminateBar {
+                phase: (self.activity_frame % 80) as f32 / 80.0,
+                track: scheme.bar_track,
+                fill: scheme.green,
+            })
+            .width(Length::Fixed(320.0))
+            .height(Length::Fixed(10.0))
+            .into(),
+        };
+        body = body.push(bar).push(
+            action_text("Cancel")
+                .on_press(Message::Cancel)
+                .style(pill_button_secondary),
+        );
+
+        container(body).center(Length::Fill).into()
+    }
+
+    /// The error surface after the session's item failed: the normal error
+    /// copy plus the one action that can resume it.
+    fn recording_failure_surface(&self, scheme: &Scheme, index: usize) -> Element<'_, Message> {
+        let scheme = *scheme;
+        let entry = self.recent.get(index);
+        let message = entry
+            .and_then(|entry| entry.message.clone())
+            .filter(|message| !message.trim().is_empty())
+            .unwrap_or_else(|| "The recording could not be transcribed.".to_string());
+        let retryable = self.retryable_recording(index) && self.recent_audio_present(index);
+        let retry = if retryable {
+            action_text("Retry")
+                .on_press(Message::RetryRecording(index))
+                .style(color_button(scheme.blue, scheme.on_accent))
+        } else {
+            action_text("Retry").style(greyed_button(scheme))
+        };
+        let retry = self.tip(
+            retry,
+            if retryable {
+                "Transcribe this recording again"
+            } else {
+                "The recording file is missing."
+            },
+            &scheme,
+        );
+        container(
+            column![
+                icon_colored(ICON_X, 28.0, scheme.danger),
+                text("Recording failed")
+                    .size(24)
+                    .font(Font {
+                        weight: font::Weight::Bold,
+                        ..Font::DEFAULT
+                    })
+                    .color(scheme.text),
+                text(message)
+                    .size(theme::TEXT_SM)
+                    .color(scheme.muted)
+                    .width(Length::Fill)
+                    .align_x(iced::Alignment::Center),
+                retry,
+            ]
+            .spacing(theme::SPACE_MD)
+            .align_x(iced::Alignment::Center),
+        )
+        .center(Length::Fill)
+        .into()
+    }
+
+    /// The big circular stop control shared by the countdown and the capture.
+    fn stop_control(&self, scheme: Scheme, diameter: f32, hint: &'static str) -> Element<'_, Message> {
+        let button = button(
+            container(icon_colored(
+                ICON_STOP_FILL,
+                diameter * 0.4,
+                scheme.on_accent,
+            ))
+            .center(Length::Fill),
+        )
+        .width(Length::Fixed(diameter))
+        .height(Length::Fixed(diameter))
+        .padding(0)
+        .on_press(self.recording_stop_message().unwrap_or(Message::StopRecording))
+        .style(move |theme, status| {
+            let mut style = color_button(scheme.danger, scheme.on_accent)(theme, status);
+            style.border.radius = PILL.into();
+            style
+        });
+        self.tip(button, hint, &scheme)
     }
 
     /// Match a backend-reported audio path to a queue item.
@@ -10183,11 +10593,6 @@ impl App {
             PaneTab::Recordings => self.recordings_tab(&scheme),
         };
         let mut content = column![self.pane_actions(&scheme), self.pane_tabs(&scheme)].spacing(12);
-        // Recording is global state, not queue content: it keeps its strip on
-        // every tab so leaving Recordings cannot hide a live recording.
-        if let Some(strip) = self.recording_strip(&scheme) {
-            content = content.push(strip);
-        }
         content = content.push(body).height(Length::Fill);
         let panel = container(content)
             .padding(12)
@@ -10554,76 +10959,6 @@ impl App {
             .into()
     }
 
-    /// The live recording meter. It sits above both tabs' content so a
-    /// recording is never hidden by switching to another tab.
-    fn recording_strip(&self, scheme: &Scheme) -> Option<Element<'_, Message>> {
-        let scheme = *scheme;
-        let session = self.record.as_ref()?;
-        let recorder = session.recorder.as_ref()?;
-        let reading = recorder.meter();
-        // Normalizing against the room hides overload, so the strip says so in
-        // words as well as changing the fill.
-        let clipping = reading.clipping;
-        let label = match session.phase {
-            RecordPhase::Countdown => "Starting",
-            _ => {
-                if clipping {
-                    "Clipping"
-                } else {
-                    "Recording"
-                }
-            }
-        };
-        let meter = canvas(RecordingMeter {
-            level: reading.level,
-            peak: reading.peak,
-            // In the dark palette `bar_track` is the same grey as the well
-            // behind it, which would make the unlit segments disappear;
-            // nudging it toward the text colour keeps the whole scale visible
-            // without introducing a new token.
-            track: theme::mix(scheme.bar_track, scheme.text, 0.08),
-            fill: if clipping {
-                theme::lighten(scheme.danger, 0.35)
-            } else {
-                scheme.danger
-            },
-            hold: Color {
-                a: 0.65,
-                ..scheme.text
-            },
-        })
-        .width(Length::Fill)
-        .height(Length::Fixed(8.0));
-        Some(
-            container(
-                row![
-                    icon_colored(ICON_MIC, 14.0, scheme.danger),
-                    text(label)
-                        .size(theme::TEXT_SM)
-                        .color(if clipping { scheme.danger } else { scheme.text }),
-                    text(format_secs(session.captured as f64))
-                        .size(theme::TEXT_XS)
-                        .color(scheme.muted),
-                    meter,
-                ]
-                .spacing(theme::SPACE_SM)
-                .align_y(iced::Alignment::Center),
-            )
-            .width(Length::Fill)
-            .padding([4, 8])
-            .style(move |_theme| container::Style {
-                background: Some(scheme.field_bg.into()),
-                border: iced::border::Border {
-                    color: scheme.border,
-                    width: 1.0,
-                    radius: 6.0.into(),
-                },
-                ..container::Style::default()
-            })
-            .into(),
-        )
-    }
-
     /// Copy for the queue tab's empty list. A transcript still on screen must
     /// not be denied: the pane says nothing is in flight and points at
     /// History instead of pitching an add.
@@ -10782,7 +11117,10 @@ impl App {
         let scheme = *scheme;
         let mut rows = column![].spacing(2).width(Length::Fill);
         for index in indices {
-            rows = rows.push(self.recent_row(index, tab, &scheme, locked));
+            // During a recording workflow every row but the session's item is
+            // dimmed; the active row is the one the right pane is describing.
+            let dimmed = self.recording_row_dimmed(tab, index, locked);
+            rows = rows.push(self.recent_row(index, tab, &scheme, dimmed));
         }
         mouse_area(
             scrollable(rows)
@@ -10890,6 +11228,14 @@ impl App {
             scheme.danger
         } else {
             scheme.muted
+        };
+        let meta_color = if locked {
+            Color {
+                a: 0.55,
+                ..meta_color
+            }
+        } else {
+            meta_color
         };
         let name_color = if locked {
             Color { a: 0.55, ..scheme.text }
@@ -11057,19 +11403,24 @@ impl App {
         if let Some(session) = &self.record {
             if session.item == Some(index) {
                 return match session.phase {
-                    RecordPhase::Preparing => ("Preparing transcript".to_string(), false),
+                    RecordPhase::Countdown | RecordPhase::Capturing => {
+                        ("Recording".to_string(), false)
+                    }
+                    RecordPhase::Preparing => ("Preparing".to_string(), false),
                     RecordPhase::Transcribing => ("Transcribing".to_string(), false),
-                    _ => (recent_meta(entry, true), false),
                 };
             }
         }
         if entry.state == ItemState::Failed {
+            let message = entry
+                .message
+                .clone()
+                .filter(|message| !message.trim().is_empty());
             return (
-                entry
-                    .message
-                    .clone()
-                    .filter(|message| !message.trim().is_empty())
-                    .unwrap_or_else(|| "Failed".to_string()),
+                match message {
+                    Some(message) => format!("Failed \u{00b7} {message}"),
+                    None => "Failed".to_string(),
+                },
                 true,
             );
         }
@@ -14616,6 +14967,11 @@ impl App {
         let running = matches!(self.status, Status::Running);
         let has_queue = !self.queue.is_empty();
         let global_progress = self.overall_shown;
+        // The recording workflow owns the right pane until the session ends.
+        let record_takeover = self.record_takeover();
+        let failure_item = self.failed_recording_item();
+        let takeover = record_takeover || failure_item.is_some();
+        let transport_muted = self.transport_muted();
 
         let clock = row![
             icon_colored(ICON_CLOCK, 14.0, scheme.text),
@@ -14823,9 +15179,23 @@ impl App {
                 ..container::Style::default()
             });
 
+        // While a recording is transcribed, the player stays visible but is
+        // washed out and cannot take a press: the session owns the transport.
+        let player_box: Element<Message> = if transport_muted {
+            stack![player_box, muted_controls_overlay(scheme)].into()
+        } else {
+            player_box.into()
+        };
+
         let mut middle = column![].spacing(8).width(Length::Fill);
         if running || self.completion_pending {
-            middle = middle.push(status_box);
+            middle = middle.push(if transport_muted {
+                // The full progress readout belongs to batch runs. A recording
+                // gets one compact line, where that readout normally sits.
+                self.transcribing_status(&scheme)
+            } else {
+                status_box.into()
+            });
         }
         middle = middle.push(player_box);
 
@@ -14833,7 +15203,18 @@ impl App {
         // the run, and anything that changes the scrollable's child index
         // remounts it and resets its offset. The 6 px gap is padding on the
         // slot so the layout is unchanged.
-        let header = self.transcript_header(&scheme);
+        let header = if takeover {
+            None
+        } else {
+            self.transcript_header(&scheme)
+        };
+        let header = header.map(|header| {
+            if transport_muted {
+                stack![header, muted_controls_overlay(scheme)].into()
+            } else {
+                header
+            }
+        });
         let has_header = header.is_some();
         let header_slot = container(match header {
             Some(header) => header,
@@ -14860,7 +15241,14 @@ impl App {
         })
         .width(Length::Fill)
         .height(Length::Fixed(editor_strip_height(self.line_edit.is_some())));
-        let transcript_box = column![header_slot, strip_slot, self.transcript_element()]
+        let transcript_body: Element<Message> = if let Some(index) = failure_item {
+            self.recording_failure_surface(&scheme, index)
+        } else if record_takeover {
+            self.recording_surface_element(&scheme)
+        } else {
+            self.transcript_element()
+        };
+        let transcript_box = column![header_slot, strip_slot, transcript_body]
             .spacing(0)
         .width(Length::Fill)
         .height(Length::Fill);
@@ -14873,13 +15261,15 @@ impl App {
         // offset to the top. The conditional content lives in slots instead, and the
         // gaps between islands are slot padding, so the child indices never change.
         let has_live = !self.lines.is_empty() || !self.transcript.is_empty();
-        let show_middle =
-            has_queue || self.selected_view.is_some() || running || has_live;
+        let show_middle = !takeover
+            && (has_queue || self.selected_view.is_some() || running || has_live);
         let mut top_slot_col = column![].spacing(ISLAND_GAP).width(Length::Fill);
         let mut has_top = false;
-        if let Some(notice) = self.model_notice(&scheme) {
-            top_slot_col = top_slot_col.push(notice);
-            has_top = true;
+        if !takeover {
+            if let Some(notice) = self.model_notice(&scheme) {
+                top_slot_col = top_slot_col.push(notice);
+                has_top = true;
+            }
         }
         // In the empty state the progress/timeline/player chrome has nothing to
         // act on; let the welcome card own the panel instead.
@@ -14935,7 +15325,8 @@ impl App {
         let find_width = (self.window_size.width / 3.0)
             .max(220.0)
             .min(self.pane_width());
-        let search_slot: Element<Message> = if has_queue && self.find_open {
+        let show_search = !takeover && !self.record_lock() && has_queue && self.find_open;
+        let search_slot: Element<Message> = if show_search {
             container(
                 mouse_area(self.search_element(&scheme))
                     .on_enter(Message::FindHover(true))
@@ -14949,11 +15340,7 @@ impl App {
         let bottom_slot = container(search_slot)
             .width(Length::Fill)
             .padding(iced::Padding {
-                top: if has_queue && self.find_open {
-                    ISLAND_GAP
-                } else {
-                    0.0
-                },
+                top: if show_search { ISLAND_GAP } else { 0.0 },
                 right: 0.0,
                 bottom: 0.0,
                 left: 0.0,
@@ -14971,11 +15358,7 @@ impl App {
         .into();
         // The toast clears the Find row; the editor strip is inside the card, so it
         // changes nothing down here.
-        let toast_bottom = if has_queue && self.find_open {
-            48.0
-        } else {
-            20.0
-        };
+        let toast_bottom = if show_search { 48.0 } else { 20.0 };
         let right_panel = self.with_toast(right_panel, scheme, toast_bottom);
 
         let mut header = row![
@@ -16195,7 +16578,144 @@ impl canvas::Program<Message> for ProgressTrack {
     }
 }
 
-/// The live microphone meter in the recording strip.
+/// The draining ring behind the countdown numerals.
+///
+/// A stroked circle for the full track plus a clockwise arc for the time that
+/// is left. Drawn rather than assembled from widgets so the sweep stays smooth
+/// at the 50 ms tick.
+struct CountdownRing {
+    /// Portion of the ring still lit, 1.0 at the start and 0.0 at zero.
+    fraction: f32,
+    track: Color,
+    accent: Color,
+}
+
+impl canvas::Program<Message> for CountdownRing {
+    type State = ();
+
+    fn update(
+        &self,
+        _state: &mut Self::State,
+        _event: canvas::Event,
+        _bounds: Rectangle,
+        _cursor: mouse::Cursor,
+    ) -> (canvas::event::Status, Option<Message>) {
+        (canvas::event::Status::Ignored, None)
+    }
+
+    fn draw(
+        &self,
+        _state: &(),
+        renderer: &iced::Renderer,
+        _theme: &Theme,
+        bounds: Rectangle,
+        _cursor: mouse::Cursor,
+    ) -> Vec<canvas::Geometry> {
+        let mut frame = canvas::Frame::new(renderer, bounds.size());
+        let width = bounds.width.min(bounds.height);
+        if width <= 0.0 {
+            return vec![frame.into_geometry()];
+        }
+        let center = Point::new(bounds.width / 2.0, bounds.height / 2.0);
+        let stroke = width * 0.06;
+        let radius = (width - stroke) / 2.0;
+        frame.stroke(
+            &canvas::Path::circle(center, radius),
+            canvas::Stroke::default()
+                .with_width(stroke)
+                .with_color(Color { a: 0.35, ..self.track }),
+        );
+
+        let fraction = self.fraction.clamp(0.0, 1.0);
+        if fraction > 0.0 {
+            let start = -std::f32::consts::FRAC_PI_2;
+            let end = start + fraction * std::f32::consts::TAU;
+            let steps = 96usize;
+            let path = canvas::Path::new(|builder| {
+                for step in 0..=steps {
+                    let angle = start + (end - start) * (step as f32 / steps as f32);
+                    let point = Point::new(
+                        center.x + radius * angle.cos(),
+                        center.y + radius * angle.sin(),
+                    );
+                    if step == 0 {
+                        builder.move_to(point);
+                    } else {
+                        builder.line_to(point);
+                    }
+                }
+            });
+            frame.stroke(
+                &path,
+                canvas::Stroke::default()
+                    .with_width(stroke)
+                    .with_color(self.accent)
+                    .with_line_cap(canvas::LineCap::Round),
+            );
+        }
+
+        vec![frame.into_geometry()]
+    }
+}
+
+/// A travelling pill for a download whose total size is not known.
+struct IndeterminateBar {
+    /// 0.0..=1.0 travel position.
+    phase: f32,
+    track: Color,
+    fill: Color,
+}
+
+impl canvas::Program<Message> for IndeterminateBar {
+    type State = ();
+
+    fn update(
+        &self,
+        _state: &mut Self::State,
+        _event: canvas::Event,
+        _bounds: Rectangle,
+        _cursor: mouse::Cursor,
+    ) -> (canvas::event::Status, Option<Message>) {
+        (canvas::event::Status::Ignored, None)
+    }
+
+    fn draw(
+        &self,
+        _state: &(),
+        renderer: &iced::Renderer,
+        _theme: &Theme,
+        bounds: Rectangle,
+        _cursor: mouse::Cursor,
+    ) -> Vec<canvas::Geometry> {
+        let mut frame = canvas::Frame::new(renderer, bounds.size());
+        let width = bounds.width;
+        let height = bounds.height;
+        if width <= 0.0 || height <= 0.0 {
+            return vec![frame.into_geometry()];
+        }
+        let radius = (height / 2.0).into();
+        let track = canvas::Path::rounded_rectangle(
+            Point::ORIGIN,
+            Size::new(width, height),
+            radius,
+        );
+        frame.fill(&track, self.track);
+
+        let span = (width * 0.28).max(height);
+        let travel = (width - span).max(0.0);
+        let x = (self.phase.clamp(0.0, 1.0) * travel).min(travel);
+        let fill = canvas::Path::rounded_rectangle(
+            Point::new(x, 0.0),
+            Size::new(span, height),
+            radius,
+        );
+        frame.fill(&fill, self.fill);
+
+        vec![frame.into_geometry()]
+    }
+}
+
+/// The live microphone meter on the capturing surface.
 ///
 /// A row of segments, not a `progress_bar`: recording has no completion
 /// fraction, and segments read as a level at a glance. The fill follows the
@@ -16417,6 +16937,8 @@ const ICON_RETRY: char = '\u{f130}';
 /// Outline and filled stars: a row's favorite affordance.
 const ICON_STAR: char = '\u{f588}';
 const ICON_STAR_FILL: char = '\u{f586}';
+/// The square stop glyph inside the capture controls' red circle.
+const ICON_STOP_FILL: char = '\u{f592}';
 
 /// Full-window drop target, kept in the widget tree at all times.
 ///
@@ -18518,6 +19040,32 @@ fn header_menu_item_style(
             shadow: Shadow::default(),
         }
     }
+}
+
+/// A wash that sits over controls the recording session owns. It mutes them
+/// visually and swallows their presses, so the pane reads as busy rather than
+/// broken.
+fn muted_controls_overlay(scheme: Scheme) -> Element<'static, Message> {
+    mouse_area(
+        container(horizontal_space())
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .style(move |_theme| container::Style {
+                background: Some(
+                    Color {
+                        a: 0.62,
+                        ..scheme.panel_bg
+                    }
+                    .into(),
+                ),
+                ..container::Style::default()
+            }),
+    )
+    .interaction(mouse::Interaction::Idle)
+    .on_press(Message::Noop)
+    .on_right_press(Message::Noop)
+    .on_middle_press(Message::Noop)
+    .into()
 }
 
 /// A subtle drop shadow that gives surfaces a soft, raised look.
@@ -26204,7 +26752,7 @@ mod tests {
         assert!(!app.retryable_recording(1));
         assert_eq!(
             app.recent_row_meta(0, PaneTab::Recordings),
-            ("microphone unavailable".to_string(), true)
+            ("Failed \u{00b7} microphone unavailable".to_string(), true)
         );
 
         let scheme = app.scheme();
@@ -26225,7 +26773,7 @@ mod tests {
         let index = app.recent.len() - 1;
         assert_eq!(
             app.recent_row_meta(index, PaneTab::Recordings),
-            ("cancelled".to_string(), true)
+            ("Failed \u{00b7} cancelled".to_string(), true)
         );
         let rows = app.row_menu_rows(PaneTab::Recordings, Some(index), &scheme);
         let retry = menu_entry(&rows, "Retry recording");
@@ -26550,6 +27098,329 @@ mod tests {
             app.record.as_ref().map(|session| session.phase),
             Some(RecordPhase::Preparing)
         );
+    }
+
+    #[test]
+    fn recording_phase_maps_to_its_surface() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("record-surfaces");
+        let mut app = pro_app();
+        let session = |phase| RecordSession {
+            phase,
+            recorder: None,
+            countdown_ends: None,
+            item: Some(0),
+            captured: 0.0,
+        };
+
+        for (phase, surface, takeover, muted) in [
+            (
+                RecordPhase::Countdown,
+                RecordSurface::Countdown,
+                true,
+                false,
+            ),
+            (
+                RecordPhase::Capturing,
+                RecordSurface::Capturing,
+                true,
+                false,
+            ),
+            (
+                RecordPhase::Preparing,
+                RecordSurface::Preparing,
+                true,
+                false,
+            ),
+            (
+                RecordPhase::Transcribing,
+                RecordSurface::Transcribing,
+                false,
+                true,
+            ),
+        ] {
+            app.record = Some(session(phase));
+            assert_eq!(app.record_surface(), Some(surface), "{phase:?}");
+            assert_eq!(app.record_takeover(), takeover, "{phase:?}");
+            assert_eq!(app.transport_muted(), muted, "{phase:?}");
+        }
+
+        app.record = None;
+        assert_eq!(app.record_surface(), None);
+        assert!(!app.record_takeover());
+        assert!(!app.transport_muted());
+    }
+
+    #[test]
+    fn countdown_view_numbers_the_three_half_seconds() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("record-countdown");
+        let mut app = pro_app();
+        let base = Instant::now();
+        app.record = Some(RecordSession {
+            phase: RecordPhase::Countdown,
+            recorder: None,
+            countdown_ends: Some(base + COUNTDOWN),
+            item: None,
+            captured: 0.0,
+        });
+
+        let view = app.countdown_view(base).expect("countdown view");
+        assert_eq!(view.numeral, 3);
+        assert_eq!(view.remaining, COUNTDOWN);
+        assert_eq!(view.fraction, 1.0);
+
+        let view = app
+            .countdown_view(base + Duration::from_millis(400))
+            .unwrap();
+        assert_eq!(view.numeral, 3);
+        assert_eq!(view.remaining, Duration::from_millis(1_100));
+
+        let view = app
+            .countdown_view(base + Duration::from_millis(600))
+            .unwrap();
+        assert_eq!(view.numeral, 2);
+        assert_eq!(view.remaining, Duration::from_millis(900));
+
+        let view = app
+            .countdown_view(base + Duration::from_millis(1_000))
+            .unwrap();
+        assert_eq!(view.numeral, 1);
+        assert_eq!(view.remaining, Duration::from_millis(500));
+
+        let view = app.countdown_view(base + COUNTDOWN).unwrap();
+        assert_eq!(view.numeral, 1);
+        assert_eq!(view.remaining, Duration::ZERO);
+        assert_eq!(view.fraction, 0.0);
+    }
+
+    #[test]
+    fn stop_controls_send_stop_recording_in_both_take_phases() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("record-stop-controls");
+        let mut app = pro_app();
+        let session = |phase| RecordSession {
+            phase,
+            recorder: None,
+            countdown_ends: None,
+            item: None,
+            captured: 0.0,
+        };
+
+        for phase in [RecordPhase::Countdown, RecordPhase::Capturing] {
+            app.record = Some(session(phase));
+            assert!(matches!(
+                app.recording_stop_message(),
+                Some(Message::StopRecording)
+            ));
+            assert_eq!(app.record_button_state().0, "Stop");
+            assert!(app.record_button_state().1);
+        }
+
+        for phase in [RecordPhase::Preparing, RecordPhase::Transcribing] {
+            app.record = Some(session(phase));
+            assert!(app.recording_stop_message().is_none());
+            assert!(!app.record_button_state().1);
+        }
+    }
+
+    #[test]
+    fn preparing_surface_follows_the_model_download() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("record-preparing");
+        let mut app = pro_app();
+        app.record = Some(RecordSession {
+            phase: RecordPhase::Preparing,
+            recorder: None,
+            countdown_ends: None,
+            item: Some(0),
+            captured: 0.0,
+        });
+
+        assert_eq!(app.preparing_progress(), (None, None));
+        app.model_download = Some(ModelDownload {
+            label: "Balanced".to_string(),
+            done: 50,
+            total: Some(100),
+        });
+        assert_eq!(
+            app.preparing_progress(),
+            (Some("Balanced".to_string()), Some(0.5))
+        );
+
+        // An unknown total keeps the label and the byte count, but the bar
+        // becomes indeterminate.
+        app.model_download.as_mut().unwrap().total = None;
+        assert_eq!(
+            app.preparing_progress(),
+            (Some("Balanced".to_string()), None)
+        );
+    }
+
+    #[test]
+    fn transcribing_keeps_the_transcript_and_mutes_the_chrome() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("record-transcribing");
+        let mut app = pro_app();
+        app.transcript = "[00:00] SPEAKER 1: live words\n".to_string();
+        app.lines = parse_lines(&app.transcript);
+        app.record = Some(RecordSession {
+            phase: RecordPhase::Transcribing,
+            recorder: None,
+            countdown_ends: None,
+            item: Some(0),
+            captured: 3.0,
+        });
+
+        assert_eq!(app.record_surface(), Some(RecordSurface::Transcribing));
+        assert!(!app.record_takeover());
+        assert!(app.transport_muted());
+        assert!(app.record_lock());
+        // The live buffer is untouched: the streaming transcript stays on
+        // screen while only the chrome around it mutes.
+        assert!(app.transcript.contains("live words"));
+        assert_eq!(app.lines.len(), 1);
+    }
+
+    #[test]
+    fn recording_rows_dim_except_the_session_item() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("record-row-dim");
+        let mut app = pro_app();
+        app.pane_tab = PaneTab::Recordings;
+        app.recent = vec![
+            RecentEntry {
+                audio: Some(PathBuf::from("/media/active.wav")),
+                recording: true,
+                finished_at: 20,
+                ..Default::default()
+            },
+            RecentEntry {
+                audio: Some(PathBuf::from("/media/other.wav")),
+                recording: true,
+                finished_at: 10,
+                ..Default::default()
+            },
+        ];
+        app.record = Some(RecordSession {
+            phase: RecordPhase::Preparing,
+            recorder: None,
+            countdown_ends: None,
+            item: Some(0),
+            captured: 0.0,
+        });
+
+        assert!(!app.recording_row_dimmed(PaneTab::Recordings, 0, false));
+        assert!(app.recording_row_dimmed(PaneTab::Recordings, 1, false));
+        assert_eq!(
+            app.recent_row_meta(0, PaneTab::Recordings).0,
+            "Preparing"
+        );
+
+        if let Some(session) = app.record.as_mut() {
+            session.phase = RecordPhase::Capturing;
+        }
+        assert_eq!(app.recent_row_meta(0, PaneTab::Recordings).0, "Recording");
+
+        if let Some(session) = app.record.as_mut() {
+            session.phase = RecordPhase::Transcribing;
+        }
+        assert_eq!(
+            app.recent_row_meta(0, PaneTab::Recordings).0,
+            "Transcribing"
+        );
+    }
+
+    #[test]
+    fn tick_is_fifty_ms_while_a_take_is_live() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("record-tick");
+        let mut app = pro_app();
+        assert_eq!(app.tick_millis(), 100);
+
+        for phase in [RecordPhase::Countdown, RecordPhase::Capturing] {
+            app.record = Some(RecordSession {
+                phase,
+                recorder: None,
+                countdown_ends: None,
+                item: None,
+                captured: 0.0,
+            });
+            assert_eq!(app.tick_millis(), 50, "{phase:?}");
+        }
+
+        for phase in [RecordPhase::Preparing, RecordPhase::Transcribing] {
+            app.record = Some(RecordSession {
+                phase,
+                recorder: None,
+                countdown_ends: None,
+                item: None,
+                captured: 0.0,
+            });
+            assert_eq!(app.tick_millis(), 100, "{phase:?}");
+        }
+    }
+
+    #[test]
+    fn failed_recording_offers_retry_and_clears_on_retry() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("record-failed-surface");
+        let media = temp_dir("record-failed-surface-media");
+        let wav = media.join("take.wav");
+        std::fs::write(&wav, b"audio").unwrap();
+
+        let mut app = pro_app();
+        app.pane_tab = PaneTab::Recordings;
+        app.recent.push(RecentEntry {
+            audio: Some(wav),
+            recording: true,
+            state: ItemState::Ready,
+            ..Default::default()
+        });
+        app.mark_item_failed(0, "microphone unavailable".to_string());
+        assert_eq!(app.failed_recording, Some(0));
+        assert_eq!(app.failed_recording_item(), Some(0));
+        // The surface builds with the retry affordance in place.
+        let scheme = app.scheme();
+        let _ = app.recording_failure_surface(&scheme, 0);
+
+        app.recording_models_ready_override = Some(false);
+        let _ = app.update(Message::RetryRecording(0));
+        assert_eq!(app.failed_recording, None);
+        assert!(app.failed_recording_item().is_none());
+        assert_eq!(
+            app.record.as_ref().map(|session| session.phase),
+            Some(RecordPhase::Preparing)
+        );
+
+        let _ = std::fs::remove_dir_all(&media);
+    }
+
+    #[test]
+    fn recording_surfaces_build_without_the_left_strip() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("record-surfaces-build");
+        let mut app = pro_app();
+        app.pane_tab = PaneTab::Recordings;
+        let scheme = app.scheme();
+
+        for phase in [
+            RecordPhase::Countdown,
+            RecordPhase::Capturing,
+            RecordPhase::Preparing,
+        ] {
+            app.record = Some(RecordSession {
+                phase,
+                recorder: None,
+                countdown_ends: Some(Instant::now() + COUNTDOWN),
+                item: None,
+                captured: 0.0,
+            });
+            // The left panel no longer carries a level strip; it builds from
+            // the normal tab content, and the capture surface lives right.
+            let _ = app.queue_panel(&scheme, LEFT_PANEL_WIDTH);
+            let _ = app.recording_surface_element(&scheme);
+        }
     }
 
     #[test]
