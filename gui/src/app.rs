@@ -6541,23 +6541,71 @@ impl App {
                 Task::none()
             }
             Message::SkipItem(index) => {
-                if !matches!(self.status, Status::Running) {
-                    if let Some(item) = self.queue.get_mut(index) {
-                        if matches!(item.status, ItemStatus::Interrupted) {
-                            item.status = ItemStatus::Failed("skipped".to_string());
-                            if let Some(audio) = &item.audio {
-                                let _ = std::fs::remove_file(
-                                    hippo_transcribe_core::pipeline::checkpoint_path(audio),
-                                );
-                            }
-                            self.save_queue();
+                // The row being transcribed is the run itself, so it cannot be
+                // skipped. Anything else can, even mid-batch: the child was given
+                // the whole list at start, so it may still transcribe the file,
+                // but the row stops being queue work and its result is dropped
+                // (see the `Event::File` guard).
+                if self.current_index == Some(index) || self.current == Some(index) {
+                    self.toast = Some((
+                        "The file being transcribed cannot be skipped".to_string(),
+                        Instant::now(),
+                    ));
+                    return Task::none();
+                }
+                let weight = if matches!(self.status, Status::Running) {
+                    self.queue
+                        .get(index)
+                        .filter(|item| {
+                            matches!(
+                                item.status,
+                                ItemStatus::Pending | ItemStatus::Interrupted
+                            )
+                        })
+                        .map(|item| queue_weight(item, 1.0))
+                        .unwrap_or(0.0)
+                } else {
+                    0.0
+                };
+                let mut changed = false;
+                if let Some(item) = self.queue.get_mut(index) {
+                    if matches!(item.status, ItemStatus::Pending | ItemStatus::Interrupted) {
+                        item.status = ItemStatus::Failed("skipped".to_string());
+                        if let Some(audio) = &item.audio {
+                            let _ = std::fs::remove_file(
+                                hippo_transcribe_core::pipeline::checkpoint_path(audio),
+                            );
                         }
+                        changed = true;
                     }
+                }
+                if changed {
+                    if weight > 0.0 {
+                        self.batch_total = (self.batch_total - weight).max(0.0);
+                    }
+                    self.save_queue();
                 }
                 Task::none()
             }
             Message::RemoveItem(index) => {
-                if !matches!(self.status, Status::Running) && index < self.queue.len() {
+                if index < self.queue.len()
+                    && (self.current_index == Some(index) || self.current == Some(index))
+                {
+                    self.toast = Some((
+                        "The file being transcribed cannot be removed".to_string(),
+                        Instant::now(),
+                    ));
+                    return Task::none();
+                }
+                if index < self.queue.len() {
+                    let weight = if matches!(self.status, Status::Running) {
+                        self.queue
+                            .get(index)
+                            .map(|item| queue_weight(item, 1.0))
+                            .unwrap_or(0.0)
+                    } else {
+                        0.0
+                    };
                     // The edited document may be the row about to be removed.
                     self.commit_inline_edit(false);
                     let was_viewing = self.selected_view.is_some();
@@ -6597,6 +6645,9 @@ impl App {
                             self.playhead = 0.0;
                             self.last_tick = None;
                         }
+                    }
+                    if weight > 0.0 {
+                        self.batch_total = (self.batch_total - weight).max(0.0);
                     }
                     self.invalidate_derived();
                     self.save_queue();
@@ -11503,7 +11554,14 @@ impl App {
                         self.current = None;
                         self.current_index = None;
                     } else {
-                        self.current = self.find_queue_index(&path);
+                        // A row skipped while the batch ran is still in the
+                        // child's list; its result must not resurrect the row.
+                        self.current = self.find_queue_index(&path).filter(|index| {
+                            !matches!(
+                                &self.queue[*index].status,
+                                ItemStatus::Failed(message) if message == "skipped"
+                            )
+                        });
                         self.current_index = self.current;
                         if let Some(index) = self.current {
                             self.queue[index].status = ItemStatus::Running;
@@ -14817,19 +14875,14 @@ impl App {
                         running.then_some("Finish the current run first."),
                         Message::TranscribeQueueItem(index),
                     ),
+                    row("Skip", true, None, Message::SkipItem(index)),
                     row(
                         "Reveal audio",
                         audio.is_some(),
                         audio.is_none().then_some("No audio file."),
                         Message::RevealQueueAudio(index),
                     ),
-                    danger(
-                        "Remove",
-                        !running,
-                        running.then_some("Stop the run before removing rows."),
-                        Message::RemoveItem(index),
-                    )
-                    .separated(),
+                    danger("Remove", true, None, Message::RemoveItem(index)).separated(),
                 ],
                 ItemStatus::Interrupted => vec![
                     row(
@@ -14838,25 +14891,14 @@ impl App {
                         running.then_some("Finish the current run first."),
                         Message::RetryItem(index),
                     ),
-                    row(
-                        "Skip",
-                        !running,
-                        running.then_some("Finish the current run first."),
-                        Message::SkipItem(index),
-                    ),
+                    row("Skip", true, None, Message::SkipItem(index)),
                     row(
                         "Reveal audio",
                         audio.is_some(),
                         audio.is_none().then_some("No audio file."),
                         Message::RevealQueueAudio(index),
                     ),
-                    danger(
-                        "Remove",
-                        !running,
-                        running.then_some("Stop the run before removing rows."),
-                        Message::RemoveItem(index),
-                    )
-                    .separated(),
+                    danger("Remove", true, None, Message::RemoveItem(index)).separated(),
                 ],
                 ItemStatus::Done => vec![row(
                     "Reveal audio",
@@ -14877,13 +14919,7 @@ impl App {
                         audio.is_none().then_some("No audio file."),
                         Message::RevealQueueAudio(index),
                     ),
-                    danger(
-                        "Remove",
-                        !running,
-                        running.then_some("Stop the run before removing rows."),
-                        Message::RemoveItem(index),
-                    )
-                    .separated(),
+                    danger("Remove", true, None, Message::RemoveItem(index)).separated(),
                 ],
             };
             // The row's paths are too long for the row, so the menu carries
@@ -15185,7 +15221,7 @@ impl App {
             content = content.push(
                 self.tip(
                     action(icon(ICON_ARROW_DOWN, 12.0))
-                        .on_press_maybe((!running && !record_locked).then_some(Message::SkipItem(index)))
+                        .on_press_maybe((!record_locked).then_some(Message::SkipItem(index)))
                         .style(subtle_icon_button),
                     "Skip this file",
                     &scheme,
@@ -29592,6 +29628,51 @@ mod tests {
         assert!(matches!(app.queue[0].status, ItemStatus::Failed(_)));
         assert!(!parked.exists());
         assert_eq!(app.transcribe_label(), "Transcribe");
+    }
+
+    #[test]
+    fn a_queued_row_can_be_skipped_or_removed_during_a_run() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("queue-skip-running");
+        let media = temp_dir("queue-skip-running-media");
+        let mut app = pro_app();
+        let mut item = |name: &str, seconds: f64| {
+            let path = media.join(name);
+            std::fs::write(&path, b"audio").unwrap();
+            let mut item = queue_item(path);
+            item.duration = Some(seconds);
+            item
+        };
+        app.queue = vec![item("a.mp3", 10.0), item("b.mp3", 10.0), item("c.mp3", 10.0)];
+        app.queue[0].status = ItemStatus::Running;
+        app.current = Some(0);
+        app.current_index = Some(0);
+        app.status = Status::Running;
+        app.batch_total = 30.0;
+
+        // Both actions are on offer for a waiting row while the batch runs.
+        let scheme = app.scheme();
+        let rows = app.row_menu_rows(PaneTab::Queue, Some(1), &scheme);
+        assert!(menu_entry(&rows, "Skip").enabled);
+        assert!(menu_entry(&rows, "Remove").enabled);
+
+        // Skipping keeps the row as a skipped one and takes its weight out of
+        // the bar, so the run still reaches its end.
+        let _ = app.update(Message::SkipItem(1));
+        assert!(matches!(app.queue[1].status, ItemStatus::Failed(_)));
+        assert_eq!(app.batch_total, 20.0);
+
+        // Removing takes the row away and its weight with it.
+        let _ = app.update(Message::RemoveItem(2));
+        assert_eq!(app.queue.len(), 2);
+        assert_eq!(app.batch_total, 10.0);
+
+        // The file being transcribed is the run itself: it stays.
+        let _ = app.update(Message::RemoveItem(0));
+        assert_eq!(app.queue.len(), 2);
+        assert!(matches!(app.queue[0].status, ItemStatus::Running));
+
+        let _ = std::fs::remove_dir_all(&media);
     }
 
     #[test]
