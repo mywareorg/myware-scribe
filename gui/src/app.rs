@@ -415,6 +415,9 @@ enum ItemState {
 struct RecentEntry {
     audio: Option<PathBuf>,
     transcript: Option<PathBuf>,
+    /// The user's name for this row in the lists. `None` shows the file name;
+    /// the file on disk is never renamed.
+    name: Option<String>,
     /// Unix seconds when the item finished; the history sorts newest first.
     finished_at: u64,
     duration: Option<f64>,
@@ -662,6 +665,12 @@ struct LabelPicker {
     input: String,
 }
 
+/// The open rename form for a history row's display name.
+struct RenameRecent {
+    row: usize,
+    text: String,
+}
+
 /// A version being previewed read-only, with the row it belongs to.
 #[derive(Debug, Clone)]
 struct VersionPreview {
@@ -797,6 +806,9 @@ struct RecentRecord {
     audio: Option<String>,
     #[serde(default)]
     transcript: Option<String>,
+    /// The lists' display name, when the user renamed the row.
+    #[serde(default)]
+    name: Option<String>,
     #[serde(default)]
     finished_at: u64,
     #[serde(default)]
@@ -1254,6 +1266,8 @@ pub enum Modal {
     Versions,
     /// The Add label picker for one history row.
     Labels,
+    /// The rename form for a history row's display name.
+    RenameRecent,
     /// The File panel row's read-only details. Last in paint order: it only
     /// appears when nothing else is open, since a context menu opens it.
     Info,
@@ -1502,6 +1516,14 @@ pub enum Message {
     DeleteLabel(String),
     /// Toggle a label in the Favorites filter.
     ToggleLabelFilter(String),
+    /// Open the rename form for a row's display name.
+    OpenRenameRecent(usize),
+    /// The display name being typed.
+    RenameRecentChanged(String),
+    /// Apply the typed display name.
+    RenameRecentSave,
+    /// Close the rename form without changing anything.
+    CloseRenameRecent,
     /// Clear every active label filter.
     /// Show the version panel for a history row.
     OpenVersions(PaneTab, usize),
@@ -1986,6 +2008,8 @@ pub struct App {
     label_filter: Vec<String>,
     /// The open label picker, if any.
     labels_open: Option<LabelPicker>,
+    /// The open rename form for a row's display name, if any.
+    rename_recent: Option<RenameRecent>,
     /// The export format list nested under File → Export as, open while the
     /// pointer is on that row.
     file_export_open: bool,
@@ -2309,6 +2333,7 @@ impl App {
             label_assignments,
             label_filter: Vec::new(),
             labels_open: None,
+            rename_recent: None,
             file_export_open: false,
             pending_export: None,
             custom_speakers: Vec::new(),
@@ -2590,6 +2615,7 @@ impl App {
             };
             let mut entry = RecentEntry {
                 audio: record.audio.map(PathBuf::from),
+                name: record.name,
                 transcript,
                 finished_at: record.finished_at,
                 duration: record.duration,
@@ -2778,6 +2804,7 @@ impl App {
                         .transcript
                         .as_ref()
                         .map(|path| path.display().to_string()),
+                    name: entry.name.clone(),
                     finished_at: entry.finished_at,
                     duration: entry.duration,
                     speakers: entry.speakers,
@@ -6566,6 +6593,32 @@ impl App {
                 Task::none()
             }
             Message::CloseLabels => self.close_modal(Modal::Labels),
+            Message::OpenRenameRecent(index) => {
+                if self.recent.get(index).is_none() {
+                    return Task::none();
+                }
+                let text = self
+                    .recent
+                    .get(index)
+                    .map(recent_title)
+                    .unwrap_or_default();
+                self.rename_recent = Some(RenameRecent { row: index, text });
+                text_input::focus(rename_recent_id())
+            }
+            Message::RenameRecentChanged(value) => {
+                if let Some(state) = self.rename_recent.as_mut() {
+                    state.text = value;
+                }
+                Task::none()
+            }
+            Message::RenameRecentSave => {
+                self.apply_rename_recent();
+                Task::none()
+            }
+            Message::CloseRenameRecent => {
+                self.rename_recent = None;
+                Task::none()
+            }
             Message::ToggleRecentLabel(index, id) => {
                 self.toggle_recent_label(index, &id);
                 Task::none()
@@ -7952,6 +8005,24 @@ impl App {
             key,
             input: String::new(),
         });
+    }
+
+    /// Apply the rename form. An empty field, or the file's own name, drops the
+    /// alias so the row shows its file again.
+    fn apply_rename_recent(&mut self) {
+        let Some(state) = self.rename_recent.take() else {
+            return;
+        };
+        let Some(entry) = self.recent.get_mut(state.row) else {
+            return;
+        };
+        let typed = state.text.trim();
+        entry.name = if typed.is_empty() || typed == recent_file_name(entry) {
+            None
+        } else {
+            Some(typed.to_string())
+        };
+        self.save_queue();
     }
 
     /// Find or create a label definition. Case-insensitive, 32 chars.
@@ -11664,7 +11735,7 @@ impl App {
         };
         self.recent
             .iter()
-            .position(|entry| recent_title(entry) == run.0)
+            .position(|entry| recent_file_name(entry) == run.0)
     }
 
     /// The completion summary as plain text, for the Copy action.
@@ -14743,6 +14814,15 @@ impl App {
                 .separated(),
             );
         }
+        rows.push(
+            row(
+                "Rename\u{2026}",
+                true,
+                None,
+                Message::OpenRenameRecent(index),
+            )
+            .separated(),
+        );
         rows.push(select_version.separated());
         rows.push(row("Info", true, None, Message::OpenInfo(tab, index)).separated());
         // The row's X is gone; removal lives at the bottom of the menu.
@@ -16408,6 +16488,8 @@ impl App {
             Some(Modal::Versions)
         } else if self.labels_open.is_some() {
             Some(Modal::Labels)
+        } else if self.rename_recent.is_some() {
+            Some(Modal::RenameRecent)
         } else if self.info_open.is_some() {
             // Lowest priority: the Info popup only ever comes from a context
             // menu, which cannot open while another dialog is up.
@@ -16471,6 +16553,7 @@ impl App {
             }
             Modal::Versions => self.versions_open = None,
             Modal::Labels => self.labels_open = None,
+            Modal::RenameRecent => self.rename_recent = None,
         }
         Task::none()
     }
@@ -17360,6 +17443,41 @@ impl App {
         .spacing(theme::SPACE_MD)
         .width(Length::Fill);
         modal_card(body, 380.0, scheme)
+    }
+
+    /// The rename form for a row's display name. It changes the lists only:
+    /// the file on disk keeps its name.
+    fn rename_recent_dialog(&self, scheme: &Scheme) -> Element<'_, Message> {
+        let scheme = *scheme;
+        let Some(state) = &self.rename_recent else {
+            return container(horizontal_space()).into();
+        };
+        let body = column![
+            text("Rename").size(20).color(scheme.text),
+            text("Shown in History, Favorites and Recordings. The file on disk keeps its name.")
+                .size(theme::TEXT_XS)
+                .color(scheme.muted),
+            text_input("Name", &state.text)
+                .id(rename_recent_id())
+                .on_input(Message::RenameRecentChanged)
+                .on_submit(Message::RenameRecentSave)
+                .width(Length::Fill)
+                .style(pill_input),
+            right_aligned(
+                row![
+                    action_text("Cancel")
+                        .on_press(Message::CloseRenameRecent)
+                        .style(pill_button_secondary),
+                    action_text("Rename")
+                        .on_press(Message::RenameRecentSave)
+                        .style(color_button(scheme.blue, scheme.on_accent)),
+                ]
+                .spacing(theme::SPACE_MD),
+            ),
+        ]
+        .spacing(theme::SPACE_MD)
+        .width(Length::Fill);
+        modal_card(body, 420.0, scheme)
     }
 
     /// A strip above the transcript saying an older version is on screen.
@@ -18975,6 +19093,7 @@ impl App {
             Some(Modal::Briefing) => self.briefing_dialog(&scheme),
             Some(Modal::Versions) => self.versions_dialog(&scheme),
             Some(Modal::Labels) => self.labels_dialog(&scheme),
+            Some(Modal::RenameRecent) => self.rename_recent_dialog(&scheme),
             Some(Modal::Info) => self.info_dialog(&scheme),
         };
         // The Info popup is read-only and transient: its scrim dismisses it,
@@ -21489,6 +21608,18 @@ fn recent_audio_presence_of(recent: &[RecentEntry]) -> Vec<bool> {
 /// audio is gone.
 fn recent_title(entry: &RecentEntry) -> String {
     entry
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| recent_file_name(entry))
+}
+
+/// The row's file name, whatever the row is called in the lists. Matching
+/// against a run's record must use this, not the display name.
+fn recent_file_name(entry: &RecentEntry) -> String {
+    entry
         .audio
         .as_deref()
         .or(entry.transcript.as_deref())
@@ -21953,6 +22084,11 @@ fn help_scroll_id(kind: HelpKind) -> scrollable::Id {
 
 fn rename_id(index: usize) -> text_input::Id {
     text_input::Id::new(format!("rename-{index}"))
+}
+
+/// The history rename form's input, focused when the form opens.
+fn rename_recent_id() -> text_input::Id {
+    text_input::Id::new("rename-recent")
 }
 
 /// Scrollbar thickness shared by every scrollable in the app.
@@ -24841,6 +24977,62 @@ mod tests {
         let (_, _, recent, favorites) = App::load_queue_and_batch();
         assert!(recent.is_empty());
         assert!(favorites.is_empty());
+    }
+
+    #[test]
+    fn renaming_a_history_row_changes_its_title_only() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("rename-row");
+        let media = temp_dir("rename-row-media");
+        let audio = media.join("talk.mp3");
+        std::fs::write(&audio, b"audio").unwrap();
+        let transcript = media.join("talk.txt");
+        std::fs::write(&transcript, "[00:00] SPEAKER 1: hi\n").unwrap();
+
+        let mut app = pro_app();
+        push_recent(
+            &mut app,
+            Some(audio.clone()),
+            transcript.clone(),
+            Some(10.0),
+            Vec::new(),
+        );
+        assert_eq!(recent_title(&app.recent[0]), "talk.mp3");
+
+        let _ = app.update(Message::OpenRenameRecent(0));
+        let state = app
+            .rename_recent
+            .as_ref()
+            .expect("the rename form should open");
+        assert_eq!(state.text, "talk.mp3", "the field starts on the shown name");
+
+        let _ = app.update(Message::RenameRecentChanged("Board meeting".to_string()));
+        let _ = app.update(Message::RenameRecentSave);
+        assert!(app.rename_recent.is_none());
+        assert_eq!(recent_title(&app.recent[0]), "Board meeting");
+        assert_eq!(
+            app.recent[0].audio.as_deref(),
+            Some(audio.as_path()),
+            "the file is not renamed"
+        );
+        assert!(audio.is_file() && transcript.is_file());
+
+        // The alias is persisted with the index.
+        let (_, _, recent, _) = App::load_queue_and_batch();
+        let stored = recent
+            .iter()
+            .find(|entry| entry.name.is_some())
+            .expect("the name was not stored");
+        assert_eq!(stored.name.as_deref(), Some("Board meeting"));
+
+        // Typing the file's own name drops the alias rather than pinning one.
+        let _ = app.update(Message::OpenRenameRecent(0));
+        let _ = app.update(Message::RenameRecentChanged("talk.mp3".to_string()));
+        let _ = app.update(Message::RenameRecentSave);
+        assert_eq!(app.recent[0].name, None);
+        assert_eq!(recent_title(&app.recent[0]), "talk.mp3");
+
+        let _ = std::fs::remove_dir_all(&media);
     }
 
     #[test]
@@ -27876,7 +28068,7 @@ mod tests {
 
     /// Every dialog, so a variant added to `Modal` cannot go untested: the
     /// escape and render passes below each walk this list.
-    const ALL_MODALS: [Modal; 13] = [
+    const ALL_MODALS: [Modal; 14] = [
         Modal::Reset,
         Modal::ClearHistory,
         Modal::Summary,
@@ -27890,6 +28082,7 @@ mod tests {
         Modal::Info,
         Modal::Versions,
         Modal::Labels,
+        Modal::RenameRecent,
     ];
 
     /// Raise one dialog the way the app would.
@@ -27971,6 +28164,19 @@ mod tests {
                 });
                 let index = app.recent.len() - 1;
                 app.open_labels(PaneTab::History, index);
+            }
+            Modal::RenameRecent => {
+                app.recent.push(RecentEntry {
+                    audio: Some(PathBuf::from("/media/talk.mp3")),
+                    transcript: Some(PathBuf::from("/media/talk.txt")),
+                    finished_at: 5,
+                    ..Default::default()
+                });
+                let index = app.recent.len() - 1;
+                app.rename_recent = Some(RenameRecent {
+                    row: index,
+                    text: "talk.mp3".to_string(),
+                });
             }
         }
     }
