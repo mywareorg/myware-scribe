@@ -1238,6 +1238,8 @@ pub enum HeaderMenu {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Modal {
     Reset,
+    /// The Clear history confirmation.
+    ClearHistory,
     Summary,
     DeleteLine,
     Calibration,
@@ -1536,9 +1538,11 @@ pub enum Message {
     /// Recordings.
     SelectTab(PaneTab),
     ClearQueue,
-    /// Drop every finished item from History, Favorites and Recordings. Files
-    /// on disk are untouched.
-    ClearHistory,
+    /// Ask before dropping everything in History, Favorites and Recordings.
+    RequestClearHistory,
+    /// The confirmation's Clear button: drop the lists, keep the files.
+    ConfirmClearHistory,
+    CloseClearHistory,
     ItemDurationProbed(PathBuf, Option<f64>),
     ViewDetailsLoaded(PathBuf, Option<Vec<backend::Turn>>, Option<(f64, Vec<f32>)>),
     RetryItem(usize),
@@ -1851,6 +1855,8 @@ pub struct App {
     header_menu: Option<HeaderMenu>,
     /// The Reset warning dialog is showing.
     reset_confirm: bool,
+    /// The Clear history confirmation is up.
+    clear_confirm: bool,
     /// The Transcribe/Retranscribe setup dialog is showing.
     run_setup_open: bool,
     /// Show the Editing Tips card at the end of a run.
@@ -2232,6 +2238,7 @@ impl App {
             transcript_at_bottom: true,
             header_menu: None,
             reset_confirm: false,
+            clear_confirm: false,
             run_setup_open: false,
             editing_tips: settings.editing_tips,
             pending_tips: false,
@@ -6691,10 +6698,26 @@ impl App {
                 }
                 Task::none()
             }
-            Message::ClearHistory => {
-                if !matches!(self.status, Status::Running) && !self.record_lock() {
-                    self.clear_history();
+            Message::RequestClearHistory => {
+                // A run or a live recording owns the lists; the same gate the
+                // Clear button itself uses.
+                if !matches!(self.status, Status::Running)
+                    && !self.record_lock()
+                    && !self.recent.is_empty()
+                {
+                    self.row_menu = None;
+                    self.row_submenu = None;
+                    self.clear_confirm = true;
                 }
+                Task::none()
+            }
+            Message::ConfirmClearHistory => {
+                self.clear_confirm = false;
+                self.clear_history();
+                Task::none()
+            }
+            Message::CloseClearHistory => {
+                self.clear_confirm = false;
                 Task::none()
             }
             Message::ClearQueue => {
@@ -13693,7 +13716,7 @@ impl App {
                 (!matches!(self.status, Status::Running)
                     && !self.record_lock()
                     && !self.recent.is_empty())
-                .then_some(Message::ClearHistory),
+                .then_some(Message::RequestClearHistory),
             )
             .style(pill_button_secondary),
             "Clear History, Favorites and Recordings (files on disk are kept)",
@@ -14459,7 +14482,7 @@ impl App {
                         } else {
                             "Nothing in History."
                         }),
-                        Message::ClearHistory,
+                        Message::RequestClearHistory,
                     )
                     .separated(),
                 );
@@ -16346,6 +16369,8 @@ impl App {
     fn open_modal(&self) -> Option<Modal> {
         if self.reset_confirm {
             Some(Modal::Reset)
+        } else if self.clear_confirm {
+            Some(Modal::ClearHistory)
         } else if self.summary_open {
             Some(Modal::Summary)
         } else if self.delete_confirm {
@@ -16387,6 +16412,7 @@ impl App {
     fn close_modal(&mut self, modal: Modal) -> Task<Message> {
         match modal {
             Modal::Reset => self.reset_confirm = false,
+            Modal::ClearHistory => self.clear_confirm = false,
             Modal::Summary => {
                 self.summary_open = false;
                 // The tips and the rename were asked for before the summary was
@@ -16831,6 +16857,35 @@ impl App {
                     .style(pill_button_secondary),
                 action_text("Reset")
                     .on_press(Message::ConfirmResetTranscript)
+                    .style(color_button(scheme.danger, scheme.on_accent)),
+            ]
+            .spacing(8),
+        ]
+        .spacing(10);
+        modal_card(body, 420.0, scheme)
+    }
+
+    /// The Clear history confirmation. The lists are a view over files the
+    /// user already has, so the warning says the files stay.
+    fn clear_history_dialog(&self, scheme: &Scheme) -> Element<'_, Message> {
+        let scheme = *scheme;
+        let count = self.recent.len();
+        let body = column![
+            text("Clear history?").size(20),
+            text(format!(
+                "{} {} leave History, Favorites and Recordings. The files on disk are kept.",
+                count,
+                if count == 1 { "transcript will" } else { "transcripts will" }
+            ))
+            .size(theme::TEXT_SM)
+            .color(scheme.muted),
+            row![
+                horizontal_space(),
+                action_text("Cancel")
+                    .on_press(Message::CloseClearHistory)
+                    .style(pill_button_secondary),
+                action_text("Clear history")
+                    .on_press(Message::ConfirmClearHistory)
                     .style(color_button(scheme.danger, scheme.on_accent)),
             ]
             .spacing(8),
@@ -18899,6 +18954,7 @@ impl App {
         let dialog = match self.open_modal() {
             None => return base,
             Some(Modal::Reset) => self.reset_dialog(&scheme),
+            Some(Modal::ClearHistory) => self.clear_history_dialog(&scheme),
             Some(Modal::Summary) => self.summary_dialog(&scheme),
             Some(Modal::DeleteLine) => match self.delete_line_dialog(&scheme) {
                 Some(dialog) => dialog,
@@ -21607,7 +21663,7 @@ fn closes_row_menu(message: &Message) -> bool {
             | Message::AddFiles
             | Message::AddFolder
             | Message::ClearQueue
-            | Message::ClearHistory
+            | Message::RequestClearHistory
             | Message::OpenVersions(_, _)
             | Message::OpenLabels(_, _)
             | Message::ImportVersions
@@ -24713,7 +24769,7 @@ mod tests {
     }
 
     #[test]
-    fn clear_history_drops_finished_items_and_keeps_the_queue() {
+    fn clear_history_asks_first_then_drops_finished_items_and_keeps_the_queue() {
         let _guard = env_lock();
         let _config = ConfigEnv::new("clear-history");
         let mut app = pro_app();
@@ -24727,8 +24783,20 @@ mod tests {
         app.favorite_order.push("/media/talk.mp3".to_string());
         app.queue.push(queue_item(PathBuf::from("/media/next.mp3")));
 
-        let _ = app.update(Message::ClearHistory);
+        // The action opens a confirmation and changes nothing yet.
+        let _ = app.update(Message::RequestClearHistory);
+        assert!(app.clear_confirm, "Clear history should ask first");
+        assert_eq!(app.recent.len(), 1, "the request must not clear anything");
 
+        // Backing out keeps every row.
+        let _ = app.update(Message::CloseClearHistory);
+        assert!(!app.clear_confirm);
+        assert_eq!(app.recent.len(), 1);
+
+        let _ = app.update(Message::RequestClearHistory);
+        let _ = app.update(Message::ConfirmClearHistory);
+
+        assert!(!app.clear_confirm);
         assert!(app.recent.is_empty());
         assert!(app.favorite_order.is_empty());
         assert_eq!(app.queue.len(), 1, "queue work is not history");
@@ -27771,8 +27839,9 @@ mod tests {
 
     /// Every dialog, so a variant added to `Modal` cannot go untested: the
     /// escape and render passes below each walk this list.
-    const ALL_MODALS: [Modal; 12] = [
+    const ALL_MODALS: [Modal; 13] = [
         Modal::Reset,
+        Modal::ClearHistory,
         Modal::Summary,
         Modal::DeleteLine,
         Modal::Calibration,
@@ -27790,6 +27859,7 @@ mod tests {
     fn raise_modal(app: &mut App, modal: Modal) {
         match modal {
             Modal::Reset => app.reset_confirm = true,
+            Modal::ClearHistory => app.clear_confirm = true,
             Modal::Summary => app.summary_open = true,
             Modal::DeleteLine => {
                 // The confirmation previews the line being edited, so it needs
