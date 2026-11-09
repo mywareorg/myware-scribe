@@ -17035,53 +17035,67 @@ impl App {
                 .filter(|ids| ids.iter().any(|existing| existing == id))
                 .count()
         };
-        let mut list = column![].spacing(4).width(Length::Fill);
+        let mut list = column![].spacing(2).width(Length::Fill);
         for label in &self.labels {
             let on = assigned.contains(&label.id);
             let color = speaker_palette(label.color as usize, &scheme);
             let marker = if on { ICON_CHECK } else { ICON_CIRCLE };
             let marker_color = if on { scheme.green } else { scheme.muted };
             let line = row![
-                icon_colored(marker, 11.0, marker_color),
-                container(
-                    text(label.name.clone())
-                        .size(11)
-                        .wrapping(NO_WRAP)
-                        .color(if theme::is_dark_scheme(&scheme) {
-                            scheme.text
-                        } else {
-                            scheme.on_accent
-                        }),
-                )
-                .padding([1, 6])
-                .style(move |_theme| container::Style {
-                    background: Some(color.into()),
-                    border: iced::border::rounded(999.0),
-                    ..container::Style::default()
-                }),
+                icon_colored(marker, 9.0, marker_color),
+                speaker_chip(&label.name, color, scheme.ink, theme::TEXT_XS),
                 text(format!("{} file(s)", usage(&label.id)))
-                    .size(10)
+                    .size(theme::TEXT_XS)
+                    .wrapping(NO_WRAP)
                     .color(scheme.muted),
-                horizontal_space(),
-                action(icon(ICON_X, 11.0))
-                    .on_press(Message::DeleteLabel(label.id.clone()))
-                    .style(subtle_icon_button),
             ]
-            .spacing(6)
+            .spacing(theme::SPACE_SM)
             .align_y(iced::Alignment::Center);
             let id = label.id.clone();
+            // The assignment toggle and the delete action are siblings, not
+            // nested: the X keeps its own hit area at the row's trailing edge.
             list = list.push(
-                button(container(line).width(Length::Fill).padding([4, 6]))
-                    .width(Length::Fill)
-                    .padding(0)
-                    .on_press(Message::ToggleLabel(id))
-                    .style(pill_button_secondary),
+                row![
+                    button(container(line).width(Length::Fill).padding([6, 8]))
+                        .width(Length::Fill)
+                        .padding(0)
+                        .on_press(Message::ToggleLabel(id))
+                        .style(if on {
+                            pill_button_toggled
+                        } else {
+                            pill_button_secondary
+                        }),
+                    action(icon(ICON_X, 11.0))
+                        .padding([2, 4])
+                        .on_press(Message::DeleteLabel(label.id.clone()))
+                        .style(subtle_icon_button),
+                ]
+                .spacing(theme::SPACE_SM)
+                .align_y(iced::Alignment::Center)
+                .width(Length::Fill),
             );
         }
+        let list_area: Element<'_, Message> = if self.labels.is_empty() {
+            container(
+                text("No labels yet. Type a name above and press Enter.")
+                    .size(theme::TEXT_XS)
+                    .color(scheme.muted),
+            )
+            .width(Length::Fill)
+            .padding([6, 8])
+            .into()
+        } else {
+            scrollable(list)
+                .direction(app_scroll_direction())
+                .height(Length::Fixed(260.0))
+                .style(visible_scrollbar_style)
+                .into()
+        };
         let input = text_input("Add a label\u{2026}", &picker.input)
             .on_input(Message::LabelInputChanged)
             .on_submit(Message::ApplyLabel)
-            .width(Length::Fill);
+            .width(Length::Fill)
+            .style(pill_input);
         let body = column![
             text(format!("Labels \u{2014} {}", recent_title(entry)))
                 .size(20)
@@ -17092,25 +17106,15 @@ impl App {
             )
             .size(theme::TEXT_XS)
             .color(scheme.muted),
-            row![
-                input,
-                action_text("Add")
-                    .on_press(Message::ApplyLabel)
-                    .style(pill_button_secondary),
-            ]
-            .spacing(8)
-            .align_y(iced::Alignment::Center),
-            scrollable(list)
-                .direction(app_scroll_direction())
-                .height(Length::Fixed(260.0))
-                .style(visible_scrollbar_style),
+            input,
+            list_area,
             right_aligned(
                 row![
                     action_text("Close")
                         .on_press(Message::CloseLabels)
                         .style(pill_button_secondary),
                 ]
-                .spacing(8),
+                .spacing(theme::SPACE_MD),
             ),
         ]
         .spacing(theme::SPACE_MD)
