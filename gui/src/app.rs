@@ -15802,28 +15802,9 @@ impl App {
         .align_y(iced::Alignment::Center)
         .into();
 
-        let queued = self.focused_queue_untranscribed();
-        let duration = queued
-            .and_then(|item| item.duration.map(|seconds| seconds as f32))
-            .or_else(|| self.shown_duration())
-            .unwrap_or(0.0)
-            .max(0.0);
-        let time = text(format!(
-            "{} / {}",
-            format_secs(self.playhead as f64),
-            if duration > 0.0 {
-                format_secs(duration as f64)
-            } else {
-                "--:--".to_string()
-            }
-        ))
-        .size(12)
-        .wrapping(NO_WRAP)
-        .color(scheme.muted);
         let meta = self.shown_item_meta();
         let mut identity = row![
             self.file_badge(&scheme),
-            time,
             text(ellipsize_middle(&self.shown_item_title(), 26))
                 .size(theme::TEXT_SM)
                 .wrapping(NO_WRAP)
@@ -16400,6 +16381,7 @@ impl App {
 
     /// Playback controls: play/pause, time, speed selector and the file name.
     fn player_element(&self, scheme: &Scheme) -> Element<'_, Message> {
+        let duration = self.shown_duration().unwrap_or(0.0).max(0.0);
         let locked = !self.can(license::Feature::Playback);
         let ready = !locked && self.player_ready();
         let playing = self
@@ -16465,6 +16447,20 @@ impl App {
             )
         };
 
+        // The clock sits with the transport it describes, not in the header.
+        let time_color = if ready { scheme.ink } else { scheme.muted };
+        let total = if duration > 0.0 {
+            format_secs(duration as f64)
+        } else {
+            "--:--".to_string()
+        };
+        let time = text(format!("{} / {}", format_secs(self.playhead as f64), total))
+            .size(12)
+            .wrapping(NO_WRAP)
+            .style(move |_theme| text::Style {
+                color: Some(time_color),
+            });
+
         let speed: Element<Message> = if locked {
             self.tip(
                 stack![
@@ -16512,7 +16508,7 @@ impl App {
 
         // The identity (badge, time, name) lives in the transcript header now,
         // so the transport is only its controls.
-        row![skip_back, play_button, skip_forward, speed]
+        row![skip_back, play_button, skip_forward, time, speed]
             .spacing(6)
             .align_y(iced::Alignment::Center)
             .width(Length::Fill)
