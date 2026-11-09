@@ -15469,8 +15469,8 @@ impl App {
         )
     }
 
-    /// The Edit menu: transcript-wide edits. Reset is only offered when the
-    /// pre-edit copy exists to go back to.
+    /// The Edit menu: the active line first, then transcript-wide edits.
+    /// Reset is only offered when the pre-edit copy exists to go back to.
     fn edit_menu(&self, scheme: &Scheme) -> Element<'_, Message> {
         let scheme = *scheme;
         let running = matches!(self.status, Status::Running);
@@ -15489,9 +15489,23 @@ impl App {
         };
         let has_text = !self.shown_transcript().is_empty();
         let reset = self.reset_available();
+        // The same gate double-click uses: an editable transcript line is
+        // present, the view is split, and no run owns the pane.
+        let can_edit_line = editing
+            && !running
+            && !self.join_lines
+            && self.shown_output().is_some()
+            && !self.shown_lines().is_empty();
         menu_card(
             vec![MenuSection {
                 rows: vec![
+                    MenuRow {
+                        label: "Line",
+                        key: Some("Alt+Enter"),
+                        checked: false,
+                        enabled: can_edit_line,
+                        action: can_edit_line.then_some(Message::EditActiveLine),
+                    },
                     MenuRow {
                         label: "Rename All",
                         key: None,
