@@ -197,6 +197,9 @@ const PANEL_ICON_DIAMETER: f32 = CONTROL_HEIGHT;
 /// Width held at the right of a history row for its star, so revealing the
 /// filled star never reflows the name.
 const RECENT_STAR_WIDTH: f32 = 20.0;
+/// Fixed height of the star slot, so showing or hiding the star cannot change
+/// a row's height and make the list jitter under the pointer.
+const RECENT_STAR_HEIGHT: f32 = 20.0;
 /// Width held for the queue row's remove action so hover does not reflow it.
 const QUEUE_REMOVE_WIDTH: f32 = 19.0;
 
@@ -13976,9 +13979,14 @@ impl App {
         } else {
             horizontal_space().into()
         };
+        // A fixed slot keeps the star's appearance from changing the row
+        // height as the pointer moves between rows, and centres both the
+        // filled and the outline glyph.
         let actions = container(actions_content)
             .width(Length::Fixed(RECENT_STAR_WIDTH))
-            .align_x(iced::Alignment::End);
+            .height(Length::Fixed(RECENT_STAR_HEIGHT))
+            .align_x(iced::Alignment::End)
+            .align_y(iced::Alignment::Center);
 
         let name = ellipsize_middle(&recent_title(entry), recent_name_budget());
         let title_row = row![
@@ -13999,10 +14007,7 @@ impl App {
         let detail_text = if status_row {
             meta
         } else {
-            entry
-                .duration
-                .map(format_secs)
-                .unwrap_or_default()
+            recent_detail_text(entry)
         };
         let chips = self.label_chips(entry, &scheme);
         let mut details = column![].spacing(2).width(Length::Fill);
@@ -21315,6 +21320,18 @@ fn preset_label(preset: &str) -> String {
         .unwrap_or_else(|| preset.to_string())
 }
 
+/// Duration followed by the preset that produced a transcript.
+fn recent_detail_text(entry: &RecentEntry) -> String {
+    let mut parts = Vec::new();
+    if let Some(duration) = entry.duration {
+        parts.push(format_secs(duration));
+    }
+    if let Some(preset) = entry.preset.as_deref().map(preset_label) {
+        parts.push(preset);
+    }
+    parts.join(" \u{00b7} ")
+}
+
 /// Human label for a language code. Unknown codes are uppercased.
 fn language_label(code: &str) -> String {
     if code.is_empty() || code.eq_ignore_ascii_case("auto") {
@@ -24765,6 +24782,17 @@ mod tests {
         let (title, line) = app.queue_empty_copy();
         assert_eq!(title, "No audio queued");
         assert!(line.contains("History"), "{line}");
+    }
+
+    #[test]
+    fn recent_detail_text_has_duration_then_preset() {
+        let entry = RecentEntry {
+            duration: Some(95.0),
+            preset: Some("balanced".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(recent_detail_text(&entry), "1:35 \u{00b7} Balanced");
+        assert_eq!(recent_detail_text(&RecentEntry::default()), "");
     }
 
     #[test]
