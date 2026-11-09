@@ -194,10 +194,11 @@ const TOGGLE_WIDTH: f32 = 64.0;
 /// they line up with the text buttons around them.
 const PANEL_ICON_DIAMETER: f32 = CONTROL_HEIGHT;
 
-/// Width held for a history row's actions: the star and the X, each an 11 px
-/// glyph with 4 px padding, plus their 2 px gap. Reserved in both states so a
-/// name never reflows when the remove icon fades in.
-const RECENT_ACTIONS_WIDTH: f32 = 42.0;
+/// Width held at the left of a history row for its star, so revealing the
+/// filled star never reflows the name.
+const RECENT_STAR_WIDTH: f32 = 20.0;
+/// Width held for a history row's remove action so hover does not reflow it.
+const RECENT_ACTIONS_WIDTH: f32 = 19.0;
 /// Width held for the queue row's remove action so hover does not reflow it.
 const QUEUE_REMOVE_WIDTH: f32 = 19.0;
 
@@ -13355,6 +13356,9 @@ impl App {
                     );
                 }
                 rows = rows.push(self.queue_row(index, &scheme));
+                if index + 1 < self.queue.len() {
+                    rows = rows.push(horizontal_rule(1));
+                }
             }
             let list = mouse_area(
                 scrollable(rows)
@@ -13484,6 +13488,9 @@ impl App {
                     rows = rows.push(day_header(&day, &scheme));
                 }
                 rows = rows.push(self.recent_row(index, PaneTab::History, &scheme, locked));
+                if index + 1 < self.recent.len() {
+                    rows = rows.push(horizontal_rule(1));
+                }
             }
             mouse_area(
                 scrollable(rows)
@@ -13728,7 +13735,8 @@ impl App {
     ) -> Element<'_, Message> {
         let scheme = *scheme;
         let mut rows = column![].spacing(2).width(Length::Fill);
-        for index in indices {
+        let count = indices.len();
+        for (position, index) in indices.into_iter().enumerate() {
             // During a recording workflow every row but the session's item is
             // dimmed; the active row is the one the right pane is describing.
             let dimmed = self.recording_row_dimmed(tab, index, locked);
@@ -13751,6 +13759,9 @@ impl App {
                 );
             }
             rows = rows.push(self.recent_row(index, tab, &scheme, dimmed));
+            if position + 1 < count {
+                rows = rows.push(horizontal_rule(1));
+            }
         }
         let list = mouse_area(
             scrollable(rows)
@@ -14008,13 +14019,19 @@ impl App {
             remove_label,
             &scheme,
         );
+        // The star lives at the left edge, as the row's status mark. A filled
+        // star is always drawn; an outline star appears on hover for rows that
+        // are not favorites. The remove action stays at the right.
+        let star_slot: Element<Message> = if favorite || hovered {
+            star
+        } else {
+            horizontal_space().into()
+        };
+        let star_slot = container(star_slot)
+            .width(Length::Fixed(RECENT_STAR_WIDTH))
+            .align_x(iced::Alignment::Start);
         let actions_content: Element<Message> = if hovered {
-            row![star, remove]
-                .spacing(2)
-                .align_y(iced::Alignment::Center)
-                .into()
-        } else if favorite {
-            row![star].align_y(iced::Alignment::Center).into()
+            remove.into()
         } else {
             horizontal_space().into()
         };
@@ -14027,11 +14044,14 @@ impl App {
         let name_budget =
             recent_name_budget().saturating_sub(if title_meta.is_empty() { 0 } else { 14 });
         let name = ellipsize_middle(&recent_title(entry), name_budget);
-        let mut title_row = row![text(name)
-            .size(theme::TEXT_SM)
-            .wrapping(NO_WRAP)
-            .color(name_color)
-            .width(Length::Fill)]
+        let mut title_row = row![
+            star_slot,
+            text(name)
+                .size(theme::TEXT_SM)
+                .wrapping(NO_WRAP)
+                .color(name_color)
+                .width(Length::Fill)
+        ]
         .spacing(6)
         .align_y(iced::Alignment::Center)
         .width(Length::Fill);
@@ -21885,9 +21905,13 @@ fn name_char_budget(pixels: f32) -> usize {
 }
 
 /// Character budget for a recent row's name: the row's span less its padding,
-/// the gap and the slot the star and X always hold.
+/// its three gaps, and the slots the left star and right remove always hold.
 fn recent_name_budget() -> usize {
-    let spare = FILE_ROW_WIDTH - 2.0 * ROW_PADDING_X - RECENT_ROW_GAP - RECENT_ACTIONS_WIDTH;
+    let spare = FILE_ROW_WIDTH
+        - 2.0 * ROW_PADDING_X
+        - 3.0 * RECENT_ROW_GAP
+        - RECENT_STAR_WIDTH
+        - RECENT_ACTIONS_WIDTH;
     name_char_budget(spare)
 }
 
