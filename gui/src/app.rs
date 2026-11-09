@@ -17772,7 +17772,7 @@ impl App {
                 } else if summary_ready {
                     "The overview and key points already made for this transcript."
                 } else {
-                    "Summarizes the transcript first; that can take a few minutes."
+                    "Summarizing transcript. This may take a few minutes"
                 },
                 self.report.summary && can_summarize,
                 can_summarize,
@@ -18290,8 +18290,7 @@ impl App {
                     )
                     .push(
                         text(format!(
-                            "{} elapsed. A long recording can take several minutes on a CPU; \
-                             cancelling is always safe.",
+                            "{} elapsed.",
                             format_secs(run.started.elapsed().as_secs_f64())
                         ))
                         .size(theme::TEXT_XS)
