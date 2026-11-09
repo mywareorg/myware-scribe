@@ -7,6 +7,7 @@ mod files;
 mod format;
 mod options;
 mod recording;
+mod store;
 mod theme;
 
 use app::App;
@@ -154,5 +155,5 @@ fn main() -> iced::Result {
     .subscription(App::subscription)
     .font(include_bytes!("../assets/bootstrap-icons.ttf").as_slice())
     .window(App::window_settings())
-    .run()
+    .run_with(App::boot)
 }

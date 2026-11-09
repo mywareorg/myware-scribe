@@ -175,10 +175,9 @@ captures. The Store needs at least one image and accepts up to ten, each at leas
 - [ ] Confirm `packaging/identity.json` still matches Partner Center character
       for character. Current values are `SeanWu.HippoTranscribe`,
       `CN=6862352A-51D9-40F2-9242-0F769B2F87AB`, display name `Sean Wu`.
-- [ ] Create the durable Pro add-on in Partner Center before building: set its
-      product ID (the code's `PRODUCT_ID`, currently `pro`), price and markets,
-      and paste its Store ID into the Windows client. Submit the add-on with the
-      app.
+- [ ] Create the durable Pro add-on in Partner Center before building: give it
+      the product ID `pro` (the client finds the add-on by that ID, so no Store ID
+      is compiled in), set its price and markets, and submit it with the app.
 - [ ] Test the purchase flow once the app and add-on pass certification: keep
       the listing "not discoverable", install the Store build on the dev
       machine, then buy, restore, refund and go offline. Make the listing public

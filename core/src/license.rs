@@ -405,6 +405,16 @@ impl State {
         self.refresh(None, now);
     }
 
+    /// Drop a store entitlement the store no longer reports (a refund, or a
+    /// subscription that ended). Unlike [`Self::revoke_pro`] this leaves the
+    /// local trial and the development switch alone.
+    pub fn expire_store(&mut self, now: SystemTime) {
+        self.record.pro = false;
+        self.record.checked_unix = Some(unix(now));
+        self.record.source = Some(Source::None.as_str().to_string());
+        self.refresh(None, now);
+    }
+
     pub fn trial_used(&self) -> bool {
         self.record.trial_started_unix.is_some()
     }

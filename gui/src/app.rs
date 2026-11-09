@@ -1452,6 +1452,8 @@ pub enum Message {
     SaveReport,
     /// The report's save dialog returned; `None` means it was dismissed.
     ReportPicked(Option<PathBuf>),
+    /// The Store answered whether the Pro add-on is owned.
+    StoreLicenseChecked(Option<bool>),
     OpenRename,
     /// Open the custom-vocabulary editor, from Edit or from Help.
     OpenVocabulary,
@@ -2193,6 +2195,19 @@ fn aspect_clamp(requested: Size, last: Size) -> Size {
 }
 
 impl App {
+    /// Iced's entry point: build the app and ask the Store whether Pro is owned.
+    /// The check runs off the UI thread; there is nothing to wait for.
+    pub fn boot() -> (Self, Task<Message>) {
+        let app = Self::new();
+        (
+            app,
+            Task::perform(
+                async { crate::store::entitlement_check() },
+                Message::StoreLicenseChecked,
+            ),
+        )
+    }
+
     pub fn new() -> Self {
         let settings = Self::load_settings();
         let first_run = Self::is_first_run();
@@ -2206,7 +2221,12 @@ impl App {
         };
         let (labels, label_assignments) = Self::load_labels();
         let now = SystemTime::now();
-        let provider = license::provider();
+        let mut provider = license::provider();
+        if provider.name() == "none" {
+            if let Some(store) = crate::store::provider() {
+                provider = store;
+            }
+        }
         let pro_override = provider.override_tier();
         let mut license_state = license::State::load(
             &Self::license_path().unwrap_or_else(|| PathBuf::from("license.json")),
@@ -4456,12 +4476,16 @@ impl App {
         // The preview build has no store client, so it must not advertise a
         // price or a purchase it cannot complete.
         if self.provider.name() != "none" {
-            let price = self
+            // The store reports a localized price; the fallback only covers the
+            // moment before the background lookup lands, and says nothing when
+            // it cannot be fetched.
+            let line = self
                 .provider
                 .price()
-                .unwrap_or_else(|| license::FALLBACK_PRICE.to_string());
+                .map(|price| format!("{price} once \u{00b7} lifetime license"))
+                .unwrap_or_else(|| "One-time purchase".to_string());
             body = body.push(
-                text(format!("{price} once \u{00b7} lifetime license"))
+                text(line)
                     .size(theme::TEXT_SM)
                     .color(scheme.muted),
             );
@@ -7047,6 +7071,26 @@ impl App {
                     self.status = Status::Idle;
                     self.invalidate_derived();
                     self.save_queue();
+                }
+                Task::none()
+            }
+            Message::StoreLicenseChecked(pro) => {
+                if let Some(pro) = pro {
+                    let now = SystemTime::now();
+                    let was_pro = self.license.access.tier == license::Tier::Pro;
+                    if pro {
+                        if !was_pro {
+                            self.license.grant_pro(now);
+                            self.save_license();
+                            self.clamp_preset();
+                        }
+                    } else if was_pro && self.license.access.source != license::Source::Trial {
+                        // A refund or a lapsed subscription; a local trial is not
+                        // the store's to take away.
+                        self.license.expire_store(now);
+                        self.save_license();
+                        self.clamp_preset();
+                    }
                 }
                 Task::none()
             }
