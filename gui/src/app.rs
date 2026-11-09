@@ -1432,8 +1432,8 @@ pub enum Message {
     SeekBy(f32),
     SeekByChecked(f32, bool),
     CopyTranscript,
-    /// Close the summary and show the completed file it covers.
-    OpenSummaryTranscript,
+    /// Close the completion summary.
+    CloseSummary,
     /// Open an http(s) address in the system browser.
     OpenUrl(String),
     /// Turn the transcript's one-click editing on or off.
@@ -7127,17 +7127,7 @@ impl App {
                 self.toast = Some(("Copied transcript".to_string(), Instant::now()));
                 iced::clipboard::write(self.shown_transcript().to_string())
             }
-            Message::OpenSummaryTranscript => {
-                let target = self.summary_target();
-                // Closing through `close_modal` keeps the completion chain
-                // (tips, then rename) exactly as the Close button leaves it.
-                let chain = self.close_modal(Modal::Summary);
-                let open = match target {
-                    Some(index) => self.open_recent(index, None),
-                    None => Task::none(),
-                };
-                Task::batch([chain, open])
-            }
+            Message::CloseSummary => self.close_modal(Modal::Summary),
             Message::OpenUrl(url) => {
                 if url.starts_with("https://") || url.starts_with("http://") {
                     open_url(&url);
@@ -11972,21 +11962,6 @@ impl App {
             word_total.to_string(),
         ]);
         (headers, rows)
-    }
-
-    /// The completed file the summary should open: the newest History row the
-    /// last batch produced. One file or many, the last one to land is the one
-    /// the button is expected to show.
-    fn summary_target(&self) -> Option<usize> {
-        self.recent
-            .iter()
-            .enumerate()
-            .filter(|(_, entry)| {
-                let name = recent_file_name(entry);
-                self.batch_summary.iter().any(|(run, _)| *run == name)
-            })
-            .max_by_key(|(_, entry)| entry.finished_at)
-            .map(|(index, _)| index)
     }
 
     #[cfg(test)]
@@ -17172,7 +17147,6 @@ impl App {
         let audio: f64 = runs.iter().map(|(_, stats)| stats.audio_seconds).sum();
         let run: f64 = runs.iter().map(|(_, stats)| stats.run_seconds).sum();
         let speed = if run > 0.0 { audio / run } else { 0.0 };
-        let target = self.summary_target();
 
         let mut body = column![].spacing(theme::SPACE_XL).width(Length::Fill);
         let mut height = 58.0;
@@ -17301,18 +17275,13 @@ impl App {
                 height += theme::SPACE_LG;
             }
         }
-        let mut footer = row![]
-            .spacing(theme::SPACE_MD)
-            .align_y(iced::Alignment::Center);
-        // A finished run ends on the transcript it produced: one action, no
-        // separate close. Escape still dismisses the sheet.
-        if target.is_some() {
-            footer = footer.push(
-                action_text("Show transcript")
-                    .on_press(Message::OpenSummaryTranscript)
-                    .style(color_button(scheme.blue, scheme.on_accent)),
-            );
-        }
+        let footer = row![
+            action_text("Close")
+                .on_press(Message::CloseSummary)
+                .style(color_button(scheme.blue, scheme.on_accent)),
+        ]
+        .spacing(theme::SPACE_MD)
+        .align_y(iced::Alignment::Center);
 
         let meta = format!(
             "{} file{} \u{00b7} {} audio \u{00b7} {} run",
