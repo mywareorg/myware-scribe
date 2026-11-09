@@ -3526,15 +3526,15 @@ impl App {
             }
             let mut meta = meta.join(" \u{00b7} ");
             if self.modified {
-                let prefix = if meta.is_empty() {
-                    String::new()
+                // The header has little room: the state word alone fits beside
+                // the duration, where "Export as to keep" was truncated to
+                // "Mod... keep" and read as noise.
+                let state = if self.join_lines { "Joined" } else { "Modified" };
+                meta = if meta.is_empty() {
+                    state.to_string()
                 } else {
-                    format!("{meta} \u{00b7} ")
+                    format!("{meta} \u{00b7} {state}")
                 };
-                meta = format!(
-                    "{prefix}{} \u{00b7} Export as to keep",
-                    if self.join_lines { "Joined" } else { "Modified" }
-                );
             }
             return meta;
         }
