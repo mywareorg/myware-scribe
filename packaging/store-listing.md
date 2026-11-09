@@ -95,22 +95,33 @@ counts in mind, they are the limits the form enforces.
 
 ## Screenshot shot list
 
-Capture on the Windows build machine at native 1920x1080 with 100% display
-scaling, the window maximised, and the app installed from the candidate MSIX.
-Use a clean queue and neutral file names, no personal paths, and one shot in the
-dark theme. The Store needs at least one image and accepts up to ten, each at
-least 1366x768. Do not upscale partial-window captures.
+Captured from the 1.0 build at 2880x1920 (3:2; the Store letterboxes it into the
+16:9 frame). The eight files in `packaging/screenshots/` are the listing set, in
+order of upload:
 
-The eight files in `packaging/screenshots/` are the listing set, in order:
+1. `1.png` — light theme, a finished two-speaker interview in speaker bubbles:
+   the waveform with its speaker legend, the player at 2x, and History with a
+   renamed row and an unread dot.
+2. `2.png` — the queue with a file waiting and the Transcription Settings dialog
+   open: preset, speakers and acceleration.
+3. `3.png` — the run-complete Summary: audio length, run time and speed, then the
+   per-speaker table, over the queue.
+4. `4.png` — dark theme: the same interview in bubbles, with History, its unread
+   dots and the transcript toolbar.
+5. `5.png` — dark theme, editing: the bottom line-editor strip with the speaker
+   controls, join/split, undo and redo, and the Done control.
+6. `6.png` — Generate Report: timestamps, line merging, participants and the
+   summary switch, with the file type set to PDF.
+7. `7.png` — recording: the 3-second countdown ring with Stop while the capture
+   starts.
+8. `8.png` — Publish -> Export Transcript with all six formats and their
+   extensions listed over a finished recording.
 
-1. `01-queue-transcript.png` — a finished multi-speaker transcript with the queue, player and speaker bar.
-2. `02-running.png` — a run in progress: stage label, progress, elapsed time.
-3. `03-karaoke.png` — word-level timestamps and the karaoke band on the active line.
-4. `04-record.png` — the Record dialog and microphone meter.
-5. `05-export.png` — the export format picker, or the saved Word document.
-6. `06-briefing.png` — a briefing with cited action items.
-7. `07-settings.png` — Settings: storage, models and the Diagnostics row.
-8. `08-dark.png` — the dark theme.
+For any recapture, shoot on the Windows build machine at 100% display scaling
+with the window maximised and the app installed from the candidate MSIX, keep
+paths and unrelated files off screen, and do not upscale partial-window
+captures. The Store needs at least one image and accepts up to ten, each at least
+1366x768.
 
 ## Before submitting
 
