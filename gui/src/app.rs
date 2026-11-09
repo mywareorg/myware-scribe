@@ -18290,8 +18290,7 @@ impl App {
                     )
                     .push(
                         text(format!(
-                            "{} elapsed. A long recording can take several minutes on a CPU; \
-                             cancelling is always safe.",
+                            "{} elapsed.",
                             format_secs(run.started.elapsed().as_secs_f64())
                         ))
                         .size(theme::TEXT_XS)
