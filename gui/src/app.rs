@@ -3698,7 +3698,7 @@ impl App {
             return Task::none();
         }
         if !self.can(license::Feature::Editing) {
-            self.toast = Some(("Editing is a Pro feature".to_string(), Instant::now()));
+            self.paywall_open = true;
             return Task::none();
         }
         if self.shown_output().is_none() {
@@ -5113,7 +5113,7 @@ impl App {
                     return Task::none();
                 }
                 if !self.can(license::Feature::Editing) {
-                    self.toast = Some(("Editing is a Pro feature".to_string(), Instant::now()));
+                    self.paywall_open = true;
                     return Task::none();
                 }
                 self.edit_mode = !self.edit_mode;
@@ -10904,7 +10904,7 @@ impl App {
             return Task::none();
         }
         if !self.can(license::Feature::Editing) {
-            self.toast = Some(("Editing is a Pro feature".to_string(), Instant::now()));
+            self.paywall_open = true;
             return Task::none();
         }
         // Only transcripts we can write back to are editable, and the live
@@ -15982,7 +15982,11 @@ impl App {
             container(
                 text("Edit")
                     .wrapping(NO_WRAP)
-                    .color(if controls { scheme.text } else { scheme.muted }),
+                    .color(if !controls || !self.can(license::Feature::Editing) {
+                        scheme.muted
+                    } else {
+                        scheme.text
+                    }),
             )
             .width(Length::Fill)
             .center_x(Length::Fill),
@@ -27856,6 +27860,45 @@ mod tests {
         let _ = pro.update(Message::ExportCurrentAs(ExportFormat::Txt));
         assert!(!pro.paywall_open);
         assert!(pro.pending_export.is_some(), "Pro can export");
+
+        let _ = std::fs::remove_dir_all(&media);
+    }
+
+    #[test]
+    fn editing_needs_pro() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("editing-pro");
+        let media = temp_dir("editing-pro-media");
+        let audio = media.join("talk.mp3");
+        std::fs::write(&audio, b"audio").unwrap();
+        let transcript = media.join("talk.txt");
+        std::fs::write(&transcript, "[00:00] SPEAKER 1: hi\n").unwrap();
+
+        let mut free = App::new();
+        push_recent(
+            &mut free,
+            Some(audio.clone()),
+            transcript.clone(),
+            Some(2.0),
+            Vec::new(),
+        );
+        open_test_item(&mut free, 0);
+
+        let _ = free.update(Message::ToggleEditMode);
+        assert!(free.paywall_open, "the mode button should offer Pro");
+        assert!(!free.edit_mode);
+
+        free.paywall_open = false;
+        let _ = free.update(Message::EditLine(0));
+        assert!(free.line_edit.is_none(), "no editor on the free tier");
+        assert!(free.paywall_open, "opening a line should offer Pro");
+
+        let mut pro = pro_app();
+        push_recent(&mut pro, Some(audio), transcript, Some(2.0), Vec::new());
+        open_test_item(&mut pro, 0);
+        let _ = pro.update(Message::ToggleEditMode);
+        assert!(pro.edit_mode);
+        assert!(!pro.paywall_open);
 
         let _ = std::fs::remove_dir_all(&media);
     }
