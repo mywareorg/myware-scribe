@@ -5134,10 +5134,19 @@ impl App {
                     return Task::none();
                 }
                 self.edit_mode = !self.edit_mode;
-                if !self.edit_mode {
-                    // Leaving the mode ends whatever line it was on.
-                    self.commit_inline_edit(false);
+                if self.edit_mode {
+                    // Turning it on edits what is already highlighted, the same
+                    // line Alt+Enter opens.
+                    let index = self
+                        .active_line_index()
+                        .or_else(|| self.display_order().first().copied());
+                    return match index {
+                        Some(index) => self.begin_inline_edit_at(index, None),
+                        None => Task::none(),
+                    };
                 }
+                // Leaving the mode saves and closes the line it was on.
+                self.commit_inline_edit(true);
                 Task::none()
             }
             Message::ToggleHeaderMenu(menu) => {
@@ -15792,11 +15801,7 @@ impl App {
         .width(Length::Fixed(EDIT_BUTTON_WIDTH))
         .on_press(Message::ToggleEditMode)
         .padding([5, 0])
-        .style(if self.edit_mode {
-            pill_button_toggled
-        } else {
-            pill_button_secondary
-        })
+        .style(move |theme, status| edit_mode_button_style(self.edit_mode)(theme, status))
         .into();
         let menus: Element<Message> = row![
             self.header_menu_button("View", HeaderMenu::View),
@@ -24214,6 +24219,38 @@ fn button_label(theme: &iced::Theme) -> Color {
     }
 }
 
+/// The Edit button in its latched state: a well darker than the chrome around
+/// it, with no drop shadow, so the mode reads as pressed in rather than as a
+/// card sitting on top.
+fn edit_mode_button_style(on: bool) -> impl Fn(&iced::Theme, button::Status) -> button::Style {
+    move |theme, status| {
+        let base = pill_button_secondary(theme, status);
+        if !on {
+            return base;
+        }
+        let color = style_background_color(&base).unwrap_or(theme.palette().background);
+        let hot = matches!(
+            status,
+            button::Status::Hovered | button::Status::Pressed
+        );
+        let (top, bottom) = if hot {
+            (theme::darken(color, 0.10), theme::darken(color, 0.16))
+        } else {
+            (theme::darken(color, 0.16), theme::darken(color, 0.20))
+        };
+        button::Style {
+            background: Some(linear_gradient(top, bottom)),
+            text_color: base.text_color,
+            border: iced::border::Border {
+                color: theme::darken(color, 0.34),
+                width: 1.0,
+                radius: PILL.into(),
+            },
+            shadow: Shadow::default(),
+        }
+    }
+}
+
 fn pill_button_secondary(theme: &iced::Theme, status: button::Status) -> button::Style {
     let base = button::secondary(theme, status);
     let color = style_background_color(&base).unwrap_or(theme.palette().background);
@@ -28737,11 +28774,17 @@ mod tests {
         let _guard = env_lock();
         let _config = ConfigEnv::new("edit-mode");
         let original = "[00:00] SPEAKER 1: one\n[00:05] SPEAKER 2: two\n";
-        let (mut app, _transcript, media) = line_edit_fixture("edit-mode", original);
+        let (mut app, transcript, media) = line_edit_fixture("edit-mode", original);
 
         assert!(!app.edit_mode);
         let _ = app.update(Message::ToggleEditMode);
         assert!(app.edit_mode);
+        // Turning it on edits the highlighted line straight away.
+        assert_eq!(
+            app.line_edit.as_ref().map(|edit| edit.index),
+            Some(0),
+            "the active line should open with the mode"
+        );
 
         // One click is enough while the mode is on.
         let _ = app.update(Message::LineClicked(1));
@@ -28751,10 +28794,14 @@ mod tests {
             "the click should open that line's editor"
         );
 
-        // Turning it off ends the edit.
+        // Turning it off saves and ends the edit.
+        current_row_mut(&mut app).content = text_editor::Content::with_text("changed");
         let _ = app.update(Message::ToggleEditMode);
         assert!(!app.edit_mode);
         assert!(app.line_edit.is_none());
+        assert!(std::fs::read_to_string(&transcript)
+            .unwrap()
+            .contains("SPEAKER 2: changed"));
 
         let _ = std::fs::remove_dir_all(&media);
     }
