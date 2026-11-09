@@ -289,16 +289,16 @@ const PUBLISH_BUTTON_WIDTH: f32 = 96.0;
 const VIEW_BUTTON_WIDTH: f32 = 84.0;
 const HELP_BUTTON_WIDTH: f32 = 78.0;
 
-/// Left offsets of the transcript card's menus. The header starts
-/// `[Publish][View]`, so Publish's menu hangs from the card's own padding and
-/// View sits a button and a gap further right. The menu layer aligns its child
-/// to the start, so these are distances from the card's left edge.
-fn publish_menu_offset() -> f32 {
+/// Right-hand insets of the transcript card's menus. The buttons end the
+/// header row, so each menu hangs under its button measured from the card's
+/// right edge: Publish by the row's padding, View by Publish's width and the
+/// gap as well. The menu layer aligns its child to the end.
+fn publish_menu_inset() -> f32 {
     HEADER_PAD_X
 }
 
-fn view_menu_offset() -> f32 {
-    publish_menu_offset() + PUBLISH_BUTTON_WIDTH + theme::SPACE_SM
+fn view_menu_inset() -> f32 {
+    HEADER_PAD_X + PUBLISH_BUTTON_WIDTH + HEADER_GAP
 }
 
 
@@ -12378,6 +12378,10 @@ impl App {
     /// True when diarization ran and found a single voice, so every line lost
     /// its label. Worth saying out loud: an unlabelled transcript otherwise
     /// looks like a failure.
+
+    /// True when diarization ran and found a single voice, so every line lost
+    /// its label. Worth saying out loud: an unlabelled transcript otherwise
+    /// looks like a failure.
     fn only_one_speaker(&self) -> bool {
         self.pipelines_diarize()
             && !self.shown_turns().is_empty()
@@ -15746,23 +15750,54 @@ impl App {
             return None;
         }
 
-        // The header is the card's own menus, left to right Publish, Edit and
-        // View. Each menu hangs from its own button's left edge; the offset
-        // helpers add the fixed button widths to its left. Help belongs to the
-        // app header, not to this card, so it is not here.
+        // The document's identity, then the card's own menus at the right
+        // edge. View sits left of Publish; each menu hangs from its own
+        // button's left edge, measured from the right by the inset helpers.
+        // Help belongs to the app header, not to this card, so it is not here.
         let menus: Element<Message> = row![
-            self.header_menu_button("Publish", HeaderMenu::Publish),
             self.header_menu_button("View", HeaderMenu::View),
+            self.header_menu_button("Publish", HeaderMenu::Publish),
         ]
         .spacing(HEADER_GAP)
         .align_y(iced::Alignment::Center)
         .into();
 
-        // The file's identity now lives on the player island; this header is
-        // only the transcript's own menus, with the rest of the row left for
-        // the reading controls the caller adds.
+        let duration = self.shown_duration().unwrap_or(0.0).max(0.0);
+        let time = text(format!(
+            "{} / {}",
+            format_secs(self.playhead as f64),
+            if duration > 0.0 {
+                format_secs(duration as f64)
+            } else {
+                "--:--".to_string()
+            }
+        ))
+        .size(12)
+        .wrapping(NO_WRAP)
+        .color(scheme.muted);
+        let meta = self.shown_item_meta();
+        let mut identity = row![
+            self.file_badge(&scheme),
+            time,
+            text(ellipsize_middle(&self.shown_item_title(), 26))
+                .size(theme::TEXT_SM)
+                .wrapping(NO_WRAP)
+                .color(scheme.text),
+        ]
+        .spacing(theme::SPACE_SM)
+        .align_y(iced::Alignment::Center);
+        if !meta.is_empty() {
+            identity = identity.push(
+                text(ellipsize_middle(&meta, 16))
+                    .size(theme::TEXT_XS)
+                    .wrapping(NO_WRAP)
+                    .color(scheme.muted),
+            );
+        }
+        let identity: Element<Message> = identity.into();
+
         let header = container(
-            row![menus, horizontal_space()]
+            row![identity, horizontal_space(), menus]
                 .spacing(HEADER_GAP)
                 .align_y(iced::Alignment::Center),
         )
@@ -15853,7 +15888,7 @@ impl App {
             MenuHover::Export { row: 0 },
         );
         if !self.publish_export_open || !has_text {
-            return menu_layer(card);
+            return menu_layer_from_right(card, 0.0, 0.0);
         }
         // The nested list is the row menu's Export submenu: the same formats,
         // each of which will ask for a destination.
@@ -15877,8 +15912,14 @@ impl App {
             sub_width,
             MenuHover::None,
         );
-        // It hangs off the Export row: one card right, one card padding down.
-        stack![menu_layer(card), menu_layer_at(submenu, width + 4.0, 8.0)].into()
+        // The header's menus end the row, so the nested card opens to the left
+        // of the Export card rather than past the window edge: one card left,
+        // one card padding down.
+        stack![
+            menu_layer_from_right(card, 0.0, 0.0),
+            menu_layer_from_right(submenu, width + 4.0, 8.0)
+        ]
+        .into()
     }
 
     /// The open View menu: the display toggles, then text zoom.
@@ -16314,7 +16355,6 @@ impl App {
 
     /// Playback controls: play/pause, time, speed selector and the file name.
     fn player_element(&self, scheme: &Scheme) -> Element<'_, Message> {
-        let duration = self.shown_duration().unwrap_or(0.0).max(0.0);
         let locked = !self.can(license::Feature::Playback);
         let ready = !locked && self.player_ready();
         let playing = self
@@ -16380,18 +16420,6 @@ impl App {
             )
         };
 
-        let time_color = if ready { scheme.ink } else { scheme.muted };
-        let total = if duration > 0.0 {
-            format_secs(duration as f64)
-        } else {
-            "--:--".to_string()
-        };
-        let time = text(format!("{} / {}", format_secs(self.playhead as f64), total))
-            .size(12)
-            .style(move |_theme| text::Style {
-                color: Some(time_color),
-            });
-
         let speed: Element<Message> = if locked {
             self.tip(
                 stack![
@@ -16437,8 +16465,19 @@ impl App {
             .into()
         };
 
-        // The file's identity moved here from the transcript header: icon,
-        // duration/state and name sit together at the right of the transport.
+        // The identity (badge, time, name) lives in the transcript header now,
+        // so the transport is only its controls.
+        row![skip_back, play_button, skip_forward, speed]
+            .spacing(6)
+            .align_y(iced::Alignment::Center)
+            .width(Length::Fill)
+            .into()
+    }
+
+    /// The document's identity mark: a file glyph while reading, a microphone
+    /// while a run is live.
+    fn file_badge(&self, scheme: &Scheme) -> Element<'_, Message> {
+        let scheme = *scheme;
         let (glyph, tint) = if self.selected_view.is_some() {
             (ICON_FILE_TEXT, scheme.blue)
         } else if matches!(self.status, Status::Running) {
@@ -16446,7 +16485,7 @@ impl App {
         } else {
             (ICON_FILE_TEXT, scheme.blue)
         };
-        let badge = container(icon_colored(glyph, 13.0, tint))
+        container(icon_colored(glyph, 13.0, tint))
             .width(Length::Fixed(HEADER_BADGE_WIDTH))
             .height(Length::Fixed(HEADER_BADGE_WIDTH))
             .center_x(Length::Fixed(HEADER_BADGE_WIDTH))
@@ -16455,37 +16494,20 @@ impl App {
                 background: Some(Color { a: 0.16, ..tint }.into()),
                 border: iced::border::rounded(13.0),
                 ..container::Style::default()
-            });
-        let meta = ellipsize_middle(&self.shown_item_meta(), 20);
-        let file_name = ellipsize_middle(&self.shown_item_name(), 26);
-        let mut controls = row![
-            skip_back,
-            play_button,
-            skip_forward,
-            time,
-            speed,
-            horizontal_space(),
-            badge,
-        ]
-        .spacing(6)
-        .align_y(iced::Alignment::Center)
-        .width(Length::Fill);
-        if !meta.is_empty() {
-            controls = controls.push(
-                text(meta)
-                    .size(11)
-                    .wrapping(NO_WRAP)
-                    .color(scheme.muted),
-            );
-        }
-        controls
-            .push(
-                text(file_name)
-                    .size(11)
-                    .wrapping(NO_WRAP)
-                    .color(scheme.muted),
-            )
+            })
             .into()
+    }
+
+    /// What the header calls the document: the row's label, which the user can
+    /// rename in the File panel, not the file's own name.
+    fn shown_item_title(&self) -> String {
+        if let Some(entry) = self
+            .selected_recent
+            .and_then(|index| self.recent.get(index))
+        {
+            return recent_title(entry);
+        }
+        self.shown_item_name()
     }
 
     /// The Find controls: the field, previous/next and the match count. The row
@@ -19155,10 +19177,10 @@ impl App {
         let card_menu_open = !self.popup_open();
         let view_layer: Element<Message> = match self.header_menu {
             Some(HeaderMenu::Publish) if card_menu_open => {
-                card_menu_layer(self.publish_menu(&scheme), publish_menu_offset())
+                card_menu_layer(self.publish_menu(&scheme), publish_menu_inset())
             }
             Some(HeaderMenu::View) if card_menu_open => {
-                card_menu_layer(self.view_menu(&scheme), view_menu_offset())
+                card_menu_layer(self.view_menu(&scheme), view_menu_inset())
             }
             _ => container(horizontal_space())
                 .width(Length::Fill)
@@ -23592,17 +23614,17 @@ fn header_menu_width<'r, 'a: 'r>(rows: impl IntoIterator<Item = &'r MenuRow<'a>>
 /// only a press outside dismisses the menu.
 /// The transcript card's menu layer: `body` hangs `offset` from the card's left
 /// edge and `VIEW_MENU_TOP` from its top.
-fn card_menu_layer<'a>(body: Element<'a, Message>, offset: f32) -> Element<'a, Message> {
+fn card_menu_layer<'a>(body: Element<'a, Message>, right: f32) -> Element<'a, Message> {
     container(body)
         .width(Length::Fill)
         .height(Length::Fill)
-        .align_x(iced::Alignment::Start)
+        .align_x(iced::Alignment::End)
         .align_y(iced::Alignment::Start)
         .padding(iced::Padding {
             top: VIEW_MENU_TOP,
-            right: 0.0,
+            right,
             bottom: 0.0,
-            left: offset,
+            left: 0.0,
         })
         .into()
 }
@@ -23791,29 +23813,23 @@ fn menu_card_at<'a>(
         .into()
 }
 
-/// A full-pane layer that places its child at the top-left, so one card menu
-/// can be stacked with a nested card beside it.
-fn menu_layer<'a>(body: Element<'a, Message>) -> Element<'a, Message> {
+/// A full-pane layer that places its child at the top-right, inset by `right`
+/// and `top`, so one card menu can be stacked with a nested card beside it.
+fn menu_layer_from_right<'a>(
+    body: Element<'a, Message>,
+    right: f32,
+    top: f32,
+) -> Element<'a, Message> {
     container(body)
         .width(Length::Fill)
         .height(Length::Fill)
-        .align_x(iced::Alignment::Start)
-        .align_y(iced::Alignment::Start)
-        .into()
-}
-
-/// [`menu_layer`], inset by `left` and `top` for a card that hangs off another.
-fn menu_layer_at<'a>(body: Element<'a, Message>, left: f32, top: f32) -> Element<'a, Message> {
-    container(body)
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .align_x(iced::Alignment::Start)
+        .align_x(iced::Alignment::End)
         .align_y(iced::Alignment::Start)
         .padding(iced::Padding {
             top,
-            right: 0.0,
+            right,
             bottom: 0.0,
-            left,
+            left: 0.0,
         })
         .into()
 }
@@ -27480,15 +27496,15 @@ mod tests {
     }
 
     #[test]
-    fn each_header_menu_offset_advances_by_the_button_before_it() {
-        // The menus hang from their buttons' left edges, so each offset is the
-        // header padding plus the buttons to its left and the gaps between
-        // them. Pinned here because a hardcoded offset would drift from the
-        // button widths it is supposed to match.
-        assert_eq!(publish_menu_offset(), HEADER_PAD_X);
+    fn each_header_menu_inset_clears_the_buttons_to_its_right() {
+        // The menus end the header row, so each is laid out from the right: the
+        // padding plus the buttons to its right and the gaps between them.
+        // Pinned here because a hardcoded inset would drift from the widths it
+        // is supposed to match.
+        assert_eq!(publish_menu_inset(), HEADER_PAD_X);
         assert_eq!(
-            view_menu_offset() - publish_menu_offset(),
-            PUBLISH_BUTTON_WIDTH + theme::SPACE_SM
+            view_menu_inset() - publish_menu_inset(),
+            PUBLISH_BUTTON_WIDTH + HEADER_GAP
         );
     }
 
@@ -28667,6 +28683,29 @@ mod tests {
             raise_modal(&mut app, modal);
             let _ = app.view();
         }
+
+        let _ = std::fs::remove_dir_all(&media);
+    }
+
+    #[test]
+    fn the_header_names_the_row_by_its_renamed_label() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("header-title");
+        let original = "[00:00] SPEAKER 1: one\n[00:05] SPEAKER 2: two\n";
+        let (mut app, _transcript, media) = line_edit_fixture("header-title", original);
+
+        assert_eq!(app.shown_item_title(), "talk.mp3");
+
+        // The File panel's rename is what the header reads, not the file name.
+        let _ = app.update(Message::OpenRenameRecent(0));
+        let _ = app.update(Message::RenameRecentChanged("Board meeting".to_string()));
+        let _ = app.update(Message::RenameRecentSave);
+        assert_eq!(app.shown_item_title(), "Board meeting");
+        assert_eq!(
+            app.recent[0].audio.as_deref().and_then(|path| path.file_name()).and_then(|name| name.to_str()),
+            Some("talk.mp3"),
+            "the file keeps its own name"
+        );
 
         let _ = std::fs::remove_dir_all(&media);
     }
