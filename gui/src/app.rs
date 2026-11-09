@@ -1427,9 +1427,7 @@ pub enum Message {
     SeekBy(f32),
     SeekByChecked(f32, bool),
     CopyTranscript,
-    /// Copy the completion summary as plain text.
-    CopySummary,
-    /// Close the summary and show the one completed file it covers.
+    /// Close the summary and show the completed file it covers.
     OpenSummaryTranscript,
     /// Open an http(s) address in the system browser.
     OpenUrl(String),
@@ -1498,7 +1496,6 @@ pub enum Message {
     SplitLineAtCursor,
     UndoLineEdit,
     RedoLineEdit,
-    CloseSummary,
     /// Turn the end-of-run Editing Tips card on or off. Saved at once.
     SetEditingTips(bool),
     AddFiles,
@@ -6992,7 +6989,6 @@ impl App {
                 }
                 Task::none()
             }
-            Message::CloseSummary => self.close_modal(Modal::Summary),
             Message::SetEditingTips(show) => {
                 self.editing_tips = show;
                 self.save_settings();
@@ -7136,14 +7132,6 @@ impl App {
                 }
                 self.toast = Some(("Copied transcript".to_string(), Instant::now()));
                 iced::clipboard::write(self.shown_transcript().to_string())
-            }
-            Message::CopySummary => {
-                let text = self.summary_text();
-                if text.is_empty() {
-                    return Task::none();
-                }
-                self.toast = Some(("Copied summary".to_string(), Instant::now()));
-                iced::clipboard::write(text)
             }
             Message::OpenSummaryTranscript => {
                 let target = self.summary_target();
@@ -11964,42 +11952,19 @@ impl App {
         (headers, rows)
     }
 
-    /// The one completed file a single-file summary covers, when it can be
-    /// found in History. Batch summaries have no single target.
+    /// The completed file the summary should open: the newest History row the
+    /// last batch produced. One file or many, the last one to land is the one
+    /// the button is expected to show.
     fn summary_target(&self) -> Option<usize> {
-        let [run] = self.batch_summary.as_slice() else {
-            return None;
-        };
         self.recent
             .iter()
-            .position(|entry| recent_file_name(entry) == run.0)
-    }
-
-    /// The completion summary as plain text, for the Copy action.
-    fn summary_text(&self) -> String {
-        let runs = self.batch_runs();
-        if runs.is_empty() {
-            return String::new();
-        }
-        let audio: f64 = runs.iter().map(|(_, stats)| stats.audio_seconds).sum();
-        let run: f64 = runs.iter().map(|(_, stats)| stats.run_seconds).sum();
-        let speed = if run > 0.0 { audio / run } else { 0.0 };
-        let mut out = String::from("Summary\n");
-        out.push_str(&format!(
-            "{} file{} \u{00b7} {} audio \u{00b7} {} run \u{00b7} {speed:.1}\u{00d7} realtime\n",
-            runs.len(),
-            if runs.len() == 1 { "" } else { "s" },
-            human_duration(audio),
-            human_duration(run),
-        ));
-        for (name, stats) in runs {
-            out.push_str(&format!("\n{name}\n"));
-            for line in Self::single_stats_lines(stats) {
-                out.push_str(line.trim_start());
-                out.push('\n');
-            }
-        }
-        out
+            .enumerate()
+            .filter(|(_, entry)| {
+                let name = recent_file_name(entry);
+                self.batch_summary.iter().any(|(run, _)| *run == name)
+            })
+            .max_by_key(|(_, entry)| entry.finished_at)
+            .map(|(index, _)| index)
     }
 
     #[cfg(test)]
@@ -12028,7 +11993,9 @@ impl App {
         }
     }
 
-    /// The summary block for one completed run.
+    /// The summary block for one completed run. Only the summary's text form
+    /// needs it now; the sheet renders its own rows.
+    #[cfg(test)]
     fn single_stats_lines(s: &backend::Stats) -> Vec<String> {
         let speed = if s.run_seconds > 0.0 {
             s.audio_seconds / s.run_seconds
@@ -17305,34 +17272,17 @@ impl App {
                 height += theme::SPACE_LG;
             }
         }
-        let mut footer = row![
-            action_text("Copy summary")
-                .on_press(Message::CopySummary)
-                .style(pill_button_secondary),
-        ]
-        .spacing(theme::SPACE_MD)
-        .align_y(iced::Alignment::Center);
-        match target {
-            Some(_) => {
-                footer = footer
-                    .push(
-                        action_text("Open transcript")
-                            .on_press(Message::OpenSummaryTranscript)
-                            .style(color_button(scheme.blue, scheme.on_accent)),
-                    )
-                    .push(
-                        action_text("Done")
-                            .on_press(Message::CloseSummary)
-                            .style(pill_button_secondary),
-                    );
-            }
-            None => {
-                footer = footer.push(
-                    action_text("Done")
-                        .on_press(Message::CloseSummary)
-                        .style(color_button(scheme.blue, scheme.on_accent)),
-                );
-            }
+        let mut footer = row![]
+            .spacing(theme::SPACE_MD)
+            .align_y(iced::Alignment::Center);
+        // A finished run ends on the transcript it produced: one action, no
+        // separate close. Escape still dismisses the sheet.
+        if target.is_some() {
+            footer = footer.push(
+                action_text("Show transcript")
+                    .on_press(Message::OpenSummaryTranscript)
+                    .style(color_button(scheme.blue, scheme.on_accent)),
+            );
         }
 
         let meta = format!(
@@ -28906,9 +28856,9 @@ mod tests {
         app.summary_open = true;
         app.pending_tips = true;
 
-        // Summary -> tips, and nothing after: a run no longer asks for a
-        // rename.
-        let _ = app.update(Message::CloseSummary);
+        // Summary -> tips, and nothing after: a run no longer asks for a rename,
+        // and Escape is how the sheet is left now that it has no close button.
+        let _ = app.update(Message::Escape);
         assert_eq!(app.help_open, Some(HelpKind::EditingTips));
 
         let _ = app.update(Message::CloseHelp);
@@ -28930,7 +28880,7 @@ mod tests {
 
         app.summary_open = true;
         app.pending_tips = true;
-        let _ = app.update(Message::CloseSummary);
+        let _ = app.update(Message::Escape);
         assert_eq!(app.help_open, None, "the card was turned off");
 
         // The next completion does not queue the card at all.
