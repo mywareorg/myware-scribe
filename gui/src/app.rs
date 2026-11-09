@@ -1230,6 +1230,8 @@ pub enum Modal {
     Versions,
     /// The Add label picker for one history row.
     Labels,
+    /// The Save As format list.
+    SaveAs,
     /// The File panel row's read-only details. Last in paint order: it only
     /// appears when nothing else is open, since a context menu opens it.
     Info,
@@ -1357,6 +1359,10 @@ pub enum Message {
     OpenUrl(String),
     SaveTranscriptAs,
     SaveTranscriptAsPicked(Option<PathBuf>),
+    /// Close the Save As format list.
+    CloseExportFormat,
+    /// Export the shown transcript in `format`, beside its source.
+    ExportCurrentAs(ExportFormat),
     RevealOutput,
     OpenRename,
     /// Open the custom-vocabulary editor, from Edit or from Help.
@@ -1945,6 +1951,8 @@ pub struct App {
     label_filter: Vec<String>,
     /// The open label picker, if any.
     labels_open: Option<LabelPicker>,
+    /// The Save As format list, when open.
+    save_as_open: bool,
     /// Speaker names created through the line editor this session. A name lives
     /// on the document only while some row uses it; keeping it here means a
     /// just-created speaker stays reachable by the chip and the swap action.
@@ -2262,6 +2270,7 @@ impl App {
             label_assignments,
             label_filter: Vec::new(),
             labels_open: None,
+            save_as_open: false,
             custom_speakers: Vec::new(),
             add_report: None,
             pane_cue: None,
@@ -6901,37 +6910,17 @@ impl App {
                     self.toast = Some(("No transcript to save".to_string(), Instant::now()));
                     return Task::none();
                 }
-                // Prefer the filename of the transcript currently on screen.
-                // It already carries the stem, preset and speaker count in the
-                // same order as the generated output.
-                let mut default_name = self
-                    .selected_view
-                    .as_ref()
-                    .map(|view| view.source.as_path())
-                    .or_else(|| self.shown_output())
-                    .or_else(|| self.shown_audio())
-                    .and_then(|path| path.file_name())
-                    .and_then(|name| name.to_str())
-                    .map(|name| Path::new(name).with_extension("txt").display().to_string())
-                    .unwrap_or_else(|| "transcript.txt".to_string());
-                if self.join_lines {
-                    let stem = Path::new(&default_name)
-                        .file_stem()
-                        .and_then(|stem| stem.to_str())
-                        .unwrap_or("transcript");
-                    default_name = format!("{stem}-joined.txt");
-                }
-                Task::perform(
-                    async move {
-                        let mut dialog = rfd::FileDialog::new();
-                        for format in ExportFormat::ALL {
-                            dialog = dialog.add_filter(format.label(), &[format.extension()]);
-                        }
-                        dialog.set_file_name(default_name).save_file()
-                    },
-                    Message::SaveTranscriptAsPicked,
-                )
+                // The same list the row menu's Export as offers, without the
+                // native save dialog: the format is an app decision, not a
+                // file-manager one.
+                self.save_as_open = true;
+                Task::none()
             }
+            Message::CloseExportFormat => {
+                self.save_as_open = false;
+                Task::none()
+            }
+            Message::ExportCurrentAs(format) => self.export_current_as(format),
             Message::SaveTranscriptAsPicked(path) => {
                 if let Some(mut path) = path {
                     let format = path
@@ -8708,6 +8697,63 @@ impl App {
         Task::none()
     }
 
+    /// Where an export of `transcript` in `format` goes. A plain-text export
+    /// beside the transcript gets an `-export` suffix so it cannot overwrite
+    /// the transcript; a JSON export never overwrites the metadata sidecar.
+    fn export_path(transcript: &Path, format: ExportFormat) -> PathBuf {
+        let stem = transcript
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or("transcript");
+        let mut path = transcript.with_file_name(format!("{stem}.{}", format.extension()));
+        if path == transcript {
+            path = transcript.with_file_name(format!("{stem}-export.{}", format.extension()));
+        }
+        if format == ExportFormat::Json
+            && hippo_transcribe_core::sidecar::locate(transcript).as_deref() == Some(path.as_path())
+        {
+            path = transcript.with_file_name(format!("{stem}-export.{}", format.extension()));
+        }
+        path
+    }
+
+    /// Export the transcript on screen in `format`, beside its source. This is
+    /// File → Save As, the same list the row menu's Export as offers.
+    fn export_current_as(&mut self, format: ExportFormat) -> Task<Message> {
+        self.commit_inline_edit(false);
+        if self.shown_transcript().trim().is_empty() {
+            self.toast = Some(("No transcript to export".to_string(), Instant::now()));
+            self.save_as_open = false;
+            return Task::none();
+        }
+        let source = self
+            .shown_output()
+            .map(Path::to_path_buf)
+            .or_else(|| self.selected_view.as_ref().map(|view| view.source.clone()));
+        let target = match source {
+            Some(source) => Self::export_path(&source, format),
+            None => {
+                let stem = self
+                    .shown_audio()
+                    .and_then(|path| path.file_stem())
+                    .and_then(|stem| stem.to_str())
+                    .unwrap_or("transcript");
+                let directory = self
+                    .output_dir
+                    .clone()
+                    .or_else(|| {
+                        self.shown_audio()
+                            .and_then(|path| path.parent())
+                            .map(Path::to_path_buf)
+                    })
+                    .unwrap_or_default();
+                directory.join(format!("{stem}.{}", format.extension()))
+            }
+        };
+        self.save_as_open = false;
+        self.update(Message::SaveTranscriptAsPicked(Some(target)))
+    }
+
     /// Export a history row directly in `format`, without the Save As dialog.
     /// The file lands beside the row's transcript; a plain-text export beside
     /// it gets an `-export` suffix so it cannot overwrite the transcript.
@@ -8733,21 +8779,7 @@ impl App {
             self.toast = Some(("No transcript to export".to_string(), Instant::now()));
             return Task::none();
         }
-        let stem = transcript
-            .file_stem()
-            .and_then(|stem| stem.to_str())
-            .unwrap_or("transcript");
-        let mut path = transcript.with_file_name(format!("{stem}.{}", format.extension()));
-        if path == transcript {
-            path = transcript.with_file_name(format!("{stem}-export.{}", format.extension()));
-        }
-        // The JSON beside a transcript is usually its metadata sidecar; writing
-        // an export over it would erase speaker ids and line bounds.
-        if format == ExportFormat::Json
-            && hippo_transcribe_core::sidecar::locate(&transcript).as_deref() == Some(path.as_path())
-        {
-            path = transcript.with_file_name(format!("{stem}-export.{}", format.extension()));
-        }
+        let path = Self::export_path(&transcript, format);
         let lines = attach_confidences(parse_lines(&text), &backend::read_confidences(&transcript));
         let cues = backend::export_cues(Some(transcript.as_path()), &lines);
         let turns = turns_from_lines(&lines, entry.duration);
@@ -15393,7 +15425,7 @@ impl App {
             vec![MenuSection {
                 rows: vec![
                     MenuRow {
-                        label: "Save As",
+                        label: "Save As\u{2026}",
                         key: Some("Ctrl+S"),
                         checked: false,
                         enabled: has_text,
@@ -16191,6 +16223,8 @@ impl App {
             Some(Modal::Versions)
         } else if self.labels_open.is_some() {
             Some(Modal::Labels)
+        } else if self.save_as_open {
+            Some(Modal::SaveAs)
         } else if self.info_open.is_some() {
             // Lowest priority: the Info popup only ever comes from a context
             // menu, which cannot open while another dialog is up.
@@ -16253,6 +16287,7 @@ impl App {
             }
             Modal::Versions => self.versions_open = None,
             Modal::Labels => self.labels_open = None,
+            Modal::SaveAs => self.save_as_open = false,
         }
         Task::none()
     }
@@ -17012,6 +17047,65 @@ impl App {
             );
         }
         Some(chips.into())
+    }
+
+    /// The Save As format list: the same options the row menu's Export as
+    /// offers, written beside the transcript.
+    fn save_as_dialog(&self, scheme: &Scheme) -> Element<'_, Message> {
+        let scheme = *scheme;
+        let subject = self
+            .shown_output()
+            .or_else(|| self.selected_view.as_ref().map(|view| view.source.as_path()))
+            .or_else(|| self.shown_audio())
+            .and_then(|path| path.file_name())
+            .and_then(|name| name.to_str())
+            .unwrap_or("Transcript")
+            .to_string();
+        let mut list = column![].spacing(2).width(Length::Fill);
+        for format in ExportFormat::ALL {
+            let extension = format.extension();
+            list = list.push(
+                button(
+                    container(
+                        row![
+                            text(format.label())
+                                .size(theme::TEXT_SM)
+                                .color(scheme.text),
+                            horizontal_space(),
+                            text(format!(".{extension}"))
+                                .size(theme::TEXT_XS)
+                                .color(scheme.muted),
+                        ]
+                        .spacing(theme::SPACE_SM)
+                        .align_y(iced::Alignment::Center),
+                    )
+                    .width(Length::Fill)
+                    .padding([6, 8]),
+                )
+                .width(Length::Fill)
+                .padding(0)
+                .on_press(Message::ExportCurrentAs(format))
+                .style(pill_button_secondary),
+            );
+        }
+        let body = column![
+            text("Save as").size(20).color(scheme.text),
+            text(format!("{subject} \u{00b7} written beside the transcript"))
+                .size(theme::TEXT_XS)
+                .color(scheme.muted),
+            list,
+            right_aligned(
+                row![
+                    action_text("Close")
+                        .on_press(Message::CloseExportFormat)
+                        .style(pill_button_secondary),
+                ]
+                .spacing(theme::SPACE_MD),
+            ),
+        ]
+        .spacing(theme::SPACE_MD)
+        .width(Length::Fill);
+        modal_card(body, 460.0, scheme)
     }
 
     /// The label picker: type a name to create or select it, press a label to
@@ -18738,6 +18832,7 @@ impl App {
             Some(Modal::Briefing) => self.briefing_dialog(&scheme),
             Some(Modal::Versions) => self.versions_dialog(&scheme),
             Some(Modal::Labels) => self.labels_dialog(&scheme),
+            Some(Modal::SaveAs) => self.save_as_dialog(&scheme),
             Some(Modal::Info) => self.info_dialog(&scheme),
         };
         // The Info popup is read-only and transient: its scrim dismisses it,
@@ -18746,6 +18841,7 @@ impl App {
             Some(Modal::Info) => Some(Message::CloseInfo),
             Some(Modal::Versions) => Some(Message::CloseVersions),
             Some(Modal::Labels) => Some(Message::CloseLabels),
+            Some(Modal::SaveAs) => Some(Message::CloseExportFormat),
             _ => None,
         };
         modal_overlay(base, dialog, scheme, dismiss)
@@ -26466,6 +26562,29 @@ mod tests {
     }
 
     #[test]
+    fn save_as_lists_formats_and_writes_beside_the_transcript() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("save-as-formats");
+        let original = "[00:00] SPEAKER 1: one\n[00:05] SPEAKER 2: two\n";
+        let (mut app, transcript, media) = line_edit_fixture("save-as-formats", original);
+
+        let _ = app.update(Message::SaveTranscriptAs);
+        assert!(app.save_as_open, "File → Save As should open the format list");
+
+        let _ = app.update(Message::ExportCurrentAs(ExportFormat::Txt));
+        assert!(!app.save_as_open, "choosing a format should close the list");
+        let stem = transcript.file_stem().unwrap().to_str().unwrap();
+        let exported = transcript.with_file_name(format!("{stem}-export.txt"));
+        assert!(
+            exported.is_file(),
+            "export missing: {}",
+            exported.display()
+        );
+
+        let _ = std::fs::remove_dir_all(&media);
+    }
+
+    #[test]
     fn every_header_menu_renders() {
         let _guard = env_lock();
         let _config = ConfigEnv::new("all-menus-config");
@@ -27472,7 +27591,7 @@ mod tests {
 
     /// Every dialog, so a variant added to `Modal` cannot go untested: the
     /// escape and render passes below each walk this list.
-    const ALL_MODALS: [Modal; 12] = [
+    const ALL_MODALS: [Modal; 13] = [
         Modal::Reset,
         Modal::Summary,
         Modal::DeleteLine,
@@ -27485,6 +27604,7 @@ mod tests {
         Modal::Info,
         Modal::Versions,
         Modal::Labels,
+        Modal::SaveAs,
     ];
 
     /// Raise one dialog the way the app would.
@@ -27566,6 +27686,7 @@ mod tests {
                 let index = app.recent.len() - 1;
                 app.open_labels(PaneTab::History, index);
             }
+            Modal::SaveAs => app.save_as_open = true,
         }
     }
 
