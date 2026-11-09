@@ -8662,9 +8662,24 @@ impl App {
             return self.retry_recording(index);
         }
         if self.recent_row_opens(index) {
-            return self.update(Message::OpenRecent(index));
+            return self.resume_recent_playback(index);
         }
         Task::none()
+    }
+
+    /// Open a finished row if needed, then start its audio unless it is already
+    /// playing. A double-click on an already-open row resumes from the current
+    /// playhead instead of reloading the document.
+    fn resume_recent_playback(&mut self, index: usize) -> Task<Message> {
+        let open = if self.selected_recent == Some(index) && self.selected_view.is_some() {
+            Task::none()
+        } else {
+            self.open_recent(index, None)
+        };
+        if self.player_ready() && !self.player.as_ref().is_some_and(Player::is_playing) {
+            let _ = self.toggle_playback();
+        }
+        open
     }
 
     /// Enter repeats the selected row's double-click action.
