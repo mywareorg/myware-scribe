@@ -486,6 +486,13 @@ struct RowMenu {
     position: Point,
 }
 
+/// The context menu's two hover-expanded lists. Only one is open at a time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RowSubmenu {
+    Export,
+    Labels,
+}
+
 /// A row's full file details, captured when its Info popup opens.
 ///
 /// Deliberately holds paths rather than an index: the lists shift under it
@@ -1428,6 +1435,10 @@ pub enum Message {
     ExportRecentAs(usize, ExportFormat),
     /// Open the context menu's nested format list for the row it hangs from.
     OpenExportSubmenu,
+    /// Open the context menu's label list for the row it hangs from.
+    OpenLabelSubmenu,
+    /// Toggle one label on a recent row without opening the label picker.
+    ToggleRecentLabel(usize, String),
     /// A found transcript could not be read or was empty. Settles the add
     /// report without restoring anything.
     TranscriptAdoptionMissed,
@@ -1485,7 +1496,7 @@ pub enum Message {
     OpenRowMenuForSelection,
     /// The pointer entered a row menu item; true while it is Export, whose
     /// format list opens on hover.
-    RowMenuHover(bool),
+    RowMenuHover(Option<RowSubmenu>),
     CloseRowMenu,
     /// The pointer moved onto a history row, or off every row.
     RecentHover(Option<usize>),
@@ -1945,8 +1956,8 @@ pub struct App {
     pane_cue: Option<PaneCue>,
     /// Tabs that gained items from an add, each timed so the tab itself blinks.
     tab_cues: [Option<Instant>; 4],
-    /// The context menu's Export format list is showing.
-    export_submenu: bool,
+    /// The context menu's nested list that is showing, if any.
+    row_submenu: Option<RowSubmenu>,
     batch: bool,
     /// Queue paths belonging to the current (or most recent) transcription
     /// batch, including follow-up passes for files added during a run.
@@ -2256,7 +2267,7 @@ impl App {
             add_report: None,
             pane_cue: None,
             tab_cues: [None; 4],
-            export_submenu: false,
+            row_submenu: None,
             batch: false,
             batch_paths,
             batch_summary: Vec::new(),
@@ -3260,7 +3271,7 @@ impl App {
         self.queue_drag = None;
         // A menu opened on a queue row points at an index that just shifted.
         self.row_menu = None;
-        self.export_submenu = false;
+        self.row_submenu = None;
         self.invalidate_derived();
         if let Some(index) = newest {
             // The rows did not disappear; they moved to History. Point at
@@ -3287,7 +3298,7 @@ impl App {
         self.selected_recent = None;
         self.recent_hover = None;
         self.row_menu = None;
-        self.export_submenu = false;
+        self.row_submenu = None;
         self.favorite_drag = None;
         self.favorite_hover = None;
         self.recent_presence.clear();
@@ -4803,13 +4814,13 @@ impl App {
             self.transcript_line_hover = None;
             self.queue_hover = None;
             self.row_menu = None;
-            self.export_submenu = false;
+            self.row_submenu = None;
         }
         // Choosing a context-menu action closes the menu before it runs, so
         // the action sees the surface without a menu over it.
         if self.row_menu.is_some() && closes_row_menu(&message) {
             self.row_menu = None;
-            self.export_submenu = false;
+            self.row_submenu = None;
         }
         match message {
             Message::TogglePlayerCollapsed => {
@@ -6447,7 +6458,11 @@ impl App {
             Message::EnqueueRecent(index) => self.enqueue_recent_from_menu(index),
             Message::ExportRecentAs(index, format) => self.export_recent_as(index, format),
             Message::OpenExportSubmenu => {
-                self.export_submenu = true;
+                self.row_submenu = Some(RowSubmenu::Export);
+                Task::none()
+            }
+            Message::OpenLabelSubmenu => {
+                self.row_submenu = Some(RowSubmenu::Labels);
                 Task::none()
             }
             Message::OpenQueueRow(index) => self.view_item(index),
@@ -6482,6 +6497,10 @@ impl App {
                 Task::none()
             }
             Message::CloseLabels => self.close_modal(Modal::Labels),
+            Message::ToggleRecentLabel(index, id) => {
+                self.toggle_recent_label(index, &id);
+                Task::none()
+            }
             Message::LabelInputChanged(value) => {
                 if let Some(picker) = self.labels_open.as_mut() {
                     picker.input = value;
@@ -6534,15 +6553,15 @@ impl App {
                 self.open_row_menu(tab, index, anchor);
                 Task::none()
             }
-            Message::RowMenuHover(is_export) => {
+            Message::RowMenuHover(submenu) => {
                 if self.row_menu.is_some() {
-                    self.export_submenu = is_export;
+                    self.row_submenu = submenu;
                 }
                 Task::none()
             }
             Message::CloseRowMenu => {
                 self.row_menu = None;
-                self.export_submenu = false;
+                self.row_submenu = None;
                 Task::none()
             }
             Message::RecentHover(index) => {
@@ -6577,7 +6596,7 @@ impl App {
                 self.version_preview = None;
                 self.recent_hover = None;
                 self.row_menu = None;
-                self.export_submenu = false;
+                self.row_submenu = None;
                 self.favorite_drag = None;
                 self.favorite_hover = None;
                 self.favorite_pointer = None;
@@ -7769,7 +7788,7 @@ impl App {
             index,
             position: anchor,
         });
-        self.export_submenu = false;
+        self.row_submenu = None;
         if let Some(index) = index {
             match tab {
                 PaneTab::Queue => {
@@ -7950,6 +7969,26 @@ impl App {
             return;
         };
         let key = picker.key.clone();
+        let mut ids = self.label_assignments.get(&key).cloned().unwrap_or_default();
+        if let Some(position) = ids.iter().position(|existing| existing == id) {
+            ids.remove(position);
+        } else {
+            if ids.len() >= 8 {
+                self.toast = Some(("Up to 8 labels per file".to_string(), Instant::now()));
+                return;
+            }
+            ids.push(id.to_string());
+        }
+        self.set_label_assignment(&key, ids);
+    }
+
+    /// Toggle a label on a row straight from its context submenu, without
+    /// opening the label picker. The submenu stays open so several labels can
+    /// be checked in one pass.
+    fn toggle_recent_label(&mut self, index: usize, id: &str) {
+        let Some(key) = self.recent.get(index).and_then(Self::label_key) else {
+            return;
+        };
         let mut ids = self.label_assignments.get(&key).cloned().unwrap_or_default();
         if let Some(position) = ids.iter().position(|existing| existing == id) {
             ids.remove(position);
@@ -14101,6 +14140,67 @@ impl App {
         (recent_meta(entry, true), false)
     }
 
+    /// The Export row's hover list: one direct export per format.
+    fn export_submenu_entries(&self, index: usize) -> Vec<RowMenuEntry> {
+        ExportFormat::ALL
+            .iter()
+            .map(|format| RowMenuEntry {
+                label: format.label().to_string(),
+                enabled: true,
+                hint: None,
+                action: Some(Message::ExportRecentAs(index, *format)),
+                danger: false,
+                check: None,
+                separator_before: false,
+            })
+            .collect()
+    }
+
+    /// The Add label row's hover list: existing labels toggle directly, with
+    /// the full picker kept for creating and deleting definitions.
+    fn label_submenu_entries(&self, tab: PaneTab, index: usize) -> Vec<RowMenuEntry> {
+        let assigned = self
+            .recent
+            .get(index)
+            .and_then(Self::label_key)
+            .and_then(|key| self.label_assignments.get(&key).cloned())
+            .unwrap_or_default();
+        let mut entries: Vec<RowMenuEntry> = self
+            .labels
+            .iter()
+            .map(|label| RowMenuEntry {
+                label: label.name.clone(),
+                enabled: true,
+                hint: None,
+                action: Some(Message::ToggleRecentLabel(index, label.id.clone())),
+                danger: false,
+                check: Some(assigned.contains(&label.id)),
+                separator_before: false,
+            })
+            .collect();
+        if entries.is_empty() {
+            entries.push(RowMenuEntry {
+                label: "No labels yet".to_string(),
+                enabled: false,
+                hint: Some("Create one in Manage labels\u{2026}".to_string()),
+                action: None,
+                danger: false,
+                check: None,
+                separator_before: false,
+            });
+        }
+        entries.push(RowMenuEntry {
+            label: "Manage labels\u{2026}".to_string(),
+            enabled: true,
+            hint: None,
+            action: Some(Message::OpenLabels(tab, index)),
+            danger: false,
+            check: None,
+            separator_before: true,
+        });
+        entries
+    }
+
     /// The File panel context menu's rows. Disabled actions stay visible with
     /// their reason in the tooltip, so the menu never rearranges itself.
     fn row_menu_rows(
@@ -14115,22 +14215,24 @@ impl App {
                    enabled: bool,
                    hint: Option<&'static str>,
                    action: Message| RowMenuEntry {
-            label,
+            label: label.to_string(),
             enabled,
             hint: hint.map(str::to_string),
             action: enabled.then_some(action),
             danger: false,
+            check: None,
             separator_before: false,
         };
         let danger = |label: &'static str,
                       enabled: bool,
                       hint: Option<&'static str>,
                       action: Message| RowMenuEntry {
-            label,
+            label: label.to_string(),
             enabled,
             hint: hint.map(str::to_string),
             action: enabled.then_some(action),
             danger: true,
+            check: None,
             separator_before: false,
         };
 
@@ -14426,7 +14528,13 @@ impl App {
         };
         if self.can(license::Feature::Labels) {
             rows.push(
-                row("Add label\u{2026}", true, None, Message::OpenLabels(tab, index)).separated(),
+                row(
+                    "Add label\u{2026}",
+                    true,
+                    None,
+                    Message::OpenLabelSubmenu,
+                )
+                .separated(),
             );
         }
         rows.push(select_version.separated());
@@ -18063,46 +18171,45 @@ impl App {
         .interaction(mouse::Interaction::Idle)
         .on_press(Message::CloseRowMenu)
         .on_right_press(Message::CloseRowMenu);
-        // The Export formats hang off the Export row as a second card. A true
-        // nested `pick_list` would not match this hand-drawn menu's chrome, so
-        // the submenu is the same card, placed one row down and one card right.
-        let export_row = rows
-            .iter()
-            .position(|row| row.label == "Export as\u{2026}");
-        let submenu = match (self.export_submenu, export_row, menu.index) {
-            (true, Some(row), Some(index)) => {
-                let entries: Vec<RowMenuEntry> = ExportFormat::ALL
-                    .iter()
-                    .map(|format| RowMenuEntry {
-                        label: format.label(),
-                        enabled: true,
-                        hint: None,
-                        action: Some(Message::ExportRecentAs(index, *format)),
-                        danger: false,
-                        separator_before: false,
-                    })
-                    .collect();
-                let sub_height = entries.len() as f32 * ROW_MENU_ROW_HEIGHT + 16.0;
-                let sub_x = (x + ROW_MENU_WIDTH + 4.0)
-                    .clamp(0.0, (self.window_size.width - ROW_MENU_WIDTH - 8.0).max(0.0));
-                let sub_y = (y + 8.0 + row as f32 * ROW_MENU_ROW_HEIGHT)
-                    .clamp(0.0, (self.window_size.height - sub_height - 8.0).max(0.0));
-                Some(
-                    container(row_menu_card(entries, *scheme, false))
-                        .width(Length::Fill)
-                        .height(Length::Fill)
-                        .align_x(iced::Alignment::Start)
-                        .align_y(iced::Alignment::Start)
-                        .padding(iced::Padding {
-                            top: sub_y,
-                            right: 0.0,
-                            bottom: 0.0,
-                            left: sub_x,
-                        }),
-                )
-            }
-            _ => None,
+        // A nested list hangs off its parent row as a second card, one row
+        // down and one card right. The Export formats and the existing labels
+        // share the same geometry.
+        let submenu_spec = match self.row_submenu {
+            Some(RowSubmenu::Export) => rows
+                .iter()
+                .position(|row| row.label == "Export as\u{2026}")
+                .and_then(|row| {
+                    menu.index
+                        .map(|index| (row, self.export_submenu_entries(index)))
+                }),
+            Some(RowSubmenu::Labels) => rows
+                .iter()
+                .position(|row| row.label == "Add label\u{2026}")
+                .and_then(|row| {
+                    menu.index
+                        .map(|index| (row, self.label_submenu_entries(menu.tab, index)))
+                }),
+            None => None,
         };
+        let submenu = submenu_spec.map(|(row, entries)| {
+            let separators = entries.iter().filter(|row| row.separator_before).count() as f32;
+            let sub_height = entries.len() as f32 * ROW_MENU_ROW_HEIGHT + separators * 3.0 + 16.0;
+            let sub_x = (x + ROW_MENU_WIDTH + 4.0)
+                .clamp(0.0, (self.window_size.width - ROW_MENU_WIDTH - 8.0).max(0.0));
+            let sub_y = (y + 8.0 + row as f32 * ROW_MENU_ROW_HEIGHT)
+                .clamp(0.0, (self.window_size.height - sub_height - 8.0).max(0.0));
+            container(row_menu_card(entries, *scheme, false))
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .align_x(iced::Alignment::Start)
+                .align_y(iced::Alignment::Start)
+                .padding(iced::Padding {
+                    top: sub_y,
+                    right: 0.0,
+                    bottom: 0.0,
+                    left: sub_x,
+                })
+        });
         let card = container(row_menu_card(rows, *scheme, true))
             .width(Length::Fill)
             .height(Length::Fill)
@@ -22762,11 +22869,13 @@ fn menu_card<'a>(sections: Vec<MenuSection<'a>>, scheme: Scheme) -> Element<'a, 
 
 /// One action in the File panel's context menu.
 struct RowMenuEntry {
-    label: &'static str,
+    label: String,
     enabled: bool,
     hint: Option<String>,
     action: Option<Message>,
     danger: bool,
+    /// `Some` draws the leading check slot; the boolean is the checked state.
+    check: Option<bool>,
     /// Draw a hairline above this row to separate groups.
     separator_before: bool,
 }
@@ -22799,12 +22908,16 @@ fn row_menu_card(
                     }),
             );
         }
-        let is_export = row.label == "Export as\u{2026}";
+        let submenu = if row.label == "Export as\u{2026}" {
+            Some(RowSubmenu::Export)
+        } else if row.label == "Add label\u{2026}" {
+            Some(RowSubmenu::Labels)
+        } else {
+            None
+        };
         let item = row_menu_item(row, scheme);
         if track_export_hover {
-            body = body.push(
-                mouse_area(item).on_enter(Message::RowMenuHover(is_export)),
-            );
+            body = body.push(mouse_area(item).on_enter(Message::RowMenuHover(submenu)));
         } else {
             body = body.push(item);
         }
@@ -22834,6 +22947,7 @@ fn row_menu_card(
 /// the pointer but stays muted, and its press does nothing; its tooltip says
 /// why it is unavailable.
 fn row_menu_item(row: RowMenuEntry, scheme: Scheme) -> Element<'static, Message> {
+    let check = row.check;
     let label = text(row.label)
         .size(16)
         .wrapping(NO_WRAP)
@@ -22844,7 +22958,19 @@ fn row_menu_item(row: RowMenuEntry, scheme: Scheme) -> Element<'static, Message>
         } else {
             scheme.ink
         });
-    let button = action(row![label].width(Length::Fill))
+    let mut content = row![].spacing(6).align_y(iced::Alignment::Center);
+    if let Some(checked) = check {
+        let slot: Element<'static, Message> = if checked {
+            icon_colored(ICON_CHECK, 12.0, scheme.green)
+        } else {
+            container(horizontal_space())
+                .width(Length::Fixed(12.0))
+                .into()
+        };
+        content = content.push(slot);
+    }
+    content = content.push(label.width(Length::Fill));
+    let button = action(content)
         .width(Length::Fill)
         .padding([5, 6])
         .style(row_menu_item_style(scheme, row.enabled))
@@ -25424,6 +25550,47 @@ mod tests {
         assert!(app.labels_open.is_none(), "free must not open the label picker");
         assert!(app.paywall_open, "free should be sent to the paywall");
         assert!(app.label_chips(&app.recent[0], &app.scheme()).is_none());
+    }
+
+    #[test]
+    fn label_submenu_toggles_without_opening_the_picker() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("labels-submenu");
+        let mut app = pro_app();
+        app.recent.push(RecentEntry {
+            audio: Some(PathBuf::from("/media/talk.mp3")),
+            transcript: Some(PathBuf::from("/media/talk.txt")),
+            finished_at: 1,
+            ..Default::default()
+        });
+        app.labels = vec![LabelDef {
+            id: "label-1".to_string(),
+            name: "Clinic".to_string(),
+            color: 0,
+        }];
+
+        let entries = app.label_submenu_entries(PaneTab::History, 0);
+        let clinic = menu_entry(&entries, "Clinic");
+        assert_eq!(clinic.check, Some(false));
+        assert!(matches!(
+            clinic.action,
+            Some(Message::ToggleRecentLabel(0, _))
+        ));
+        assert!(matches!(
+            menu_entry(&entries, "Manage labels\u{2026}").action,
+            Some(Message::OpenLabels(PaneTab::History, 0))
+        ));
+
+        let _ = app.update(Message::ToggleRecentLabel(0, "label-1".to_string()));
+        assert!(app.labels_open.is_none(), "the picker must stay closed");
+        let key = App::label_key(&app.recent[0]).unwrap();
+        assert_eq!(
+            app.label_assignments.get(&key).map(Vec::as_slice),
+            Some(["label-1".to_string()].as_slice())
+        );
+
+        let entries = app.label_submenu_entries(PaneTab::History, 0);
+        assert_eq!(menu_entry(&entries, "Clinic").check, Some(true));
     }
 
     #[test]
