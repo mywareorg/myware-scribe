@@ -16485,7 +16485,11 @@ impl App {
             } else {
                 version_when(row.created_at)
             };
-            let marker = if row.current { "\u{25cf}" } else { "\u{25cb}" };
+            let marker = if row.current {
+                ICON_CIRCLE_FILL
+            } else {
+                ICON_CIRCLE
+            };
             let marker_color = if row.current {
                 scheme.green
             } else {
@@ -16493,7 +16497,7 @@ impl App {
             };
             let exists = row.exists;
             let line = row![
-                text(marker).size(12).color(marker_color),
+                icon_colored(marker, 9.0, marker_color),
                 column![
                     text(label)
                         .size(theme::TEXT_SM)
@@ -19533,6 +19537,7 @@ const ICON_FORWARD: char = '\u{f7f3}';
 const ICON_ARROW_UP: char = '\u{f148}';
 const ICON_ARROW_DOWN: char = '\u{f128}';
 const ICON_CIRCLE: char = '\u{f28a}';
+const ICON_CIRCLE_FILL: char = '\u{f287}';
 const ICON_HOURGLASS: char = '\u{f421}';
 const ICON_CHECK: char = '\u{f633}';
 const ICON_X: char = '\u{f659}';
