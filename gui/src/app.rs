@@ -20138,19 +20138,39 @@ impl canvas::Program<Message> for ProgressTrack {
                 .with_width(1.0),
         );
 
-        // Inset by the border, then clamp the radius to half of whichever
-        // dimension is smaller: that is what keeps a short fill round.
+        // Inset by the border. The fill follows the track's own rounded
+        // interior rather than a rectangle: at the start of a run the fill is
+        // only a pixel or two wide, and a full-height rectangle there would
+        // stand outside the track's curved left cap as a tall vertical line.
         let inset = 1.0f32;
-        let fill_width = (width * self.fraction - inset).clamp(0.0, width - inset * 2.0);
-        let fill_height = (height - inset * 2.0).max(0.0);
-        if fill_width >= 0.5 && fill_height > 0.5 {
-            let corner = fill_width.min(fill_height) / 2.0;
-            let path = canvas::Path::rounded_rectangle(
+        let inner_width = (width - inset * 2.0).max(0.0);
+        let inner_height = (height - inset * 2.0).max(0.0);
+        let inner_radius = (radius - inset).max(0.0);
+        let fill_end = (width * self.fraction).clamp(0.0, width);
+        let fill_width = (fill_end - inset).clamp(0.0, inner_width);
+        if fill_width >= 0.5 && inner_height > 0.5 {
+            let inner = canvas::Path::rounded_rectangle(
                 Point::new(inset, inset),
-                Size::new(fill_width, fill_height),
-                corner.into(),
+                Size::new(inner_width, inner_height),
+                inner_radius.into(),
             );
-            frame.fill(&path, self.fill);
+            if fill_width < inner_height {
+                // Narrower than the cap: clip the pill, so the sliver keeps
+                // the cap's curve instead of a straight full-height edge.
+                frame.with_clip(
+                    Rectangle::new(Point::new(inset, inset), Size::new(fill_width, inner_height)),
+                    |frame| frame.fill(&inner, self.fill),
+                );
+            } else {
+                // Wide enough for its own rounded head; the left cap matches
+                // the track's interior, so the fill stays inside the pill.
+                let path = canvas::Path::rounded_rectangle(
+                    Point::new(inset, inset),
+                    Size::new(fill_width, inner_height),
+                    (inner_height / 2.0).into(),
+                );
+                frame.fill(&path, self.fill);
+            }
         }
         vec![frame.into_geometry()]
     }
