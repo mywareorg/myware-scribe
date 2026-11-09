@@ -13877,8 +13877,16 @@ impl App {
         // Only a row with its transcript on disk opens; audio-only rows are a
         // danger meta and nothing else.
         let openable = entry.state == ItemState::Ready && transcript_present;
-        let name = ellipsize_middle(&recent_title(entry), recent_name_budget());
         let (meta, meta_danger) = self.recent_row_meta(index, tab);
+        // A readable transcript uses the compact row: duration and preset on
+        // the title line, labels beneath it, and no language, speaker count or
+        // completion clock. Other states keep a status line.
+        let status_row = !meta.is_empty();
+        let title_meta = if status_row {
+            String::new()
+        } else {
+            row_title_meta(entry)
+        };
         let meta_color = if meta_danger {
             scheme.danger
         } else {
@@ -13906,82 +13914,31 @@ impl App {
         let record_locked = self.record_lock();
 
         let edited = transcript_edited(entry);
-        let chip = settings_label(entry);
-        let mut meta_row = row![
-            text(meta)
-                .size(11)
-                .wrapping(NO_WRAP)
-                .color(meta_color),
-        ]
-        .spacing(4)
-        .align_y(iced::Alignment::Center)
-        .width(Length::Fill);
-        if edited {
-            let edited_color = if locked {
-                scheme.muted
-            } else if theme::is_dark_scheme(&scheme) {
-                scheme.blue
-            } else {
-                // The light palette's blue is a bright cyan; mix it toward ink
-                // so the pencil and its label read against white.
-                theme::mix(scheme.blue, scheme.ink, 0.6)
-            };
-            // U+270E is not in the UI text font, so it rendered as tofu. Use
-            // the bundled icon font's pencil instead.
-            meta_row = meta_row
-                .push(icon_colored(ICON_PENCIL, 10.0, edited_color))
-                .push(
-                    text("Edited")
-                        .size(10)
-                        .wrapping(NO_WRAP)
-                        .color(edited_color),
-                );
-        }
-        meta_row = meta_row.push(horizontal_space());
-        if tab == PaneTab::Recordings
-            && self.retryable_recording(index)
-            && audio_present
-            && !record_locked
-        {
-            meta_row = meta_row.push(
-                action(text("Retry").size(10).wrapping(NO_WRAP))
-                    .padding([0, 3])
-                    .on_press(Message::RetryRecording(index))
-                    .style(pill_button_secondary),
-            );
-        } else if let Some(chip) = chip {
-            meta_row = meta_row.push(
-                container(
-                    text(chip)
-                        .size(10)
-                        .wrapping(NO_WRAP)
-                        .color(scheme.muted),
-                )
-                .padding([1, 6])
-                .style(move |_theme| container::Style {
-                    background: Some(scheme.bar_track.into()),
-                    border: iced::border::rounded(999.0),
-                    ..container::Style::default()
-                }),
-            );
-        }
-        let meta_line: Element<'static, Message> = meta_row.into();
-
-        let mut label = column![
-            text(name)
-                .size(theme::TEXT_SM)
-                .wrapping(NO_WRAP)
-                .color(name_color),
-            meta_line,
-        ]
-        .spacing(1)
-        .width(Length::Fill);
-        if let Some(chips) = self.label_chips(entry, &scheme) {
-            label = label.push(chips);
-        }
+        let edited_color = if locked {
+            scheme.muted
+        } else if theme::is_dark_scheme(&scheme) {
+            scheme.blue
+        } else {
+            // The light palette's blue is a bright cyan; mix it toward ink
+            // so the pencil and its label read against white.
+            theme::mix(scheme.blue, scheme.ink, 0.6)
+        };
+        let edited_view = || -> Element<'static, Message> {
+            row![
+                icon_colored(ICON_PENCIL, 10.0, edited_color),
+                text("Edited")
+                    .size(10)
+                    .wrapping(NO_WRAP)
+                    .color(edited_color),
+            ]
+            .spacing(4)
+            .align_y(iced::Alignment::Center)
+            .into()
+        };
 
         // The star and X both keep a reserved slot, so a favorite is visible
-        // at a glance and the name never reflows when they appear.
+        // at a glance and the name never reflows when they appear. A filled
+        // star stays on screen even when the row is not hovered.
         let favorite = entry.favorite;
         let star = self.tip(
             action(icon_colored(
@@ -14020,19 +13977,105 @@ impl App {
             remove_label,
             &scheme,
         );
-        // The action slot keeps its width so the name never reflows, but the
-        // star and X only appear while the row is under the pointer.
         let actions_content: Element<Message> = if hovered {
             row![star, remove]
                 .spacing(2)
                 .align_y(iced::Alignment::Center)
                 .into()
+        } else if favorite {
+            row![star].align_y(iced::Alignment::Center).into()
         } else {
             horizontal_space().into()
         };
         let actions = container(actions_content)
             .width(Length::Fixed(RECENT_ACTIONS_WIDTH))
             .align_x(iced::Alignment::End);
+
+        // Leave the right-hand duration/preset room in the name's character
+        // budget; the row ellipsizes rather than colliding with it.
+        let name_budget =
+            recent_name_budget().saturating_sub(if title_meta.is_empty() { 0 } else { 14 });
+        let name = ellipsize_middle(&recent_title(entry), name_budget);
+        let mut title_row = row![text(name)
+            .size(theme::TEXT_SM)
+            .wrapping(NO_WRAP)
+            .color(name_color)
+            .width(Length::Fill)]
+        .spacing(6)
+        .align_y(iced::Alignment::Center)
+        .width(Length::Fill);
+        if !title_meta.is_empty() {
+            title_row = title_row.push(
+                text(title_meta)
+                    .size(10)
+                    .wrapping(NO_WRAP)
+                    .color(meta_color),
+            );
+        }
+        title_row = title_row.push(actions);
+
+        let mut details = column![].spacing(2).width(Length::Fill);
+        if status_row {
+            let chip = settings_label(entry);
+            let mut meta_row = row![
+                text(meta)
+                    .size(11)
+                    .wrapping(NO_WRAP)
+                    .color(meta_color),
+            ]
+            .spacing(4)
+            .align_y(iced::Alignment::Center)
+            .width(Length::Fill);
+            if edited {
+                meta_row = meta_row.push(edited_view());
+            }
+            meta_row = meta_row.push(horizontal_space());
+            if tab == PaneTab::Recordings
+                && self.retryable_recording(index)
+                && audio_present
+                && !record_locked
+            {
+                meta_row = meta_row.push(
+                    action(text("Retry").size(10).wrapping(NO_WRAP))
+                        .padding([0, 3])
+                        .on_press(Message::RetryRecording(index))
+                        .style(pill_button_secondary),
+                );
+            } else if let Some(chip) = chip {
+                meta_row = meta_row.push(
+                    container(
+                        text(chip)
+                            .size(10)
+                            .wrapping(NO_WRAP)
+                            .color(scheme.muted),
+                    )
+                    .padding([1, 6])
+                    .style(move |_theme| container::Style {
+                        background: Some(scheme.bar_track.into()),
+                        border: iced::border::rounded(999.0),
+                        ..container::Style::default()
+                    }),
+                );
+            }
+            details = details.push(meta_row);
+            if let Some(chips) = self.label_chips(entry, &scheme) {
+                details = details.push(chips);
+            }
+        } else {
+            let mut detail_line = row![].spacing(6).align_y(iced::Alignment::Center);
+            let mut has_detail = false;
+            if let Some(chips) = self.label_chips(entry, &scheme) {
+                detail_line = detail_line.push(chips);
+                has_detail = true;
+            }
+            if edited {
+                detail_line = detail_line.push(edited_view());
+                has_detail = true;
+            }
+            if has_detail {
+                details = details.push(detail_line);
+            }
+        }
 
         let row_tint = Color {
             a: 0.12,
@@ -14056,9 +14099,9 @@ impl App {
             Color::TRANSPARENT
         };
         let row = container(
-            row![label, actions]
-                .spacing(6)
-                .align_y(iced::Alignment::Center),
+            column![title_row, details]
+                .spacing(1)
+                .width(Length::Fill),
         )
         .padding([6, 8])
         .width(Length::Fill)
@@ -14137,7 +14180,10 @@ impl App {
                 true,
             );
         }
-        (recent_meta(entry, true), false)
+        // A readable transcript has no status line: duration and preset live
+        // on the title, labels underneath, and language/speakers/completion
+        // time are deliberately omitted.
+        (String::new(), false)
     }
 
     /// The Export row's hover list: one direct export per format.
@@ -21258,6 +21304,18 @@ fn language_label(code: &str) -> String {
     }
 }
 
+/// Duration and preset for a finished transcript's title line.
+fn row_title_meta(entry: &RecentEntry) -> String {
+    let mut parts = Vec::new();
+    if let Some(duration) = entry.duration {
+        parts.push(format_secs(duration));
+    }
+    if let Some(preset) = entry.preset.as_deref().map(preset_label) {
+        parts.push(preset);
+    }
+    parts.join(" \u{00b7} ")
+}
+
 /// The settings chip for a row: the preset plus the language actually used.
 fn settings_label(entry: &RecentEntry) -> Option<String> {
     let preset = preset_label(entry.preset.as_deref()?);
@@ -21289,24 +21347,6 @@ fn transcript_differs_from_original(transcript: &Path) -> bool {
         (Ok(current), Ok(original)) => current != original,
         _ => false,
     }
-}
-
-fn recent_meta(entry: &RecentEntry, transcript_present: bool) -> String {
-    if !transcript_present {
-        return "Transcript missing".to_string();
-    }
-    let mut parts = Vec::new();
-    if let Some(duration) = entry.duration {
-        parts.push(format_secs(duration));
-    }
-    if let Some(speakers) = entry.speakers {
-        parts.push(format!(
-            "{speakers} {}",
-            if speakers == 1 { "speaker" } else { "speakers" }
-        ));
-    }
-    parts.push(clock_time(entry.finished_at));
-    parts.join(" \u{00b7} ")
 }
 
 /// A day heading for the history list: "Today", "Yesterday" or "Nov 3".
@@ -24682,29 +24722,17 @@ mod tests {
     }
 
     #[test]
-    fn recent_meta_names_duration_speakers_and_time() {
+    fn row_title_meta_shows_duration_and_preset_only() {
         let entry = RecentEntry {
-            audio: Some(PathBuf::from("/media/talk.mp3")),
-            transcript: Some(PathBuf::from("/media/talk.txt")),
-            finished_at: 1_600_000_000,
             duration: Some(95.0),
+            preset: Some("balanced".to_string()),
+            language_requested: Some("en".to_string()),
             speakers: Some(2),
-        ..Default::default()
+            finished_at: 1_600_000_000,
+            ..Default::default()
         };
-        let meta = recent_meta(&entry, true);
-        assert!(
-            meta.starts_with("1:35 \u{00b7} 2 speakers \u{00b7} "),
-            "{meta}"
-        );
-        assert!(meta.ends_with(&clock_time(entry.finished_at)), "{meta}");
-
-        let one = RecentEntry {
-            duration: None,
-            speakers: Some(1),
-            ..entry.clone()
-        };
-        assert!(recent_meta(&one, true).contains("1 speaker"));
-        assert_eq!(recent_meta(&entry, false), "Transcript missing");
+        assert_eq!(row_title_meta(&entry), "1:35 \u{00b7} Balanced");
+        assert_eq!(row_title_meta(&RecentEntry::default()), "");
     }
 
     #[test]
