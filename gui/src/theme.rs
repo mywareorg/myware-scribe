@@ -322,8 +322,8 @@ impl Scheme {
             muted: Color::from_rgb(0.659, 0.659, 0.659), // Gray 40  #a8a8a8
             on_accent: Color::from_rgb(0.086, 0.086, 0.086), // Gray 100
             speaker_colors: [
-                Color::from_rgb(21.0 / 255.0, 128.0 / 255.0, 61.0 / 255.0), // green 700
-                Color::from_rgb(126.0 / 255.0, 34.0 / 255.0, 206.0 / 255.0), // purple 700
+                Color::from_rgb(29.0 / 255.0, 78.0 / 255.0, 216.0 / 255.0), // blue 700
+                Color::from_rgb(190.0 / 255.0, 18.0 / 255.0, 60.0 / 255.0), // rose 700
                 Color::from_rgb(194.0 / 255.0, 65.0 / 255.0, 12.0 / 255.0), // orange 700
                 Color::from_rgb(146.0 / 255.0, 64.0 / 255.0, 14.0 / 255.0), // amber 800
                 Color::from_rgb(63.0 / 255.0, 98.0 / 255.0, 18.0 / 255.0),  // lime 800
@@ -336,8 +336,8 @@ impl Scheme {
             // A brighter yellow than the amber ramp: that ramp is too close to
             // the dark panel's warm greys to read as a filled star.
             star: Color::from_rgb(1.0, 212.0 / 255.0, 59.0 / 255.0),
-            sms0: Color::from_rgb(21.0 / 255.0, 128.0 / 255.0, 61.0 / 255.0),
-            sms1: Color::from_rgb(126.0 / 255.0, 34.0 / 255.0, 206.0 / 255.0),
+            sms0: Color::from_rgb(29.0 / 255.0, 78.0 / 255.0, 216.0 / 255.0),
+            sms1: Color::from_rgb(190.0 / 255.0, 18.0 / 255.0, 60.0 / 255.0),
             warn_tint: Color::from_rgba(0.471, 0.663, 1.0, 0.18),
             search_hl: Color::from_rgba(0.945, 0.761, 0.106, 0.35),
             search_active: Color::from_rgba(0.945, 0.761, 0.106, 0.65),
@@ -369,12 +369,12 @@ mod tests {
     }
 
     #[test]
-    fn the_dark_transcript_starts_green_and_purple() {
+    fn the_dark_transcript_starts_blue_and_red() {
         let dark = Scheme::dark();
-        let green = dark.speaker_colors[0];
-        let purple = dark.speaker_colors[1];
-        assert!(green.g > green.r && green.g > green.b);
-        assert!(purple.r > purple.g && purple.b > purple.g);
+        let blue = dark.speaker_colors[0];
+        let red = dark.speaker_colors[1];
+        assert!(blue.b > blue.r && blue.b > blue.g);
+        assert!(red.r > red.g && red.r > red.b);
     }
 
     #[test]

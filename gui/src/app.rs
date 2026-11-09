@@ -15747,15 +15747,9 @@ impl App {
             } else {
                 scheme.timeline_bg
             },
-            // Dark mode reads the waveform as the recording's energy, not its
-            // success, so it draws in the warning red; light mode keeps green.
-            wave: if locked {
-                scheme.muted
-            } else if theme::is_dark_scheme(scheme) {
-                scheme.danger
-            } else {
-                scheme.green
-            },
+            // The waveform stays green in both palettes; only a locked player
+            // greys it out.
+            wave: if locked { scheme.muted } else { scheme.green },
             playhead_color: if locked { scheme.muted } else { scheme.ink },
             enabled,
             zoom: self.waveform_zoom,
