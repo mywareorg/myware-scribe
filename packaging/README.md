@@ -19,6 +19,10 @@ values in `identity.json`, then packs the executable and its runtime DLLs.
 The Store rejects any package whose identity does not match the reservation
 character for character, so these values are not optional.
 
+Then work through the `Before submitting` checklist in `store-listing.md`. It
+carries the copy, the screenshot set and the two texts Partner Center asks for:
+the `runFullTrust` justification and the certification notes.
+
 ## Testing locally
 
 The Store re-signs submitted packages, so no certificate is needed to upload.

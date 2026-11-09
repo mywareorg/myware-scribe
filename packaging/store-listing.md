@@ -14,56 +14,64 @@ counts in mind, they are the limits the form enforces.
 
 ## Long description
 
-    Hippo Transcribe turns interviews, meetings and voice notes into readable
-    transcripts without sending anything to a server.
+    Hippo Transcribe turns interviews, meetings and voice notes into readable,
+    speaker-labelled transcripts without sending anything to a server.
 
-    Drop in an audio or video file and it produces a transcript labelled by
-    speaker, with timestamps you can turn off. Everything runs on your own
-    computer. The transcription models download once on first launch — a few
-    hundred megabytes — and after that the app works with the network
-    disconnected. There is no account to create and no usage data to opt out
-    of.
+    Drop in audio or video and it produces a transcript you can read, search,
+    edit and export. Speech recognition and speaker separation run on your own
+    computer. The models download once on first launch — about 215 MB for the
+    standard set — and after that transcription works with the network
+    disconnected. There is no account to create and no usage data to collect.
 
     It is built for the recordings people actually have: interviews, panel
-    discussions, lectures, calls recorded on a phone. Speech recognition and
-    speaker separation run locally on the CPU, so it works on an ordinary
-    laptop without a graphics card.
-
-    A single-speaker recording is transcribed in one pass. A recording with two
-    or more speakers is split into turns first, then transcribed, so each line
-    carries the right speaker.
+    discussions, lectures and calls recorded on a phone. A single-speaker
+    recording is transcribed in one pass; a recording with two or more speakers
+    is split into turns first, so each line carries the right speaker. Language
+    detection is automatic, or you can pin a language.
 
     What you get:
-    - A .txt transcript, with or without timestamps, saved beside the audio or
-      in a folder you choose.
-    - Speaker labels such as SPEAKER 1 and SPEAKER 2.
-    - A queue, so a folder of recordings can be left to run.
-    - Progress for each file, and a desktop notification when the batch is done.
-    - No telemetry and no network use during transcription. (1.1 adds a Store
-      licence check when Pro can actually be purchased.)
-
-    The first run downloads the model files once, with progress in the app;
-    after that transcription needs no internet connection. Long recordings take
-    time on a CPU; expect roughly the length of the recording again for an hour
-    of audio.
+    - A queue that keeps its rows after a run, so you can see what was
+      processed. Each transcript lands in History the moment its file finishes,
+      marked unread until you open it.
+    - Export from the Publish menu as plain text, SubRip (.srt) or WebVTT (.vtt)
+      subtitles, Markdown, CSV or Word — with timestamps you can show or hide.
+    - One-document reports: the transcript, a participant section with how long
+      each speaker talked, and optionally a summary of the key points, saved as
+      PDF, Word or plain text.
+    - Inline line editing, speaker renaming, a custom dictionary for names and
+      jargon, and freeform labels for organising transcripts.
+    - Playback with word-level highlighting, a waveform that doubles as a seek
+      bar, and a playback speed control.
+    - Recording from the microphone with a three-second countdown, then
+      transcription of the take.
+    - Light and dark themes, and a desktop notification when the whole queue is
+      done.
 
     The free version handles any number of files, one speaker at a time, with
-    the Balanced model. Pro adds the Speed and Accuracy models, speaker labels,
-    batch runs, transcript editing, playback scrubbing and a briefing that
-    summarises a finished transcript with cited action items; it arrives in 1.1,
-    and until then the 7-day trial inside the app shows what it adds.
+    the Balanced model, and includes copy, save, search and export. Pro adds the
+    Speed and Accuracy models, speaker labels, batch runs, transcript editing,
+    playback and the summary. In this release Pro is a one-off 7-day trial
+    started in the app: there is no purchase yet, and when the trial ends the
+    free version carries on working unchanged.
+
+    Everything stays on the machine: audio files, transcripts, models and logs.
+    The only network use is downloading the models. There is no telemetry and
+    nothing is uploaded.
 
 ## Feature bullets
 
     - Speaker-labelled transcripts from interviews, meetings and notes
-    - Works offline once the models have downloaded
+    - Works offline once the models have downloaded (about 215 MB once)
     - No account, no sign-in, no telemetry
+    - Export as text, .srt or .vtt subtitles, Markdown, CSV or Word
+    - One-document reports with a participant table and an optional summary
+    - Timestamps on or off, per export and per report
+    - Batch queue for whole folders; finished rows stay visible
+    - History marks new transcripts unread until you open them
+    - Inline editing, speaker renaming and a custom dictionary
+    - Word-level karaoke playback and waveform seeking
     - Automatic language detection, or pin a language
-    - Timestamps on or off, per export
-    - Batch queue for whole folders of recordings
-    - Transcript saved as .txt beside the audio or in a chosen folder
-    - Re-runs reuse cached results for unchanged audio
-    - Desktop notification when a run finishes
+    - Light and dark themes, and a notification when the queue finishes
     - Logs stay on the machine, and the folder opens from Settings
 
 ## Search terms (seven, one per line)
@@ -81,7 +89,9 @@ counts in mind, they are the limits the form enforces.
 - OS: Windows 10 version 1809 (build 17763) or later, Windows 11.
 - Architecture: x64.
 - Memory: 4 GB minimum, 8 GB recommended.
-- Disk: about 2 GB for models, plus room for transcripts.
+- Disk: about 250 MB for the standard model set, or about 600 MB for the
+  accuracy model; the optional summary model adds about 1.1 GB. Plus room for
+  your transcripts and exports.
 - Graphics: not required; this release runs inference on the CPU.
 
 ## Support and policy
@@ -92,6 +102,38 @@ counts in mind, they are the limits the form enforces.
   (the `pages` job in `.gitlab-ci.yml` publishes `PRIVACY.md` there on every push
   to `main`; confirm Pages is enabled for the project).
 - Copyright: `(c) 2026 Sean Wu`.
+
+## Restricted capability and certification notes
+
+Paste the justification into Partner Center > Properties > Restricted
+capabilities when the `runFullTrust` capability is flagged.
+
+    Hippo Transcribe is a packaged Win32 desktop application
+    (Windows.FullTrustApplication). Full trust is needed to read the audio and
+    video files the user picks from any folder, write transcripts, exports and
+    reports beside them or to a folder the user chooses, load its native speech
+    recognition and speaker separation DLLs from the package, and keep the
+    downloaded models in its own local application data. The microphone
+    capability is used only while the user is recording, behind a visible
+    countdown and stop control. Audio is never uploaded; all processing is
+    local.
+
+Certification notes to paste into the submission:
+
+    - First launch downloads the speech recognition models (about 215 MB for
+      the standard set) with progress shown in the app. Transcription works
+      offline afterwards; with no network the app explains that the models are
+      missing. The short sample shipped in the package, sample-short.mp3, gives
+      a quick pass.
+    - This is a CPU build. Expect roughly real time: a minute of audio takes
+      about a minute on a modern laptop, longer on an older one.
+    - The microphone capability is exercised by Record: a three-second
+      countdown, then capture, then a Stop control.
+    - Pro features (speaker labels, batch runs, editing, playback, summary)
+      are unlocked by a 7-day trial started in the app. There is no purchase in
+      this release and no add-on is attached to the submission.
+    - Files are written only to the app's own data folder and to locations the
+      user chooses.
 
 ## Screenshot shot list
 
@@ -131,13 +173,10 @@ captures. The Store needs at least one image and accepts up to ten, each at leas
 - [ ] Confirm `packaging/identity.json` still matches Partner Center character
       for character. Current values are `SeanWu.HippoTranscribe`,
       `CN=6862352A-51D9-40F2-9242-0F769B2F87AB`, display name `Sean Wu`.
-- [ ] Paywall: 1.0 ships as a preview. The Pro surfaces stay visible (header
-      chip, locked-feature toasts, the nudge after a Free run) and the dialog
-      offers the 7-day trial, but no "Buy Pro" button is shown because there is
-      no Store entitlement provider yet; the copy says Pro arrives in 1.1. The
-      listing must therefore promise a trial and features, not a purchase — do
-      not add a price, a "buy" call to action or a Pro price to the listing
-      until 1.1 lands with the durable add-on.
+- [ ] Confirm the Pro story before publishing: 1.0 ships as a preview with a
+      one-off 7-day trial and no purchase. The listing promises the trial and
+      the features, not a purchase, and attaches no add-on. Add a price or a
+      "buy" call to action only when a later release ships the Store add-on.
 - [ ] Complete the IARC questionnaire, the age-rating section and the system
       requirements block.
 - [ ] Upload the `.msix`, then submit for certification.
@@ -148,7 +187,6 @@ captures. The Store needs at least one image and accepts up to ten, each at leas
 have downloaded" is accurate: the first launch fetches the model files, and
 transcription itself makes no network requests. Mention the one-time download
 wherever offline use is described, so the Store listing cannot be read as
-promising an offline install. The Store licence check happens only when someone
-buys or restores Pro. Do not use "never phones home", "100% offline" or
+promising an offline install. Do not use "never phones home", "100% offline" or
 "HIPAA compliant" anywhere in the listing; the privacy policy says "HIPAA
 inspired" instead.

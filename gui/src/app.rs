@@ -16982,7 +16982,7 @@ impl App {
             (
                 "Transcription models are missing".to_string(),
                 format!(
-                    "Missing: {missing}. One-time download, about 650 MB. Audio never leaves this device."
+                    "Missing: {missing}. One-time download. Audio never leaves this device."
                 ),
             )
         };
