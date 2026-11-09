@@ -1461,7 +1461,6 @@ pub enum Message {
     /// Toggle a label in the Favorites filter.
     ToggleLabelFilter(String),
     /// Clear every active label filter.
-    ClearLabelFilter,
     /// Show the version panel for a history row.
     OpenVersions(PaneTab, usize),
     /// Rebuild history rows from the manifests in the save location.
@@ -6507,10 +6506,6 @@ impl App {
                 } else {
                     self.label_filter.push(id);
                 }
-                Task::none()
-            }
-            Message::ClearLabelFilter => {
-                self.label_filter.clear();
                 Task::none()
             }
             Message::OpenVersions(tab, index) => {
@@ -13570,6 +13565,11 @@ impl App {
             for label in chunk {
                 let active = self.label_filter.contains(&label.id);
                 let color = speaker_palette(label.color as usize, &scheme);
+                let on_color = if theme::is_dark_scheme(&scheme) {
+                    scheme.text
+                } else {
+                    scheme.on_accent
+                };
                 let id = label.id.clone();
                 line = line.push(
                     button(
@@ -13577,11 +13577,7 @@ impl App {
                             text(label.name.clone())
                                 .size(10)
                                 .wrapping(NO_WRAP)
-                                .color(if active {
-                                    scheme.on_accent
-                                } else {
-                                    scheme.text
-                                }),
+                                .color(if active { on_color } else { scheme.text }),
                         )
                         .padding([1, 6]),
                     )
@@ -13589,7 +13585,7 @@ impl App {
                     .on_press(Message::ToggleLabelFilter(id))
                     .style(move |theme, status| {
                         if active {
-                            color_button(color, scheme.on_accent)(theme, status)
+                            color_button(color, on_color)(theme, status)
                         } else {
                             pill_button_secondary(theme, status)
                         }
@@ -13597,13 +13593,6 @@ impl App {
                 );
             }
             rows = rows.push(line);
-        }
-        if !self.label_filter.is_empty() {
-            rows = rows.push(
-                action_text("Clear filter")
-                    .on_press(Message::ClearLabelFilter)
-                    .style(pill_button_secondary),
-            );
         }
         Some(rows.into())
     }
@@ -13624,9 +13613,6 @@ impl App {
                 text(names.join(", "))
                     .size(theme::TEXT_XS)
                     .color(scheme.muted),
-                action_text("Clear filter")
-                    .on_press(Message::ClearLabelFilter)
-                    .style(pill_button_secondary),
             ]
             .spacing(6)
             .align_x(iced::Alignment::Center),
@@ -13892,7 +13878,15 @@ impl App {
         .align_y(iced::Alignment::Center)
         .width(Length::Fill);
         if edited {
-            let edited_color = if locked { scheme.muted } else { scheme.blue };
+            let edited_color = if locked {
+                scheme.muted
+            } else if theme::is_dark_scheme(&scheme) {
+                scheme.blue
+            } else {
+                // The light palette's blue is a bright cyan; mix it toward ink
+                // so the pencil and its label read against white.
+                theme::mix(scheme.blue, scheme.ink, 0.6)
+            };
             // U+270E is not in the UI text font, so it rendered as tofu. Use
             // the bundled icon font's pencil instead.
             meta_row = meta_row
@@ -16840,7 +16834,11 @@ impl App {
                     text(label.name.clone())
                         .size(10)
                         .wrapping(NO_WRAP)
-                        .color(scheme.on_accent),
+                        .color(if theme::is_dark_scheme(&scheme) {
+                            scheme.text
+                        } else {
+                            scheme.on_accent
+                        }),
                 )
                 .padding([1, 5])
                 .style(move |_theme| container::Style {
@@ -16886,16 +16884,19 @@ impl App {
         for label in &self.labels {
             let on = assigned.contains(&label.id);
             let color = speaker_palette(label.color as usize, &scheme);
-            let marker = if on { "\u{2713}" } else { "\u{25cb}" };
+            let marker = if on { ICON_CHECK } else { ICON_CIRCLE };
+            let marker_color = if on { scheme.green } else { scheme.muted };
             let line = row![
-                text(marker)
-                    .size(12)
-                    .color(if on { scheme.green } else { scheme.muted }),
+                icon_colored(marker, 11.0, marker_color),
                 container(
                     text(label.name.clone())
                         .size(11)
                         .wrapping(NO_WRAP)
-                        .color(scheme.on_accent),
+                        .color(if theme::is_dark_scheme(&scheme) {
+                            scheme.text
+                        } else {
+                            scheme.on_accent
+                        }),
                 )
                 .padding([1, 6])
                 .style(move |_theme| container::Style {
