@@ -298,8 +298,13 @@ fn publish_menu_inset() -> f32 {
     HEADER_PAD_X
 }
 
-fn view_menu_inset() -> f32 {
-    HEADER_PAD_X + PUBLISH_BUTTON_WIDTH + HEADER_GAP + EDIT_BUTTON_WIDTH + HEADER_GAP
+fn view_menu_inset(queue_tab: bool) -> f32 {
+    if queue_tab {
+        // View is the only menu there, so it ends the row itself.
+        HEADER_PAD_X
+    } else {
+        HEADER_PAD_X + PUBLISH_BUTTON_WIDTH + HEADER_GAP + EDIT_BUTTON_WIDTH + HEADER_GAP
+    }
 }
 
 
@@ -5111,6 +5116,10 @@ impl App {
             }
             Message::ToggleEditMode => {
                 self.header_menu = None;
+                // The queue tab carries no editing controls.
+                if self.pane_tab == PaneTab::Queue {
+                    return Task::none();
+                }
                 if !self.can(license::Feature::Editing) {
                     self.toast = Some(("Editing is a Pro feature".to_string(), Instant::now()));
                     return Task::none();
@@ -6885,6 +6894,14 @@ impl App {
                 self.queue_hover = None;
                 self.row_menu = None;
                 self.row_submenu = None;
+                // The queue tab has no editing controls: the mode ends with the
+                // tab it belongs to, and its panel goes with it.
+                if tab == PaneTab::Queue {
+                    self.edit_mode = false;
+                    self.commit_inline_edit(false);
+                }
+                self.header_menu = None;
+                self.publish_export_open = false;
                 self.favorite_drag = None;
                 self.favorite_hover = None;
                 self.favorite_pointer = None;
@@ -9782,6 +9799,10 @@ impl App {
         // Transcribing is queue work, including a history entry re-run.
         self.version_preview = None;
         self.pane_tab = PaneTab::Queue;
+        // The queue tab has no editing controls; an open line is written back
+        // before its panel leaves the screen.
+        self.edit_mode = false;
+        self.commit_inline_edit(false);
         self.recent_hover = None;
         let has_pending = self
             .queue
@@ -10863,6 +10884,15 @@ impl App {
     /// point in the text's own coordinates - once the editor exists and has
     /// been laid out.
     fn begin_inline_edit_at(&mut self, index: usize, caret: Option<Point>) -> Task<Message> {
+        // Editing is a transcript-tab job: the queue tab shows work, not a
+        // document to rewrite, and its rows open in History for that.
+        if self.pane_tab == PaneTab::Queue {
+            self.toast = Some((
+                "Switch to History to edit this transcript".to_string(),
+                Instant::now(),
+            ));
+            return Task::none();
+        }
         // The editor takes the keyboard; Find is no longer focused.
         self.close_find();
         if self.join_lines {
@@ -15773,6 +15803,9 @@ impl App {
     /// (join, split, delete), undo/redo, and the commit button. Inserted between
     /// the transcript header and the list while the editor is open.
     fn line_edit_panel(&self, scheme: Scheme) -> Option<Element<'_, Message>> {
+        if self.pane_tab == PaneTab::Queue {
+            return None;
+        }
         let edit = self.line_edit.as_ref()?;
         let row = edit.current_row()?;
         let index = edit.index;
@@ -15947,14 +15980,17 @@ impl App {
         .padding([5, 0])
         .style(move |theme, status| edit_mode_button_style(self.edit_mode)(theme, status))
         .into();
-        let menus: Element<Message> = row![
-            self.header_menu_button("View", HeaderMenu::View),
-            edit,
-            self.header_menu_button("Publish", HeaderMenu::Publish),
-        ]
-        .spacing(HEADER_GAP)
-        .align_y(iced::Alignment::Center)
-        .into();
+        // The queue tab is queue work: no editing, and nothing to publish from
+        // it. View still applies to the transcript it shows.
+        let mut menus = row![self.header_menu_button("View", HeaderMenu::View)];
+        if self.pane_tab != PaneTab::Queue {
+            menus = menus.push(edit);
+            menus = menus.push(self.header_menu_button("Publish", HeaderMenu::Publish));
+        }
+        let menus: Element<Message> = menus
+            .spacing(HEADER_GAP)
+            .align_y(iced::Alignment::Center)
+            .into();
 
         let meta = self.shown_item_meta();
         let mut identity = row![
@@ -19348,7 +19384,10 @@ impl App {
                 card_menu_layer(self.publish_menu(&scheme), publish_menu_inset())
             }
             Some(HeaderMenu::View) if card_menu_open => {
-                card_menu_layer(self.view_menu(&scheme), view_menu_inset())
+                card_menu_layer(
+                    self.view_menu(&scheme),
+                    view_menu_inset(self.pane_tab == PaneTab::Queue),
+                )
             }
             _ => container(horizontal_space())
                 .width(Length::Fill)
@@ -27817,9 +27856,11 @@ mod tests {
         // is supposed to match.
         assert_eq!(publish_menu_inset(), HEADER_PAD_X);
         assert_eq!(
-            view_menu_inset() - publish_menu_inset(),
+            view_menu_inset(false) - publish_menu_inset(),
             PUBLISH_BUTTON_WIDTH + HEADER_GAP + EDIT_BUTTON_WIDTH + HEADER_GAP
         );
+        // On the queue tab View ends the row on its own.
+        assert_eq!(view_menu_inset(true), HEADER_PAD_X);
     }
 
     #[test]
@@ -28997,6 +29038,38 @@ mod tests {
             raise_modal(&mut app, modal);
             let _ = app.view();
         }
+
+        let _ = std::fs::remove_dir_all(&media);
+    }
+
+    #[test]
+    fn the_queue_tab_has_no_editing_controls() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("queue-no-edit");
+        let original = "[00:00] SPEAKER 1: one\n";
+        let (mut app, _transcript, media) = line_edit_fixture("queue-no-edit", original);
+
+        // Arrive with the mode on and a line open.
+        let _ = app.update(Message::ToggleEditMode);
+        assert!(app.edit_mode);
+        assert!(app.line_edit.is_some());
+        assert!(app.line_edit_panel(app.scheme()).is_some());
+
+        // The queue tab ends both and draws no panel.
+        let _ = app.update(Message::SelectTab(PaneTab::Queue));
+        assert!(!app.edit_mode);
+        assert!(app.line_edit.is_none());
+        assert!(app.line_edit_panel(app.scheme()).is_none());
+
+        // Nor can the mode be entered, or a line opened, from there.
+        let _ = app.update(Message::ToggleEditMode);
+        assert!(!app.edit_mode);
+        let _ = app.update(Message::EditLine(0));
+        assert!(app.line_edit.is_none());
+        assert!(app
+            .toast
+            .as_ref()
+            .is_some_and(|(text, _)| text.contains("Switch to History")));
 
         let _ = std::fs::remove_dir_all(&media);
     }
