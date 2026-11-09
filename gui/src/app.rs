@@ -286,25 +286,19 @@ const HEADER_BADGE_WIDTH: f32 = 26.0;
 /// widths of the buttons to its left, so these must be the widths the buttons
 /// are actually given.
 const PUBLISH_BUTTON_WIDTH: f32 = 96.0;
-const EDIT_BUTTON_WIDTH: f32 = 78.0;
 const VIEW_BUTTON_WIDTH: f32 = 84.0;
 const HELP_BUTTON_WIDTH: f32 = 78.0;
 
-/// Left offsets of the four menus. The header starts
-/// `[Publish][Edit][View][Help]`, so Publish's menu hangs from the card's own
-/// padding and each later one sits a button and a gap further right. The menu
-/// layer aligns its child to the start, so these are distances from the card's
-/// left edge.
+/// Left offsets of the transcript card's menus. The header starts
+/// `[Publish][View]`, so Publish's menu hangs from the card's own padding and
+/// View sits a button and a gap further right. The menu layer aligns its child
+/// to the start, so these are distances from the card's left edge.
 fn publish_menu_offset() -> f32 {
     HEADER_PAD_X
 }
 
-fn edit_menu_offset() -> f32 {
-    publish_menu_offset() + PUBLISH_BUTTON_WIDTH + theme::SPACE_SM
-}
-
 fn view_menu_offset() -> f32 {
-    edit_menu_offset() + EDIT_BUTTON_WIDTH + theme::SPACE_SM
+    publish_menu_offset() + PUBLISH_BUTTON_WIDTH + theme::SPACE_SM
 }
 
 
@@ -1283,7 +1277,6 @@ impl ViewShortcut {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HeaderMenu {
     Publish,
-    Edit,
     View,
     Help,
 }
@@ -1299,7 +1292,6 @@ pub enum HeaderMenu {
 /// and tooltips alone, so it is tracked separately (`header_menu`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Modal {
-    Reset,
     /// The Clear history confirmation.
     ClearHistory,
     Summary,
@@ -1372,7 +1364,6 @@ pub enum Message {
     LockedSpeakers,
     LockedGpu,
     LockedPlayer,
-    LockedRename,
     FeatureAdvance,
     PurchasePro,
     RestorePro,
@@ -1403,9 +1394,6 @@ pub enum Message {
     ToggleHeaderMenu(HeaderMenu),
     CloseHeaderMenu,
     /// Show the Reset warning; nothing is reverted until it is confirmed.
-    RequestResetTranscript,
-    ConfirmResetTranscript,
-    CloseResetConfirm,
     /// Show the run options (save location, preset, speakers, acceleration)
     /// before starting.
     OpenRunSetup,
@@ -1487,7 +1475,6 @@ pub enum Message {
     /// Open the report options.
     OpenReport,
     DownloadBriefingModel,
-    LockedBriefing,
     EditLine(usize),
     FlipLineSpeaker(usize),
     /// The line editor's speaker picker opened or closed its menu.
@@ -1900,7 +1887,6 @@ pub struct App {
     karaoke_all: Vec<Vec<Word>>,
     karaoke_words: Vec<Word>,
     summary_open: bool,
-    pending_rename: bool,
     completion_pending: bool,
     rename_open: bool,
     rename_fields: Vec<(String, String)>,
@@ -1941,7 +1927,6 @@ pub struct App {
     /// The transcript header's open menu, if any. One at a time.
     header_menu: Option<HeaderMenu>,
     /// The Reset warning dialog is showing.
-    reset_confirm: bool,
     /// The Clear history confirmation is up.
     clear_confirm: bool,
     /// The Transcribe/Retranscribe setup dialog is showing.
@@ -2083,6 +2068,8 @@ pub struct App {
     report_open: bool,
     /// What the report options are set to produce.
     report: ReportOptions,
+    /// A report is waiting on a summary it asked for.
+    report_after_summary: bool,
     /// The export format list nested under Publish → Export Transcript, open
     /// while the pointer is on that row.
     publish_export_open: bool,
@@ -2301,7 +2288,6 @@ impl App {
             karaoke_all: Vec::new(),
             karaoke_words: Vec::new(),
             summary_open: false,
-            pending_rename: false,
             completion_pending: false,
             rename_open: false,
             rename_fields: Vec::new(),
@@ -2334,7 +2320,6 @@ impl App {
             transcript_offset: 0.0,
             transcript_at_bottom: true,
             header_menu: None,
-            reset_confirm: false,
             clear_confirm: false,
             run_setup_open: false,
             editing_tips: settings.editing_tips,
@@ -2411,6 +2396,7 @@ impl App {
             pending_report: None,
             report_open: false,
             report: ReportOptions::default(),
+            report_after_summary: false,
             publish_export_open: false,
             pending_export: None,
             custom_speakers: Vec::new(),
@@ -3703,10 +3689,6 @@ impl App {
     /// Pro builds keep a finished transcript on screen during a new run.
     fn keeps_finished_view(&self) -> bool {
         !self.shows(license::Audience::FreeOnly) && self.viewing_completed_item()
-    }
-
-    fn completed_count(&self) -> usize {
-        self.batch_summary.len()
     }
 
     /// A press on the line itself: the first click seeks, the second opens the
@@ -5121,7 +5103,7 @@ impl App {
                 if !self.popup_open()
                     && matches!(
                         self.header_menu,
-                        Some(HeaderMenu::Publish | HeaderMenu::Edit | HeaderMenu::View)
+                        Some(HeaderMenu::Publish | HeaderMenu::View)
                     )
                 {
                     self.header_menu = None;
@@ -5173,21 +5155,6 @@ impl App {
                     return Task::none();
                 }
                 self.start();
-                Task::none()
-            }
-            Message::RequestResetTranscript => {
-                self.header_menu = None;
-                if self.reset_available() {
-                    self.reset_confirm = true;
-                }
-                Task::none()
-            }
-            Message::ConfirmResetTranscript => {
-                self.reset_confirm = false;
-                self.reset_transcript()
-            }
-            Message::CloseResetConfirm => {
-                self.reset_confirm = false;
                 Task::none()
             }
             Message::ToggleJoinLines => {
@@ -5938,13 +5905,6 @@ impl App {
                 self.toast = Some(("Player is a Pro feature".to_string(), Instant::now()));
                 Task::none()
             }
-            Message::LockedRename => {
-                self.toast = Some((
-                    "Rename speakers and editing is a Pro feature".to_string(),
-                    Instant::now(),
-                ));
-                Task::none()
-            }
             Message::LockedSpeakers => {
                 self.toast = Some((
                     "Speaker labels are a Pro feature.".to_string(),
@@ -6043,7 +6003,9 @@ impl App {
                     return Task::none();
                 }
                 self.open_briefing();
-                Task::none()
+                // A report waiting on a summary resumes here when the summary
+                // came from the cache rather than a run.
+                self.resume_report_after_summary()
             }
             Message::CloseBriefing => {
                 if let Some(modal) = self.open_modal() {
@@ -6080,7 +6042,9 @@ impl App {
                 Task::none()
             }
             Message::ReportToggled(toggle) => {
-                let summary_ready = matches!(self.briefing, Some(BriefingState::Ready { .. }));
+                // Summarizing on demand is the Pro feature; whether one already
+                // exists only changes what the dialog promises.
+                let can_summarize = self.can(license::Feature::Briefing);
                 match toggle {
                     ReportToggle::Timestamps => {
                         self.report.timestamps = !self.report.timestamps
@@ -6091,7 +6055,7 @@ impl App {
                     ReportToggle::Participants => {
                         self.report.participants = !self.report.participants
                     }
-                    ReportToggle::Summary if summary_ready => {
+                    ReportToggle::Summary if can_summarize => {
                         self.report.summary = !self.report.summary
                     }
                     ReportToggle::Summary => {}
@@ -6102,14 +6066,10 @@ impl App {
                 self.report.format = format;
                 Task::none()
             }
-            Message::SaveReport => self.save_report(),
+            Message::SaveReport => self.save_report_or_summarize(),
             Message::ReportPicked(path) => self.finish_report(path),
             Message::DownloadBriefingModel => {
                 self.start_model_download_for(vec!["briefing"]);
-                Task::none()
-            }
-            Message::LockedBriefing => {
-                self.toast = Some(("Summarize Transcript is a Pro feature".to_string(), Instant::now()));
                 Task::none()
             }
             Message::DownloadModels => {
@@ -6919,7 +6879,6 @@ impl App {
                         self.current_index = None;
                         self.completion_pending = false;
                         self.summary_open = false;
-                        self.pending_rename = false;
                         self.pending_tips = false;
                         self.run_start = None;
                         self.elapsed_final = None;
@@ -6966,7 +6925,6 @@ impl App {
                     self.scroll_seek = false;
                     self.output_txt = None;
                     self.summary_open = false;
-                    self.pending_rename = false;
                     self.pending_tips = false;
                     self.rename_open = false;
                     self.rename_fields.clear();
@@ -7337,7 +7295,7 @@ impl App {
                         RecordPhase::Preparing | RecordPhase::Transcribing => {}
                     }
                 }
-                self.poll_briefing();
+                let briefing_resume = self.poll_briefing();
                 if self.feature_deck_auto_advance() {
                     if self.feature_slide_at.elapsed() >= Duration::from_secs(7) {
                         self.feature_slide = (self.feature_slide + 1) % FEATURE_DECK.len();
@@ -7347,6 +7305,9 @@ impl App {
                     self.feature_slide_at = Instant::now();
                 }
                 let mut tasks = vec![self.drain_events()];
+                if let Some(task) = briefing_resume {
+                    tasks.push(task);
+                }
                 self.drain_model_download();
                 self.drain_calibration();
                 if let Some(calibration) = &mut self.calibration {
@@ -7732,14 +7693,14 @@ impl App {
     }
 
     /// Move helper events into the dialog, and settle when it finishes.
-    fn poll_briefing(&mut self) {
+    fn poll_briefing(&mut self) -> Option<Task<Message>> {
         let events: Vec<backend::BriefingEvent> = match self.briefing.as_ref() {
             Some(BriefingState::Running(run)) => run
                 .events
                 .lock()
                 .map(|mut queue| queue.drain(..).collect())
                 .unwrap_or_default(),
-            _ => return,
+            _ => return None,
         };
         let mut terminal: Option<Result<(), String>> = None;
         if let Some(BriefingState::Running(run)) = self.briefing.as_mut() {
@@ -7758,10 +7719,10 @@ impl App {
             }
         }
         let Some(result) = terminal else {
-            return;
+            return None;
         };
         let Some(BriefingState::Running(run)) = self.briefing.take() else {
-            return;
+            return None;
         };
         let response = std::fs::read_to_string(&run.response);
         let _ = std::fs::remove_file(&run.response);
@@ -7789,6 +7750,16 @@ impl App {
             },
             Err(message) => BriefingState::Failed(message),
         });
+        // A failed summary cannot carry a report: drop the request so a later
+        // briefing cannot spring a save dialog.
+        if matches!(self.briefing, Some(BriefingState::Failed(_))) {
+            self.report_after_summary = false;
+        }
+        if self.report_after_summary && matches!(self.briefing, Some(BriefingState::Ready { .. }))
+        {
+            return Some(self.resume_report_after_summary());
+        }
+        None
     }
 
     /// Export the briefing in `format`. The destination comes from the native
@@ -7832,6 +7803,39 @@ impl App {
             format,
             suggested,
         })
+    }
+
+    /// Save the report, producing the summary first when the options ask for
+    /// one that does not exist yet. The briefing dialog is the progress surface
+    /// for that step; the save dialog follows once it lands.
+    fn save_report_or_summarize(&mut self) -> Task<Message> {
+        let ready = matches!(self.briefing, Some(BriefingState::Ready { .. }));
+        if self.report.summary && !ready {
+            if !self.can(license::Feature::Briefing) {
+                self.report.summary = false;
+                return self.save_report();
+            }
+            self.report_open = false;
+            self.report_after_summary = true;
+            return self.update(Message::OpenBriefing);
+        }
+        self.save_report()
+    }
+
+    /// Continue a report whose summary had to be produced first.
+    fn resume_report_after_summary(&mut self) -> Task<Message> {
+        if !self.report_after_summary
+            || !matches!(self.briefing, Some(BriefingState::Ready { .. }))
+        {
+            return Task::none();
+        }
+        self.report_after_summary = false;
+        // Build the document, then drop the progress dialog: the report is the
+        // deliverable, and the summary lives inside it.
+        let task = self.save_report();
+        self.briefing = None;
+        self.briefing_export_open = false;
+        task
     }
 
     /// Render the report from the options and ask where to save it.
@@ -7966,21 +7970,8 @@ impl App {
 
     /// Whether Reset has somewhere to go: the sibling copy `write_transcript_file`
     /// keeps before the first edit. Without an edit there is no earlier state.
-    fn reset_available(&self) -> bool {
-        if !self.can(license::Feature::Editing) {
-            return false;
-        }
-        if self.selected_view.is_none() && matches!(self.status, Status::Running) {
-            return false;
-        }
-        self.shown_output()
-            .map(unedited_path)
-            .is_some_and(|path| path.is_file())
-    }
-
-    /// Revert the edited document to `<stem>-unedited.txt`, the copy kept when
-    /// the transcript was first rewritten. The revert is one undo step, so a
-    /// Reset made by mistake can be taken back like any other edit.
+    /// Put the shown document back to its pre-edit copy. Reverting a previewed
+    /// version uses this too: the copy is the version's own untouched text.
     fn reset_transcript(&mut self) -> Task<Message> {
         self.commit_inline_edit(false);
         let Some(output) = self.shown_output().map(Path::to_path_buf) else {
@@ -8684,7 +8675,7 @@ impl App {
         self.version_preview = None;
         self.versions_open = None;
         let view = self.open_recent(row, None);
-        let reset = self.update(Message::RequestResetTranscript);
+        let reset = self.reset_transcript();
         Task::batch([view, reset])
     }
 
@@ -9474,13 +9465,12 @@ impl App {
         }))
     }
 
-    /// Show the summary (and queue the rename dialog) after the bar reaches 100%.
+    /// Show the summary after the bar reaches 100%.
     /// Returns true when a summary was opened.
     fn present_completion(&mut self) -> bool {
         if !self.has_results() {
             return false;
         }
-        let generated = self.batch_summary.len();
         // The report always appears after a run. The paywall is reached from
         // the Pro controls, not instead of the result the user just waited for.
         self.summary_open = true;
@@ -9488,7 +9478,6 @@ impl App {
         // that shares this chain: no editing, no card.
         let editing = self.can(license::Feature::Editing);
         self.pending_tips = editing && self.editing_tips;
-        self.pending_rename = editing && generated == 1 && self.completed_count() == 1;
         self.toast = None;
         if self.notifications {
             notify("Hippo Transcribe", "Finished \u{00b7} saved locally");
@@ -15763,7 +15752,6 @@ impl App {
         // app header, not to this card, so it is not here.
         let menus: Element<Message> = row![
             self.header_menu_button("Publish", HeaderMenu::Publish),
-            self.header_menu_button("Edit", HeaderMenu::Edit),
             self.header_menu_button("View", HeaderMenu::View),
         ]
         .spacing(HEADER_GAP)
@@ -15802,7 +15790,6 @@ impl App {
         let open = self.header_menu == Some(menu);
         let width = match menu {
             HeaderMenu::Publish => PUBLISH_BUTTON_WIDTH,
-            HeaderMenu::Edit => EDIT_BUTTON_WIDTH,
             HeaderMenu::View => VIEW_BUTTON_WIDTH,
             HeaderMenu::Help => HELP_BUTTON_WIDTH,
         };
@@ -15851,17 +15838,6 @@ impl App {
                 action: has_text.then_some(Message::CopyTranscript),
             },
             MenuRow {
-                label: "Summarize Transcript",
-                key: None,
-                checked: false,
-                enabled: has_text,
-                action: has_text.then_some(if self.can(license::Feature::Briefing) {
-                    Message::OpenBriefing
-                } else {
-                    Message::LockedBriefing
-                }),
-            },
-            MenuRow {
                 label: "Generate Report\u{2026}",
                 key: None,
                 checked: false,
@@ -15903,63 +15879,6 @@ impl App {
         );
         // It hangs off the Export row: one card right, one card padding down.
         stack![menu_layer(card), menu_layer_at(submenu, width + 4.0, 8.0)].into()
-    }
-
-    /// The Edit menu: the active line first, then transcript-wide edits.
-    /// Reset is only offered when the pre-edit copy exists to go back to.
-    fn edit_menu(&self, scheme: &Scheme) -> Element<'_, Message> {
-        let scheme = *scheme;
-        let running = matches!(self.status, Status::Running);
-        let editing = self.can(license::Feature::Editing);
-        let can_rename = editing
-            && !running
-            && self.shown_output().is_some()
-            && !self.shown_lines().is_empty();
-        // Without a licence the row still explains itself rather than going dead.
-        let rename_message = if can_rename {
-            Some(Message::OpenRename)
-        } else if !editing {
-            Some(Message::LockedRename)
-        } else {
-            None
-        };
-        let reset = self.reset_available();
-        // The same gate double-click uses: an editable transcript line is
-        // present, the view is split, and no run owns the pane.
-        let can_edit_line = editing
-            && !running
-            && !self.join_lines
-            && self.shown_output().is_some()
-            && !self.shown_lines().is_empty();
-        menu_card(
-            vec![MenuSection {
-                rows: vec![
-                    MenuRow {
-                        label: "Line",
-                        key: Some("Alt+Enter"),
-                        checked: false,
-                        enabled: can_edit_line,
-                        action: can_edit_line.then_some(Message::EditActiveLine),
-                    },
-                    MenuRow {
-                        label: "Rename All",
-                        key: None,
-                        checked: false,
-                        enabled: can_rename,
-                        action: rename_message,
-                    },
-                    MenuRow {
-                        label: "Dictionary",
-                        key: None,
-                        checked: false,
-                        enabled: true,
-                        action: Some(Message::OpenVocabulary),
-                    },
-                ],
-                footer: Some(reset_edits_row(reset, scheme)),
-            }],
-            scheme,
-        )
     }
 
     /// The open View menu: the display toggles, then text zoom.
@@ -16632,9 +16551,7 @@ impl App {
     /// `view`. Escape, the pointer gate and the view all ask this one question,
     /// so they cannot disagree about which dialog is in front.
     fn open_modal(&self) -> Option<Modal> {
-        if self.reset_confirm {
-            Some(Modal::Reset)
-        } else if self.clear_confirm {
+        if self.clear_confirm {
             Some(Modal::ClearHistory)
         } else if self.summary_open {
             Some(Modal::Summary)
@@ -16680,7 +16597,6 @@ impl App {
     /// offer. While it is still testing the device it ignores the request.
     fn close_modal(&mut self, modal: Modal) -> Task<Message> {
         match modal {
-            Modal::Reset => self.reset_confirm = false,
             Modal::ClearHistory => self.clear_confirm = false,
             Modal::Summary => {
                 self.summary_open = false;
@@ -16725,6 +16641,7 @@ impl App {
                 }
                 self.briefing = None;
                 self.briefing_export_open = false;
+                self.report_after_summary = false;
             }
             Modal::Versions => self.versions_open = None,
             Modal::Labels => self.labels_open = None,
@@ -16735,8 +16652,7 @@ impl App {
     }
 
     /// What to show after a dialog in the completion chain closes: the Editing
-    /// Tips card first (unless turned off), then the Rename Speakers form if the
-    /// run was the one that called for it.
+    /// Tips card, unless turned off.
     ///
     /// The flag is re-read here rather than when it was set, so ticking the box
     /// on the card takes effect at once and an unticked box brings the card back
@@ -16749,10 +16665,6 @@ impl App {
                 self.toast = None;
                 return Task::none();
             }
-        }
-        if self.pending_rename {
-            self.pending_rename = false;
-            return self.open_rename();
         }
         Task::none()
     }
@@ -17113,30 +17025,6 @@ impl App {
         modal_card(body, 460.0, scheme)
     }
 
-    /// The reset warning. Reverting discards every edit, so it asks first and
-    /// says what it goes back to.
-    fn reset_dialog(&self, scheme: &Scheme) -> Element<'_, Message> {
-        let scheme = *scheme;
-        let body = column![
-            text("Warning").size(20),
-            text("Resetting reverts to the initial transcript.")
-                .size(theme::TEXT_SM)
-                .color(scheme.muted),
-            row![
-                horizontal_space(),
-                action_text("Cancel")
-                    .on_press(Message::CloseResetConfirm)
-                    .style(pill_button_secondary),
-                action_text("Reset")
-                    .on_press(Message::ConfirmResetTranscript)
-                    .style(color_button(scheme.danger, scheme.on_accent)),
-            ]
-            .spacing(8),
-        ]
-        .spacing(10);
-        modal_card(body, 420.0, scheme)
-    }
-
     /// The Clear history confirmation. The lists are a view over files the
     /// user already has, so the warning says the files stay.
     fn clear_history_dialog(&self, scheme: &Scheme) -> Element<'_, Message> {
@@ -17147,7 +17035,11 @@ impl App {
             text(format!(
                 "{} {} leave History, Favorites and Recordings. The files on disk are kept.",
                 count,
-                if count == 1 { "transcript will" } else { "transcripts will" }
+                if count == 1 {
+                    "transcript will"
+                } else {
+                    "transcripts will"
+                }
             ))
             .size(theme::TEXT_SM)
             .color(scheme.muted),
@@ -17660,11 +17552,12 @@ impl App {
     fn report_dialog(&self, scheme: &Scheme) -> Element<'_, Message> {
         let scheme = *scheme;
         let summary_ready = matches!(self.briefing, Some(BriefingState::Ready { .. }));
+        let can_summarize = self.can(license::Feature::Briefing);
         let mut body = column![
             text("Generate Report").size(20).color(scheme.text),
             text(
-                "One document: the transcript, the people in it and, when one \
-                 exists, the summary."
+                "One document: the transcript, the people in it and, if you \
+                 ask for it, a summary."
             )
             .size(theme::TEXT_XS)
             .color(scheme.muted),
@@ -17694,13 +17587,15 @@ impl App {
             ),
             report_switch_row(
                 "Include summary",
-                if summary_ready {
-                    "The overview and key points from Summarize Transcript."
+                if !can_summarize {
+                    "Summarizing is a Pro feature."
+                } else if summary_ready {
+                    "The overview and key points already made for this transcript."
                 } else {
-                    "Summarize the transcript first."
+                    "Summarizes the transcript first; that can take a few minutes."
                 },
-                self.report.summary && summary_ready,
-                summary_ready,
+                self.report.summary && can_summarize,
+                can_summarize,
                 Message::ReportToggled(ReportToggle::Summary),
                 scheme,
             ),
@@ -17713,29 +17608,27 @@ impl App {
             let current = self.report.format == format;
             let marker = if current { ICON_CIRCLE_FILL } else { ICON_CIRCLE };
             let ink = if current { scheme.blue } else { scheme.muted };
+            let radio = action(icon_colored(marker, 10.0, ink))
+                .padding([6, 8])
+                .style(move |theme, status| row_menu_item_style(scheme, true)(theme, status))
+                .on_press(Message::ReportFormatChanged(format));
             formats = formats.push(
-                button(
-                    container(
-                        row![
-                            icon_colored(marker, 10.0, ink),
-                            text(format.label())
-                                .size(theme::TEXT_SM)
-                                .color(scheme.text),
-                            horizontal_space(),
-                            text(format.extension())
-                                .size(theme::TEXT_XS)
-                                .color(scheme.muted),
-                        ]
-                        .spacing(theme::SPACE_SM)
-                        .align_y(iced::Alignment::Center),
-                    )
-                    .width(Length::Fill)
-                    .padding([6, 8]),
+                container(
+                    row![
+                        radio,
+                        text(format.label())
+                            .size(theme::TEXT_SM)
+                            .color(scheme.text),
+                        horizontal_space(),
+                        text(format.extension())
+                            .size(theme::TEXT_XS)
+                            .color(scheme.muted),
+                    ]
+                    .spacing(theme::SPACE_SM)
+                    .align_y(iced::Alignment::Center)
+                    .width(Length::Fill),
                 )
-                .width(Length::Fill)
-                .padding(0)
-                .on_press(Message::ReportFormatChanged(format))
-                .style(move |theme, status| row_menu_item_style(scheme, true)(theme, status)),
+                .padding([0, 2]),
             );
         }
         body = body
@@ -17746,7 +17639,7 @@ impl App {
                     action_text("Cancel")
                         .on_press(Message::CloseReport)
                         .style(pill_button_secondary),
-                    action_text("Save\u{2026}")
+                    action_text("Save to\u{2026}")
                         .on_press(Message::SaveReport)
                         .style(color_button(scheme.blue, scheme.on_accent)),
                 ]
@@ -19264,9 +19157,6 @@ impl App {
             Some(HeaderMenu::Publish) if card_menu_open => {
                 card_menu_layer(self.publish_menu(&scheme), publish_menu_offset())
             }
-            Some(HeaderMenu::Edit) if card_menu_open => {
-                card_menu_layer(self.edit_menu(&scheme), edit_menu_offset())
-            }
             Some(HeaderMenu::View) if card_menu_open => {
                 card_menu_layer(self.view_menu(&scheme), view_menu_offset())
             }
@@ -19386,7 +19276,6 @@ impl App {
 
         let dialog = match self.open_modal() {
             None => return base,
-            Some(Modal::Reset) => self.reset_dialog(&scheme),
             Some(Modal::ClearHistory) => self.clear_history_dialog(&scheme),
             Some(Modal::Summary) => self.summary_dialog(&scheme),
             Some(Modal::DeleteLine) => match self.delete_line_dialog(&scheme) {
@@ -23778,25 +23667,30 @@ fn report_switch_row<'a>(
     message: Message,
     scheme: Scheme,
 ) -> Element<'a, Message> {
-    let content = row![
-        tips_check(on, scheme),
-        column![
-            text(label)
-                .size(theme::TEXT_SM)
-                .color(if enabled { scheme.text } else { scheme.muted }),
-            text(hint).size(theme::TEXT_XS).color(scheme.muted),
-        ]
-        .spacing(1),
-    ]
-    .spacing(theme::SPACE_SM)
-    .align_y(iced::Alignment::Center)
-    .width(Length::Fill);
-    action(content)
-        .width(Length::Fill)
-        .padding([6, 8])
+    // The box is the control; the words beside it are text, not a second
+    // target, so a stray click on the label cannot change the report.
+    let check = action(tips_check(on, scheme))
+        .padding([2, 2])
         .style(move |theme, status| row_menu_item_style(scheme, enabled)(theme, status))
-        .on_press_maybe(enabled.then_some(message))
-        .into()
+        .on_press_maybe(enabled.then_some(message));
+    container(
+        row![
+            check,
+            column![
+                text(label)
+                    .size(theme::TEXT_SM)
+                    .color(if enabled { scheme.text } else { scheme.muted }),
+                text(hint).size(theme::TEXT_XS).color(scheme.muted),
+            ]
+            .spacing(1),
+        ]
+        .spacing(theme::SPACE_SM)
+        .align_y(iced::Alignment::Center)
+        .width(Length::Fill),
+    )
+    .width(Length::Fill)
+    .padding([6, 8])
+    .into()
 }
 
 /// A hairline between two menu groups.
@@ -24097,27 +23991,6 @@ fn row_menu_item_style(
             shadow: Shadow::default(),
         }
     }
-}
-
-/// The Edit menu's last row, set off by the section's rule: resetting is a
-/// destructive edit, so it reads red, and stays muted when there is nothing to
-/// go back to.
-fn reset_edits_row(reset: bool, scheme: Scheme) -> Element<'static, Message> {
-    let ink = if reset { scheme.danger } else { scheme.muted };
-    action(
-        container(
-            text("Reset Edits")
-                .size(16)
-                .wrapping(NO_WRAP)
-                .color(ink),
-        )
-        .width(Length::Fill),
-    )
-    .width(Length::Fill)
-    .padding([5, 6])
-    .style(move |theme, status| header_menu_item_style(scheme, reset)(theme, status))
-    .on_press_maybe(reset.then_some(Message::RequestResetTranscript))
-    .into()
 }
 
 /// One row of a header menu: a leading check slot that keeps every label on the
@@ -27614,12 +27487,8 @@ mod tests {
         // button widths it is supposed to match.
         assert_eq!(publish_menu_offset(), HEADER_PAD_X);
         assert_eq!(
-            edit_menu_offset() - publish_menu_offset(),
+            view_menu_offset() - publish_menu_offset(),
             PUBLISH_BUTTON_WIDTH + theme::SPACE_SM
-        );
-        assert_eq!(
-            view_menu_offset() - edit_menu_offset(),
-            EDIT_BUTTON_WIDTH + theme::SPACE_SM
         );
     }
 
@@ -27686,7 +27555,6 @@ mod tests {
         let (mut app, _transcript, media) = line_edit_fixture("all-menus", original);
         for menu in [
             HeaderMenu::Publish,
-            HeaderMenu::Edit,
             HeaderMenu::View,
             HeaderMenu::Help,
         ] {
@@ -28552,7 +28420,7 @@ mod tests {
     }
 
     #[test]
-    fn reset_warns_before_reverting_to_the_initial_transcript() {
+    fn reset_transcript_reverts_to_the_initial_copy_in_one_step() {
         let _guard = env_lock();
         let _config = ConfigEnv::new("reset-config");
         let original = "[00:00] SPEAKER 1: one\n[00:05] SPEAKER 2: two\n";
@@ -28562,23 +28430,10 @@ mod tests {
         current_row_mut(&mut app).content = text_editor::Content::with_text("changed");
         let _ = app.update(Message::DoneLineEdit);
         assert!(app.modified, "the edit should mark the transcript modified");
-        assert!(app.reset_available(), "the pre-edit copy should exist");
 
-        // The request only warns; nothing is reverted until it is confirmed.
-        let _ = app.update(Message::RequestResetTranscript);
-        assert!(app.reset_confirm);
-        assert!(app.popup_open(), "the warning is a modal");
-        assert!(app.shown_transcript().contains("changed"));
-
-        // Cancelling leaves the edit alone.
-        let _ = app.update(Message::CloseResetConfirm);
-        assert!(!app.reset_confirm);
-        assert!(app.shown_transcript().contains("changed"));
-
-        // Confirming reverts the document and the file.
-        let _ = app.update(Message::RequestResetTranscript);
-        let _ = app.update(Message::ConfirmResetTranscript);
-        assert!(!app.reset_confirm);
+        // Reverting is what the version panel's Revert uses: the document, the
+        // file and the edited flag all go back.
+        let _ = app.reset_transcript();
         assert!(!app.modified);
         assert_eq!(app.shown_transcript(), original);
         assert_eq!(std::fs::read_to_string(&transcript).unwrap(), original);
@@ -28670,8 +28525,7 @@ mod tests {
 
     /// Every dialog, so a variant added to `Modal` cannot go untested: the
     /// escape and render passes below each walk this list.
-    const ALL_MODALS: [Modal; 15] = [
-        Modal::Reset,
+    const ALL_MODALS: [Modal; 14] = [
         Modal::ClearHistory,
         Modal::Summary,
         Modal::DeleteLine,
@@ -28691,7 +28545,6 @@ mod tests {
     /// Raise one dialog the way the app would.
     fn raise_modal(app: &mut App, modal: Modal) {
         match modal {
-            Modal::Reset => app.reset_confirm = true,
             Modal::ClearHistory => app.clear_confirm = true,
             Modal::Summary => app.summary_open = true,
             Modal::DeleteLine => {
@@ -28819,7 +28672,7 @@ mod tests {
     }
 
     #[test]
-    fn the_editing_tips_follow_the_summary_before_the_rename() {
+    fn the_editing_tips_follow_the_summary() {
         let _guard = env_lock();
         let _config = ConfigEnv::new("tips-chain");
         let original = "[00:00] SPEAKER 1: one\n[00:05] SPEAKER 2: two\n";
@@ -28827,22 +28680,21 @@ mod tests {
 
         app.summary_open = true;
         app.pending_tips = true;
-        app.pending_rename = true;
 
-        // Summary -> tips -> rename, in that order, each closing handing on.
+        // Summary -> tips, and nothing after: a run no longer asks for a
+        // rename.
         let _ = app.update(Message::CloseSummary);
         assert_eq!(app.help_open, Some(HelpKind::EditingTips));
-        assert!(!app.rename_open);
 
         let _ = app.update(Message::CloseHelp);
         assert_eq!(app.help_open, None);
-        assert!(app.rename_open);
+        assert!(!app.rename_open);
 
         let _ = std::fs::remove_dir_all(&media);
     }
 
     #[test]
-    fn ticking_the_tips_box_skips_them_and_still_renames() {
+    fn ticking_the_tips_box_skips_them() {
         let _guard = env_lock();
         let _config = ConfigEnv::new("tips-off");
         let original = "[00:00] SPEAKER 1: one\n[00:05] SPEAKER 2: two\n";
@@ -28853,14 +28705,10 @@ mod tests {
 
         app.summary_open = true;
         app.pending_tips = true;
-        app.pending_rename = true;
         let _ = app.update(Message::CloseSummary);
         assert_eq!(app.help_open, None, "the card was turned off");
-        assert!(app.rename_open, "the rename still gets its turn");
 
         // The next completion does not queue the card at all.
-        app.rename_open = false;
-        app.pending_rename = false;
         app.batch_summary = vec![("talk.mp3".to_string(), backend::Stats::default())];
         assert!(app.present_completion());
         assert!(!app.pending_tips);
@@ -30420,6 +30268,66 @@ mod tests {
         let _ = app.update(Message::ReportPicked(Some(docx.clone())));
         let bytes = std::fs::read(&docx).unwrap();
         assert_eq!(&bytes[..2], b"PK", "the report must be a docx package");
+
+        let _ = std::fs::remove_dir_all(&media);
+    }
+
+    #[test]
+    fn a_report_that_asks_for_a_summary_makes_one_first() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("report-summary-chain");
+        let original = "[00:00] SPEAKER 1: one\n[00:05] SPEAKER 2: two\n";
+        let (mut app, transcript, media) = line_edit_fixture("report-summary-chain", original);
+
+        assert!(app.briefing.is_none());
+        let _ = app.update(Message::OpenReport);
+        let _ = app.update(Message::ReportToggled(ReportToggle::Summary));
+        assert!(app.report.summary);
+        let _ = app.update(Message::SaveReport);
+
+        // The summary comes first: nothing is written and the progress dialog
+        // has the screen.
+        assert!(app.pending_report.is_none());
+        assert!(app.report_after_summary);
+        assert!(app.briefing.is_some(), "the summary step should be showing");
+        assert!(!app.report_open);
+
+        // When it lands, the save prompt follows and the progress dialog closes.
+        app.briefing = Some(BriefingState::Ready {
+            briefing: Briefing {
+                overview: "Short talk.".to_string(),
+                points: vec![hippo_briefing::Item {
+                    text: "The sky is blue".to_string(),
+                    lines: vec![1],
+                }],
+                decisions: Vec::new(),
+                actions: Vec::new(),
+            },
+            lines: vec![BriefingLine {
+                start: 0.0,
+                end: Some(2.0),
+                speaker: "SPEAKER 1".to_string(),
+                text: "one".to_string(),
+            }],
+            source: Some(transcript.clone()),
+        });
+        let _ = app.resume_report_after_summary();
+
+        assert!(!app.report_after_summary);
+        assert!(
+            app.briefing.is_none(),
+            "the progress dialog gives way to the save prompt"
+        );
+        let blocks = &app
+            .pending_report
+            .as_ref()
+            .expect("the report should be waiting on its destination")
+            .blocks;
+        assert!(blocks.contains(&ReportBlock::Heading("Summary".to_string())));
+        assert!(blocks.iter().any(|block| matches!(
+            block,
+            ReportBlock::Bullet(text) if text.starts_with("The sky is blue")
+        )));
 
         let _ = std::fs::remove_dir_all(&media);
     }
