@@ -807,7 +807,7 @@ mod tests {
         write_sidecar(&transcript, &lines);
 
         let saved = sidecar::read(&transcript).expect("sidecar");
-        assert_eq!(saved.version, 3);
+        assert_eq!(saved.version, sidecar::VERSION);
         assert_eq!(saved.lines[0].text, "hello there");
         // Clamped to the turn each line starts in.
         assert_eq!(saved.lines[0].end, Some(3.0));

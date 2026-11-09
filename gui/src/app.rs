@@ -456,6 +456,16 @@ pub enum PaneTab {
     Recordings,
 }
 
+/// Stable slot for a tab's remembered focus and blink timer.
+fn pane_tab_slot(tab: PaneTab) -> usize {
+    match tab {
+        PaneTab::Queue => 0,
+        PaneTab::Favorites => 1,
+        PaneTab::History => 2,
+        PaneTab::Recordings => 3,
+    }
+}
+
 /// The visible label of each File panel tab.
 fn pane_tab_label(tab: PaneTab) -> &'static str {
     match tab {
@@ -1887,6 +1897,8 @@ pub struct App {
     add_report: Option<AddReport>,
     /// A pane changed by an action taken elsewhere: tint it for a moment.
     pane_cue: Option<PaneCue>,
+    /// Tabs that gained items from an add, each timed so the tab itself blinks.
+    tab_cues: [Option<Instant>; 4],
     /// The context menu's Export format list is showing.
     export_submenu: bool,
     batch: bool,
@@ -1909,9 +1921,15 @@ pub struct App {
     current_index: Option<usize>,
     /// Index of the completed queue item currently shown, if any.
     selected: Option<usize>,
+    /// Last focused queue row, kept while another tab is showing.
+    queue_focus: Option<usize>,
     /// Index of the history entry currently shown, if any. Retranscribe reads
     /// this when the queue has no waiting item.
     selected_recent: Option<usize>,
+    /// Last focused row in each recent tab, by its index into `recent`.
+    favorites_focus: Option<usize>,
+    history_focus: Option<usize>,
+    recordings_focus: Option<usize>,
     selected_view: Option<ItemView>,
     /// Error shown in the transcript pane when a completed item cannot load.
     view_error: Option<String>,
@@ -2186,6 +2204,7 @@ impl App {
             custom_speakers: Vec::new(),
             add_report: None,
             pane_cue: None,
+            tab_cues: [None; 4],
             export_submenu: false,
             batch: false,
             batch_paths,
@@ -2196,7 +2215,11 @@ impl App {
             current: None,
             current_index: None,
             selected: None,
+            queue_focus: None,
             selected_recent: None,
+            favorites_focus: None,
+            history_focus: None,
+            recordings_focus: None,
             selected_view: None,
             view_error: None,
             join_lines: false,
@@ -3234,6 +3257,7 @@ impl App {
         remap(&mut self.current);
         remap(&mut self.current_index);
         remap(&mut self.selected);
+        remap(&mut self.queue_focus);
         if preview {
             self.selected_view = None;
             self.view_error = None;
@@ -3760,6 +3784,7 @@ impl App {
             return Task::none();
         };
         self.selected_recent = Some(index);
+        self.save_tab_focus(self.pane_tab);
         // Opening a row is not a tab change: each list keeps its place. The
         // single-file adoption path asks for History explicitly.
         let Some(source) = Self::current_transcript(&entry)
@@ -4484,6 +4509,7 @@ impl App {
             // A cross-pane cue is timed: this keeps the loop alive until the
             // tick that clears it, so it never sticks if nothing else happens.
             || self.pane_cue.is_some()
+            || self.tab_cues.iter().any(Option::is_some)
     }
 
     /// True while a recording workflow owns the app: nothing that would change
@@ -6445,13 +6471,15 @@ impl App {
                 Task::none()
             }
             Message::SelectTab(tab) => {
+                // Save even when the tab is already showing: clicking a tab
+                // again must keep the row the user last focused, not revert to
+                // an older remembered index.
+                self.save_tab_focus(self.pane_tab);
                 self.pane_tab = tab;
-                // Entering Queue with work waiting puts the cursor on the
-                // topmost row, so the pane always has a focused item and the
-                // keyboard actions have a target.
-                if tab == PaneTab::Queue && !self.queue.is_empty() {
-                    self.selected = Some(0);
-                }
+                // Every tab restores its last focused row, or its first row
+                // when it has no remembered focus. Queue's selection is its
+                // own memory; the recent tabs keep theirs per tab.
+                self.restore_tab_focus(tab);
                 self.version_preview = None;
                 self.recent_hover = None;
                 self.row_menu = None;
@@ -7222,6 +7250,11 @@ impl App {
                     .is_some_and(|cue| cue.at.elapsed() >= PANE_CUE)
                 {
                     self.pane_cue = None;
+                }
+                for cue in &mut self.tab_cues {
+                    if cue.is_some_and(|at| at.elapsed() >= PANE_CUE) {
+                        *cue = None;
+                    }
                 }
                 Task::batch(tasks)
             }
@@ -8227,12 +8260,63 @@ impl App {
         }
     }
 
+    /// Store the current selection as the tab's remembered focus before
+    /// leaving it. Queue's `selected` is already its own memory.
+    fn save_tab_focus(&mut self, tab: PaneTab) {
+        match tab {
+            PaneTab::Favorites => self.favorites_focus = self.selected_recent,
+            PaneTab::History => self.history_focus = self.selected_recent,
+            PaneTab::Recordings => self.recordings_focus = self.selected_recent,
+            PaneTab::Queue => self.queue_focus = self.selected,
+        }
+    }
+
+    /// Put focus back on the tab's last item, or on its first item when that
+    /// item is gone or the tab has never been focused. An empty tab has no
+    /// focused item.
+    fn restore_tab_focus(&mut self, tab: PaneTab) {
+        match tab {
+            PaneTab::Queue => {
+                let remembered = self
+                    .queue_focus
+                    .filter(|index| *index < self.queue.len());
+                self.selected = remembered.or_else(|| (!self.queue.is_empty()).then_some(0));
+            }
+            PaneTab::Favorites => {
+                if self.favorites_locked() {
+                    self.selected_recent = None;
+                    return;
+                }
+                let remembered = self
+                    .favorites_focus
+                    .filter(|index| self.recent.get(*index).is_some_and(|entry| entry.favorite));
+                self.selected_recent =
+                    remembered.or_else(|| self.favorite_indices().first().copied());
+            }
+            PaneTab::History => {
+                let remembered = self
+                    .history_focus
+                    .filter(|index| *index < self.recent.len());
+                self.selected_recent =
+                    remembered.or_else(|| (!self.recent.is_empty()).then_some(0));
+            }
+            PaneTab::Recordings => {
+                let remembered = self
+                    .recordings_focus
+                    .filter(|index| self.recent.get(*index).is_some_and(|entry| entry.recording));
+                self.selected_recent =
+                    remembered.or_else(|| self.recording_indices().first().copied());
+            }
+        }
+    }
+
     /// Select a history row without opening it.
     fn select_recent_row(&mut self, tab: PaneTab, index: usize) {
         if tab == PaneTab::Queue || index >= self.recent.len() {
             return;
         }
         self.selected_recent = Some(index);
+        self.save_tab_focus(tab);
     }
 
     /// Whether a row in any history list has a transcript to open.
@@ -8284,25 +8368,23 @@ impl App {
         }
     }
 
-    /// Queue a history entry for a fresh run and start it. The File panel
-    /// footer offers this as its general action; double-click never reaches
-    /// it, and the context menu stages the file with Add to queue instead.
+    /// Queue a history entry for a fresh run and open its options, so the
+    /// preset, language and speaker count can be changed before it starts.
+    /// The target names only this row: confirming must not run the rest of the
+    /// queue. The File panel footer offers this as its general action;
+    /// double-click never reaches it, and the context menu stages the file
+    /// with Add to queue instead.
     fn retranscribe_recent(&mut self, index: usize) -> Task<Message> {
         if matches!(self.status, Status::Running) || self.transcribe_blocked() {
             return Task::none();
         }
-        // A rerun should use the settings that produced the transcript, not
-        // whichever preset happened to be selected last.
+        // The dialog starts from the settings that produced this transcript;
+        // the user can still change them there.
         self.apply_entry_settings(index);
-        if self.enqueue_recent(index).is_none() {
+        let Some(row) = self.enqueue_recent(index) else {
             return Task::none();
-        }
-        // Retranscribe is a run, not a request to open settings and wait for a
-        // second press. `start` finds the row this just made pending; clear any
-        // setup left open so the queue is not hidden behind a stale dialog.
-        self.run_setup_open = false;
-        self.queue_run_target = None;
-        self.start();
+        };
+        self.open_run_setup(Some(row));
         Task::none()
     }
 
@@ -8411,6 +8493,7 @@ impl App {
         remap(&mut self.current);
         remap(&mut self.current_index);
         remap(&mut self.selected);
+        remap(&mut self.queue_focus);
         self.invalidate_derived();
         self.save_queue();
     }
@@ -8473,18 +8556,27 @@ impl App {
         if restored + queued > 0 {
             self.toast = Some((add_summary(restored, queued), Instant::now()));
         }
+        // Blink wherever this add landed. A batch can feed both tabs, so the
+        // cue is set independently rather than on the tab that wins focus.
+        if restored > 0 {
+            self.cue_tab(PaneTab::History);
+        }
         // Leave the pane where the next action is: queued work in the Queue,
         // otherwise the transcripts the add restored in History.
         if queued > 0 {
+            self.cue_tab(PaneTab::Queue);
             if let Some(index) = first_queued {
                 self.pane_tab = PaneTab::Queue;
                 // The add moved the pane to Queue, so give the new work the
                 // focus rather than leaving the tab without a selected row.
                 self.selected = Some(index);
+                self.queue_focus = Some(index);
                 self.cue_pane(PaneTab::Queue, Some(index));
             }
         } else if restored > 0 {
             self.pane_tab = PaneTab::History;
+            self.selected_recent = newest;
+            self.history_focus = newest;
             self.cue_pane(PaneTab::History, newest);
         }
     }
@@ -8499,10 +8591,23 @@ impl App {
         });
     }
 
+    /// Blink a tab without naming a row. An add can land in both Queue and
+    /// History, so the tab timers are independent.
+    fn cue_tab(&mut self, tab: PaneTab) {
+        self.tab_cues[pane_tab_slot(tab)] = Some(Instant::now());
+    }
+
+    fn tab_cue_active(&self, tab: PaneTab) -> bool {
+        self.tab_cues[pane_tab_slot(tab)]
+            .is_some_and(|at| at.elapsed() < PANE_CUE)
+    }
+
     /// Whether a pane is inside its cue window.
     fn cue_active(&self, tab: PaneTab) -> bool {
-        self.pane_cue
-            .is_some_and(|cue| cue.tab == tab && cue.at.elapsed() < PANE_CUE)
+        self.tab_cue_active(tab)
+            || self
+                .pane_cue
+                .is_some_and(|cue| cue.tab == tab && cue.at.elapsed() < PANE_CUE)
     }
 
     /// Whether a specific row is inside its cue window.
@@ -8665,6 +8770,11 @@ impl App {
     /// item keeps the button "Transcribe": Start works through the queue. The
     /// same rule drives the setup dialog's primary button.
     fn transcribe_label(&self) -> &'static str {
+        // A row-menu Transcribe names one queue row, so its dialog must not
+        // inherit the footer's Transcribe All wording.
+        if self.queue_run_target.is_some() {
+            return "Transcribe";
+        }
         let pending = self
             .queue
             .iter()
@@ -8778,6 +8888,7 @@ impl App {
             .position(|item| item.audio.as_deref() == Some(audio.as_path()));
         self.selected = row_index;
         self.selected_recent = Some(index);
+        self.save_tab_focus(self.pane_tab);
         self.invalidate_derived();
         self.save_queue();
         row_index
@@ -8795,6 +8906,7 @@ impl App {
         self.header_menu = None;
         if let Some(index) = target {
             self.selected = Some(index);
+            self.queue_focus = Some(index);
         }
         self.queue_run_target = target;
         self.run_setup_open = true;
@@ -23714,6 +23826,49 @@ mod tests {
     }
 
     #[test]
+    fn tabs_restore_their_last_focused_row() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("tab-focus-history");
+        let mut app = pro_app();
+        app.recent = vec![
+            RecentEntry {
+                finished_at: 3,
+                ..Default::default()
+            },
+            RecentEntry {
+                finished_at: 2,
+                favorite: true,
+                ..Default::default()
+            },
+            RecentEntry {
+                finished_at: 1,
+                favorite: true,
+                recording: true,
+                ..Default::default()
+            },
+        ];
+
+        // History starts on its last row, then Favorites has no remembered
+        // focus and falls back to its first item.
+        app.pane_tab = PaneTab::History;
+        app.selected_recent = Some(2);
+        let _ = app.update(Message::SelectTab(PaneTab::Favorites));
+        assert_eq!(app.selected_recent, Some(1), "first favorite when unfocused");
+
+        // Choosing another favorite is remembered when History is entered...
+        app.selected_recent = Some(2);
+        let _ = app.update(Message::SelectTab(PaneTab::History));
+        assert_eq!(app.selected_recent, Some(2), "History remembers its row");
+
+        // ...and Favorites remembers the row that was focused in it.
+        let _ = app.update(Message::SelectTab(PaneTab::Favorites));
+        assert_eq!(app.selected_recent, Some(2), "Favorites remembers its row");
+
+        let _ = app.update(Message::SelectTab(PaneTab::Recordings));
+        assert_eq!(app.selected_recent, Some(2), "Recordings falls back to its first");
+    }
+
+    #[test]
     fn queue_footer_labels_multiple_items_as_transcribe_all() {
         let _guard = env_lock();
         let _config = ConfigEnv::new("queue-all-label");
@@ -26441,6 +26596,11 @@ mod tests {
         assert!(app.run_setup_open);
         assert_eq!(app.queue_run_target, Some(1));
         assert_eq!(app.selected, Some(1));
+        assert_eq!(
+            app.transcribe_label(),
+            "Transcribe",
+            "a targeted row must not inherit Transcribe All"
+        );
 
         // Closing the options drops the one-row target; the footer's next
         // Transcribe starts the pending queue normally.
@@ -28729,13 +28889,15 @@ mod tests {
         assert_eq!(app.queue[0].audio.as_deref(), Some(audio.as_path()));
         assert_eq!(app.selected, Some(0));
 
-        // The footer's Retranscribe is a run, not a request to open settings:
-        // it starts the row it just queued instead of stopping at the dialog.
+        // The footer's Retranscribe opens the options for the row it queued,
+        // targeting only that row so confirming cannot run the rest of the
+        // queue.
         app.queue.clear();
         app.status = Status::Idle;
         app.run_setup_open = false;
         let _ = app.update(Message::RetranscribeRecent(index));
-        assert!(!app.run_setup_open, "Retranscribe stopped at run setup");
+        assert!(app.run_setup_open, "Retranscribe must open its options");
+        assert_eq!(app.queue_run_target, Some(0));
         assert_eq!(app.queue.len(), 1);
         assert!(matches!(app.queue[0].status, ItemStatus::Pending));
 
