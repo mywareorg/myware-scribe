@@ -14347,6 +14347,7 @@ impl App {
             .map(|format| RowMenuEntry {
                 label: format.label().to_string(),
                 enabled: true,
+                trailing: Some(format.extension().to_string()),
                 hint: None,
                 action: Some(Message::ExportRecentAs(index, *format)),
                 danger: false,
@@ -14371,6 +14372,7 @@ impl App {
             .map(|label| RowMenuEntry {
                 label: label.name.clone(),
                 enabled: true,
+                trailing: None,
                 hint: None,
                 action: Some(Message::ToggleRecentLabel(index, label.id.clone())),
                 danger: false,
@@ -14382,6 +14384,7 @@ impl App {
             entries.push(RowMenuEntry {
                 label: "No labels yet".to_string(),
                 enabled: false,
+                trailing: None,
                 hint: Some("Create one in Manage labels\u{2026}".to_string()),
                 action: None,
                 danger: false,
@@ -14392,6 +14395,7 @@ impl App {
         entries.push(RowMenuEntry {
             label: "Manage labels\u{2026}".to_string(),
             enabled: true,
+            trailing: None,
             hint: None,
             action: Some(Message::OpenLabels(tab, index)),
             danger: false,
@@ -14417,6 +14421,7 @@ impl App {
                    action: Message| RowMenuEntry {
             label: label.to_string(),
             enabled,
+            trailing: None,
             hint: hint.map(str::to_string),
             action: enabled.then_some(action),
             danger: false,
@@ -14429,6 +14434,7 @@ impl App {
                       action: Message| RowMenuEntry {
             label: label.to_string(),
             enabled,
+            trailing: None,
             hint: hint.map(str::to_string),
             action: enabled.then_some(action),
             danger: true,
@@ -23212,6 +23218,9 @@ fn menu_layer_at<'a>(body: Element<'a, Message>, left: f32, top: f32) -> Element
 struct RowMenuEntry {
     label: String,
     enabled: bool,
+    /// Right-aligned caption, the way a header menu shows a shortcut. The
+    /// export list uses it for the file extension.
+    trailing: Option<String>,
     hint: Option<String>,
     action: Option<Message>,
     danger: bool,
@@ -23289,6 +23298,7 @@ fn row_menu_card(
 /// why it is unavailable.
 fn row_menu_item(row: RowMenuEntry, scheme: Scheme) -> Element<'static, Message> {
     let check = row.check;
+    let trailing = row.trailing;
     let label = text(row.label)
         .size(16)
         .wrapping(NO_WRAP)
@@ -23311,6 +23321,14 @@ fn row_menu_item(row: RowMenuEntry, scheme: Scheme) -> Element<'static, Message>
         content = content.push(slot);
     }
     content = content.push(label.width(Length::Fill));
+    if let Some(trailing) = trailing {
+        content = content.push(
+            text(trailing)
+                .size(theme::TEXT_XS)
+                .wrapping(NO_WRAP)
+                .color(scheme.muted),
+        );
+    }
     let button = action(content)
         .width(Length::Fill)
         .padding([5, 6])
