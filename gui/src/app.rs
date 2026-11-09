@@ -402,6 +402,8 @@ struct RecentEntry {
     /// The user's name for this row in the lists. `None` shows the file name;
     /// the file on disk is never renamed.
     name: Option<String>,
+    /// Finished by a run and not opened since: History counts it and marks it.
+    unread: bool,
     /// Unix seconds when the item finished; the history sorts newest first.
     finished_at: u64,
     duration: Option<f64>,
@@ -854,6 +856,9 @@ struct RecentRecord {
     /// The lists' display name, when the user renamed the row.
     #[serde(default)]
     name: Option<String>,
+    /// Not opened since a run produced it.
+    #[serde(default)]
+    unread: bool,
     #[serde(default)]
     finished_at: u64,
     #[serde(default)]
@@ -2104,7 +2109,6 @@ pub struct App {
     /// History entries for rows that finished in this batch, keyed by the
     /// queue row's path. The row stays visible until the batch ends, so the
     /// entry is held here rather than merged on the spot.
-    finished_rows: Vec<(PathBuf, RecentEntry)>,
     current: Option<usize>,
     current_index: Option<usize>,
     /// Index of the completed queue item currently shown, if any.
@@ -2412,7 +2416,6 @@ impl App {
             batch_summary: Vec::new(),
             batch_total: 0.0,
             batch_done: 0.0,
-            finished_rows: Vec::new(),
             current: None,
             current_index: None,
             selected: None,
@@ -2682,6 +2685,7 @@ impl App {
             let mut entry = RecentEntry {
                 audio: record.audio.map(PathBuf::from),
                 name: record.name,
+                unread: record.unread,
                 transcript,
                 finished_at: record.finished_at,
                 duration: record.duration,
@@ -2871,6 +2875,7 @@ impl App {
                         .as_ref()
                         .map(|path| path.display().to_string()),
                     name: entry.name.clone(),
+                    unread: entry.unread,
                     finished_at: entry.finished_at,
                     duration: entry.duration,
                     speakers: entry.speakers,
@@ -3360,67 +3365,6 @@ impl App {
     /// Move every finished row into History and drop those rows from the
     /// queue. Called once the batch settles, so the queue drains as one list
     /// instead of losing rows while the user is still watching it.
-    fn reap_finished_rows(&mut self) {
-        if self.finished_rows.is_empty()
-            && !self
-                .queue
-                .iter()
-                .any(|item| matches!(item.status, ItemStatus::Done))
-        {
-            return;
-        }
-        let entries = std::mem::take(&mut self.finished_rows);
-        let mut newest = None;
-        for (_, entry) in entries {
-            newest = Some(self.merge_recent(entry));
-        }
-        // Several files can finish inside the same second; the sort then falls
-        // back to path and would not put the last one on top. Move it there so
-        // the Focus below and the visible top row agree.
-        if let Some(index) = newest {
-            if index != 0 && index < self.recent.len() {
-                let entry = self.recent.remove(index);
-                self.recent.insert(0, entry);
-                self.refresh_recent_presence();
-                newest = Some(0);
-            }
-        }
-        let selected_row = self
-            .selected
-            .and_then(|index| self.queue.get(index))
-            .map(|item| (item.path.clone(), matches!(item.status, ItemStatus::Done)));
-        self.queue
-            .retain(|item| !matches!(item.status, ItemStatus::Done));
-        match selected_row {
-            // The row the user was reading just moved to History. Fall back to
-            // the live transcript rather than leaving a dead selection.
-            Some((_, true)) => {
-                self.return_to_live();
-                self.selected = None;
-            }
-            // A pending row's index shifts when finished rows are dropped;
-            // look it up again by path.
-            Some((path, false)) => {
-                self.selected = self.queue.iter().position(|item| item.path == path);
-            }
-            None => self.selected = None,
-        }
-        self.current = None;
-        self.current_index = None;
-        self.queue_hover = None;
-        self.queue_run_target = None;
-        self.queue_drag = None;
-        // A menu opened on a queue row points at an index that just shifted.
-        self.row_menu = None;
-        self.row_submenu = None;
-        self.invalidate_derived();
-        if let Some(index) = newest {
-            // The rows did not disappear; they moved to History. Point at
-            // them once the batch settles.
-            self.cue_pane(PaneTab::History, Some(index));
-        }
-    }
-
     /// Drop every finished item from the File panel's lists. Files on disk are
     /// not touched: History is a view over transcripts the user already has.
     fn clear_history(&mut self) {
@@ -3455,11 +3399,7 @@ impl App {
             return;
         }
         let preview = self.selected == Some(index) && self.selected_view.is_some();
-        let removed_path = self.queue[index].path.clone();
         self.queue.remove(index);
-        // A finished row that the user removes must not come back when the
-        // batch is reaped.
-        self.finished_rows.retain(|(path, _)| path != &removed_path);
         let remap = |stored: &mut Option<usize>| {
             if let Some(value) = *stored {
                 *stored = match value.cmp(&index) {
@@ -4004,6 +3944,11 @@ impl App {
         let Some(entry) = self.recent.get(index).cloned() else {
             return Task::none();
         };
+        // Opening the row is what makes it read.
+        if self.recent.get(index).is_some_and(|entry| entry.unread) {
+            self.recent[index].unread = false;
+            self.save_queue();
+        }
         self.selected_recent = Some(index);
         self.save_tab_focus(self.pane_tab);
         // Opening a row is not a tab change: each list keeps its place. The
@@ -6955,7 +6900,6 @@ impl App {
                         // rows.
                         self.commit_inline_edit(false);
                         self.queue.clear();
-                        self.finished_rows.clear();
                         self.batch_paths.clear();
                         self.batch_summary.clear();
                         self.batch_total = 0.0;
@@ -6983,7 +6927,6 @@ impl App {
                     // writing to.
                     self.commit_inline_edit(false);
                     self.queue.clear();
-                    self.finished_rows.clear();
                     self.batch_paths.clear();
                     self.batch_summary.clear();
                     self.batch_total = 0.0;
@@ -10089,6 +10032,11 @@ impl App {
         (count > 0).then(|| count.to_string())
     }
 
+    /// History rows a run has produced that the user has not opened yet.
+    fn unread_history(&self) -> usize {
+        self.recent.iter().filter(|entry| entry.unread).count()
+    }
+
     /// Favorites is a Pro view. Free still sees the tab, with its Pro tag.
     fn favorites_locked(&self) -> bool {
         !self.shows(license::Audience::ProOnly)
@@ -11775,35 +11723,48 @@ impl App {
                         // before it disappears.
                         self.batch_done += measured.unwrap_or(1.0) as f32;
                         self.batch_summary.push((label.clone(), stats));
-                        // Keep the row visible as Done and hold its history
-                        // entry until the whole batch drains. Reaping it here
-                        // made completed queue items seem to vanish mid-run.
+                        // The queue row stays, marked Done, and the transcript
+                        // lands in History as it finishes rather than when the
+                        // batch drains. History blinks for it and keeps it
+                        // unread until the user opens it.
                         let row_path = self.queue.get(index).map(|item| item.path.clone());
                         if let Some(item) = self.queue.get_mut(index) {
                             item.status = ItemStatus::Done;
                             item.transcript = Some(transcript.clone());
                         }
-                        if let Some(row_path) = row_path {
-                            self.finished_rows.push((
-                                row_path,
-                                RecentEntry {
-                                    audio,
-                                    transcript: Some(transcript),
-                                    finished_at: unix_secs(),
-                                    duration: measured,
-                                    speakers,
-                                    preset,
-                                    language_requested,
-                                    language_detected,
-                                    speakers_requested,
-                                    normalize,
-                                    model,
-                                    manifest,
-                                    settings_key,
-                                    version_id,
-                                    ..Default::default()
-                                },
-                            ));
+                        if row_path.is_some() {
+                            // Inserting at the top moves every open row down;
+                            // keep the focused one on the document it names.
+                            let viewed = self
+                                .selected_view
+                                .as_ref()
+                                .map(|view| view.source.clone());
+                            let history_index = self.merge_recent(RecentEntry {
+                                audio,
+                                transcript: Some(transcript),
+                                finished_at: unix_secs(),
+                                duration: measured,
+                                speakers,
+                                preset,
+                                language_requested,
+                                language_detected,
+                                speakers_requested,
+                                normalize,
+                                model,
+                                manifest,
+                                settings_key,
+                                version_id,
+                                unread: true,
+                                ..Default::default()
+                            });
+                            if let Some(source) = viewed {
+                                if let Some(row) = self.recent.iter().position(|entry| {
+                                    Self::current_transcript(entry) == Some(source.as_path())
+                                }) {
+                                    self.selected_recent = Some(row);
+                                }
+                            }
+                            self.cue_pane(PaneTab::History, Some(history_index));
                         }
                         self.toast = Some((format!("Finished {label}"), Instant::now()));
                     }
@@ -11922,19 +11883,10 @@ impl App {
                             .iter()
                             .any(|item| matches!(item.status, ItemStatus::Pending));
                     if !follow_up {
-                        // The batch is over: rows that stayed visible as Done
-                        // throughout now move to History together.
-                        self.reap_finished_rows();
+                        // The batch is over but the queue keeps its rows: they
+                        // say what was run, and History already has the
+                        // transcripts. The pane stays where the user put it.
                         self.save_queue();
-                        // The queue is done and the last finished file is at
-                        // the top of History. Put the File pane there, with
-                        // that row focused, instead of leaving it on an empty
-                        // queue.
-                        if self.has_results() && !self.recent.is_empty() {
-                            self.pane_tab = PaneTab::History;
-                            self.selected_recent = Some(0);
-                            self.recent_hover = None;
-                        }
                     }
                     if follow_up {
                         self.begin_batch(true);
@@ -13816,8 +13768,23 @@ impl App {
             self.cue_active(PaneTab::Favorites),
             Message::SelectTab(PaneTab::Favorites),
         );
+        let unread = self.unread_history();
+        let history_label: Element<'static, Message> = if unread > 0 {
+            row![
+                label(pane_tab_label(PaneTab::History), self.pane_tab == PaneTab::History),
+                text(format!(" {unread}"))
+                    .size(theme::TEXT_XS)
+                    .wrapping(NO_WRAP)
+                    .color(scheme.blue),
+            ]
+            .spacing(0)
+            .align_y(iced::Alignment::Center)
+            .into()
+        } else {
+            label(pane_tab_label(PaneTab::History), self.pane_tab == PaneTab::History).into()
+        };
         let history_tab = tab(
-            label(pane_tab_label(PaneTab::History), self.pane_tab == PaneTab::History).into(),
+            history_label,
             self.pane_tab == PaneTab::History,
             self.cue_active(PaneTab::History),
             Message::SelectTab(PaneTab::History),
@@ -14530,7 +14497,25 @@ impl App {
             .align_y(iced::Alignment::Center);
 
         let name = ellipsize_middle(&recent_title(entry), recent_name_budget());
+        // A filled dot marks a row a run produced and nobody has opened. The
+        // slot is always there so reading one does not shift its neighbours.
+        let unread_mark: Element<Message> = if entry.unread {
+            container(horizontal_space())
+                .width(Length::Fixed(6.0))
+                .height(Length::Fixed(6.0))
+                .style(move |_theme| container::Style {
+                    background: Some(scheme.blue.into()),
+                    border: iced::border::rounded(3.0),
+                    ..container::Style::default()
+                })
+                .into()
+        } else {
+            container(horizontal_space())
+                .width(Length::Fixed(6.0))
+                .into()
+        };
         let title_row = row![
+            unread_mark,
             text(name)
                 .size(theme::TEXT_SM)
                 .wrapping(NO_WRAP)
@@ -31177,7 +31162,7 @@ mod tests {
     }
 
     #[test]
-    fn done_reaps_into_recent_and_keeps_summary() {
+    fn done_lands_in_history_and_leaves_its_queue_row() {
         let _guard = env_lock();
         let _config = ConfigEnv::new("done-reaps");
         let media = temp_dir("done-reaps-media");
@@ -31215,28 +31200,29 @@ mod tests {
                 },
             });
             let _ = app.update(Message::Tick);
-            // The finished row stays visible until the whole batch drains, so
-            // the queue never looks like work was dropped mid-run.
+            // The row stays visible as Done, and the transcript is in History
+            // already, marked unread, with History blinking for it.
             let row = app
                 .queue
                 .iter()
                 .find(|item| item.audio.as_deref() == Some(audio.as_path()))
                 .expect("a finished row must stay in the queue");
             assert!(matches!(row.status, ItemStatus::Done));
-            assert!(
-                app.recent.is_empty(),
-                "history is filled only when the batch ends"
-            );
+            assert!(app.recent.iter().any(|entry| {
+                entry.audio.as_deref() == Some(audio.as_path()) && entry.unread
+            }));
+            assert!(app.cue_active(PaneTab::History), "History should blink");
         }
         app.events.lock().unwrap().push_back(Event::AllDone);
         let _ = app.update(Message::Tick);
 
-        assert!(app.queue.is_empty());
+        // The queue keeps its rows; the batch does not empty it or move the
+        // pane away from where the user was.
+        assert_eq!(app.queue.len(), 2);
+        assert!(app.queue.iter().all(|item| matches!(item.status, ItemStatus::Done)));
         assert_eq!(app.recent.len(), 2);
-        // The pane lands on History with the last finished transcript on top
-        // and focused, instead of staying on an empty queue.
-        assert_eq!(app.pane_tab, PaneTab::History);
-        assert_eq!(app.selected_recent, Some(0));
+        assert_eq!(app.unread_history(), 2);
+        assert_eq!(app.pane_tab, PaneTab::Queue);
         assert_eq!(
             app.stats_lines()
                 .iter()
@@ -31254,6 +31240,41 @@ mod tests {
             .expect("the finished queue row should blink History");
         assert_eq!(cue.tab, PaneTab::History);
         assert!(cue.row.is_some_and(|index| index < app.recent.len()));
+
+        let _ = std::fs::remove_dir_all(&media);
+    }
+
+    #[test]
+    fn opening_a_finished_row_clears_its_unread_mark() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("unread-history");
+        let media = temp_dir("unread-history-media");
+        let audio = media.join("talk.mp3");
+        std::fs::write(&audio, b"audio").unwrap();
+        let transcript = media.join("talk.txt");
+        std::fs::write(&transcript, "[00:00] SPEAKER 1: hi\n").unwrap();
+
+        let mut app = pro_app();
+        push_recent(
+            &mut app,
+            Some(audio),
+            transcript,
+            Some(2.0),
+            Vec::new(),
+        );
+        app.recent[0].unread = true;
+        app.save_queue();
+        assert_eq!(app.unread_history(), 1);
+
+        // The mark is stored with the index, so a restart still counts it.
+        let (_, _, recent, _) = App::load_queue_and_batch();
+        assert!(recent.iter().any(|entry| entry.unread));
+
+        // Opening the row is what reads it, and that is saved too.
+        let _ = app.update(Message::OpenRecent(0));
+        assert_eq!(app.unread_history(), 0);
+        let (_, _, recent, _) = App::load_queue_and_batch();
+        assert!(recent.iter().all(|entry| !entry.unread));
 
         let _ = std::fs::remove_dir_all(&media);
     }
@@ -31288,20 +31309,20 @@ mod tests {
         let _ = app.update(Message::Tick);
 
         assert!(app.current_index.is_none());
-        // The row stays until the batch ends; only then does it move on.
+        // The row stays as Done and the transcript is in History at once.
         assert!(matches!(app.queue[0].status, ItemStatus::Done));
-        assert!(app.recent.is_empty());
+        assert_eq!(app.recent.len(), 1);
 
         app.events.lock().unwrap().push_back(Event::AllDone);
         let _ = app.update(Message::Tick);
-        assert!(app.queue.is_empty());
+        assert_eq!(app.queue.len(), 1, "the queue keeps its finished row");
         assert_eq!(app.recent.len(), 1);
 
         let _ = std::fs::remove_dir_all(&media);
     }
 
     #[test]
-    fn done_rows_stay_until_the_batch_ends() {
+    fn done_rows_stay_after_the_batch_ends() {
         let _guard = env_lock();
         let _config = ConfigEnv::new("no-done-rows");
         let media = temp_dir("no-done-rows-media");
@@ -31328,19 +31349,19 @@ mod tests {
         });
         let _ = app.update(Message::Tick);
 
-        // The finished row stays visible as Done; it only moves to History
-        // when the batch ends, so queued work never seems to vanish.
+        // The finished row stays visible as Done and its transcript is in
+        // History straight away.
         let row = app
             .queue
             .iter()
             .find(|item| item.audio.as_deref() == Some(audio.as_path()))
             .expect("a finished row must stay in the queue");
         assert!(matches!(row.status, ItemStatus::Done));
-        assert!(app.recent.is_empty());
+        assert_eq!(app.recent.len(), 1);
 
         app.events.lock().unwrap().push_back(Event::AllDone);
         let _ = app.update(Message::Tick);
-        assert!(app.queue.is_empty());
+        assert_eq!(app.queue.len(), 1, "the row stays after the batch");
         assert_eq!(app.recent.len(), 1);
         assert_eq!(app.recent[0].audio.as_deref(), Some(audio.as_path()));
         assert_eq!(
