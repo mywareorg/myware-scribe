@@ -341,12 +341,9 @@ pub fn spawn(
         }
 
         let Some(exe) = executable_path() else {
-            push(
-                &events,
-                Event::Error {
-                    message: "could not locate the Hippo Transcribe executable".to_string(),
-                },
-            );
+            let message = "could not locate the Hippo Transcribe executable".to_string();
+            hippo_transcribe_core::logging::error(&message);
+            push(&events, Event::Error { message });
             push(&events, Event::AllDone);
             pid.store(0, Ordering::SeqCst);
             return;
@@ -416,12 +413,9 @@ pub fn spawn(
         let mut child = match command.spawn() {
             Ok(child) => child,
             Err(error) => {
-                push(
-                    &events,
-                    Event::Error {
-                        message: format!("could not start the transcription process: {error}"),
-                    },
-                );
+                let message = format!("could not start the transcription process: {error}");
+                hippo_transcribe_core::logging::error(&message);
+                push(&events, Event::Error { message });
                 push(&events, Event::AllDone);
                 pid.store(0, Ordering::SeqCst);
                 return;
