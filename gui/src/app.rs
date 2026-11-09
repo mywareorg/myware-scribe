@@ -24,7 +24,7 @@ use crate::{documents::*, files::*, format::*, options::*};
 use hippo_transcribe_core::asr;
 use hippo_transcribe_core::benchmark::{self, BenchmarkEvent};
 use hippo_transcribe_core::download::{self, DownloadEvent, ModelStatus};
-use hippo_transcribe_core::export::ExportFormat;
+use hippo_transcribe_core::export::{Cue, ExportFormat};
 use hippo_transcribe_core::license;
 use hippo_transcribe_core::models;
 use hippo_briefing::{Briefing, BriefingLine};
@@ -1420,7 +1420,10 @@ pub enum Message {
     OpenBriefing,
     CloseBriefing,
     RetryBriefing,
-    SaveBriefing,
+    /// Show or hide the briefing's export format list.
+    ToggleBriefingExport,
+    /// Export the briefing in `format`, after asking for a destination.
+    ExportBriefing(ExportFormat),
     DownloadBriefingModel,
     LockedBriefing,
     EditLine(usize),
@@ -2010,6 +2013,8 @@ pub struct App {
     labels_open: Option<LabelPicker>,
     /// The open rename form for a row's display name, if any.
     rename_recent: Option<RenameRecent>,
+    /// The briefing dialog's export list is showing.
+    briefing_export_open: bool,
     /// The export format list nested under File → Export as, open while the
     /// pointer is on that row.
     file_export_open: bool,
@@ -2334,6 +2339,7 @@ impl App {
             label_filter: Vec::new(),
             labels_open: None,
             rename_recent: None,
+            briefing_export_open: false,
             file_export_open: false,
             pending_export: None,
             custom_speakers: Vec::new(),
@@ -5962,7 +5968,7 @@ impl App {
             Message::OpenBriefing => {
                 self.header_menu = None;
                 if !self.can(license::Feature::Briefing) {
-                    self.toast = Some(("Briefing is a Pro feature".to_string(), Instant::now()));
+                    self.toast = Some(("Summarize Transcript is a Pro feature".to_string(), Instant::now()));
                     return Task::none();
                 }
                 self.open_briefing();
@@ -5979,16 +5985,17 @@ impl App {
                 self.open_briefing();
                 Task::none()
             }
-            Message::SaveBriefing => {
-                self.save_briefing();
+            Message::ToggleBriefingExport => {
+                self.briefing_export_open = !self.briefing_export_open;
                 Task::none()
             }
+            Message::ExportBriefing(format) => self.export_briefing(format),
             Message::DownloadBriefingModel => {
                 self.start_model_download_for(vec!["briefing"]);
                 Task::none()
             }
             Message::LockedBriefing => {
-                self.toast = Some(("Briefing is a Pro feature".to_string(), Instant::now()));
+                self.toast = Some(("Summarize Transcript is a Pro feature".to_string(), Instant::now()));
                 Task::none()
             }
             Message::DownloadModels => {
@@ -7572,7 +7579,7 @@ impl App {
         let cues = backend::export_cues(source.as_deref(), self.shown_lines());
         if cues.is_empty() {
             self.toast = Some((
-                "Transcribe something before asking for a briefing".to_string(),
+                "Transcribe something before summarizing".to_string(),
                 Instant::now(),
             ));
             return;
@@ -7666,10 +7673,10 @@ impl App {
         let _ = std::fs::remove_file(&run.response);
         self.briefing = Some(match result {
             Ok(()) => match response
-                .map_err(|error| format!("could not read the briefing: {error}"))
+                .map_err(|error| format!("could not read the summary: {error}"))
                 .and_then(|text| {
                     serde_json::from_str::<Briefing>(&text)
-                        .map_err(|error| format!("invalid briefing: {error}"))
+                        .map_err(|error| format!("invalid summary: {error}"))
                 }) {
                 Ok(briefing) => {
                     Self::store_briefing_cache(
@@ -7690,40 +7697,47 @@ impl App {
         });
     }
 
-    fn save_briefing(&mut self) {
-        let Some(BriefingState::Ready {
-            briefing,
-            lines,
-            source,
-        }) = self.briefing.as_ref()
-        else {
-            return;
+    /// Export the briefing in `format`. The destination comes from the native
+    /// save dialog, like every other export. Only what the dialog lists is
+    /// written: the overview and the key points.
+    fn export_briefing(&mut self, format: ExportFormat) -> Task<Message> {
+        self.briefing_export_open = false;
+        let (text, cues, duration, target) = {
+            let Some(BriefingState::Ready {
+                briefing,
+                lines,
+                source,
+            }) = self.briefing.as_ref()
+            else {
+                return Task::none();
+            };
+            let target = source
+                .clone()
+                .or_else(|| self.shown_output().map(Path::to_path_buf));
+            let (cues, duration) = briefing_cues(briefing, lines);
+            (briefing_text(briefing, lines), cues, duration, target)
         };
-        let target = source.clone().or_else(|| self.shown_output().map(Path::to_path_buf));
         let Some(target) = target else {
             self.toast = Some((
-                "Nowhere to save the briefing".to_string(),
+                "Nowhere to save the summary".to_string(),
                 Instant::now(),
             ));
-            return;
+            return Task::none();
         };
         let stem = target
             .file_stem()
             .and_then(|stem| stem.to_str())
             .unwrap_or("transcript");
-        let path = target.with_file_name(format!("{stem}-briefing.md"));
-        let text = hippo_briefing::markdown(briefing, lines);
-        match write_atomic(&path, &text) {
-            Ok(()) => {
-                self.toast = Some((format!("Saved {}", path.display()), Instant::now()));
-            }
-            Err(error) => {
-                self.toast = Some((
-                    format!("Could not save {}: {error}", path.display()),
-                    Instant::now(),
-                ));
-            }
-        }
+        let suggested = target.with_file_name(format!("{stem}-summary.{}", format.extension()));
+        self.begin_export(PendingExport {
+            text,
+            source: None,
+            cues,
+            turns: Vec::new(),
+            duration,
+            format,
+            suggested,
+        })
     }
 
     /// Open the custom-vocabulary editor with what is stored.
@@ -15681,7 +15695,7 @@ impl App {
                 action: summary.then_some(Message::OpenSummary),
             },
             MenuRow {
-                label: "Briefing",
+                label: "Summarize Transcript",
                 key: None,
                 checked: false,
                 enabled: has_text,
@@ -16560,6 +16574,7 @@ impl App {
                     backend::kill(run.pid.load(Ordering::SeqCst));
                 }
                 self.briefing = None;
+                self.briefing_export_open = false;
             }
             Modal::Versions => self.versions_open = None,
             Modal::Labels => self.labels_open = None,
@@ -17849,11 +17864,7 @@ impl App {
                     .color(scheme.text),
             );
         }
-        for (heading, items) in [
-            ("Key points", &briefing.points),
-            ("Decisions", &briefing.decisions),
-            ("Action items", &briefing.actions),
-        ] {
+        for (heading, items) in [("Key points", &briefing.points)] {
             if items.is_empty() {
                 continue;
             }
@@ -17888,7 +17899,7 @@ impl App {
 
     fn briefing_dialog(&self, scheme: &Scheme) -> Element<'_, Message> {
         let scheme = *scheme;
-        let title = text("Briefing").size(theme::TEXT_LG);
+        let title = text("Summarize Transcript").size(theme::TEXT_LG);
         let close = action_text("Close")
             .on_press(Message::CloseBriefing)
             .style(pill_button_secondary);
@@ -17899,7 +17910,7 @@ impl App {
             Some(BriefingState::NeedsModel) => {
                 body = body.push(
                     text(
-                        "A briefing needs a one-time 1.1 GB model. It runs on this machine; \
+                        "A summary needs a one-time 1.1 GB model. It runs on this machine; \
                          the transcript is not uploaded.",
                     )
                     .size(theme::TEXT_XS)
@@ -17930,7 +17941,7 @@ impl App {
                 } else if download::briefing_ready() {
                     body = body.push(right_aligned(
                         row![
-                            action_text("Create briefing")
+                            action_text("Create summary")
                                 .on_press(Message::RetryBriefing)
                                 .style(color_button(scheme.blue, scheme.on_accent)),
                             close,
@@ -18015,17 +18026,49 @@ impl App {
                     ));
             }
             Some(BriefingState::Ready { briefing, lines, .. }) => {
-                body = body
-                    .push(self.briefing_items(briefing, lines, &scheme, 360.0))
-                    .push(right_aligned(
-                        row![
-                            action_text("Save as Markdown")
-                                .on_press(Message::SaveBriefing)
-                                .style(color_button(scheme.blue, scheme.on_accent)),
-                            close,
-                        ]
-                        .spacing(theme::SPACE_MD),
-                    ));
+                body = body.push(self.briefing_items(briefing, lines, &scheme, 360.0));
+                // The same formats the transcript's Export as offers, with
+                // their extensions at the trailing edge.
+                if self.briefing_export_open {
+                    let mut formats = column![].spacing(2).width(Length::Fill);
+                    for format in ExportFormat::ALL {
+                        formats = formats.push(
+                            button(
+                                container(
+                                    row![
+                                        text(format.label())
+                                            .size(theme::TEXT_SM)
+                                            .color(scheme.text),
+                                        horizontal_space(),
+                                        text(format.extension())
+                                            .size(theme::TEXT_XS)
+                                            .color(scheme.muted),
+                                    ]
+                                    .spacing(theme::SPACE_SM)
+                                    .align_y(iced::Alignment::Center),
+                                )
+                                .width(Length::Fill)
+                                .padding([6, 8]),
+                            )
+                            .width(Length::Fill)
+                            .padding(0)
+                            .on_press(Message::ExportBriefing(format))
+                            .style(move |theme, status| {
+                                row_menu_item_style(scheme, true)(theme, status)
+                            }),
+                        );
+                    }
+                    body = body.push(formats);
+                }
+                body = body.push(right_aligned(
+                    row![
+                        action_text("Export as\u{2026}")
+                            .on_press(Message::ToggleBriefingExport)
+                            .style(pill_button_secondary),
+                        close,
+                    ]
+                    .spacing(theme::SPACE_MD),
+                ));
             }
             None => {}
         }
@@ -21625,6 +21668,62 @@ fn recent_audio_presence_of(recent: &[RecentEntry]) -> Vec<bool> {
 
 /// The file a history row is named for: its audio, or the transcript when the
 /// audio is gone.
+/// The briefing as the dialog shows it: the overview, then the key points with
+/// their citations. Decisions and action items are deliberately left out.
+fn briefing_text(briefing: &Briefing, lines: &[BriefingLine]) -> String {
+    let mut out = String::new();
+    if !briefing.overview.trim().is_empty() {
+        out.push_str(briefing.overview.trim());
+        out.push_str("\n\n");
+    }
+    if !briefing.points.is_empty() {
+        out.push_str("Key points\n\n");
+        for item in &briefing.points {
+            out.push_str("- ");
+            out.push_str(item.text.trim());
+            if let Some(range) = hippo_briefing::citation(item, lines) {
+                out.push_str(&format!(" ({range})"));
+            }
+            out.push('\n');
+        }
+    }
+    out
+}
+
+/// One cue per key point, timed by the lines it cites, so the timed formats
+/// describe the briefing rather than a transcript it never was.
+fn briefing_cues(briefing: &Briefing, lines: &[BriefingLine]) -> (Vec<Cue>, Option<f32>) {
+    let mut cues = Vec::new();
+    for item in &briefing.points {
+        let first = item
+            .lines
+            .first()
+            .and_then(|number| number.checked_sub(1))
+            .and_then(|index| lines.get(index));
+        let last = item
+            .lines
+            .last()
+            .and_then(|number| number.checked_sub(1))
+            .and_then(|index| lines.get(index))
+            .or(first);
+        let Some(start) = first.map(|line| line.start) else {
+            continue;
+        };
+        cues.push(Cue {
+            start: Some(start),
+            end: last.and_then(|line| line.end).filter(|end| *end >= start),
+            speaker: String::new(),
+            text: item.text.trim().to_string(),
+            words: Vec::new(),
+        });
+    }
+    let duration = lines
+        .iter()
+        .map(|line| line.end.unwrap_or(line.start))
+        .reduce(f32::max);
+    (cues, duration)
+}
+
 fn recent_title(entry: &RecentEntry) -> String {
     entry
         .name
@@ -29688,6 +29787,80 @@ mod tests {
         assert!(LICENSES_TEXT.contains("Qwen2.5"));
         assert!(LICENSES_TEXT.contains("Apache-2.0"));
         assert_eq!(HelpKind::Licenses.label(), "Licenses");
+    }
+
+    #[test]
+    fn exporting_a_briefing_offers_every_format_and_writes_key_points_only() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("briefing-export");
+        let media = temp_dir("briefing-export-media");
+        let transcript = media.join("talk.txt");
+        std::fs::write(&transcript, "[00:00] SPEAKER 1: hi\n").unwrap();
+
+        let mut app = pro_app();
+        app.briefing = Some(BriefingState::Ready {
+            briefing: Briefing {
+                overview: "A short talk.".to_string(),
+                points: vec![hippo_briefing::Item {
+                    text: "The sky is blue".to_string(),
+                    lines: vec![1],
+                }],
+                decisions: vec![hippo_briefing::Item {
+                    text: "Ship it".to_string(),
+                    lines: vec![1],
+                }],
+                actions: vec![hippo_briefing::Item {
+                    text: "Call Ada".to_string(),
+                    lines: vec![1],
+                }],
+            },
+            lines: vec![BriefingLine {
+                start: 0.0,
+                end: Some(2.0),
+                speaker: "SPEAKER 1".to_string(),
+                text: "hi".to_string(),
+            }],
+            source: Some(transcript.clone()),
+        });
+
+        let _ = app.update(Message::ToggleBriefingExport);
+        assert!(app.briefing_export_open);
+        // The open list renders inside the dialog.
+        let _ = app.view();
+
+        let _ = app.update(Message::ExportBriefing(ExportFormat::Txt));
+        assert!(!app.briefing_export_open, "choosing a format closes the list");
+        let pending = app
+            .pending_export
+            .as_ref()
+            .expect("the export should be waiting on a destination");
+        assert_eq!(pending.format, ExportFormat::Txt);
+        assert_eq!(pending.suggested, media.join("talk-summary.txt"));
+        assert!(pending.text.contains("Key points"));
+        assert!(
+            !pending.text.contains("Ship it") && !pending.text.contains("Call Ada"),
+            "decisions and action items must not be listed: {}",
+            pending.text
+        );
+
+        let chosen = media.join("notes.txt");
+        let _ = app.update(Message::ExportPicked(Some(chosen.clone())));
+        let written = std::fs::read_to_string(&chosen).unwrap();
+        assert!(written.contains("The sky is blue"), "{written}");
+        assert!(!written.contains("Ship it"), "{written}");
+
+        // The timed formats time each key point by the line it cites.
+        let _ = app.update(Message::ExportBriefing(ExportFormat::Srt));
+        let srt = media.join("notes.srt");
+        let _ = app.update(Message::ExportPicked(Some(srt.clone())));
+        let written = std::fs::read_to_string(&srt).unwrap();
+        assert!(
+            written.contains("00:00:00,000 --> 00:00:02,000"),
+            "{written}"
+        );
+        assert!(written.contains("The sky is blue"), "{written}");
+
+        let _ = std::fs::remove_dir_all(&media);
     }
 
     #[test]
