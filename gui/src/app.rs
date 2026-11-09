@@ -627,6 +627,13 @@ struct VersionsDialog {
     versions: Vec<VersionRow>,
 }
 
+/// The open label picker: the row, its stable audio key and the typed name.
+struct LabelPicker {
+    row: usize,
+    key: String,
+    input: String,
+}
+
 /// A version being previewed read-only, with the row it belongs to.
 #[derive(Debug, Clone)]
 struct VersionPreview {
@@ -687,6 +694,14 @@ pub(crate) struct AdoptedTranscript {
 
 /// Persisted queue entry. Work in flight and rows finished in the current
 /// batch are written; finished transcripts also live in `RecentRecord`.
+/// One freeform label. Color is an index into the shared palette.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct LabelDef {
+    id: String,
+    name: String,
+    color: u8,
+}
+
 #[derive(Serialize, Deserialize)]
 struct QueueState {
     /// Shape of this file. Additive fields keep older builds reading it; a
@@ -709,6 +724,13 @@ struct QueueState {
     /// is not listed here keeps its newest-first place after these.
     #[serde(default)]
     favorite_order: Vec<String>,
+    /// Label definitions, shared by every file.
+    #[serde(default)]
+    labels: Vec<LabelDef>,
+    /// Label ids keyed by the manifest path, or the audio path when there is
+    /// no manifest. The manifest path is stable across versions of a file.
+    #[serde(default)]
+    label_assignments: HashMap<String, Vec<String>>,
 }
 
 /// The options a batch was started with, kept so an interrupted run can say
@@ -1200,6 +1222,8 @@ pub enum Modal {
     Briefing,
     /// The Select version panel for one history row.
     Versions,
+    /// The Add label picker for one history row.
+    Labels,
     /// The File panel row's read-only details. Last in paint order: it only
     /// appears when nothing else is open, since a context menu opens it.
     Info,
@@ -1422,6 +1446,22 @@ pub enum Message {
     CloseInfo,
     /// Copy the Info popup's primary path to the clipboard.
     CopyInfoPath,
+    /// Show the label picker for a history row.
+    OpenLabels(PaneTab, usize),
+    /// Close the label picker.
+    CloseLabels,
+    /// The label name being typed in the picker.
+    LabelInputChanged(String),
+    /// Create the typed label, or toggle it if it already exists.
+    ApplyLabel,
+    /// Toggle one label on the picker's row.
+    ToggleLabel(String),
+    /// Delete a label definition and every assignment.
+    DeleteLabel(String),
+    /// Toggle a label in the Favorites filter.
+    ToggleLabelFilter(String),
+    /// Clear every active label filter.
+    ClearLabelFilter,
     /// Show the version panel for a history row.
     OpenVersions(PaneTab, usize),
     /// Rebuild history rows from the manifests in the save location.
@@ -1889,6 +1929,13 @@ pub struct App {
     favorite_pointer: Option<Point>,
     /// Favorites in the user's order, keyed by audio path else transcript path.
     favorite_order: Vec<String>,
+    /// Label definitions and their assignments, keyed by manifest/audio path.
+    labels: Vec<LabelDef>,
+    label_assignments: HashMap<String, Vec<String>>,
+    /// Active label ids in the Favorites filter.
+    label_filter: Vec<String>,
+    /// The open label picker, if any.
+    labels_open: Option<LabelPicker>,
     /// Speaker names created through the line editor this session. A name lives
     /// on the document only while some row uses it; keeping it here means a
     /// just-created speaker stays reachable by the chip and the swap action.
@@ -2023,6 +2070,7 @@ impl App {
         } else {
             Self::load_queue_and_batch()
         };
+        let (labels, label_assignments) = Self::load_labels();
         let now = SystemTime::now();
         let provider = license::provider();
         let pro_override = provider.override_tier();
@@ -2201,6 +2249,10 @@ impl App {
             favorite_hover: None,
             favorite_pointer: None,
             favorite_order,
+            labels,
+            label_assignments,
+            label_filter: Vec::new(),
+            labels_open: None,
             custom_speakers: Vec::new(),
             add_report: None,
             pane_cue: None,
@@ -2601,6 +2653,16 @@ impl App {
 
     /// The options recorded for the last batch, read back independently of the
     /// queue rows so a restored queue keeps its resume context.
+    /// Read just the label definitions and assignments. Kept out of the queue
+    /// tuple so the many queue readers do not carry label state they never use.
+    fn load_labels() -> (Vec<LabelDef>, HashMap<String, Vec<String>>) {
+        Self::queue_path()
+            .and_then(|path| std::fs::read_to_string(path).ok())
+            .and_then(|text| serde_json::from_str::<QueueState>(&text).ok())
+            .map(|state| (state.labels, state.label_assignments))
+            .unwrap_or_default()
+    }
+
     fn load_last_run() -> Option<RunRecord> {
         let path = Self::queue_path()?;
         let text = std::fs::read_to_string(path).ok()?;
@@ -2677,6 +2739,8 @@ impl App {
                 })
                 .collect(),
             favorite_order: self.favorite_order.clone(),
+            labels: self.labels.clone(),
+            label_assignments: self.label_assignments.clone(),
         };
         let Ok(mut value) = serde_json::to_value(&state) else {
             return;
@@ -6414,6 +6478,41 @@ impl App {
                 self.toast = Some(("Copied path".to_string(), Instant::now()));
                 iced::clipboard::write(path)
             }
+            Message::OpenLabels(tab, index) => {
+                self.open_labels(tab, index);
+                Task::none()
+            }
+            Message::CloseLabels => self.close_modal(Modal::Labels),
+            Message::LabelInputChanged(value) => {
+                if let Some(picker) = self.labels_open.as_mut() {
+                    picker.input = value;
+                }
+                Task::none()
+            }
+            Message::ApplyLabel => {
+                self.apply_label();
+                Task::none()
+            }
+            Message::ToggleLabel(id) => {
+                self.toggle_label(&id);
+                Task::none()
+            }
+            Message::DeleteLabel(id) => {
+                self.delete_label(&id);
+                Task::none()
+            }
+            Message::ToggleLabelFilter(id) => {
+                if let Some(position) = self.label_filter.iter().position(|active| active == &id) {
+                    self.label_filter.remove(position);
+                } else {
+                    self.label_filter.push(id);
+                }
+                Task::none()
+            }
+            Message::ClearLabelFilter => {
+                self.label_filter.clear();
+                Task::none()
+            }
             Message::OpenVersions(tab, index) => {
                 self.open_versions(tab, index);
                 Task::none()
@@ -7767,6 +7866,143 @@ impl App {
             count => format!("{count} orphaned transcripts"),
         };
         self.toast = Some((message, Instant::now()));
+    }
+
+    /// The stable key labels attach to: the manifest path when there is one
+    /// (it survives versions), else the audio path.
+    fn label_key(entry: &RecentEntry) -> Option<String> {
+        entry
+            .manifest
+            .clone()
+            .or_else(|| entry.audio.as_deref().map(|path| path.display().to_string()))
+    }
+
+    fn label_for_key(&self, key: &str) -> Vec<&LabelDef> {
+        self.label_assignments
+            .get(key)
+            .map(|ids| {
+                ids.iter()
+                    .filter_map(|id| self.labels.iter().find(|label| &label.id == id))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Open the label picker for a finished row. Pro only.
+    fn open_labels(&mut self, _tab: PaneTab, index: usize) {
+        if !self.can(license::Feature::Labels) {
+            self.paywall_open = true;
+            return;
+        }
+        let Some(entry) = self.recent.get(index) else {
+            return;
+        };
+        let Some(key) = Self::label_key(entry) else {
+            self.toast = Some((
+                "This item has no file to label".to_string(),
+                Instant::now(),
+            ));
+            return;
+        };
+        self.labels_open = Some(LabelPicker {
+            row: index,
+            key,
+            input: String::new(),
+        });
+    }
+
+    /// Find or create a label definition. Case-insensitive, 32 chars.
+    fn ensure_label(&mut self, name: &str) -> Option<String> {
+        let name = name.trim();
+        if name.is_empty() || name.chars().count() > 32 {
+            return None;
+        }
+        if let Some(existing) = self
+            .labels
+            .iter()
+            .find(|label| label.name.eq_ignore_ascii_case(name))
+        {
+            return Some(existing.id.clone());
+        }
+        let id = format!("label-{}-{}", unix_secs(), self.labels.len());
+        let color = u8::try_from(self.labels.len() % 8).unwrap_or(0);
+        self.labels.push(LabelDef {
+            id: id.clone(),
+            name: name.to_string(),
+            color,
+        });
+        Some(id)
+    }
+
+    fn set_label_assignment(&mut self, key: &str, ids: Vec<String>) {
+        let mut ids: Vec<String> = ids
+            .into_iter()
+            .filter(|id| self.labels.iter().any(|label| &label.id == id))
+            .collect();
+        ids.sort();
+        ids.dedup();
+        ids.truncate(8);
+        if ids.is_empty() {
+            self.label_assignments.remove(key);
+        } else {
+            self.label_assignments.insert(key.to_string(), ids);
+        }
+        self.save_queue();
+    }
+
+    fn toggle_label(&mut self, id: &str) {
+        let Some(picker) = self.labels_open.as_ref() else {
+            return;
+        };
+        let key = picker.key.clone();
+        let mut ids = self.label_assignments.get(&key).cloned().unwrap_or_default();
+        if let Some(position) = ids.iter().position(|existing| existing == id) {
+            ids.remove(position);
+        } else {
+            if ids.len() >= 8 {
+                self.toast = Some(("Up to 8 labels per file".to_string(), Instant::now()));
+                return;
+            }
+            ids.push(id.to_string());
+        }
+        self.set_label_assignment(&key, ids);
+    }
+
+    fn apply_label(&mut self) {
+        let Some(picker) = self.labels_open.as_ref() else {
+            return;
+        };
+        let key = picker.key.clone();
+        let name = picker.input.clone();
+        let Some(id) = self.ensure_label(&name) else {
+            self.toast = Some((
+                "Enter a label name (32 characters max)".to_string(),
+                Instant::now(),
+            ));
+            return;
+        };
+        let mut ids = self.label_assignments.get(&key).cloned().unwrap_or_default();
+        if !ids.contains(&id) {
+            if ids.len() >= 8 {
+                self.toast = Some(("Up to 8 labels per file".to_string(), Instant::now()));
+                return;
+            }
+            ids.push(id);
+        }
+        self.set_label_assignment(&key, ids);
+        if let Some(picker) = self.labels_open.as_mut() {
+            picker.input.clear();
+        }
+    }
+
+    fn delete_label(&mut self, id: &str) {
+        self.labels.retain(|label| label.id != id);
+        for ids in self.label_assignments.values_mut() {
+            ids.retain(|existing| existing != id);
+        }
+        self.label_assignments.retain(|_, ids| !ids.is_empty());
+        self.label_filter.retain(|active| active != id);
+        self.save_queue();
     }
 
     /// Open the version panel for a history row.
@@ -13245,9 +13481,24 @@ impl App {
         if self.favorites_locked() {
             return self.tagged(license::Audience::FreeOnly, self.feature_deck(&scheme));
         }
-        let indices = self.favorite_indices();
-        if indices.is_empty() {
+        let all = self.favorite_indices();
+        if all.is_empty() {
             return self.favorites_empty_state(&scheme);
+        }
+        let filter_bar = self.label_filter_bar(&scheme);
+        let indices: Vec<usize> = all
+            .into_iter()
+            .filter(|index| self.row_matches_label_filter(*index))
+            .collect();
+        if indices.is_empty() {
+            let empty = self.label_filter_empty_state(&scheme);
+            return match filter_bar {
+                Some(bar) => column![bar, empty]
+                    .spacing(8)
+                    .height(Length::Fill)
+                    .into(),
+                None => empty,
+            };
         }
         let body = self.recent_list(indices, PaneTab::Favorites, &scheme, false);
         let count = self.recent.iter().filter(|entry| entry.favorite).count();
@@ -13259,10 +13510,129 @@ impl App {
                 if count == 1 { "favorite" } else { "favorites" }
             ),
         );
-        column![body, horizontal_rule(1), footer]
-            .spacing(12)
-            .height(Length::Fill)
+        let mut content = column![].spacing(12).height(Length::Fill);
+        if let Some(bar) = filter_bar {
+            content = content.push(bar);
+        }
+        content
+            .push(body)
+            .push(horizontal_rule(1))
+            .push(footer)
             .into()
+    }
+
+    /// Whether a row carries every label currently selected in Favorites.
+    fn row_matches_label_filter(&self, index: usize) -> bool {
+        if self.label_filter.is_empty() {
+            return true;
+        }
+        let Some(entry) = self.recent.get(index) else {
+            return false;
+        };
+        let Some(key) = Self::label_key(entry) else {
+            return false;
+        };
+        self.label_assignments
+            .get(&key)
+            .is_some_and(|ids| self.label_filter.iter().all(|id| ids.contains(id)))
+    }
+
+    /// A chip per label used by a favorite, plus any active one. Pro only.
+    fn label_filter_bar(&self, scheme: &Scheme) -> Option<Element<'static, Message>> {
+        if !self.can(license::Feature::Labels) {
+            return None;
+        }
+        let scheme = *scheme;
+        let favorite_keys: Vec<String> = self
+            .favorite_indices()
+            .iter()
+            .filter_map(|index| self.recent.get(*index).and_then(Self::label_key))
+            .collect();
+        let mut labels: Vec<&LabelDef> = self
+            .labels
+            .iter()
+            .filter(|label| {
+                self.label_filter.contains(&label.id)
+                    || favorite_keys.iter().any(|key| {
+                        self.label_assignments
+                            .get(key)
+                            .is_some_and(|ids| ids.contains(&label.id))
+                    })
+            })
+            .collect();
+        if labels.is_empty() {
+            return None;
+        }
+        labels.sort_by_key(|label| label.name.to_lowercase());
+        let mut rows = column![].spacing(4).width(Length::Fill);
+        for chunk in labels.chunks(3) {
+            let mut line = row![].spacing(4).align_y(iced::Alignment::Center);
+            for label in chunk {
+                let active = self.label_filter.contains(&label.id);
+                let color = speaker_palette(label.color as usize, &scheme);
+                let id = label.id.clone();
+                line = line.push(
+                    button(
+                        container(
+                            text(label.name.clone())
+                                .size(10)
+                                .wrapping(NO_WRAP)
+                                .color(if active {
+                                    scheme.on_accent
+                                } else {
+                                    scheme.text
+                                }),
+                        )
+                        .padding([1, 6]),
+                    )
+                    .padding(0)
+                    .on_press(Message::ToggleLabelFilter(id))
+                    .style(move |theme, status| {
+                        if active {
+                            color_button(color, scheme.on_accent)(theme, status)
+                        } else {
+                            pill_button_secondary(theme, status)
+                        }
+                    }),
+                );
+            }
+            rows = rows.push(line);
+        }
+        if !self.label_filter.is_empty() {
+            rows = rows.push(
+                action_text("Clear filter")
+                    .on_press(Message::ClearLabelFilter)
+                    .style(pill_button_secondary),
+            );
+        }
+        Some(rows.into())
+    }
+
+    fn label_filter_empty_state(&self, scheme: &Scheme) -> Element<'static, Message> {
+        let scheme = *scheme;
+        let names: Vec<String> = self
+            .label_filter
+            .iter()
+            .filter_map(|id| self.labels.iter().find(|label| &label.id == id))
+            .map(|label| label.name.clone())
+            .collect();
+        container(
+            column![
+                text("No favorites with these labels")
+                    .size(theme::TEXT_SM)
+                    .color(scheme.text),
+                text(names.join(", "))
+                    .size(theme::TEXT_XS)
+                    .color(scheme.muted),
+                action_text("Clear filter")
+                    .on_press(Message::ClearLabelFilter)
+                    .style(pill_button_secondary),
+            ]
+            .spacing(6)
+            .align_x(iced::Alignment::Center),
+        )
+        .center(Length::Fill)
+        .into()
     }
 
     /// Recordings: takes from the microphone, newest first.
@@ -13564,7 +13934,7 @@ impl App {
         }
         let meta_line: Element<'static, Message> = meta_row.into();
 
-        let label = column![
+        let mut label = column![
             text(name)
                 .size(theme::TEXT_SM)
                 .wrapping(NO_WRAP)
@@ -13573,6 +13943,9 @@ impl App {
         ]
         .spacing(1)
         .width(Length::Fill);
+        if let Some(chips) = self.label_chips(entry, &scheme) {
+            label = label.push(chips);
+        }
 
         // The star and X both keep a reserved slot, so a favorite is visible
         // at a glance and the name never reflows when they appear.
@@ -14057,6 +14430,11 @@ impl App {
                 reveal_audio,
             ],
         };
+        if self.can(license::Feature::Labels) {
+            rows.push(
+                row("Add label\u{2026}", true, None, Message::OpenLabels(tab, index)).separated(),
+            );
+        }
         rows.push(select_version.separated());
         rows.push(row("Info", true, None, Message::OpenInfo(tab, index)).separated());
         rows
@@ -15662,6 +16040,8 @@ impl App {
             Some(Modal::Briefing)
         } else if self.versions_open.is_some() {
             Some(Modal::Versions)
+        } else if self.labels_open.is_some() {
+            Some(Modal::Labels)
         } else if self.info_open.is_some() {
             // Lowest priority: the Info popup only ever comes from a context
             // menu, which cannot open while another dialog is up.
@@ -15723,6 +16103,7 @@ impl App {
                 self.briefing = None;
             }
             Modal::Versions => self.versions_open = None,
+            Modal::Labels => self.labels_open = None,
         }
         Task::none()
     }
@@ -16436,6 +16817,151 @@ impl App {
 
     /// The File panel row's details: the full paths, whether they are on disk,
     /// and the sizes and times behind them.
+    /// Up to three label pills for a row, with a count when there are more.
+    fn label_chips(
+        &self,
+        entry: &RecentEntry,
+        scheme: &Scheme,
+    ) -> Option<Element<'static, Message>> {
+        if !self.can(license::Feature::Labels) {
+            return None;
+        }
+        let key = Self::label_key(entry)?;
+        let labels = self.label_for_key(&key);
+        if labels.is_empty() {
+            return None;
+        }
+        let scheme = *scheme;
+        let mut chips = row![].spacing(4).align_y(iced::Alignment::Center);
+        for label in labels.iter().take(3) {
+            let color = speaker_palette(label.color as usize, &scheme);
+            chips = chips.push(
+                container(
+                    text(label.name.clone())
+                        .size(10)
+                        .wrapping(NO_WRAP)
+                        .color(scheme.on_accent),
+                )
+                .padding([1, 5])
+                .style(move |_theme| container::Style {
+                    background: Some(color.into()),
+                    border: iced::border::rounded(999.0),
+                    ..container::Style::default()
+                }),
+            );
+        }
+        if labels.len() > 3 {
+            chips = chips.push(
+                text(format!("+{}", labels.len() - 3))
+                    .size(10)
+                    .wrapping(NO_WRAP)
+                    .color(scheme.muted),
+            );
+        }
+        Some(chips.into())
+    }
+
+    /// The label picker: type a name to create or select it, press a label to
+    /// toggle it, and delete definitions that are no longer wanted.
+    fn labels_dialog(&self, scheme: &Scheme) -> Element<'_, Message> {
+        let scheme = *scheme;
+        let Some(picker) = &self.labels_open else {
+            return container(horizontal_space()).into();
+        };
+        let Some(entry) = self.recent.get(picker.row) else {
+            return container(horizontal_space()).into();
+        };
+        let assigned = self
+            .label_assignments
+            .get(&picker.key)
+            .cloned()
+            .unwrap_or_default();
+        let usage = |id: &str| {
+            self.label_assignments
+                .values()
+                .filter(|ids| ids.iter().any(|existing| existing == id))
+                .count()
+        };
+        let mut list = column![].spacing(4).width(Length::Fill);
+        for label in &self.labels {
+            let on = assigned.contains(&label.id);
+            let color = speaker_palette(label.color as usize, &scheme);
+            let marker = if on { "\u{2713}" } else { "\u{25cb}" };
+            let line = row![
+                text(marker)
+                    .size(12)
+                    .color(if on { scheme.green } else { scheme.muted }),
+                container(
+                    text(label.name.clone())
+                        .size(11)
+                        .wrapping(NO_WRAP)
+                        .color(scheme.on_accent),
+                )
+                .padding([1, 6])
+                .style(move |_theme| container::Style {
+                    background: Some(color.into()),
+                    border: iced::border::rounded(999.0),
+                    ..container::Style::default()
+                }),
+                text(format!("{} file(s)", usage(&label.id)))
+                    .size(10)
+                    .color(scheme.muted),
+                horizontal_space(),
+                action(icon(ICON_X, 11.0))
+                    .on_press(Message::DeleteLabel(label.id.clone()))
+                    .style(subtle_icon_button),
+            ]
+            .spacing(6)
+            .align_y(iced::Alignment::Center);
+            let id = label.id.clone();
+            list = list.push(
+                button(container(line).width(Length::Fill).padding([4, 6]))
+                    .width(Length::Fill)
+                    .padding(0)
+                    .on_press(Message::ToggleLabel(id))
+                    .style(pill_button_secondary),
+            );
+        }
+        let input = text_input("Add a label\u{2026}", &picker.input)
+            .on_input(Message::LabelInputChanged)
+            .on_submit(Message::ApplyLabel)
+            .width(Length::Fill);
+        let body = column![
+            text(format!("Labels \u{2014} {}", recent_title(entry)))
+                .size(20)
+                .color(scheme.text),
+            text(
+                "Labels belong to the audio file and follow every version. \
+                 Up to 8 per file."
+            )
+            .size(theme::TEXT_XS)
+            .color(scheme.muted),
+            row![
+                input,
+                action_text("Add")
+                    .on_press(Message::ApplyLabel)
+                    .style(pill_button_secondary),
+            ]
+            .spacing(8)
+            .align_y(iced::Alignment::Center),
+            scrollable(list)
+                .direction(app_scroll_direction())
+                .height(Length::Fixed(260.0))
+                .style(visible_scrollbar_style),
+            right_aligned(
+                row![
+                    action_text("Close")
+                        .on_press(Message::CloseLabels)
+                        .style(pill_button_secondary),
+                ]
+                .spacing(8),
+            ),
+        ]
+        .spacing(theme::SPACE_MD)
+        .width(Length::Fill);
+        modal_card(body, 520.0, scheme)
+    }
+
     /// A strip above the transcript saying an older version is on screen.
     fn version_banner(&self, scheme: &Scheme) -> Option<Element<'_, Message>> {
         let preview = self.version_preview.as_ref()?;
@@ -18052,6 +18578,7 @@ impl App {
             Some(Modal::Vocabulary) => self.vocabulary_dialog(&scheme),
             Some(Modal::Briefing) => self.briefing_dialog(&scheme),
             Some(Modal::Versions) => self.versions_dialog(&scheme),
+            Some(Modal::Labels) => self.labels_dialog(&scheme),
             Some(Modal::Info) => self.info_dialog(&scheme),
         };
         // The Info popup is read-only and transient: its scrim dismisses it,
@@ -18059,6 +18586,7 @@ impl App {
         let dismiss = match self.open_modal() {
             Some(Modal::Info) => Some(Message::CloseInfo),
             Some(Modal::Versions) => Some(Message::CloseVersions),
+            Some(Modal::Labels) => Some(Message::CloseLabels),
             _ => None,
         };
         modal_overlay(base, dialog, scheme, dismiss)
@@ -20768,6 +21296,7 @@ fn closes_row_menu(message: &Message) -> bool {
             | Message::ClearQueue
             | Message::ClearHistory
             | Message::OpenVersions(_, _)
+            | Message::OpenLabels(_, _)
             | Message::ImportVersions
             | Message::ScanOrphans
     )
@@ -24468,6 +24997,8 @@ mod tests {
             last_batch: vec![audio.display().to_string()],
             recent: Vec::new(),
             favorite_order: Vec::new(),
+            labels: Vec::new(),
+            label_assignments: HashMap::new(),
         };
         std::fs::write(
             config_dir.join("queue.json"),
@@ -24874,6 +25405,99 @@ mod tests {
         assert_eq!(app.recent[0].preset.as_deref(), Some("accuracy"));
         assert_eq!(app.pane_tab, PaneTab::History);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn labels_are_pro_only() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("labels-free");
+        let mut app = App::new();
+        app.license.revoke_pro(SystemTime::now());
+        app.recent.push(RecentEntry {
+            audio: Some(PathBuf::from("/media/talk.mp3")),
+            transcript: Some(PathBuf::from("/media/talk.txt")),
+            ..Default::default()
+        });
+
+        let _ = app.update(Message::OpenLabels(PaneTab::History, 0));
+        assert!(app.labels_open.is_none(), "free must not open the label picker");
+        assert!(app.paywall_open, "free should be sent to the paywall");
+        assert!(app.label_chips(&app.recent[0], &app.scheme()).is_none());
+    }
+
+    #[test]
+    fn creating_a_label_persists_and_toggles() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("labels-create");
+        let mut app = pro_app();
+        app.recent.push(RecentEntry {
+            audio: Some(PathBuf::from("/media/talk.mp3")),
+            transcript: Some(PathBuf::from("/media/talk.txt")),
+            finished_at: 1,
+            ..Default::default()
+        });
+
+        let _ = app.update(Message::OpenLabels(PaneTab::History, 0));
+        assert!(app.labels_open.is_some());
+        let _ = app.update(Message::LabelInputChanged("Clinic".to_string()));
+        let _ = app.update(Message::ApplyLabel);
+
+        assert_eq!(app.labels.len(), 1);
+        assert_eq!(app.labels[0].name, "Clinic");
+        assert_eq!(
+            app.label_assignments.values().next().map(|ids| ids.len()),
+            Some(1)
+        );
+        let (labels, assignments) = App::load_labels();
+        assert_eq!(labels.len(), 1);
+        assert_eq!(
+            assignments.values().next().map(|ids| ids.len()),
+            Some(1),
+            "labels must survive a save/load"
+        );
+
+        let id = app.labels[0].id.clone();
+        let _ = app.update(Message::ToggleLabel(id));
+        assert!(app.label_assignments.is_empty());
+    }
+
+    #[test]
+    fn the_favorites_filter_requires_every_selected_label() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("labels-filter");
+        let mut app = pro_app();
+        app.labels = vec![
+            LabelDef {
+                id: "a".to_string(),
+                name: "Clinic".to_string(),
+                color: 0,
+            },
+            LabelDef {
+                id: "b".to_string(),
+                name: "Follow-up".to_string(),
+                color: 1,
+            },
+        ];
+        app.recent.push(RecentEntry {
+            audio: Some(PathBuf::from("/media/one.mp3")),
+            favorite: true,
+            ..Default::default()
+        });
+        app.recent.push(RecentEntry {
+            audio: Some(PathBuf::from("/media/two.mp3")),
+            favorite: true,
+            ..Default::default()
+        });
+        app.label_assignments.insert(
+            "/media/one.mp3".to_string(),
+            vec!["a".to_string(), "b".to_string()],
+        );
+        app.label_assignments
+            .insert("/media/two.mp3".to_string(), vec!["a".to_string()]);
+        app.label_filter = vec!["a".to_string(), "b".to_string()];
+
+        assert!(app.row_matches_label_filter(0));
+        assert!(!app.row_matches_label_filter(1));
     }
 
     #[test]
@@ -26647,7 +27271,7 @@ mod tests {
 
     /// Every dialog, so a variant added to `Modal` cannot go untested: the
     /// escape and render passes below each walk this list.
-    const ALL_MODALS: [Modal; 11] = [
+    const ALL_MODALS: [Modal; 12] = [
         Modal::Reset,
         Modal::Summary,
         Modal::DeleteLine,
@@ -26659,6 +27283,7 @@ mod tests {
         Modal::Rename,
         Modal::Info,
         Modal::Versions,
+        Modal::Labels,
     ];
 
     /// Raise one dialog the way the app would.
@@ -26729,6 +27354,16 @@ mod tests {
                 });
                 let index = app.recent.len() - 1;
                 app.open_versions(PaneTab::History, index);
+            }
+            Modal::Labels => {
+                app.recent.push(RecentEntry {
+                    audio: Some(PathBuf::from("/media/talk.mp3")),
+                    transcript: Some(PathBuf::from("/media/talk.txt")),
+                    finished_at: 5,
+                    ..Default::default()
+                });
+                let index = app.recent.len() - 1;
+                app.open_labels(PaneTab::History, index);
             }
         }
     }
@@ -28868,6 +29503,8 @@ mod tests {
             last_batch: vec![audio.display().to_string()],
             recent: Vec::new(),
             favorite_order: Vec::new(),
+            labels: Vec::new(),
+            label_assignments: HashMap::new(),
         };
         let path = App::queue_path().unwrap();
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -31163,6 +31800,10 @@ mod tests {
             Some(Message::OpenExportSubmenu)
         ));
         assert!(!rows.iter().any(|row| row.label == "Remove item"));
+        assert!(
+            rows.iter().any(|row| row.label == "Add label\u{2026}"),
+            "Pro rows offer labels"
+        );
         assert!(
             !menu_entry(&rows, "Select version\u{2026}").enabled,
             "a row without a manifest has no versions"
