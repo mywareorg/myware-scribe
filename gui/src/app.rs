@@ -6613,6 +6613,16 @@ impl App {
                 if tab != PaneTab::Queue {
                     self.refresh_recent_presence();
                 }
+                // The focused row is the one the pane should be reading.
+                // Opening it here is what makes Favorites -> History swap the
+                // document, instead of only moving the highlighted row.
+                if tab != PaneTab::Queue {
+                    if let Some(index) = self.selected_recent {
+                        if self.recent_row_opens(index) {
+                            return self.open_recent(index, None);
+                        }
+                    }
+                }
                 Task::none()
             }
             Message::ClearHistory => {
@@ -24577,6 +24587,63 @@ mod tests {
 
         let _ = app.update(Message::SelectTab(PaneTab::Recordings));
         assert_eq!(app.selected_recent, Some(2), "Recordings falls back to its first");
+    }
+
+    #[test]
+    fn switching_tabs_opens_the_focused_row() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("tab-focus-opens");
+        let media = temp_dir("tab-focus-opens-media");
+        let make = |name: &str| {
+            let audio = media.join(format!("{name}.mp3"));
+            let transcript = media.join(format!("{name}.txt"));
+            std::fs::write(&audio, b"audio").unwrap();
+            std::fs::write(&transcript, "[00:00] SPEAKER 1: hi\n").unwrap();
+            (audio, transcript)
+        };
+        let (favorite_audio, favorite_transcript) = make("sample-long");
+        let (history_audio, history_transcript) = make("hour-conversation-short-2");
+
+        let mut app = pro_app();
+        push_recent(
+            &mut app,
+            Some(favorite_audio.clone()),
+            favorite_transcript,
+            Some(10.0),
+            Vec::new(),
+        );
+        push_recent(
+            &mut app,
+            Some(history_audio.clone()),
+            history_transcript.clone(),
+            Some(20.0),
+            Vec::new(),
+        );
+        let favorite = app
+            .recent
+            .iter()
+            .position(|entry| entry.audio.as_deref() == Some(favorite_audio.as_path()))
+            .unwrap();
+        let history = app
+            .recent
+            .iter()
+            .position(|entry| entry.audio.as_deref() == Some(history_audio.as_path()))
+            .unwrap();
+        app.recent[favorite].favorite = true;
+        app.favorites_focus = Some(favorite);
+        app.history_focus = Some(history);
+        app.pane_tab = PaneTab::Favorites;
+        app.selected_recent = Some(favorite);
+
+        let _ = app.update(Message::SelectTab(PaneTab::History));
+        assert_eq!(app.selected_recent, Some(history));
+        assert_eq!(
+            app.selected_view.as_ref().map(|view| view.source.clone()),
+            Some(history_transcript),
+            "History must open its own focused transcript"
+        );
+
+        let _ = std::fs::remove_dir_all(&media);
     }
 
     #[test]
