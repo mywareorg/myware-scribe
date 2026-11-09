@@ -1386,7 +1386,6 @@ pub enum Message {
     HelpChoice(HelpKind),
     CloseHelp,
     Noop,
-    OpenSummary,
     SmsToggled(bool),
     TogglePlayerCollapsed,
     NotificationsToggled(bool),
@@ -1464,7 +1463,6 @@ pub enum Message {
     SaveReport,
     /// The report's save dialog returned; `None` means it was dismissed.
     ReportPicked(Option<PathBuf>),
-    RevealOutput,
     OpenRename,
     /// Open the custom-vocabulary editor, from Edit or from Help.
     OpenVocabulary,
@@ -6998,21 +6996,6 @@ impl App {
                 }
                 Task::none()
             }
-            Message::OpenSummary => {
-                self.header_menu = None;
-                if self.has_results() {
-                    self.summary_open = true;
-                    // Opened by hand, so it carries none of the chain's follow-ups.
-                    self.pending_rename = false;
-                    self.pending_tips = false;
-                    self.toast = None;
-                    return scrollable::snap_to(
-                        summary_id(),
-                        scrollable::RelativeOffset { x: 0.0, y: 0.0 },
-                    );
-                }
-                Task::none()
-            }
             Message::CloseSummary => self.close_modal(Modal::Summary),
             Message::SetEditingTips(show) => {
                 self.editing_tips = show;
@@ -7181,11 +7164,6 @@ impl App {
                 if url.starts_with("https://") || url.starts_with("http://") {
                     open_url(&url);
                 }
-                Task::none()
-            }
-            Message::RevealOutput => {
-                self.header_menu = None;
-                self.reveal_output();
                 Task::none()
             }
             Message::OpenExportMenu => {
@@ -8024,17 +8002,6 @@ impl App {
         self.reset_pane_geometry();
         self.toast = Some(("Reverted to the initial transcript".to_string(), Instant::now()));
         Task::none()
-    }
-
-    fn reveal_output(&self) {
-        let dir = self
-            .shown_output()
-            .or_else(|| self.shown_audio())
-            .and_then(|path| path.parent())
-            .map(|path| path.to_path_buf())
-            .or_else(|| self.output_dir.clone());
-        let Some(dir) = dir else { return };
-        open_path(&dir);
     }
 
     /// Show a history row's output in the file manager, whether or not that
@@ -15868,11 +15835,6 @@ impl App {
     fn publish_menu(&self, scheme: &Scheme) -> Element<'_, Message> {
         let scheme = *scheme;
         let has_text = !self.shown_transcript().is_empty();
-        let has_target = self.shown_output().is_some()
-            || self.shown_audio().is_some()
-            || self.output_dir.is_some();
-        let running = matches!(self.status, Status::Running);
-        let summary = !running && self.has_results();
         let rows = vec![
             MenuRow {
                 label: "Export Transcript",
@@ -15905,20 +15867,6 @@ impl App {
                 checked: false,
                 enabled: has_text,
                 action: has_text.then_some(Message::OpenReport),
-            },
-            MenuRow {
-                label: "Last Run Summary",
-                key: None,
-                checked: false,
-                enabled: summary,
-                action: summary.then_some(Message::OpenSummary),
-            },
-            MenuRow {
-                label: "Reveal",
-                key: None,
-                checked: false,
-                enabled: has_target,
-                action: has_target.then_some(Message::RevealOutput),
             },
         ];
         let width = header_menu_width(rows.iter());
