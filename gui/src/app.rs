@@ -194,11 +194,9 @@ const TOGGLE_WIDTH: f32 = 64.0;
 /// they line up with the text buttons around them.
 const PANEL_ICON_DIAMETER: f32 = CONTROL_HEIGHT;
 
-/// Width held at the left of a history row for its star, so revealing the
+/// Width held at the right of a history row for its star, so revealing the
 /// filled star never reflows the name.
 const RECENT_STAR_WIDTH: f32 = 20.0;
-/// Width held for a history row's remove action so hover does not reflow it.
-const RECENT_ACTIONS_WIDTH: f32 = 19.0;
 /// Width held for the queue row's remove action so hover does not reflow it.
 const QUEUE_REMOVE_WIDTH: f32 = 19.0;
 
@@ -13356,9 +13354,6 @@ impl App {
                     );
                 }
                 rows = rows.push(self.queue_row(index, &scheme));
-                if index + 1 < self.queue.len() {
-                    rows = rows.push(horizontal_rule(1));
-                }
             }
             let list = mouse_area(
                 scrollable(rows)
@@ -13488,9 +13483,6 @@ impl App {
                     rows = rows.push(day_header(&day, &scheme));
                 }
                 rows = rows.push(self.recent_row(index, PaneTab::History, &scheme, locked));
-                if index + 1 < self.recent.len() {
-                    rows = rows.push(horizontal_rule(1));
-                }
             }
             mouse_area(
                 scrollable(rows)
@@ -13735,8 +13727,7 @@ impl App {
     ) -> Element<'_, Message> {
         let scheme = *scheme;
         let mut rows = column![].spacing(2).width(Length::Fill);
-        let count = indices.len();
-        for (position, index) in indices.into_iter().enumerate() {
+        for index in indices {
             // During a recording workflow every row but the session's item is
             // dimmed; the active row is the one the right pane is describing.
             let dimmed = self.recording_row_dimmed(tab, index, locked);
@@ -13759,9 +13750,6 @@ impl App {
                 );
             }
             rows = rows.push(self.recent_row(index, tab, &scheme, dimmed));
-            if position + 1 < count {
-                rows = rows.push(horizontal_rule(1));
-            }
         }
         let list = mouse_area(
             scrollable(rows)
@@ -13920,15 +13908,7 @@ impl App {
         // danger meta and nothing else.
         let openable = entry.state == ItemState::Ready && transcript_present;
         let (meta, meta_danger) = self.recent_row_meta(index, tab);
-        // A readable transcript uses the compact row: duration and preset on
-        // the title line, labels beneath it, and no language, speaker count or
-        // completion clock. Other states keep a status line.
         let status_row = !meta.is_empty();
-        let title_meta = if status_row {
-            String::new()
-        } else {
-            row_title_meta(entry)
-        };
         let meta_color = if meta_danger {
             scheme.danger
         } else {
@@ -13955,32 +13935,6 @@ impl App {
         let cued = self.row_cue_active(tab, index);
         let record_locked = self.record_lock();
 
-        let edited = transcript_edited(entry);
-        let edited_color = if locked {
-            scheme.muted
-        } else if theme::is_dark_scheme(&scheme) {
-            scheme.blue
-        } else {
-            // The light palette's blue is a bright cyan; mix it toward ink
-            // so the pencil and its label read against white.
-            theme::mix(scheme.blue, scheme.ink, 0.6)
-        };
-        let edited_view = || -> Element<'static, Message> {
-            row![
-                icon_colored(ICON_PENCIL, 10.0, edited_color),
-                text("Edited")
-                    .size(10)
-                    .wrapping(NO_WRAP)
-                    .color(edited_color),
-            ]
-            .spacing(4)
-            .align_y(iced::Alignment::Center)
-            .into()
-        };
-
-        // The star and X both keep a reserved slot, so a favorite is visible
-        // at a glance and the name never reflows when they appear. A filled
-        // star stays on screen even when the row is not hovered.
         let favorite = entry.favorite;
         let star = self.tip(
             action(icon_colored(
@@ -14006,126 +13960,56 @@ impl App {
             },
             &scheme,
         );
-        let remove_label = match tab {
-            PaneTab::Queue | PaneTab::History => "Remove from History",
-            PaneTab::Favorites => "Remove from Favorites",
-            PaneTab::Recordings => "Remove from Recordings",
-        };
-        let remove = self.tip(
-            action(icon(ICON_X, 11.0))
-                .padding([2, 4])
-                .on_press_maybe((!record_locked).then_some(Message::RemoveRecent(index)))
-                .style(subtle_icon_button),
-            remove_label,
-            &scheme,
-        );
-        // The star lives at the left edge, as the row's status mark. A filled
-        // star is always drawn; an outline star appears on hover for rows that
-        // are not favorites. The remove action stays at the right.
-        let star_slot: Element<Message> = if favorite || hovered {
+        // The star is the row's only action now; the context menu owns Remove.
+        let actions_content: Element<Message> = if favorite || hovered {
             star
         } else {
             horizontal_space().into()
         };
-        let star_slot = container(star_slot)
-            .width(Length::Fixed(RECENT_STAR_WIDTH))
-            .align_x(iced::Alignment::Start);
-        let actions_content: Element<Message> = if hovered {
-            remove.into()
-        } else {
-            horizontal_space().into()
-        };
         let actions = container(actions_content)
-            .width(Length::Fixed(RECENT_ACTIONS_WIDTH))
+            .width(Length::Fixed(RECENT_STAR_WIDTH))
             .align_x(iced::Alignment::End);
 
-        // Leave the right-hand duration/preset room in the name's character
-        // budget; the row ellipsizes rather than colliding with it.
-        let name_budget =
-            recent_name_budget().saturating_sub(if title_meta.is_empty() { 0 } else { 14 });
-        let name = ellipsize_middle(&recent_title(entry), name_budget);
-        let mut title_row = row![
-            star_slot,
+        let name = ellipsize_middle(&recent_title(entry), recent_name_budget());
+        let title_row = row![
             text(name)
                 .size(theme::TEXT_SM)
                 .wrapping(NO_WRAP)
                 .color(name_color)
-                .width(Length::Fill)
+                .width(Length::Fill),
+            actions,
         ]
         .spacing(6)
         .align_y(iced::Alignment::Center)
         .width(Length::Fill);
-        if !title_meta.is_empty() {
-            title_row = title_row.push(
-                text(title_meta)
-                    .size(10)
-                    .wrapping(NO_WRAP)
-                    .color(meta_color),
-            );
-        }
-        title_row = title_row.push(actions);
 
-        let mut details = column![].spacing(2).width(Length::Fill);
-        if status_row {
-            let chip = settings_label(entry);
-            let mut meta_row = row![
-                text(meta)
-                    .size(11)
-                    .wrapping(NO_WRAP)
-                    .color(meta_color),
-            ]
-            .spacing(4)
-            .align_y(iced::Alignment::Center)
-            .width(Length::Fill);
-            if edited {
-                meta_row = meta_row.push(edited_view());
-            }
-            meta_row = meta_row.push(horizontal_space());
-            if tab == PaneTab::Recordings
-                && self.retryable_recording(index)
-                && audio_present
-                && !record_locked
-            {
-                meta_row = meta_row.push(
-                    action(text("Retry").size(10).wrapping(NO_WRAP))
-                        .padding([0, 3])
-                        .on_press(Message::RetryRecording(index))
-                        .style(pill_button_secondary),
-                );
-            } else if let Some(chip) = chip {
-                meta_row = meta_row.push(
-                    container(
-                        text(chip)
-                            .size(10)
-                            .wrapping(NO_WRAP)
-                            .color(scheme.muted),
-                    )
-                    .padding([1, 6])
-                    .style(move |_theme| container::Style {
-                        background: Some(scheme.bar_track.into()),
-                        border: iced::border::rounded(999.0),
-                        ..container::Style::default()
-                    }),
-                );
-            }
-            details = details.push(meta_row);
-            if let Some(chips) = self.label_chips(entry, &scheme) {
-                details = details.push(chips);
-            }
+        // One line under the title: the duration for a transcript, the status
+        // for anything else, followed by its label chips. No preset, language,
+        // speaker count, completion time or edited marker.
+        let detail_text = if status_row {
+            meta
         } else {
-            let mut detail_line = row![].spacing(6).align_y(iced::Alignment::Center);
-            let mut has_detail = false;
-            if let Some(chips) = self.label_chips(entry, &scheme) {
-                detail_line = detail_line.push(chips);
-                has_detail = true;
+            entry
+                .duration
+                .map(format_secs)
+                .unwrap_or_default()
+        };
+        let chips = self.label_chips(entry, &scheme);
+        let mut details = column![].spacing(2).width(Length::Fill);
+        if !detail_text.is_empty() || chips.is_some() {
+            let mut detail_row = row![].spacing(6).align_y(iced::Alignment::Center);
+            if !detail_text.is_empty() {
+                detail_row = detail_row.push(
+                    text(detail_text)
+                        .size(11)
+                        .wrapping(NO_WRAP)
+                        .color(meta_color),
+                );
             }
-            if edited {
-                detail_line = detail_line.push(edited_view());
-                has_detail = true;
+            if let Some(chips) = chips {
+                detail_row = detail_row.push(chips);
             }
-            if has_detail {
-                details = details.push(detail_line);
-            }
+            details = details.push(detail_row);
         }
 
         let row_tint = Color {
@@ -14636,6 +14520,22 @@ impl App {
         }
         rows.push(select_version.separated());
         rows.push(row("Info", true, None, Message::OpenInfo(tab, index)).separated());
+        // The row's X is gone; removal lives at the bottom of the menu.
+        rows.push(
+            danger(
+                "Remove",
+                !running && !locked,
+                if running {
+                    Some("Stop the run before removing rows.")
+                } else if locked {
+                    Some("Finish the recording first.")
+                } else {
+                    None
+                },
+                Message::RemoveRecent(index),
+            )
+            .separated(),
+        );
         rows
     }
 
@@ -20394,7 +20294,6 @@ const ICON_SPEAKERS: char = '\u{f4d0}';
 /// A person with a plus: a new voice on this line, which the transcript-wide
 /// `ICON_SPEAKERS` group cannot say.
 const ICON_PERSON_PLUS: char = '\u{f4dd}';
-const ICON_PENCIL: char = '\u{f4cb}';
 /// A repeat arrow for retrying a failed item. Distinct from the editor's redo
 /// glyph, which used to share this codepoint.
 const ICON_RETRY: char = '\u{f130}';
@@ -21425,41 +21324,6 @@ fn language_label(code: &str) -> String {
     }
 }
 
-/// Duration and preset for a finished transcript's title line.
-fn row_title_meta(entry: &RecentEntry) -> String {
-    let mut parts = Vec::new();
-    if let Some(duration) = entry.duration {
-        parts.push(format_secs(duration));
-    }
-    if let Some(preset) = entry.preset.as_deref().map(preset_label) {
-        parts.push(preset);
-    }
-    parts.join(" \u{00b7} ")
-}
-
-/// The settings chip for a row: the preset plus the language actually used.
-fn settings_label(entry: &RecentEntry) -> Option<String> {
-    let preset = preset_label(entry.preset.as_deref()?);
-    let language = entry
-        .language_requested
-        .as_deref()
-        .or(entry.language_detected.as_deref())
-        .map(language_label)
-        .filter(|label| !label.is_empty());
-    Some(match language {
-        Some(language) => format!("{preset} \u{00b7} {language}"),
-        None => preset,
-    })
-}
-
-/// Whether an older, unedited copy of this transcript exists beside it.
-fn transcript_edited(entry: &RecentEntry) -> bool {
-    entry
-        .transcript
-        .as_deref()
-        .is_some_and(|path| crate::files::unedited_path(path).is_file())
-}
-
 /// Whether the transcript differs from its pre-edit copy. Used when the
 /// manifest's flag needs recomputing, not per frame.
 fn transcript_differs_from_original(transcript: &Path) -> bool {
@@ -21905,13 +21769,9 @@ fn name_char_budget(pixels: f32) -> usize {
 }
 
 /// Character budget for a recent row's name: the row's span less its padding,
-/// its three gaps, and the slots the left star and right remove always hold.
+/// the gap and the right-hand star slot.
 fn recent_name_budget() -> usize {
-    let spare = FILE_ROW_WIDTH
-        - 2.0 * ROW_PADDING_X
-        - 3.0 * RECENT_ROW_GAP
-        - RECENT_STAR_WIDTH
-        - RECENT_ACTIONS_WIDTH;
+    let spare = FILE_ROW_WIDTH - 2.0 * ROW_PADDING_X - RECENT_ROW_GAP - RECENT_STAR_WIDTH;
     name_char_budget(spare)
 }
 
@@ -24847,20 +24707,6 @@ mod tests {
     }
 
     #[test]
-    fn row_title_meta_shows_duration_and_preset_only() {
-        let entry = RecentEntry {
-            duration: Some(95.0),
-            preset: Some("balanced".to_string()),
-            language_requested: Some("en".to_string()),
-            speakers: Some(2),
-            finished_at: 1_600_000_000,
-            ..Default::default()
-        };
-        assert_eq!(row_title_meta(&entry), "1:35 \u{00b7} Balanced");
-        assert_eq!(row_title_meta(&RecentEntry::default()), "");
-    }
-
-    #[test]
     fn day_headings_label_today_and_dates() {
         // A fixed afternoon in September: no time zone shifts the date, and
         // no DST change happens in the day before it.
@@ -25292,53 +25138,6 @@ mod tests {
         assert!(app.batch_paths.is_empty());
         assert!(!App::queue_path().unwrap().exists());
         assert!(App::settings_path().unwrap().exists());
-    }
-
-    #[test]
-    fn settings_chip_names_the_preset_and_language() {
-        let entry = RecentEntry {
-            preset: Some("accuracy".to_string()),
-            language_requested: Some("en".to_string()),
-            ..Default::default()
-        };
-        assert_eq!(
-            settings_label(&entry).as_deref(),
-            Some("Accuracy \u{00b7} English")
-        );
-
-        let detected = RecentEntry {
-            preset: Some("speed".to_string()),
-            language_detected: Some("es".to_string()),
-            ..Default::default()
-        };
-        assert_eq!(
-            settings_label(&detected).as_deref(),
-            Some("Speed \u{00b7} Spanish")
-        );
-
-        let preset_only = RecentEntry {
-            preset: Some("balanced".to_string()),
-            ..Default::default()
-        };
-        assert_eq!(settings_label(&preset_only).as_deref(), Some("Balanced"));
-        assert_eq!(settings_label(&RecentEntry::default()), None);
-    }
-
-    #[test]
-    fn an_edited_transcript_is_detected_from_its_original_copy() {
-        let dir = temp_dir("edited-flag");
-        let transcript = dir.join("talk-accuracy-transcription-2speakers-ts.txt");
-        std::fs::write(&transcript, "[00:00] A: hi\n").unwrap();
-        let entry = RecentEntry {
-            transcript: Some(transcript.clone()),
-            ..Default::default()
-        };
-        assert!(!transcript_edited(&entry));
-
-        std::fs::write(crate::files::unedited_path(&transcript), "hi\n").unwrap();
-        assert!(transcript_edited(&entry));
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -32155,9 +31954,13 @@ mod tests {
             "a row without a manifest has no versions"
         );
 
-        // Info sits at the bottom, separated, and carries the row it was
-        // opened on rather than a live index.
-        let info = rows.last().expect("no Info row");
+        // Info carries the row it was opened on rather than a live index, and
+        // Remove is the final row now that the row X is gone.
+        let remove = rows.last().expect("no Remove row");
+        assert_eq!(remove.label, "Remove");
+        assert!(remove.separator_before);
+        assert!(matches!(remove.action, Some(Message::RemoveRecent(0))));
+        let info = &rows[rows.len() - 2];
         assert_eq!(info.label, "Info");
         assert!(info.separator_before);
         assert!(matches!(info.action, Some(Message::OpenInfo(PaneTab::History, 0))));
