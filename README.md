@@ -4,8 +4,7 @@
 
 Local, offline speaker diarization and transcription. A single native Rust
 executable provides both the desktop GUI (iced) and a command-line mode
-(`--cli`). No Python. Network access is limited to downloading models and, in a
-store build that has bought or is restoring Pro, the store's entitlement check.
+(`--cli`). No Python. Network access is limited to downloading models.
 
 **The name comes from HIPAA.** Audio is processed on your machine, and
 transcripts stay there. The design is HIPAA inspired; it is not HIPAA certified,
@@ -95,14 +94,12 @@ cargo build --profile release-fast -p hippo-summarize
 Without `hippo-summarize.exe` beside `hippo-transcribe.exe`, Summarize
 Transcript reports the helper as missing. In a Visual Studio developer prompt,
 `cargo build-fast` builds both binaries into that profile and `cargo run-fast`
-runs the GUI. Use the full build script for the final release. Pass `-Free` or `-Pro` to force
-the entitlement for that run.
+runs the GUI. Use the full build script for the final release; every build
+includes every feature.
 
 For the GPU edit/run loop, use `scripts\run-gpu.ps1`. It selects the Vulkan
 SDK, Ninja, and the DLL CRT, stages the sherpa/ONNX/OpenMP runtime DLLs, and
-runs `cargo run --profile release-fast --features gpu`. It defaults to
-`HIPPO_TRANSCRIBE_TIER=pro` so GPU calibration is visible; pass `-Free` to test
-the free-tier lock or `-Pro` to make it explicit.
+runs `cargo run --profile release-fast --features gpu`.
 
 Prerequisites: Visual Studio 2022 Build Tools with the "Desktop development with
 C++" workload, Rust stable MSVC (`rustup default stable-x86_64-pc-windows-msvc`),
@@ -124,9 +121,9 @@ reports what the profile actually contains to `dist\shortcuts-diagnose.txt`.
 ## Models
 
 Models are non-gated and installed into `%LOCALAPPDATA%\hippo-transcribe\models`
-(Windows) or `~/.cache/hippo-transcribe/models` (Linux/macOS). Downloading models
-and confirming a Pro purchase are the only reasons the app uses the network; the
-transcription pipeline itself never does.
+(Windows) or `~/.cache/hippo-transcribe/models` (Linux/macOS). Downloading models is
+the only reason the app uses the network; the transcription pipeline itself
+never does.
 
 Download everything at once:
 
@@ -215,8 +212,7 @@ hippo-transcribe --cli probe audio.mp3 120               # duration + RMS wavefo
 
 Presets: `speed` (whisper `tiny`, multilingual), `balanced` (whisper `small`,
 multilingual) and `accuracy` (whisper `large-v3-turbo`). `balanced` is the
-default and the only preset available on the free tier; `speed` and `accuracy`
-require Pro.
+default; all three are available.
 
 Options: `--preset speed|balanced|accuracy`, `--language <code>|auto`,
 `--num-speakers N`, `--output-dir`, `--no-timestamps`,
@@ -242,13 +238,13 @@ whisper.cpp uses the fastest backend the build provides:
   This path has never been run on real hardware, so treat it as experimental.
 - **CPU fallback** — if GPU context creation fails, the run continues on the CPU
   and the console reports why. `HIPPO_TRANSCRIBE_ACCEL=cpu` forces CPU.
-- **Acceleration** — Pro users choose CPU or GPU below Preset/Speakers. CPU is
+- **Acceleration** — CPU or GPU is chosen below Preset/Speakers. CPU is
   the `1×` baseline; GPU shows the measured speed multiplier once calibrated.
   The `Now:` line reports the backend actually used by the running pipeline.
   On the first run for a preset, a **GPU Calibration** window offers a short
   CPU-vs-GPU test; testing progress, results, and the choice all stay in that
-  window. Closing it keeps CPU for that preset; `↻` retests. Free users see GPU
-  locked, and CPU-only builds show it unavailable. A transcription error, or an
+  window. Closing it keeps CPU for that preset; `↻` retests. CPU-only builds show
+  GPU as unavailable. A transcription error, or an
   unclean shutdown during a GPU run, returns that preset to CPU automatically.
 - **Windows GPU troubleshooting** — run `.\scripts\test-gpu-build.ps1` before a
   build; `-Probe` isolates the ggml shader configure, `-Build` performs the GPU
@@ -267,26 +263,13 @@ decode settings, so re-runs and re-opened transcripts skip whisper entirely;
 clip edges are silence-trimmed before encoding. `scripts/benchmark.sh [--preset P] [--speakers N] <audio>...` runs that
 over a corpus for backend and preset comparisons.
 
-## Free and Pro
+## Features
 
-The free tier is the full-length pipeline: the balanced model, one speaker,
-unlimited files, no minutes and no account. Copy, save and search are included.
-Pro adds the Speed and Accuracy presets, speaker diarization (speaker labels),
-batch transcription, transcript editing, audio playback and the briefing.
-
-Pro is a one-time purchase on both stores. A 7-day trial is available once per
-install. Entitlement state lives in `license.json` beside the settings and is
-never used to delete transcripts or queue items; a lapsed license simply falls
-back to the free tier. Store receipt checks survive 30 days offline, then
-re-verify.
-
-1.0 ships as a preview: the Pro surfaces (header chip, locked-feature toasts, the
-nudge after a free run) are visible, the paywall offers the trial, and no purchase
-button is shown because no store client is built yet. Purchasing lands in 1.1 with
-the durable add-on, which is also the first point at which it can be tested —
-the Store does not resolve an add-on for an app that is not yet published.
-
-`HIPPO_TRANSCRIBE_TIER=pro` (or `free`) forces the tier for development.
+Every feature is included in this release: the Speed and Accuracy presets,
+speaker diarization and labels, batch transcription, transcript editing,
+playback, labels and the summary. There is no tier, no trial and no purchase,
+and no store client is built in. `core/src/license.rs` keeps the entitlement
+seam for a future store release; the GUI fixes the access state at Pro.
 
 ## GUI
 
@@ -297,8 +280,7 @@ speaker count and press Transcribe. **Record** captures from the microphone
 (48 kHz mono WAV, written beside your transcripts or to the save location): a
 1.5 s countdown starts the take, the meter and stop control live in the
 transcription pane, and stopping transcribes it immediately with no setup —
-Speed on Pro, Balanced on free, one speaker. Recording is available in the free
-tier. Pressing Record while a batch is transcribing stops the batch, leaves the
+the Speed preset, one speaker. Pressing Record while a batch is transcribing stops the batch, leaves the
 queued files for later, and records the take on its own. A recording workflow
 locks the panel until it finishes. The microphone is chosen in Settings. The Help menu holds the appearance choices (Light,
 Dark, System; System follows the desktop and is the default) and the header
@@ -308,14 +290,14 @@ opens Settings for transcript text size, preset, speaker count, language,
 loudness normalization, playback speed, follow mode, notifications, save
 location, and model storage.
 
-**File → Briefing** (Pro) reads the finished transcript and writes an overview,
-key points, decisions and action items, each citing the transcript lines it came
-from; **Save as Markdown** writes `<transcript>-briefing.md`. The first briefing
-downloads a 1.1 GB model once; generation runs on this machine and can be
-cancelled while it works. Each chunk's results appear as they are read, and a
-finished briefing is cached beside the transcript as `<stem>-briefing.json` so
-reopening it costs nothing. It is a derived document, not a record: the
-transcript stays the source of truth.
+**Publish → Generate Report** builds one document from the finished transcript:
+the transcript itself, a participants section with each speaker's speaking time,
+and, when asked for, a summary of the overview and key points with citations.
+The summary step downloads a 1.1 GB model once; it runs on this machine and can
+be cancelled while it works, and a finished summary is cached beside the
+transcript as `<stem>-briefing.json` so reopening it costs nothing. The report
+saves as PDF, Word or plain text through the native save dialog. It is a derived
+document, not a record: the transcript stays the source of truth.
 
 The briefing helper runs on the CPU by default. Built with
 `cargo build -p hippo-summarize --features vulkan` (or `metal`/`cuda`), set
@@ -331,12 +313,12 @@ reordered.
 
 Word times are stored in the sidecar. While audio plays, the words already
 spoken on the active line are banded and the current word underlined
-(View → Karaoke, key `k`; Pro). The Speed preset decodes without
+(View → Karaoke, key `k`). The Speed preset decodes without
 token timestamps, so those transcripts — and any produced before this change —
 export line-level cues instead.
 Keyboard: Up/Down moves through the transcript, Alt+Enter edits the active line,
 Space toggles playback, and Left/Right seek ±5 seconds while no text field has
-focus. Editing and playback keys require Pro.
+focus.
 
 The Edit and Help menus both open Custom Vocabulary, where names, acronyms and
 jargon can be listed for the decoder and misheard words can be paired with their
@@ -351,7 +333,7 @@ confirmation. Saves are written atomically and keep a
 
 Finished files move to the **History** tab of the File panel; the **Queue** tab
 keeps only work that is still pending, running, failed or interrupted.
-**Favorites** is a flat starred list (Pro); **Recordings** lists every take,
+**Favorites** is a flat starred list; **Recordings** lists every take,
 including a failed one with Retry. Only the Queue carries a count, and only of
 work left. History rows are grouped by day (Today, Yesterday, then the date) and
 show the file's duration, speaker count and finish time. Each row has a star and
@@ -404,10 +386,9 @@ them with `python3 scripts/make-privacy-page.py` after editing `PRIVACY.md`.
 
 Audio, transcripts, diarization caches, models and settings stay on the machine
 that runs Hippo Transcribe. There is no cloud service, no account, no telemetry
-and no analytics. Network access is the one-time model download (with optional
-checksum-verified mirror overrides) and, only for a Pro purchase or restore, the
-store's entitlement check: the store reports whether the add-on is owned, and
-nothing about the audio or the transcript is part of that request.
+and no analytics. Network access is the one-time model download, with optional
+checksum-verified mirror overrides; nothing about the audio or the transcript
+is part of those requests.
 
 See [`PRIVACY.md`](PRIVACY.md) for the full data-flow and retention details.
 

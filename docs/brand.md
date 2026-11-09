@@ -15,9 +15,7 @@ behavior is the proof. Do not claim certification or literal compliance.
   and medical professionals, Hippo keeps recordings on the machine that made
   them.
 - **Technical:** Local diarization and transcription. Network access is limited
-  to the one-time model download.
-- **Store builds:** A Pro purchase or restore asks the store whether the add-on
-  is owned. No audio, transcript, filename or path is part of that request.
+  to the model download.
 
 ## Banned claims
 
@@ -25,18 +23,17 @@ Do not use: HIPAA compliant, HIPAA certified, guaranteed private, unhackable,
 zero risk, or any wording that implies a certification, audit or Business
 Associate Agreement.
 
-Also banned, because a store build contacts the store to confirm a Pro purchase:
-"never phones home", "100% offline", "works without any network access ever", and
-any claim that the application makes no network requests at all. Say what is
-true instead — "your recordings never leave this machine", "offline after the
-models are installed".
+Also banned, because the first launch downloads models: "never phones home",
+"100% offline", "works without any network access ever", and any claim that the
+application makes no network requests at all. Say what is true instead — "your
+recordings never leave this machine", "offline after the models are installed".
 
-## Product split
+## Product
 
-- **Free:** balanced model, one speaker, full-length transcripts, unlimited
-  files, no minutes, no account, no subscription.
-- **Pro:** Speed and Accuracy presets, speaker labels, batch transcription,
-  transcript editing and audio playback. One-time purchase.
+Every feature is included in this release: the Speed and Accuracy presets,
+speaker labels, batch transcription, transcript editing, playback, labels and
+the summary. There is no tier, no trial, no purchase and no account, and no
+store client is built in.
 
 ## Visual system
 

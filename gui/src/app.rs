@@ -1298,7 +1298,6 @@ pub enum Modal {
     Summary,
     DeleteLine,
     Calibration,
-    Paywall,
     Settings,
     Help,
     RunSetup,
@@ -1359,17 +1358,11 @@ pub enum Message {
     SetTheme(AppTheme),
     OpenSettings,
     CloseSettings,
-    OpenPaywall,
-    ClosePaywall,
     LockedPreset,
     LockedSpeakers,
     LockedGpu,
     LockedPlayer,
     FeatureAdvance,
-    PurchasePro,
-    RestorePro,
-    StartTrial,
-    ToggleTier,
     DownloadModels,
     CancelModelDownload,
     ClearPartialModels,
@@ -1797,8 +1790,6 @@ pub struct App {
     preset: Preset,
     theme_mode: AppTheme,
     license: license::State,
-    provider: Box<dyn license::Provider>,
-    paywall_open: bool,
     stage: String,
     /// The pipeline's stage id for the same event `stage` labels: `decoding`,
     /// `transcription`, `diarization`, `loading`, `done`. The label is what the
@@ -2205,24 +2196,15 @@ impl App {
             Self::load_queue_and_batch()
         };
         let (labels, label_assignments) = Self::load_labels();
-        let now = SystemTime::now();
-        let provider = license::provider();
-        let pro_override = provider.override_tier();
-        let mut license_state = license::State::load(
-            &Self::license_path().unwrap_or_else(|| PathBuf::from("license.json")),
-            now,
-        );
-        license_state.refresh(pro_override, now);
-        // Free only offers the balanced model; a downgrade must never leave a
-        // Pro-only preset selected.
-        let mut preset = settings
+        // Every feature is included in this release: there is no paid tier, no
+        // trial and no store client, so the access state is fixed at Pro.
+        let mut license_state = license::State::default();
+        license_state.access.tier = license::Tier::Pro;
+        let preset = settings
             .preset
             .as_deref()
             .and_then(Preset::from_arg)
             .unwrap_or_default();
-        if license_state.access.tier == license::Tier::Free {
-            preset = Preset::Balanced;
-        }
         let gpu_crashed = Self::gpu_guard_path().is_some_and(|path| path.exists());
         let mut app = Self {
             output_dir: settings.output_dir.as_ref().map(PathBuf::from),
@@ -2233,8 +2215,6 @@ impl App {
                 .and_then(AppTheme::from_arg)
                 .unwrap_or_default(),
             license: license_state,
-            provider,
-            paywall_open: false,
             stage: "idle".to_string(),
             stage_id: "idle".to_string(),
             progress: 0.0,
@@ -2526,10 +2506,6 @@ impl App {
         if let Some(path) = Self::gpu_guard_path() {
             let _ = std::fs::remove_file(path);
         }
-    }
-
-    fn license_path() -> Option<PathBuf> {
-        license::license_path()
     }
 
     fn legacy_settings_path() -> Option<PathBuf> {
@@ -4389,175 +4365,6 @@ impl App {
         self.diarized() && self.num_speakers != Some(1)
     }
 
-    fn save_license(&self) {
-        if let Some(path) = Self::license_path() {
-            self.license.save(&path);
-        }
-    }
-
-    /// Drop back to the free preset after a trial/downgrade.
-    fn clamp_preset(&mut self) {
-        if self.preset != Preset::Balanced && !self.can(license::Feature::SpeedPreset) {
-            self.preset = Preset::Balanced;
-            self.save_settings();
-        }
-        if !self.can(license::Feature::Playback) {
-            self.player = None;
-        }
-    }
-
-    /// Header control showing the current tier and opening the paywall.
-    fn license_button<'a>(&'a self, scheme: &Scheme) -> Element<'a, Message> {
-        let label = match self.license.access.tier {
-            license::Tier::Pro if self.license.access.source == license::Source::Trial => {
-                "Pro trial"
-            }
-            license::Tier::Pro => "Pro",
-            license::Tier::Free => "Get Pro",
-        };
-        let button: Element<Message> = if self.shows(license::Audience::ProOnly) {
-            action_text(label)
-                .on_press(Message::OpenPaywall)
-                .style(pill_button_secondary)
-                .into()
-        } else {
-            action_text(label)
-                .on_press(Message::OpenPaywall)
-                .style(color_button(scheme.blue, scheme.on_accent))
-                .into()
-        };
-        self.tip(
-            button,
-            "Speed and Accuracy presets, speaker labels, batch, editing and playback",
-            scheme,
-        )
-    }
-
-    /// Development-only Free/Pro switch shown in the header.
-    fn tier_toggle_button<'a>(&'a self, scheme: &Scheme) -> Element<'a, Message> {
-        let label = if self.shows(license::Audience::ProOnly) {
-            "Use Free"
-        } else {
-            "Use Pro"
-        };
-        self.tip(
-            action_text(label)
-                .on_press(Message::ToggleTier)
-                .style(pill_button_secondary),
-            "Development: switch between the Free and Pro versions",
-            scheme,
-        )
-    }
-
-    /// The Pro paywall / license dialog.
-    fn paywall_dialog<'a>(&'a self, scheme: &Scheme) -> Element<'a, Message> {
-        let scheme = *scheme;
-        let mut body = column![text("Hippo Transcribe Pro").size(20)];
-        // The preview build has no store client, so it must not advertise a
-        // price or a purchase it cannot complete.
-        if self.provider.name() != "none" {
-            let price = self
-                .provider
-                .price()
-                .unwrap_or_else(|| license::FALLBACK_PRICE.to_string());
-            body = body.push(
-                text(format!("{price} once \u{00b7} lifetime license"))
-                    .size(theme::TEXT_SM)
-                    .color(scheme.muted),
-            );
-        }
-        body = body.spacing(10);
-
-        for feature in license::Feature::ALL {
-            body = body.push(
-                row![
-                    icon_colored(ICON_CHECK, 14.0, scheme.green),
-                    text(feature.label()).size(theme::TEXT_SM),
-                ]
-                .spacing(6),
-            );
-        }
-
-        body = body.push(
-            text("Free version includes balanced model, unlimited, full length transcriptions")
-                .size(theme::TEXT_XS)
-                .color(scheme.muted),
-        );
-
-        let mut actions = row![].spacing(8).align_y(iced::Alignment::Center);
-        let mut secondary = row![].spacing(8).align_y(iced::Alignment::Center);
-        let mut has_secondary = false;
-        if self.shows(license::Audience::ProOnly) {
-            actions = actions.push(
-                text(format!(
-                    "Pro is active ({}).",
-                    self.license.access.source.label()
-                ))
-                .size(theme::TEXT_SM)
-                .color(scheme.green),
-            );
-        } else {
-            if !self.license.trial_used() {
-                actions = actions.push(
-                    action_text("Start 7-day trial")
-                        .on_press(Message::StartTrial)
-                        .style(pill_button_secondary),
-                );
-            }
-
-            if self.provider.name() == "none" {
-                // Store purchasing arrives in 1.1. Say what Pro is and let the
-                // trial do the selling, instead of apologising for a dead button.
-                actions = actions.push(
-                    text("Pro arrives in 1.1. The 7-day trial shows what it adds.")
-                        .size(theme::TEXT_XS)
-                        .color(scheme.muted),
-                );
-            } else {
-                actions = actions.push(
-                    action_text("Buy Pro")
-                        .on_press(Message::PurchasePro)
-                        .style(color_button(scheme.blue, scheme.on_accent)),
-                );
-            }
-            // Keep restore on its own line so the label never wraps.
-            secondary = secondary.push(
-                action_text("Restore purchase")
-                    .on_press(Message::RestorePro)
-                    .style(pill_button_secondary),
-            );
-            has_secondary = true;
-        }
-
-        body = body.push(
-            container(actions)
-                .width(Length::Fill)
-                .align_x(iced::Alignment::End),
-        );
-        if has_secondary {
-            body = body.push(
-                container(secondary)
-                    .width(Length::Fill)
-                    .align_x(iced::Alignment::End),
-            );
-        }
-        body = body.push(
-            container(
-                row![
-                    horizontal_space(),
-                    action_text("Close")
-                        .on_press(Message::ClosePaywall)
-                        .style(pill_button_secondary)
-                ]
-                .spacing(8),
-            )
-            .width(Length::Fill)
-            .align_x(iced::Alignment::End),
-        );
-
-        modal_card(body.spacing(10), 460.0, scheme)
-    }
-
     /// True when the selected preset has every model file it needs.
     fn models_ready(&self) -> bool {
         download::ready_for(self.preset.arg(), self.pipelines_diarize())
@@ -4984,10 +4791,6 @@ impl App {
                     self.save_settings();
                     return Task::none();
                 }
-                if !self.can(license::Feature::GpuAcceleration) {
-                    self.paywall_open = true;
-                    return Task::none();
-                }
                 if !asr::gpu_available() {
                     self.toast =
                         Some(("GPU unavailable in this build".to_string(), Instant::now()));
@@ -5060,10 +4863,9 @@ impl App {
                 self.start_calibration_test();
                 Task::none()
             }
-            Message::LockedGpu => {
-                self.paywall_open = true;
-                Task::none()
-            }
+            // The locks these once stood for are gone: every control is live.
+            Message::LockedGpu | Message::LockedPreset | Message::LockedPlayer
+            | Message::LockedSpeakers => Task::none(),
             Message::OpenLogFolder => {
                 let dir = hippo_transcribe_core::logging::log_dir();
                 let _ = std::fs::create_dir_all(&dir);
@@ -5903,112 +5705,10 @@ impl App {
                 self.toast = None;
                 Task::none()
             }
-            Message::OpenPaywall => {
-                self.paywall_open = true;
-                Task::none()
-            }
-            Message::LockedPreset => {
-                self.toast = Some((
-                    "Speed and Accuracy presets are Pro features".to_string(),
-                    Instant::now(),
-                ));
-                Task::none()
-            }
             Message::FeatureAdvance => {
                 if self.feature_deck_visible() {
                     self.feature_slide = (self.feature_slide + 1) % FEATURE_DECK.len();
                     self.feature_slide_at = Instant::now();
-                }
-                Task::none()
-            }
-            Message::LockedPlayer => {
-                self.toast = Some(("Player is a Pro feature".to_string(), Instant::now()));
-                Task::none()
-            }
-            Message::LockedSpeakers => {
-                self.toast = Some((
-                    "Speaker labels are a Pro feature.".to_string(),
-                    Instant::now(),
-                ));
-                Task::none()
-            }
-            Message::ClosePaywall => {
-                self.paywall_open = false;
-                Task::none()
-            }
-            Message::StartTrial => {
-                let now = SystemTime::now();
-                if self.license.start_trial(now) {
-                    self.save_license();
-                    self.clamp_preset();
-                    self.toast = Some(("Pro trial started".to_string(), Instant::now()));
-                } else {
-                    self.toast = Some((
-                        "The Pro trial has already been used".to_string(),
-                        Instant::now(),
-                    ));
-                }
-                Task::none()
-            }
-            Message::PurchasePro => {
-                let now = SystemTime::now();
-                let state = self.provider.purchase();
-                self.license.purchase = state;
-                match state {
-                    license::PurchaseState::Active => {
-                        self.license.grant_pro(now);
-                        self.save_license();
-                        self.clamp_preset();
-                        self.paywall_open = false;
-                        self.toast = Some(("Pro unlocked".to_string(), Instant::now()));
-                    }
-                    license::PurchaseState::Unavailable => {
-                        self.toast = Some((
-                            "The Store purchase arrives in 1.1; the trial is open now".to_string(),
-                            Instant::now(),
-                        ));
-                    }
-                    license::PurchaseState::Cancelled => {
-                        self.toast = Some(("Purchase cancelled".to_string(), Instant::now()));
-                    }
-                    license::PurchaseState::Failed => {
-                        self.toast = Some(("Purchase failed".to_string(), Instant::now()));
-                    }
-                    license::PurchaseState::Pending | license::PurchaseState::Idle => {
-                        self.toast = Some((state.label().to_string(), Instant::now()));
-                    }
-                }
-                Task::none()
-            }
-            Message::ToggleTier => {
-                let now = SystemTime::now();
-                if self.license.access.tier == license::Tier::Pro {
-                    self.license.revoke_pro(now);
-                    self.save_license();
-                    self.clamp_preset();
-                    self.toast = Some(("Switched to Free".to_string(), Instant::now()));
-                } else {
-                    self.license.grant_pro(now);
-                    self.save_license();
-                    self.toast = Some(("Switched to Pro".to_string(), Instant::now()));
-                }
-                Task::none()
-            }
-            Message::RestorePro => {
-                let now = SystemTime::now();
-                let state = self.provider.restore();
-                self.license.purchase = state;
-                if state == license::PurchaseState::Active {
-                    self.license.grant_pro(now);
-                    self.save_license();
-                    self.clamp_preset();
-                    self.paywall_open = false;
-                    self.toast = Some(("Purchase restored".to_string(), Instant::now()));
-                } else {
-                    self.toast = Some((
-                        format!("No purchase to restore ({})", state.label()),
-                        Instant::now(),
-                    ));
                 }
                 Task::none()
             }
@@ -6680,11 +6380,7 @@ impl App {
                 Task::none()
             }
             Message::ToggleFavorite(index) => {
-                if self.shows(license::Audience::ProOnly) {
-                    self.toggle_favorite(index);
-                } else {
-                    self.paywall_open = true;
-                }
+                self.toggle_favorite(index);
                 Task::none()
             }
             Message::CopyRecentText(index) => {
@@ -8258,12 +7954,8 @@ impl App {
             .unwrap_or_default()
     }
 
-    /// Open the label picker for a finished row. Pro only.
+    /// Open the label picker for a finished row.
     fn open_labels(&mut self, _tab: PaneTab, index: usize) {
-        if !self.can(license::Feature::Labels) {
-            self.paywall_open = true;
-            return;
-        }
         let Some(entry) = self.recent.get(index) else {
             return;
         };
@@ -13059,7 +12751,6 @@ impl App {
     fn feature_deck_auto_advance(&self) -> bool {
         self.feature_deck_visible()
             && self.help_open.is_none()
-            && !self.paywall_open
             && !self.settings_open
             && !self.summary_open
             && !self.rename_open
@@ -16809,8 +16500,6 @@ impl App {
             Some(Modal::DeleteLine)
         } else if self.calibration.is_some() {
             Some(Modal::Calibration)
-        } else if self.paywall_open {
-            Some(Modal::Paywall)
         } else if self.settings_open {
             Some(Modal::Settings)
         } else if self.help_open.is_some() {
@@ -16865,7 +16554,6 @@ impl App {
                     self.begin_batch(false);
                 }
             }
-            Modal::Paywall => self.paywall_open = false,
             Modal::Settings => self.settings_open = false,
             Modal::Help => self.help_open = None,
             Modal::RunSetup => self.run_setup_open = false,
@@ -19403,14 +19091,9 @@ impl App {
             horizontal_space(),
             toast_slot,
             horizontal_space(),
-            self.license_button(&scheme),
         ]
         .spacing(theme::SPACE_SM)
         .align_y(iced::Alignment::Center);
-        // Development-only Free/Pro switch, beside the license button.
-        if cfg!(debug_assertions) {
-            header = header.push(self.tier_toggle_button(&scheme));
-        }
         // Help ends the row in every build, so its right edge is the row's right
         // edge — and the menu's, since that is what the layer aligns to. The
         // debug-only toggle is pushed above precisely so it cannot move it.
@@ -19449,7 +19132,6 @@ impl App {
                 None => return base,
             },
             Some(Modal::Calibration) => self.calibration_dialog(&scheme),
-            Some(Modal::Paywall) => self.paywall_dialog(&scheme),
             Some(Modal::Settings) => self.settings_dialog(&scheme),
             Some(Modal::Help) => self.help_dialog(&scheme),
             Some(Modal::RunSetup) => self.run_setup_dialog(&scheme),
@@ -25095,17 +24777,9 @@ mod tests {
         }
     }
 
-    /// App with Pro entitlements so feature-gated tests exercise their feature.
+    /// Every build is Pro now, so the fixture is the plain app.
     fn pro_app() -> App {
-        let now = std::time::SystemTime::now();
-        if let Some(path) = App::license_path() {
-            let mut state = license::State::load(&path, now);
-            state.grant_pro(now);
-            state.save(&path);
-        }
-        let mut app = App::new();
-        app.license.grant_pro(now);
-        app
+        App::new()
     }
 
     /// Open the inline editor on `index` through the real message path.
@@ -26880,11 +26554,10 @@ mod tests {
     }
 
     #[test]
-    fn labels_are_pro_only() {
+    fn labels_open_for_any_row() {
         let _guard = env_lock();
-        let _config = ConfigEnv::new("labels-free");
+        let _config = ConfigEnv::new("labels-open");
         let mut app = App::new();
-        app.license.revoke_pro(SystemTime::now());
         app.recent.push(RecentEntry {
             audio: Some(PathBuf::from("/media/talk.mp3")),
             transcript: Some(PathBuf::from("/media/talk.txt")),
@@ -26892,9 +26565,7 @@ mod tests {
         });
 
         let _ = app.update(Message::OpenLabels(PaneTab::History, 0));
-        assert!(app.labels_open.is_none(), "free must not open the label picker");
-        assert!(app.paywall_open, "free should be sent to the paywall");
-        assert!(app.label_chips(&app.recent[0], &app.scheme()).is_none());
+        assert!(app.labels_open.is_some(), "the picker should open");
     }
 
     #[test]
@@ -28832,12 +28503,11 @@ mod tests {
 
     /// Every dialog, so a variant added to `Modal` cannot go untested: the
     /// escape and render passes below each walk this list.
-    const ALL_MODALS: [Modal; 14] = [
+    const ALL_MODALS: [Modal; 13] = [
         Modal::ClearHistory,
         Modal::Summary,
         Modal::DeleteLine,
         Modal::Calibration,
-        Modal::Paywall,
         Modal::Settings,
         Modal::Help,
         Modal::RunSetup,
@@ -28863,7 +28533,6 @@ mod tests {
             Modal::Calibration => {
                 app.calibration = Some(Calibration::new(Preset::Accuracy, false))
             }
-            Modal::Paywall => app.paywall_open = true,
             Modal::Settings => app.settings_open = true,
             Modal::Help => app.help_open = Some(HelpKind::About),
             Modal::RunSetup => app.run_setup_open = true,
@@ -29075,19 +28744,17 @@ mod tests {
     }
 
     #[test]
-    fn a_free_completion_opens_the_summary_not_the_paywall() {
+    fn a_completion_opens_the_summary() {
         let _guard = env_lock();
-        let _config = ConfigEnv::new("completion-summary-free");
+        let _config = ConfigEnv::new("completion-summary");
         let mut app = App::new();
         app.notifications = false;
         app.batch_summary = vec![("talk.mp3".to_string(), backend::Stats::default())];
 
         assert!(app.present_completion());
         assert!(app.summary_open);
-        assert!(!app.paywall_open);
     }
 
-    #[test]
     #[test]
     fn the_editor_strip_can_open_the_speaker_rename() {
         let _guard = env_lock();
@@ -29717,7 +29384,7 @@ mod tests {
         let _config = ConfigEnv::new("queue-skip-running");
         let media = temp_dir("queue-skip-running-media");
         let mut app = pro_app();
-        let mut item = |name: &str, seconds: f64| {
+        let item = |name: &str, seconds: f64| {
             let path = media.join(name);
             std::fs::write(&path, b"audio").unwrap();
             let mut item = queue_item(path);
@@ -29818,19 +29485,13 @@ mod tests {
     }
 
     #[test]
-    fn recording_run_args_use_speed_for_pro_and_balanced_for_free() {
+    fn recording_run_args_use_the_speed_preset() {
         let _guard = env_lock();
         let _config = ConfigEnv::new("recording-run-args");
 
-        let free = App::new();
+        let app = App::new();
         assert_eq!(
-            free.recording_run_args(),
-            (Preset::Balanced, Some(1), false, true)
-        );
-
-        let pro = pro_app();
-        assert_eq!(
-            pro.recording_run_args(),
+            app.recording_run_args(),
             (Preset::Speed, Some(1), false, true)
         );
     }
@@ -30758,9 +30419,9 @@ mod tests {
     }
 
     #[test]
-    fn a_briefing_is_a_pro_feature() {
+    fn a_briefing_needs_a_transcript() {
         let _guard = env_lock();
-        let _config = ConfigEnv::new("briefing-free");
+        let _config = ConfigEnv::new("briefing-no-transcript");
 
         let mut app = App::new();
         let _ = app.update(Message::OpenBriefing);
@@ -30769,7 +30430,7 @@ mod tests {
         assert!(app
             .toast
             .as_ref()
-            .is_some_and(|(message, _)| message.contains("Pro")));
+            .is_some_and(|(message, _)| message.contains("Transcribe something")));
     }
 
     #[test]
@@ -32170,21 +31831,6 @@ mod tests {
             assert!(app.selected_view.is_none());
         }
 
-        // Free: only the live transcript is visible during a run.
-        {
-            let _config = ConfigEnv::new("history-run-free");
-            let mut app = App::new();
-            seed(&mut app);
-            assert!(app.shows(license::Audience::FreeOnly));
-
-            let _ = app.update(Message::OpenRecent(0));
-            assert!(app.selected_view.is_none());
-            assert_eq!(
-                app.toast.as_ref().map(|(text, _)| text.as_str()),
-                Some("Reviewing during active transcription is a Pro feature")
-            );
-        }
-
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -33555,31 +33201,26 @@ mod tests {
     }
 
     #[test]
-    fn favorites_is_locked_for_free_and_lists_starred_items_for_pro() {
+    fn favorites_lists_starred_items() {
         let _guard = env_lock();
-        let _config = ConfigEnv::new("pane-favorites-gate");
+        let _config = ConfigEnv::new("pane-favorites");
 
-        // Free sees the tab and its Pro tag, but starring opens the paywall
-        // instead of changing the item.
-        let mut free = App::new();
-        assert!(free.favorites_locked());
-        free.recent.push(RecentEntry {
+        let mut app = App::new();
+        assert!(!app.favorites_locked());
+        app.recent.push(RecentEntry {
             audio: Some(PathBuf::from("/media/free.mp3")),
             transcript: Some(PathBuf::from("/media/free.txt")),
             finished_at: 5,
             ..Default::default()
         });
-        let _ = free.update(Message::SelectTab(PaneTab::Favorites));
-        assert_eq!(free.pane_tab, PaneTab::Favorites);
-        let _ = free.update(Message::ToggleFavorite(0));
-        assert!(free.paywall_open);
-        assert!(!free.recent[0].favorite);
+        let _ = app.update(Message::SelectTab(PaneTab::Favorites));
+        assert_eq!(app.pane_tab, PaneTab::Favorites);
+        let _ = app.update(Message::ToggleFavorite(0));
+        assert!(app.recent[0].favorite);
 
-        // Pro toggles it. Unsaved favorites keep the store's newest-first order;
-        // a freshly starred item leads so the star has a visible result.
-        let mut pro = pro_app();
-        assert!(!pro.favorites_locked());
-        pro.recent = vec![
+        // Unsaved favorites keep the store's newest-first order; a freshly
+        // starred item leads so the star has a visible result.
+        app.recent = vec![
             RecentEntry {
                 audio: Some(PathBuf::from("/media/new.mp3")),
                 transcript: Some(PathBuf::from("/media/new.txt")),
@@ -33601,15 +33242,15 @@ mod tests {
                 ..Default::default()
             },
         ];
-        assert_eq!(pro.favorite_indices(), vec![0, 1]);
+        assert_eq!(app.favorite_indices(), vec![0, 1]);
 
         // Starring puts the item at the top of Favorites, not at the bottom.
-        let _ = pro.update(Message::ToggleFavorite(2));
-        assert!(pro.recent[2].favorite);
-        assert_eq!(pro.favorite_indices(), vec![2, 0, 1]);
-        let _ = pro.update(Message::ToggleFavorite(0));
-        assert!(!pro.recent[0].favorite);
-        assert_eq!(pro.favorite_indices(), vec![2, 1]);
+        let _ = app.update(Message::ToggleFavorite(2));
+        assert!(app.recent[2].favorite);
+        assert_eq!(app.favorite_indices(), vec![2, 0, 1]);
+        let _ = app.update(Message::ToggleFavorite(0));
+        assert!(!app.recent[0].favorite);
+        assert_eq!(app.favorite_indices(), vec![2, 1]);
     }
 
     #[test]

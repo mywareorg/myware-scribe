@@ -16,30 +16,28 @@ the network.
 
 - **Models** — downloaded once into the model directory
   (`%LOCALAPPDATA%\hippo-transcribe\models` on Windows,
-  `~/.cache/hippo-transcribe/models` on Linux/macOS). The 1.1 GB briefing model
-  is fetched only when someone asks for a briefing.
+  `~/.cache/hippo-transcribe/models` on Linux/macOS). The 1.1 GB summary model
+  is fetched only when someone asks for a summary in a report.
 - **Diarization cache** — optional local cache keyed by audio content and
   diarization settings.
 - **Settings and queue** — window layout, presets, save location, queue state and
   transcript paths, stored under the platform configuration directory.
-- **Outputs** — the `.txt` transcript and timestamped variant you generate, the
-  `.json` sidecar holding speaker ids, line bounds and confidences, plus the
-  `.hippo-transcribe.bak` backup written when a transcript is edited, and any
-  `<transcript>-briefing.md` you save. While a run is in progress its lines are
-  parked in a hidden `.<audio>.hippo-transcribe.partial` file beside the audio;
-  it is removed when the file finishes.
+- **Outputs** — the transcript you generate, its `.json` sidecar holding speaker
+  ids, line bounds and confidences, any export (plain text, SubRip, WebVTT,
+  Markdown, CSV or Word) and any report (PDF, Word or plain text) you save, plus
+  the `.hippo-transcribe.bak` backup written when a transcript is edited. While a
+  run is in progress its lines are parked in a hidden
+  `.<audio>.hippo-transcribe.partial` file beside the audio; it is removed when
+  the file finishes.
 - **Custom vocabulary** — the terms and replacements you enter, stored as
   `vocabulary.json` beside the settings. It holds only what you typed.
-- **Briefings** are generated on this machine from the transcript text. The
+- **Summaries** are generated on this machine from the transcript text. The
   text is not uploaded, and the model that writes it is the same kind of local
   file as the transcription models.
 - **Microphone recordings** — only when you press Record. Capture happens on
   the machine and the WAV is written where your transcripts go; nothing is sent
   anywhere.
 
-- **Entitlement** — a Pro purchase writes the tier and the last verified state to
-  `license.json` beside the settings. It holds no audio, no transcript and no
-  file metadata.
 - **Logs** — the last five runs write a local log (`%LOCALAPPDATA%\hippo-transcribe\logs`
   on Windows) recording app events: the version, which model was used, whether the
   GPU or CPU backend was chosen, counts of files processed, and error messages.
@@ -47,14 +45,11 @@ the network.
   text or file paths beyond the counts, and are never sent anywhere; deleting them
   is safe.
 
-Nothing is stored in a remote account. A Pro purchase is recorded by the store
-against the buyer's store account; that record is a purchase, not a transcript.
+Nothing is stored in a remote account: there is no account.
 
 ## Network use
 
-Hippo Transcribe reaches the network in two cases only: obtaining models, and,
-in a store build that has been bought or is being restored, asking the store
-whether the Pro add-on is owned.
+Hippo Transcribe reaches the network for one reason only: obtaining models.
 
 ### Model download
 
@@ -64,21 +59,6 @@ whether the Pro add-on is owned.
 - No audio, transcript, filename, path, usage event or identifier is sent with
   those requests.
 
-### Store licensing
-
-- Only a Pro purchase or restore triggers this. The free tier never contacts a
-  store: with the models already installed, a free installation generates no
-  network traffic at all.
-- The request is made by the store client — the Microsoft Store on Windows, the
-  App Store on macOS — not by Hippo Transcribe. That client supplies the account,
-  device and purchase records it already holds, under the platform operator's
-  privacy statement.
-- It carries the application and add-on identifiers. It never carries audio,
-  transcripts, filenames, file paths, diarization output, timing data or any
-  identifier of Hippo Transcribe's own; the application creates none.
-- The answer is cached on disk, so Pro keeps working offline. The cached answer is
-  re-checked after 30 days, or when the store reports that entitlements changed.
-
 After models are installed, transcription itself has no network dependency.
 
 ## Telemetry and accounts
@@ -86,10 +66,6 @@ After models are installed, transcription itself has no network dependency.
 There is no telemetry, no analytics, no crash reporting, no advertising SDK and
 no Hippo Transcribe account. The application does not assign a device or user
 identifier and does not record which features you use.
-
-Pro buyers are signed in to their platform store account, which is how the store
-knows the purchase exists. Hippo Transcribe receives only the resulting
-entitlement answer, described above.
 
 ## Retention and deletion
 

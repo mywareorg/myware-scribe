@@ -52,9 +52,12 @@ PAGE = """<!doctype html>
 
 
 def inline(text: str) -> str:
-    """Escape, then apply the two inline forms the policy actually uses."""
+    """Escape, then apply the inline forms the policy actually uses."""
     out = html.escape(text, quote=False)
     out = re.sub(r"`([^`]+)`", r"<code>\1</code>", out)
+    # List items open with a bold label; without this the asterisks rendered
+    # literally on the published page.
+    out = re.sub(r"\*\*([^*]+)\*\*", r"<strong>\1</strong>", out)
     return out
 
 

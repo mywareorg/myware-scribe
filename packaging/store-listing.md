@@ -47,12 +47,9 @@ counts in mind, they are the limits the form enforces.
     - Light and dark themes, and a desktop notification when the whole queue is
       done.
 
-    The free version handles any number of files, one speaker at a time, with
-    the Balanced model, and includes copy, save, search and export. Pro adds the
-    Speed and Accuracy models, speaker labels, batch runs, transcript editing,
-    playback and the summary. In this release Pro is a one-off 7-day trial
-    started in the app: there is no purchase yet, and when the trial ends the
-    free version carries on working unchanged.
+    Every feature is included, in every install: the Speed and Accuracy models,
+    speaker labels, batch runs, transcript editing, playback and the summary.
+    There is no tier, no trial, no account and nothing to buy.
 
     Everything stays on the machine: audio files, transcripts, models and logs.
     The only network use is downloading the models. There is no telemetry and
@@ -129,9 +126,9 @@ Certification notes to paste into the submission:
       about a minute on a modern laptop, longer on an older one.
     - The microphone capability is exercised by Record: a three-second
       countdown, then capture, then a Stop control.
-    - Pro features (speaker labels, batch runs, editing, playback, summary)
-      are unlocked by a 7-day trial started in the app. There is no purchase in
-      this release and no add-on is attached to the submission.
+    - Every feature is available from first launch: speaker labels, batch runs,
+      editing, playback and the summary need no trial, purchase or account.
+      No add-on is attached to the submission.
     - Files are written only to the app's own data folder and to locations the
       user chooses.
 
@@ -173,10 +170,8 @@ captures. The Store needs at least one image and accepts up to ten, each at leas
 - [ ] Confirm `packaging/identity.json` still matches Partner Center character
       for character. Current values are `SeanWu.HippoTranscribe`,
       `CN=6862352A-51D9-40F2-9242-0F769B2F87AB`, display name `Sean Wu`.
-- [ ] Confirm the Pro story before publishing: 1.0 ships as a preview with a
-      one-off 7-day trial and no purchase. The listing promises the trial and
-      the features, not a purchase, and attaches no add-on. Add a price or a
-      "buy" call to action only when a later release ships the Store add-on.
+- [ ] Confirm there is no in-app purchase: every feature is included and no
+      add-on is attached to the submission, so leave pricing and add-ons empty.
 - [ ] Complete the IARC questionnaire, the age-rating section and the system
       requirements block.
 - [ ] Upload the `.msix`, then submit for certification.
