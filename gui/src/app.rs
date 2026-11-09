@@ -302,13 +302,8 @@ fn publish_menu_inset() -> f32 {
     HEADER_PAD_X
 }
 
-fn view_menu_inset(queue_tab: bool) -> f32 {
-    if queue_tab {
-        // View is the only menu there, so it ends the row itself.
-        HEADER_PAD_X
-    } else {
-        HEADER_PAD_X + PUBLISH_BUTTON_WIDTH + HEADER_GAP + EDIT_BUTTON_WIDTH + HEADER_GAP
-    }
+fn view_menu_inset() -> f32 {
+    HEADER_PAD_X + PUBLISH_BUTTON_WIDTH + HEADER_GAP + EDIT_BUTTON_WIDTH + HEADER_GAP
 }
 
 
@@ -5102,8 +5097,13 @@ impl App {
             }
             Message::ToggleEditMode => {
                 self.header_menu = None;
-                // The queue tab carries no editing controls.
+                // The queue tab's transcript is read-only.
                 if self.pane_tab == PaneTab::Queue {
+                    self.toast = Some((
+                        "The queue tab is read-only \u{2014} open the transcript to edit it"
+                            .to_string(),
+                        Instant::now(),
+                    ));
                     return Task::none();
                 }
                 if !self.can(license::Feature::Editing) {
@@ -15951,17 +15951,14 @@ impl App {
         .padding([5, 0])
         .style(move |theme, status| edit_mode_button_style(self.edit_mode)(theme, status))
         .into();
-        // The queue tab is queue work: no editing, and nothing to publish from
-        // it. View still applies to the transcript it shows.
-        let mut menus = row![self.header_menu_button("View", HeaderMenu::View)];
-        if self.pane_tab != PaneTab::Queue {
-            menus = menus.push(edit);
-            menus = menus.push(self.header_menu_button("Publish", HeaderMenu::Publish));
-        }
-        let menus: Element<Message> = menus
-            .spacing(HEADER_GAP)
-            .align_y(iced::Alignment::Center)
-            .into();
+        let menus: Element<Message> = row![
+            self.header_menu_button("View", HeaderMenu::View),
+            edit,
+            self.header_menu_button("Publish", HeaderMenu::Publish),
+        ]
+        .spacing(HEADER_GAP)
+        .align_y(iced::Alignment::Center)
+        .into();
 
         let meta = self.shown_item_meta();
         let mut identity = row![
@@ -19301,10 +19298,7 @@ impl App {
                 card_menu_layer(self.publish_menu(&scheme), publish_menu_inset())
             }
             Some(HeaderMenu::View) if card_menu_open => {
-                card_menu_layer(
-                    self.view_menu(&scheme),
-                    view_menu_inset(self.pane_tab == PaneTab::Queue),
-                )
+                card_menu_layer(self.view_menu(&scheme), view_menu_inset())
             }
             _ => container(horizontal_space())
                 .width(Length::Fill)
@@ -27740,11 +27734,9 @@ mod tests {
         // is supposed to match.
         assert_eq!(publish_menu_inset(), HEADER_PAD_X);
         assert_eq!(
-            view_menu_inset(false) - publish_menu_inset(),
+            view_menu_inset() - publish_menu_inset(),
             PUBLISH_BUTTON_WIDTH + HEADER_GAP + EDIT_BUTTON_WIDTH + HEADER_GAP
         );
-        // On the queue tab View ends the row on its own.
-        assert_eq!(view_menu_inset(true), HEADER_PAD_X);
     }
 
     #[test]
@@ -28927,7 +28919,7 @@ mod tests {
     }
 
     #[test]
-    fn the_queue_tab_has_no_editing_controls() {
+    fn the_queue_tabs_transcript_is_read_only() {
         let _guard = env_lock();
         let _config = ConfigEnv::new("queue-no-edit");
         let original = "[00:00] SPEAKER 1: one\n";
@@ -28948,6 +28940,10 @@ mod tests {
         // Nor can the mode be entered, or a line opened, from there.
         let _ = app.update(Message::ToggleEditMode);
         assert!(!app.edit_mode);
+        assert!(app
+            .toast
+            .as_ref()
+            .is_some_and(|(text, _)| text.contains("read-only")));
         let _ = app.update(Message::EditLine(0));
         assert!(app.line_edit.is_none());
         assert!(app
