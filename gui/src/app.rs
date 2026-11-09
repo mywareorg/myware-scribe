@@ -9320,6 +9320,11 @@ impl App {
     /// trap the next attempt in the same backend.
     fn disable_gpu_after_failure(&mut self, reason: &str) {
         Self::clear_gpu_guard();
+        // The child never started, so the GPU was never used; blaming it would
+        // disable acceleration for an unrelated spawn failure.
+        if is_process_start_failure(reason) {
+            return;
+        }
         if !self.gpu_profile().is_some_and(|profile| profile.selected) {
             return;
         }
@@ -11316,8 +11321,14 @@ impl App {
                         self.save_queue();
                     } else {
                         let was_gpu = self.gpu_selected();
-                        self.disable_gpu_after_failure(&message);
-                        self.gpu_retry_pending = was_gpu;
+                        if !is_process_start_failure(&message) {
+                            self.disable_gpu_after_failure(&message);
+                            self.gpu_retry_pending = was_gpu;
+                        } else {
+                            // A failed spawn is not a GPU result and retrying
+                            // it would loop on the same missing child.
+                            self.gpu_retry_pending = false;
+                        }
                         self.stage = "error".to_string();
                         self.stage_id = "error".to_string();
                         let had_current = self.current.is_some();
@@ -20341,13 +20352,14 @@ const ICON_STAR_FILL: char = '\u{f586}';
 /// The square stop glyph inside the capture controls' red circle.
 const ICON_STOP_FILL: char = '\u{f592}';
 
-/// Full-window drop target, kept in the widget tree at all times.
-///
-/// The wrapper is unconditional for the same reason as the toast layer:
-/// swapping between a bare base and a stack shifts the index of every
-/// descendant, which remounts the transcript scrollable and resets its offset
-/// to 0. Only the overlay's contents vary, and an inert filler keeps the empty
-/// case from touching layout or input.
+/// A failure that happened before the pipeline child existed, so GPU
+/// acceleration was never exercised.
+fn is_process_start_failure(error: &str) -> bool {
+    let error = error.to_ascii_lowercase();
+    error.contains("could not start the transcription process")
+        || error.contains("could not locate the hippo transcribe executable")
+}
+
 /// True when a stored GPU error no longer describes the GPU.
 ///
 /// Two failures are about the run, not the backend: a missing model, and a
@@ -20358,9 +20370,16 @@ fn stale_gpu_error(error: &str, models_ready: bool) -> bool {
         return false;
     }
     let error = error.to_ascii_lowercase();
-    error.contains("model not found") || error.contains("could not start the transcription process")
+    error.contains("model not found") || is_process_start_failure(&error)
 }
 
+/// Full-window drop target, kept in the widget tree at all times.
+///
+/// The wrapper is unconditional for the same reason as the toast layer:
+/// swapping between a bare base and a stack shifts the index of every
+/// descendant, which remounts the transcript scrollable and resets its offset
+/// to 0. Only the overlay's contents vary, and an inert filler keeps the empty
+/// case from touching layout or input.
 fn drop_overlay<'a>(
     base: impl Into<Element<'a, Message>>,
     scheme: Scheme,
