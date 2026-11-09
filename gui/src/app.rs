@@ -17772,7 +17772,7 @@ impl App {
                 } else if summary_ready {
                     "The overview and key points already made for this transcript."
                 } else {
-                    "Summarizes the transcript first; that can take a few minutes."
+                    "Summarizing transcript. This may take a few minutes"
                 },
                 self.report.summary && can_summarize,
                 can_summarize,
