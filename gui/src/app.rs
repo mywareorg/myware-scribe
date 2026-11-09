@@ -17118,11 +17118,14 @@ impl App {
         for label in &self.labels {
             let on = assigned.contains(&label.id);
             let color = speaker_palette(label.color as usize, &scheme);
-            let marker = if on { ICON_CHECK } else { ICON_CIRCLE };
-            let marker_color = if on { scheme.green } else { scheme.muted };
+            let marker = if on { ICON_CIRCLE_FILL } else { ICON_CIRCLE };
+            let marker_color = if on { color } else { scheme.muted };
             let line = row![
-                icon_colored(marker, 9.0, marker_color),
-                speaker_chip(&label.name, color, scheme.ink, theme::TEXT_XS),
+                icon_colored(marker, 10.0, marker_color),
+                text(label.name.clone())
+                    .size(theme::TEXT_SM)
+                    .wrapping(NO_WRAP)
+                    .color(scheme.text),
                 text(format!("{} file(s)", usage(&label.id)))
                     .size(theme::TEXT_XS)
                     .wrapping(NO_WRAP)
@@ -17139,10 +17142,8 @@ impl App {
                         .width(Length::Fill)
                         .padding(0)
                         .on_press(Message::ToggleLabel(id))
-                        .style(if on {
-                            pill_button_toggled
-                        } else {
-                            pill_button_secondary
+                        .style(move |theme, status| {
+                            row_menu_item_style(scheme, true)(theme, status)
                         }),
                     action(icon(ICON_X, 11.0))
                         .padding([2, 4])
@@ -17305,11 +17306,7 @@ impl App {
                     .padding(0)
                     .on_press_maybe(exists.then_some(Message::PreviewVersion(id)))
                     .style(move |theme, status| {
-                        if exists {
-                            pill_button_secondary(theme, status)
-                        } else {
-                            greyed_button(scheme)(theme, status)
-                        }
+                        row_menu_item_style(scheme, exists)(theme, status)
                     }),
             );
         }
