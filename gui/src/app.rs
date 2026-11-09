@@ -286,6 +286,7 @@ const HEADER_BADGE_WIDTH: f32 = 26.0;
 /// widths of the buttons to its left, so these must be the widths the buttons
 /// are actually given.
 const PUBLISH_BUTTON_WIDTH: f32 = 96.0;
+const EDIT_BUTTON_WIDTH: f32 = 60.0;
 const VIEW_BUTTON_WIDTH: f32 = 84.0;
 const HELP_BUTTON_WIDTH: f32 = 78.0;
 
@@ -298,7 +299,7 @@ fn publish_menu_inset() -> f32 {
 }
 
 fn view_menu_inset() -> f32 {
-    HEADER_PAD_X + PUBLISH_BUTTON_WIDTH + HEADER_GAP
+    HEADER_PAD_X + PUBLISH_BUTTON_WIDTH + HEADER_GAP + EDIT_BUTTON_WIDTH + HEADER_GAP
 }
 
 
@@ -1432,6 +1433,8 @@ pub enum Message {
     OpenSummaryTranscript,
     /// Open an http(s) address in the system browser.
     OpenUrl(String),
+    /// Turn the transcript's one-click editing on or off.
+    ToggleEditMode,
     /// Open Publish → Export Transcript, from Ctrl+S or the menu row itself.
     OpenExportMenu,
     /// The pointer entered or left the Publish menu's Export row.
@@ -2066,6 +2069,8 @@ pub struct App {
     pending_report: Option<PendingReport>,
     /// The report options are showing.
     report_open: bool,
+    /// A click on a line opens its editor instead of seeking.
+    edit_mode: bool,
     /// What the report options are set to produce.
     report: ReportOptions,
     /// A report is waiting on a summary it asked for.
@@ -2395,6 +2400,7 @@ impl App {
             briefing_export_open: false,
             pending_report: None,
             report_open: false,
+            edit_mode: false,
             report: ReportOptions::default(),
             report_after_summary: false,
             publish_export_open: false,
@@ -3702,6 +3708,16 @@ impl App {
         if self.header_menu.is_some() {
             self.header_menu = None;
             return Task::none();
+        }
+        // Edit mode makes one click open the line. The field owns presses on
+        // the row it is editing, so a press that lands here on that row is a
+        // press outside it.
+        if self.edit_mode {
+            self.last_line_click = None;
+            if self.line_edit.as_ref().is_some_and(|edit| edit.index == index) {
+                return Task::none();
+            }
+            return self.begin_inline_edit_at(index, point);
         }
         let double = self.last_line_click.is_some_and(|(last, at)| {
             last == index && at.elapsed() <= Duration::from_millis(400)
@@ -5108,6 +5124,19 @@ impl App {
                 {
                     self.header_menu = None;
                     self.publish_export_open = false;
+                }
+                Task::none()
+            }
+            Message::ToggleEditMode => {
+                self.header_menu = None;
+                if !self.can(license::Feature::Editing) {
+                    self.toast = Some(("Editing is a Pro feature".to_string(), Instant::now()));
+                    return Task::none();
+                }
+                self.edit_mode = !self.edit_mode;
+                if !self.edit_mode {
+                    // Leaving the mode ends whatever line it was on.
+                    self.commit_inline_edit(false);
                 }
                 Task::none()
             }
@@ -15754,8 +15783,24 @@ impl App {
         // edge. View sits left of Publish; each menu hangs from its own
         // button's left edge, measured from the right by the inset helpers.
         // Help belongs to the app header, not to this card, so it is not here.
+        // Edit is a mode, not a menu: no caret, and it stays lit while on.
+        let edit: Element<Message> = action(
+            container(text("Edit").wrapping(NO_WRAP))
+                .width(Length::Fill)
+                .center_x(Length::Fill),
+        )
+        .width(Length::Fixed(EDIT_BUTTON_WIDTH))
+        .on_press(Message::ToggleEditMode)
+        .padding([5, 0])
+        .style(if self.edit_mode {
+            pill_button_toggled
+        } else {
+            pill_button_secondary
+        })
+        .into();
         let menus: Element<Message> = row![
             self.header_menu_button("View", HeaderMenu::View),
+            edit,
             self.header_menu_button("Publish", HeaderMenu::Publish),
         ]
         .spacing(HEADER_GAP)
@@ -27504,7 +27549,7 @@ mod tests {
         assert_eq!(publish_menu_inset(), HEADER_PAD_X);
         assert_eq!(
             view_menu_inset() - publish_menu_inset(),
-            PUBLISH_BUTTON_WIDTH + HEADER_GAP
+            PUBLISH_BUTTON_WIDTH + HEADER_GAP + EDIT_BUTTON_WIDTH + HEADER_GAP
         );
     }
 
@@ -28683,6 +28728,33 @@ mod tests {
             raise_modal(&mut app, modal);
             let _ = app.view();
         }
+
+        let _ = std::fs::remove_dir_all(&media);
+    }
+
+    #[test]
+    fn edit_mode_opens_the_editor_on_a_single_click_and_closes_it() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("edit-mode");
+        let original = "[00:00] SPEAKER 1: one\n[00:05] SPEAKER 2: two\n";
+        let (mut app, _transcript, media) = line_edit_fixture("edit-mode", original);
+
+        assert!(!app.edit_mode);
+        let _ = app.update(Message::ToggleEditMode);
+        assert!(app.edit_mode);
+
+        // One click is enough while the mode is on.
+        let _ = app.update(Message::LineClicked(1));
+        assert_eq!(
+            app.line_edit.as_ref().map(|edit| edit.index),
+            Some(1),
+            "the click should open that line's editor"
+        );
+
+        // Turning it off ends the edit.
+        let _ = app.update(Message::ToggleEditMode);
+        assert!(!app.edit_mode);
+        assert!(app.line_edit.is_none());
 
         let _ = std::fs::remove_dir_all(&media);
     }
