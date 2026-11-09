@@ -21868,20 +21868,24 @@ fn merge_recent_entry(recent: &mut Vec<RecentEntry>, mut entry: RecentEntry) -> 
                 None
             }
         });
-    let index = match existing {
+    // The row's identity, captured before the sort moves rows: a position
+    // taken now would name a different entry once newest-first ordering has
+    // run, and every caller treats the return value as the entry's slot.
+    let identity = (
+        entry.audio.clone(),
+        entry.transcript.clone(),
+        entry.finished_at,
+    );
+    match existing {
         Some(index) => {
             // A rerun replaces the output but must not clear the user's
             // favorite, nor forget that the item came from the recorder.
             entry.favorite |= recent[index].favorite;
             entry.recording |= recent[index].recording;
             recent[index] = entry;
-            index
         }
-        None => {
-            recent.push(entry);
-            recent.len() - 1
-        }
-    };
+        None => recent.push(entry),
+    }
     // Newest first; ties fall back to the path so the order is stable.
     recent.sort_by(|a, b| {
         b.finished_at.cmp(&a.finished_at).then_with(|| {
@@ -21889,13 +21893,14 @@ fn merge_recent_entry(recent: &mut Vec<RecentEntry>, mut entry: RecentEntry) -> 
                 .cmp(&(b.transcript.as_deref(), b.audio.as_deref()))
         })
     });
-    let merged = recent[index].clone();
-    recent.iter().position(|other| {
-        other.audio == merged.audio
-            && other.transcript == merged.transcript
-            && other.finished_at == merged.finished_at
-    })
-    .unwrap_or(index)
+    recent
+        .iter()
+        .position(|other| {
+            other.audio == identity.0
+                && other.transcript == identity.1
+                && other.finished_at == identity.2
+        })
+        .unwrap_or(0)
 }
 
 fn queue_weight(item: &QueueItem, fallback: f32) -> f32 {
@@ -29364,6 +29369,55 @@ mod tests {
     }
 
     #[test]
+    fn merge_recent_returns_the_new_rows_slot_not_the_oldest() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("merge-return-index");
+        let mut recent = vec![
+            RecentEntry {
+                audio: Some(PathBuf::from("/media/old-1.wav")),
+                finished_at: 100,
+                ..Default::default()
+            },
+            RecentEntry {
+                audio: Some(PathBuf::from("/media/old-2.wav")),
+                finished_at: 200,
+                ..Default::default()
+            },
+        ];
+
+        let index = merge_recent_entry(
+            &mut recent,
+            RecentEntry {
+                audio: Some(PathBuf::from("/media/new.wav")),
+                finished_at: 300,
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(index, 0, "the newest row sits first after the sort");
+        assert_eq!(
+            recent[index].audio.as_deref(),
+            Some(Path::new("/media/new.wav"))
+        );
+
+        // Replacing an existing row is found again after the sort too.
+        let index = merge_recent_entry(
+            &mut recent,
+            RecentEntry {
+                audio: Some(PathBuf::from("/media/old-2.wav")),
+                finished_at: 400,
+                ..Default::default()
+            },
+        );
+        assert_eq!(index, 0);
+        assert_eq!(
+            recent[index].audio.as_deref(),
+            Some(Path::new("/media/old-2.wav"))
+        );
+        assert_eq!(recent.len(), 3, "a rerun must replace, not add");
+    }
+
+    #[test]
     fn stop_after_capture_creates_a_recording_item() {
         let _guard = env_lock();
         let _config = ConfigEnv::new("record-stop-capture");
@@ -29374,6 +29428,19 @@ mod tests {
         wav.finish().unwrap();
 
         let mut app = pro_app();
+        // Older history must not become the slot the new take is recorded at:
+        // the newest-first sort moves rows, so the returned index has to name
+        // the take after the sort.
+        app.recent.push(RecentEntry {
+            audio: Some(dir.join("earlier-1.wav")),
+            finished_at: 1,
+            ..Default::default()
+        });
+        app.recent.push(RecentEntry {
+            audio: Some(dir.join("earlier-2.wav")),
+            finished_at: 2,
+            ..Default::default()
+        });
         // Keep the start in `Preparing` without downloading or spawning.
         app.recording_models_ready_override = Some(false);
         app.record = Some(RecordSession {
@@ -29389,6 +29456,7 @@ mod tests {
         let session = app.record.as_ref().expect("a preparing session");
         assert_eq!(session.phase, RecordPhase::Preparing);
         let index = session.item.expect("the capture's item");
+        assert_eq!(index, 0, "the newest take must sit first");
         let entry = &app.recent[index];
         assert!(entry.recording);
         assert_eq!(entry.state, ItemState::Ready);
@@ -29396,6 +29464,15 @@ mod tests {
         assert!(entry.transcript.is_none());
         assert_eq!(entry.audio.as_deref(), Some(path.as_path()));
         assert!(entry.duration.unwrap() >= 1.9);
+
+        // The older rows keep their own takes.
+        assert_eq!(app.recent.len(), 3);
+        let older: Vec<_> = app.recent[1..]
+            .iter()
+            .filter_map(|entry| entry.audio.clone())
+            .collect();
+        assert!(older.contains(&dir.join("earlier-1.wav")));
+        assert!(older.contains(&dir.join("earlier-2.wav")));
 
         let _ = std::fs::remove_dir_all(&dir);
     }
