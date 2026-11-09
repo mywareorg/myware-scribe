@@ -5097,6 +5097,13 @@ impl App {
             }
             Message::ToggleEditMode => {
                 self.header_menu = None;
+                if matches!(self.status, Status::Running) {
+                    self.toast = Some((
+                        "Finish the run before editing".to_string(),
+                        Instant::now(),
+                    ));
+                    return Task::none();
+                }
                 // The queue tab's transcript is read-only.
                 if self.pane_tab == PaneTab::Queue {
                     self.toast = Some((
@@ -5127,7 +5134,7 @@ impl App {
                 Task::none()
             }
             Message::ToggleHeaderMenu(menu) => {
-                if self.popup_open() {
+                if self.popup_open() || matches!(self.status, Status::Running) {
                     return Task::none();
                 }
                 // One menu at a time, whichever surface opened it.
@@ -7188,6 +7195,13 @@ impl App {
             }
             Message::OpenExportMenu => {
                 if self.popup_open() {
+                    return Task::none();
+                }
+                if matches!(self.status, Status::Running) {
+                    self.toast = Some((
+                        "Finish the run before exporting".to_string(),
+                        Instant::now(),
+                    ));
                     return Task::none();
                 }
                 if self.shown_transcript().trim().is_empty() {
@@ -15941,20 +15955,28 @@ impl App {
         // button's left edge, measured from the right by the inset helpers.
         // Help belongs to the app header, not to this card, so it is not here.
         // Edit is a mode, not a menu: no caret, and it stays lit while on.
+        // While a run owns the transcript, none of the three is usable: the
+        // document is still being built.
+        let running_now = matches!(self.status, Status::Running);
+        let controls = !running_now;
         let edit: Element<Message> = action(
-            container(text("Edit").wrapping(NO_WRAP))
-                .width(Length::Fill)
-                .center_x(Length::Fill),
+            container(
+                text("Edit")
+                    .wrapping(NO_WRAP)
+                    .color(if controls { scheme.text } else { scheme.muted }),
+            )
+            .width(Length::Fill)
+            .center_x(Length::Fill),
         )
         .width(Length::Fixed(EDIT_BUTTON_WIDTH))
-        .on_press(Message::ToggleEditMode)
+        .on_press_maybe(controls.then_some(Message::ToggleEditMode))
         .padding([5, 0])
         .style(move |theme, status| edit_mode_button_style(self.edit_mode)(theme, status))
         .into();
         let menus: Element<Message> = row![
-            self.header_menu_button("View", HeaderMenu::View),
+            self.header_menu_button("View", HeaderMenu::View, controls),
             edit,
-            self.header_menu_button("Publish", HeaderMenu::Publish),
+            self.header_menu_button("Publish", HeaderMenu::Publish, controls),
         ]
         .spacing(HEADER_GAP)
         .align_y(iced::Alignment::Center)
@@ -16005,7 +16027,9 @@ impl App {
         &self,
         label: &'static str,
         menu: HeaderMenu,
+        enabled: bool,
     ) -> Element<'_, Message> {
+        let scheme = self.scheme();
         let open = self.header_menu == Some(menu);
         let width = match menu {
             HeaderMenu::Publish => PUBLISH_BUTTON_WIDTH,
@@ -16015,7 +16039,9 @@ impl App {
         action(
             container(
                 row![
-                    text(label).wrapping(NO_WRAP),
+                    text(label)
+                        .wrapping(NO_WRAP)
+                        .color(if enabled { scheme.text } else { scheme.muted }),
                     icon(if open { ICON_CARET_UP } else { ICON_CARET_DOWN }, theme::TEXT_XS),
                 ]
                 .spacing(theme::SPACE_XS)
@@ -16025,9 +16051,9 @@ impl App {
             .center_x(Length::Fill),
         )
         .width(Length::Fixed(width))
-        .on_press(Message::ToggleHeaderMenu(menu))
+        .on_press_maybe(enabled.then_some(Message::ToggleHeaderMenu(menu)))
         .padding([5, 0])
-        .style(if open {
+        .style(if open && enabled {
             pill_button_toggled
         } else {
             pill_button_secondary
@@ -19389,7 +19415,8 @@ impl App {
         // Help ends the row in every build, so its right edge is the row's right
         // edge — and the menu's, since that is what the layer aligns to. The
         // debug-only toggle is pushed above precisely so it cannot move it.
-        header = header.push(self.header_menu_button("Help", HeaderMenu::Help));
+        // Help stays available during a run: it is reference, not document work.
+        header = header.push(self.header_menu_button("Help", HeaderMenu::Help, true));
 
         let mut base = column![
             header,
@@ -25685,6 +25712,40 @@ mod tests {
             .expect("a failed row still describes itself");
         assert_eq!(title, "Not transcribed");
         assert!(body.contains("no speech found"), "{body}");
+
+        let _ = std::fs::remove_dir_all(&media);
+    }
+
+    #[test]
+    fn a_run_disables_the_transcript_menus() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("menus-during-run");
+        let original = "[00:00] SPEAKER 1: one\n";
+        let (mut app, _transcript, media) = line_edit_fixture("menus-during-run", original);
+        app.pane_tab = PaneTab::Queue;
+        app.status = Status::Running;
+
+        let _ = app.update(Message::ToggleHeaderMenu(HeaderMenu::View));
+        assert!(app.header_menu.is_none(), "View must not open mid-run");
+
+        let _ = app.update(Message::ToggleEditMode);
+        assert!(!app.edit_mode, "the mode must not arm mid-run");
+        assert!(app
+            .toast
+            .as_ref()
+            .is_some_and(|(text, _)| text.contains("Finish the run")));
+
+        let _ = app.update(Message::OpenExportMenu);
+        assert!(app.header_menu.is_none(), "Publish must not open mid-run");
+        assert!(app
+            .toast
+            .as_ref()
+            .is_some_and(|(text, _)| text.contains("before exporting")));
+
+        // Once the run ends they work again.
+        app.status = Status::Idle;
+        let _ = app.update(Message::ToggleHeaderMenu(HeaderMenu::View));
+        assert_eq!(app.header_menu, Some(HeaderMenu::View));
 
         let _ = std::fs::remove_dir_all(&media);
     }
