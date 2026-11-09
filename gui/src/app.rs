@@ -10993,6 +10993,10 @@ impl App {
             }
             self.replace_edit_lines(lines);
         }
+        // A saved edit may leave a speaker with no lines at all. The name was
+        // only kept reachable for the session, and the legend counts voices by
+        // who actually speaks, so drop it here rather than on the next cancel.
+        self.prune_speakers();
         // The edited row stops being a field; re-measure without resetting the
         // anchor or the row height.
         self.reflow_pane_geometry();
@@ -29026,6 +29030,17 @@ mod tests {
         let _ = app.update(Message::CancelLineEdit);
         assert!(!app.speaker_order().iter().any(|name| name == "SPEAKER 5"));
 
+        // Saving can empty a speaker out too: row 1 is the only SPEAKER 4, so
+        // reassigning it leaves the voice with nothing to colour.
+        open_line_edit(&mut app, 1);
+        assert_eq!(current_row_mut(&mut app).speaker, "SPEAKER 4");
+        current_row_mut(&mut app).speaker = "SPEAKER 1".to_string();
+        let _ = app.update(Message::DoneLineEdit);
+        assert!(
+            !app.speaker_order().iter().any(|name| name == "SPEAKER 4"),
+            "a speaker with no lines must leave the legend"
+        );
+
         let _ = std::fs::remove_dir_all(&media);
     }
 
@@ -29064,15 +29079,15 @@ mod tests {
     }
 
     #[test]
-    fn a_speaker_cycled_out_of_the_editor_stays_reachable() {
+    fn a_speaker_cycled_out_of_the_editor_does_not_persist() {
         let _guard = env_lock();
         let _config = ConfigEnv::new("strip-new-speaker-registry");
         let original = "[00:00] SPEAKER 1: one\n[00:05] SPEAKER 2: two\n";
         let (mut app, _transcript, media) = line_edit_fixture("strip-new-speaker-registry", original);
 
         // Add a third voice, then cycle the chip back to the first before
-        // saving. Nothing in the document ever uses SPEAKER 3, so only the
-        // session registry can keep it in the order the swap action walks.
+        // saving. No line ever speaks as SPEAKER 3, so the saved transcript has
+        // no such voice and the legend must not give it a colour.
         open_line_edit(&mut app, 1);
         let _ = app.update(Message::AddLineSpeaker);
         assert_eq!(current_row_mut(&mut app).speaker, "SPEAKER 3");
@@ -29080,13 +29095,11 @@ mod tests {
         assert_eq!(current_row_mut(&mut app).speaker, "SPEAKER 1");
         let _ = app.update(Message::DoneLineEdit);
         assert!(
-            app.speaker_order().iter().any(|name| name == "SPEAKER 3"),
-            "the created name must stay reachable for the session"
+            !app.speaker_order().iter().any(|name| name == "SPEAKER 3"),
+            "a speaker with no lines must not persist"
         );
-
-        // Another line can pick it up from the cycle.
-        let _ = app.update(Message::FlipLineSpeaker(0));
-        assert_eq!(app.shown_lines()[0].speaker, "SPEAKER 3");
+        // Both lines now speak as SPEAKER 1, so that is the whole cast.
+        assert_eq!(app.speaker_order(), vec!["SPEAKER 1".to_string()]);
 
         let _ = std::fs::remove_dir_all(&media);
     }
