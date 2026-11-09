@@ -17675,37 +17675,23 @@ impl App {
         .spacing(theme::SPACE_SM)
         .width(Length::Fill);
 
-        let mut formats = column![].spacing(2).width(Length::Fill);
-        for format in ReportFormat::ALL {
-            let current = self.report.format == format;
-            let marker = if current { ICON_CIRCLE_FILL } else { ICON_CIRCLE };
-            let ink = if current { scheme.blue } else { scheme.muted };
-            let radio = action(icon_colored(marker, 10.0, ink))
-                .padding([6, 8])
-                .style(move |theme, status| row_menu_item_style(scheme, true)(theme, status))
-                .on_press(Message::ReportFormatChanged(format));
-            formats = formats.push(
-                container(
-                    row![
-                        radio,
-                        text(format.label())
-                            .size(theme::TEXT_SM)
-                            .color(scheme.text),
-                        horizontal_space(),
-                        text(format.extension())
-                            .size(theme::TEXT_XS)
-                            .color(scheme.muted),
-                    ]
-                    .spacing(theme::SPACE_SM)
-                    .align_y(iced::Alignment::Center)
-                    .width(Length::Fill),
-                )
-                .padding([0, 2]),
-            );
-        }
+        let file_type = row![
+            text("File type").size(theme::TEXT_SM).color(scheme.text),
+            horizontal_space(),
+            pick_list(
+                ReportFormat::ALL,
+                Some(self.report.format),
+                Message::ReportFormatChanged,
+            )
+            .style(speed_pick(scheme))
+            .menu_style(pick_menu_style(scheme))
+            .handle(caret_handle()),
+        ]
+        .spacing(theme::SPACE_MD)
+        .align_y(iced::Alignment::Center)
+        .width(Length::Fill);
         body = body
-            .push(text("File type").size(theme::TEXT_SM).color(scheme.text))
-            .push(formats)
+            .push(file_type)
             .push(right_aligned(
                 row![
                     action_text("Cancel")

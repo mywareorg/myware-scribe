@@ -28,11 +28,12 @@ pub enum ExportFormat {
 }
 
 impl ExportFormat {
-    pub const ALL: [ExportFormat; 7] = [
+    /// The formats the export lists offer. JSON stays a valid target when the
+    /// user types a `.json` name; it is not a menu choice.
+    pub const ALL: [ExportFormat; 6] = [
         ExportFormat::Txt,
         ExportFormat::Srt,
         ExportFormat::Vtt,
-        ExportFormat::Json,
         ExportFormat::Markdown,
         ExportFormat::Csv,
         ExportFormat::Docx,
