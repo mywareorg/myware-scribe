@@ -17832,7 +17832,16 @@ impl App {
         height: f32,
     ) -> Element<'static, Message> {
         let scheme = *scheme;
-        let mut content = column![].spacing(theme::SPACE_MD).width(Length::Fill);
+        // The scrollbar floats over the scroller's right edge, so the list keeps
+        // a gutter for it: otherwise the bar sits on the last words of every
+        // wrapped line.
+        let mut content = column![]
+            .spacing(theme::SPACE_MD)
+            .width(Length::Fill)
+            .padding(iced::Padding {
+                right: SCROLLBAR_WIDTH + theme::SPACE_SM,
+                ..iced::Padding::default()
+            });
         if !briefing.overview.trim().is_empty() {
             content = content.push(
                 text(briefing.overview.clone())
