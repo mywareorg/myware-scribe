@@ -221,9 +221,6 @@ pub(crate) enum HelpKind {
     About,
     Licenses,
     Shortcuts,
-    /// What the transcript lets you edit, and how. Also shown at the end of a
-    /// run until the reader turns it off.
-    EditingTips,
     Console,
     Settings,
 }
@@ -234,7 +231,6 @@ impl HelpKind {
             HelpKind::About => "About",
             HelpKind::Licenses => "Licenses",
             HelpKind::Shortcuts => "Shortcuts",
-            HelpKind::EditingTips => "Editing Tips",
             HelpKind::Console => "Console",
             HelpKind::Settings => "Settings",
         }

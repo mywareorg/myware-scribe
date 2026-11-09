@@ -1076,10 +1076,6 @@ struct Settings {
     show_timestamps: bool,
     #[serde(default = "notifications_default")]
     notifications: bool,
-    /// Show the Editing Tips card at the end of a run, until the reader ticks
-    /// "Don't show these tips again".
-    #[serde(default = "editing_tips_default")]
-    editing_tips: bool,
     /// Lift quiet recordings before ASR and diarization.
     #[serde(default = "normalize_default")]
     normalize: bool,
@@ -1116,10 +1112,6 @@ fn timestamps_default() -> bool {
     true
 }
 
-fn editing_tips_default() -> bool {
-    true
-}
-
 fn normalize_default() -> bool {
     true
 }
@@ -1138,7 +1130,6 @@ impl Default for Settings {
             input_device: None,
             show_timestamps: true,
             notifications: true,
-            editing_tips: true,
             normalize: true,
             karaoke: true,
             gpu_profiles: HashMap::new(),
@@ -1510,8 +1501,6 @@ pub enum Message {
     SplitLineAtCursor,
     UndoLineEdit,
     RedoLineEdit,
-    /// Turn the end-of-run Editing Tips card on or off. Saved at once.
-    SetEditingTips(bool),
     AddFiles,
     FilesPicked(Option<Vec<PathBuf>>),
     AddFolder,
@@ -1945,10 +1934,6 @@ pub struct App {
     clear_confirm: bool,
     /// The Transcribe/Retranscribe setup dialog is showing.
     run_setup_open: bool,
-    /// Show the Editing Tips card at the end of a run.
-    editing_tips: bool,
-    /// This completion still owes the tips card, before any pending rename.
-    pending_tips: bool,
     transcript_dirty: bool,
     follow_offset: Option<f32>,
     /// Horizontal target of the last programmatic transcript scroll, used to
@@ -2337,8 +2322,6 @@ impl App {
             header_menu: None,
             clear_confirm: false,
             run_setup_open: false,
-            editing_tips: settings.editing_tips,
-            pending_tips: false,
             transcript_dirty: false,
             follow_offset: None,
             scroll_target: None,
@@ -2582,7 +2565,6 @@ impl App {
             language: self.language.clone(),
             input_device: self.input_device.clone(),
             notifications: self.notifications,
-            editing_tips: self.editing_tips,
             normalize: self.normalize,
             karaoke: self.karaoke,
             gpu_profiles: self.gpu_profiles.clone(),
@@ -6986,7 +6968,6 @@ impl App {
                         self.current_index = None;
                         self.completion_pending = false;
                         self.summary_open = false;
-                        self.pending_tips = false;
                         self.run_start = None;
                         self.elapsed_final = None;
                         self.eta_shown = None;
@@ -7031,7 +7012,6 @@ impl App {
                     self.scroll_seek = false;
                     self.output_txt = None;
                     self.summary_open = false;
-                    self.pending_tips = false;
                     self.rename_open = false;
                     self.rename_fields.clear();
                     self.rename_focus = 0;
@@ -7058,11 +7038,6 @@ impl App {
                     self.invalidate_derived();
                     self.save_queue();
                 }
-                Task::none()
-            }
-            Message::SetEditingTips(show) => {
-                self.editing_tips = show;
-                self.save_settings();
                 Task::none()
             }
             Message::OpenRename => {
@@ -9595,10 +9570,6 @@ impl App {
         // The report always appears after a run. The paywall is reached from
         // the Pro controls, not instead of the result the user just waited for.
         self.summary_open = true;
-        // The tips explain editing, so they follow the same gate as the rename
-        // that shares this chain: no editing, no card.
-        let editing = self.can(license::Feature::Editing);
-        self.pending_tips = editing && self.editing_tips;
         self.toast = None;
         if self.should_notify_completion() {
             notify("Hippo Transcribe", "Finished \u{00b7} saved locally");
@@ -16259,13 +16230,6 @@ impl App {
                 action: Some(Message::HelpChoice(HelpKind::Shortcuts)),
             },
             MenuRow {
-                label: "Editing Tips",
-                key: None,
-                checked: false,
-                enabled: true,
-                action: Some(Message::HelpChoice(HelpKind::EditingTips)),
-            },
-            MenuRow {
                 label: "Dictionary",
                 key: None,
                 checked: false,
@@ -16861,12 +16825,7 @@ impl App {
     fn close_modal(&mut self, modal: Modal) -> Task<Message> {
         match modal {
             Modal::ClearHistory => self.clear_confirm = false,
-            Modal::Summary => {
-                self.summary_open = false;
-                // The tips and the rename were asked for before the summary was
-                // ready to show; closing it is the moment to work through them.
-                return self.after_completion();
-            }
+            Modal::Summary => self.summary_open = false,
             Modal::DeleteLine => self.delete_confirm = false,
             Modal::Calibration => {
                 let Some(calibration) = &self.calibration else {
@@ -16885,15 +16844,7 @@ impl App {
             }
             Modal::Paywall => self.paywall_open = false,
             Modal::Settings => self.settings_open = false,
-            Modal::Help => {
-                let was_tips = self.help_open == Some(HelpKind::EditingTips);
-                self.help_open = None;
-                // The tips are the middle of the completion chain; a reference
-                // dialog the reader opened themselves is not.
-                if was_tips {
-                    return self.after_completion();
-                }
-            }
+            Modal::Help => self.help_open = None,
             Modal::RunSetup => self.run_setup_open = false,
             Modal::Rename => self.rename_open = false,
             Modal::Vocabulary => self.vocabulary_open = false,
@@ -16910,24 +16861,6 @@ impl App {
             Modal::Labels => self.labels_open = None,
             Modal::RenameRecent => self.rename_recent = None,
             Modal::Report => self.report_open = false,
-        }
-        Task::none()
-    }
-
-    /// What to show after a dialog in the completion chain closes: the Editing
-    /// Tips card, unless turned off.
-    ///
-    /// The flag is re-read here rather than when it was set, so ticking the box
-    /// on the card takes effect at once and an unticked box brings the card back
-    /// on the next run.
-    fn after_completion(&mut self) -> Task<Message> {
-        if self.pending_tips {
-            self.pending_tips = false;
-            if self.editing_tips {
-                self.help_open = Some(HelpKind::EditingTips);
-                self.toast = None;
-                return Task::none();
-            }
         }
         Task::none()
     }
@@ -17560,28 +17493,12 @@ impl App {
                 let lines = LICENSES_TEXT.lines().count() as f32;
                 (licences_page(scheme), lines * 21.0 + 200.0, 640.0)
             }
-            HelpKind::EditingTips => (editing_tips_page(scheme), 230.0, 560.0),
             HelpKind::Console | HelpKind::Settings => (horizontal_space().into(), 40.0, 560.0),
         };
 
         let mut footer = row![]
             .spacing(theme::SPACE_MD)
             .align_y(iced::Alignment::Center);
-        if kind == HelpKind::EditingTips {
-            footer = footer.push(
-                action(tips_check(!self.editing_tips, scheme))
-                    .padding([4, 4])
-                    .style(header_menu_item_style(scheme, true))
-                    .on_press(Message::SetEditingTips(!self.editing_tips)),
-            );
-            footer = footer.push(
-                text("Don't show these tips again")
-                    .size(theme::TEXT_2XS)
-                    .wrapping(NO_WRAP)
-                    .color(scheme.muted),
-            );
-            footer = footer.push(horizontal_space());
-        }
         footer = footer.push(
             action_text("Done")
                 .on_press(Message::CloseHelp)
@@ -21785,50 +21702,6 @@ fn shortcuts_page(scheme: Scheme) -> Element<'static, Message> {
     page.into()
 }
 
-fn editing_tips_page(scheme: Scheme) -> Element<'static, Message> {
-    let mut page = column![].spacing(theme::SPACE_LG).width(Length::Fill);
-    for (index, (title, detail)) in [
-        ("Double-click Speaker", "Enter editing mode"),
-        ("Right-click Speaker", "Change Speaker"),
-        ("Edit \u{2192} Rename Speakers", "Bulk rename speakers"),
-    ]
-    .iter()
-    .enumerate()
-    {
-        let badge = container(
-            text((index + 1).to_string())
-                .size(theme::TEXT_2XS)
-                .color(scheme.text),
-        )
-        .width(Length::Fixed(22.0))
-        .height(Length::Fixed(22.0))
-        .center_x(Length::Fixed(22.0))
-        .center_y(Length::Fixed(22.0))
-        .style(move |_theme| container::Style {
-            background: Some(scheme.track.into()),
-            border: iced::border::rounded(11.0),
-            ..container::Style::default()
-        });
-        page = page.push(
-            row![
-                badge,
-                column![
-                    text(*title).size(theme::TEXT_MD).font(Font {
-                        weight: font::Weight::Medium,
-                        ..Font::DEFAULT
-                    }),
-                    text(*detail).size(theme::TEXT_SM).color(scheme.muted),
-                ]
-                .spacing(theme::SPACE_2XS),
-            ]
-            .spacing(theme::SPACE_LG)
-            .align_y(iced::Alignment::Start)
-            .width(Length::Fill),
-        );
-    }
-    page.into()
-}
-
 /// Strip the light Markdown the notices file uses. The wording itself is kept
 /// verbatim; only the emphasis markers and bullet prefix are removed.
 fn markdown_plain(line: &str) -> String {
@@ -22750,7 +22623,6 @@ fn help_scroll_id(kind: HelpKind) -> scrollable::Id {
         HelpKind::About => "help-about",
         HelpKind::Licenses => "help-licenses",
         HelpKind::Shortcuts => "help-shortcuts",
-        HelpKind::EditingTips => "help-tips",
         HelpKind::Console => "help-console",
         HelpKind::Settings => "help-settings",
     })
@@ -23849,14 +23721,6 @@ fn card_menu_layer<'a>(body: Element<'a, Message>, right: f32) -> Element<'a, Me
         .into()
 }
 
-/// The Editing Tips opt-out: a square that fills when set, with the tick centred
-/// inside it.
-///
-/// The tick goes *inside* the bordered box, at the tightened icon line height,
-/// so the paragraph it is measured from fits within the box. A line box taller
-/// than the space offered leaves cosmic-text with no vertical room for the
-/// baseline and it then yields no layout run at all, which measures and draws as
-/// nothing.
 /// A row of dialog buttons, pushed to the right edge.
 fn right_aligned<'a>(content: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
     container(content)
@@ -23865,7 +23729,14 @@ fn right_aligned<'a>(content: impl Into<Element<'a, Message>>) -> Element<'a, Me
         .into()
 }
 
-fn tips_check<'a>(checked: bool, scheme: Scheme) -> Element<'a, Message> {
+/// A square checkbox that fills when set, with the tick centred inside it.
+///
+/// The tick goes *inside* the bordered box, at the tightened icon line height,
+/// so the paragraph it is measured from fits within the box. A line box taller
+/// than the space offered leaves cosmic-text with no vertical room for the
+/// baseline and it then yields no layout run at all, which measures and draws as
+/// nothing.
+fn check_box<'a>(checked: bool, scheme: Scheme) -> Element<'a, Message> {
     const BOX: f32 = 14.0;
     const TICK: f32 = 12.0;
 
@@ -23911,7 +23782,7 @@ fn report_switch_row<'a>(
 ) -> Element<'a, Message> {
     // The box is the control; the words beside it are text, not a second
     // target, so a stray click on the label cannot change the report.
-    let check = action(tips_check(on, scheme))
+    let check = action(check_box(on, scheme))
         .padding([2, 2])
         .style(move |theme, status| row_menu_item_style(scheme, enabled)(theme, status))
         .on_press_maybe(enabled.then_some(message));
@@ -29148,73 +29019,6 @@ mod tests {
     }
 
     #[test]
-    fn the_editing_tips_follow_the_summary() {
-        let _guard = env_lock();
-        let _config = ConfigEnv::new("tips-chain");
-        let original = "[00:00] SPEAKER 1: one\n[00:05] SPEAKER 2: two\n";
-        let (mut app, _transcript, media) = line_edit_fixture("tips-chain", original);
-
-        app.summary_open = true;
-        app.pending_tips = true;
-
-        // Summary -> tips, and nothing after: a run no longer asks for a rename,
-        // and Escape is how the sheet is left now that it has no close button.
-        let _ = app.update(Message::Escape);
-        assert_eq!(app.help_open, Some(HelpKind::EditingTips));
-
-        let _ = app.update(Message::CloseHelp);
-        assert_eq!(app.help_open, None);
-        assert!(!app.rename_open);
-
-        let _ = std::fs::remove_dir_all(&media);
-    }
-
-    #[test]
-    fn completion_notifies_only_when_the_whole_queue_is_done() {
-        let _guard = env_lock();
-        let _config = ConfigEnv::new("notify-end-of-queue");
-        let mut app = pro_app();
-        assert!(app.notifications);
-
-        // A finished file with another still waiting is not the end of the
-        // queue, so no notification.
-        app.batch_summary = vec![("talk.mp3".to_string(), backend::Stats::default())];
-        app.queue = vec![queue_item(PathBuf::from("next.mp3"))];
-        assert!(!app.should_notify_completion());
-
-        // With nothing left to run, the notification is due.
-        app.queue[0].status = ItemStatus::Done;
-        assert!(app.should_notify_completion());
-
-        // The setting still wins.
-        app.notifications = false;
-        assert!(!app.should_notify_completion());
-    }
-
-    #[test]
-    fn ticking_the_tips_box_skips_them() {
-        let _guard = env_lock();
-        let _config = ConfigEnv::new("tips-off");
-        let original = "[00:00] SPEAKER 1: one\n[00:05] SPEAKER 2: two\n";
-        let (mut app, _transcript, media) = line_edit_fixture("tips-off", original);
-
-        let _ = app.update(Message::SetEditingTips(false));
-        assert!(!app.editing_tips);
-
-        app.summary_open = true;
-        app.pending_tips = true;
-        let _ = app.update(Message::Escape);
-        assert_eq!(app.help_open, None, "the card was turned off");
-
-        // The next completion does not queue the card at all.
-        app.batch_summary = vec![("talk.mp3".to_string(), backend::Stats::default())];
-        assert!(app.present_completion());
-        assert!(!app.pending_tips);
-
-        let _ = std::fs::remove_dir_all(&media);
-    }
-
-    #[test]
     fn a_free_completion_opens_the_summary_not_the_paywall() {
         let _guard = env_lock();
         let _config = ConfigEnv::new("completion-summary-free");
@@ -29228,34 +29032,6 @@ mod tests {
     }
 
     #[test]
-    fn the_tips_are_still_reachable_from_the_help_menu_when_suppressed() {
-        let _guard = env_lock();
-        let _config = ConfigEnv::new("tips-help");
-        let original = "[00:00] SPEAKER 1: one\n";
-        let (mut app, _transcript, media) = line_edit_fixture("tips-help", original);
-
-        let _ = app.update(Message::SetEditingTips(false));
-        let _ = app.update(Message::HelpChoice(HelpKind::EditingTips));
-        assert_eq!(app.help_open, Some(HelpKind::EditingTips));
-        let _ = app.view();
-
-        let _ = std::fs::remove_dir_all(&media);
-    }
-
-    #[test]
-    fn the_editing_tips_setting_round_trips_through_settings() {
-        let _guard = env_lock();
-        let _dir = ConfigEnv::new("editing-tips");
-
-        let mut app = pro_app();
-        assert!(app.editing_tips, "a fresh profile shows the tips");
-
-        let _ = app.update(Message::SetEditingTips(false));
-        let reloaded = pro_app();
-        assert!(!reloaded.editing_tips);
-    }
-
-
     #[test]
     fn the_editor_strip_can_open_the_speaker_rename() {
         let _guard = env_lock();
