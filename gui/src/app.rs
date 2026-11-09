@@ -3762,11 +3762,32 @@ impl App {
     /// row is clicked).
     fn view_item(&mut self, index: usize) -> Task<Message> {
         // Clicking the row that is already on screen (e.g. while its audio is
-        // playing) is not a view change.
-        if self.selected == Some(index) && self.selected_view.is_some() {
+        // playing) is not a view change — but a document left over from
+        // History is not this row's, so it has to be replaced.
+        if self.selected == Some(index) && self.queue_pane_matches(index) {
             return Task::none();
         }
         self.open_item_view(index)
+    }
+
+    /// True when the pane is showing the focused queue row's own content: the
+    /// live transcript while it runs, the stored transcript once finished, or
+    /// the empty preview a row with nothing to read gets.
+    fn queue_pane_matches(&self, index: usize) -> bool {
+        let Some(item) = self.queue.get(index) else {
+            return false;
+        };
+        match item.status {
+            ItemStatus::Running => self.selected_view.is_none(),
+            ItemStatus::Done => self
+                .selected_view
+                .as_ref()
+                .is_some_and(|view| item.transcript.as_deref() == Some(view.source.as_path())),
+            _ => self
+                .selected_view
+                .as_ref()
+                .is_some_and(|view| !view.finished && view.source == item.path),
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -3895,36 +3916,55 @@ impl App {
         };
         if matches!(item.status, ItemStatus::Running) {
             self.return_to_live();
-            return Task::none();
-        }
-        if matches!(item.status, ItemStatus::Pending) {
-            self.speaker_filter = None;
-            self.player = None;
-            self.playhead = 0.0;
-            self.last_tick = None;
-            self.search_query.clear();
-            self.search_index = 0;
-            self.view_error = None;
-            self.join_lines = false;
-            self.joined_lines.clear();
-            self.joined_transcript.clear();
-            self.modified = false;
+            // `return_to_live` drops the selection; the queue keeps its focus.
             self.selected = Some(index);
-            self.custom_speakers.clear();
-            self.selected_view = Some(ItemView {
-                source: item.path.clone(),
-                finished: false,
-                transcript: String::new(),
-                lines: Vec::new(),
-                turns: Vec::new(),
-                peaks: Arc::new(Vec::new()),
-                duration: item.duration.map(|seconds| seconds as f32),
-                audio: item.audio.clone(),
-                output: None,
-            });
-            self.invalidate_derived();
             return Task::none();
         }
+        if matches!(item.status, ItemStatus::Done) {
+            // The row has a transcript, and it lives in History: show that
+            // document rather than anything else that was on screen.
+            self.selected = Some(index);
+            let transcript = item.transcript.clone();
+            let row = transcript.and_then(|path| {
+                self.recent
+                    .iter()
+                    .position(|entry| entry.transcript.as_deref() == Some(path.as_path()))
+            });
+            let Some(row) = row else {
+                return Task::none();
+            };
+            let task = self.open_recent(row, None);
+            self.selected = Some(index);
+            return task;
+        }
+        // Queued, interrupted or failed: there is nothing to read yet. The
+        // pane takes an empty preview of this row, so no other document can
+        // stand in for it.
+        self.speaker_filter = None;
+        self.player = None;
+        self.playhead = 0.0;
+        self.last_tick = None;
+        self.search_query.clear();
+        self.search_index = 0;
+        self.view_error = None;
+        self.join_lines = false;
+        self.joined_lines.clear();
+        self.joined_transcript.clear();
+        self.modified = false;
+        self.selected = Some(index);
+        self.custom_speakers.clear();
+        self.selected_view = Some(ItemView {
+            source: item.path.clone(),
+            finished: false,
+            transcript: String::new(),
+            lines: Vec::new(),
+            turns: Vec::new(),
+            peaks: Arc::new(Vec::new()),
+            duration: item.duration.map(|seconds| seconds as f32),
+            audio: item.audio.clone(),
+            output: None,
+        });
+        self.invalidate_derived();
         Task::none()
     }
 
@@ -5417,9 +5457,7 @@ impl App {
                     return Task::none();
                 };
                 let running = matches!(self.status, Status::Running);
-                let selectable = matches!(item.status, ItemStatus::Running)
-                    || (!running
-                        && matches!(item.status, ItemStatus::Pending | ItemStatus::Interrupted));
+                let selectable = matches!(item.status, ItemStatus::Running) || !running;
                 if selectable {
                     return self.view_item(index);
                 }
@@ -6860,8 +6898,21 @@ impl App {
                             return self.open_recent(index, None);
                         }
                     }
+                    return Task::none();
                 }
-                Task::none()
+                // The queue reads queue work: focus the row's own content, so a
+                // transcript left from History cannot stay on screen.
+                match self.selected {
+                    Some(index) => self.view_item(index),
+                    None => {
+                        self.selected_view = None;
+                        self.view_error = None;
+                        self.player = None;
+                        self.playhead = 0.0;
+                        self.last_tick = None;
+                        Task::none()
+                    }
+                }
             }
             Message::RequestClearHistory => {
                 // A run or a live recording owns the lists; the same gate the
@@ -9757,6 +9808,14 @@ impl App {
             self.open_calibration(true);
             return;
         }
+        // A transcript left open from History is not this tab's document; the
+        // live file takes the pane. Done after the queue decisions above, so a
+        // re-run still finds the history row it was asked for.
+        if self.selected_view.as_ref().is_some_and(|view| view.finished) {
+            let focus = self.selected;
+            self.return_to_live();
+            self.selected = focus;
+        }
         self.begin_batch(false);
     }
 
@@ -9962,8 +10021,9 @@ impl App {
             self.playhead = 0.0;
             self.player = None;
             // Pro keeps a finished transcript on screen while a new run starts.
+            // The queue's focused row is not a document and stays put.
             if !self.keeps_finished_view() {
-                self.selected = None;
+                self.selected_recent = None;
                 self.selected_view = None;
                 self.view_error = None;
             }
@@ -11501,6 +11561,10 @@ impl App {
                             )
                         });
                         self.current_index = self.current;
+                        if self.pane_tab == PaneTab::Queue {
+                            // The queue tab follows the file in flight.
+                            self.selected = self.current;
+                        }
                         if let Some(index) = self.current {
                             self.queue[index].status = ItemStatus::Running;
                             // Persist at once: a crash before the file finishes
@@ -15308,6 +15372,29 @@ impl App {
         // must never show another transcript's text for the selected row.
         if self.focused_queue_untranscribed().is_some() {
             return self.empty_transcript_state(&scheme);
+        }
+        // The queue tab reads the queue: only the focused row's own content is
+        // shown, never a document left over from History.
+        if self.pane_tab == PaneTab::Queue {
+            match self.selected {
+                Some(index) if self.queue.get(index).is_some() => {
+                    if let Some(view) = &self.selected_view {
+                        let owned = matches!(self.queue[index].status, ItemStatus::Done)
+                            && self.queue[index].transcript.as_deref()
+                                == Some(view.source.as_path());
+                        if !owned {
+                            return self.empty_transcript_state(&scheme);
+                        }
+                    }
+                }
+                _ => {
+                    // No focused row: the live buffer is only this tab's while
+                    // a run is actually producing it.
+                    if !(matches!(self.status, Status::Running) && self.selected_view.is_none()) {
+                        return self.empty_transcript_state(&scheme);
+                    }
+                }
+            }
         }
         if self.feature_deck_visible() {
             return self.tagged(license::Audience::FreeOnly, self.feature_deck(&scheme));
@@ -25595,9 +25682,12 @@ mod tests {
         assert_eq!(title, "Not transcribed yet");
         assert!(body.contains("Run the queue"), "{body}");
         assert_eq!(app.shown_item_title(), "next.mp3");
-        // The old document is still loaded behind the notice, so the guard is
-        // what keeps its text off the pane.
-        assert!(app.shown_transcript().contains("old words"));
+        // Entering the queue drops the History document; nothing of it is left
+        // behind the notice.
+        assert!(
+            !app.shown_transcript().contains("old words"),
+            "the history transcript should be gone"
+        );
 
         // A failed row explains itself instead of promising a transcript.
         app.queue[0].status = ItemStatus::Failed("no speech found".to_string());
@@ -31214,6 +31304,35 @@ mod tests {
     }
 
     #[test]
+    fn a_finished_queue_row_opens_its_own_transcript() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("queue-pane-done");
+        let original = "[00:00] SPEAKER 1: one\n";
+        let (mut app, transcript, media) = line_edit_fixture("queue-pane-done", original);
+        // The queue keeps a finished row; the history row it produced is in the
+        // store with the same transcript.
+        let mut done = queue_item(transcript.clone());
+        done.status = ItemStatus::Done;
+        done.transcript = Some(transcript.clone());
+        app.queue = vec![done];
+        app.selected = Some(0);
+        app.pane_tab = PaneTab::History;
+
+        let _ = app.update(Message::SelectTab(PaneTab::Queue));
+
+        assert_eq!(app.selected, Some(0));
+        let view = app
+            .selected_view
+            .as_ref()
+            .expect("the finished row's transcript should be shown");
+        assert_eq!(view.source, transcript);
+        assert!(view.finished);
+        assert_eq!(app.shown_transcript(), original);
+
+        let _ = std::fs::remove_dir_all(&media);
+    }
+
+    #[test]
     fn opening_a_finished_row_clears_its_unread_mark() {
         let _guard = env_lock();
         let _config = ConfigEnv::new("unread-history");
@@ -32007,9 +32126,10 @@ mod tests {
             assert!(app.keeps_finished_view());
 
             // The row being transcribed is still clickable: it returns to the
-            // live transcript from the pinned one.
+            // live transcript from the pinned one, and the queue keeps it
+            // focused.
             let _ = app.update(Message::QueueDragStart(0));
-            assert!(app.selected.is_none());
+            assert_eq!(app.selected, Some(0));
             assert!(app.selected_view.is_none());
         }
 
