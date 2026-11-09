@@ -82,11 +82,21 @@ For the edit/run loop, use the fast iteration profile:
 powershell -ExecutionPolicy Bypass -File .\scripts\run-windows.ps1
 ```
 
-That runs `cargo run --profile release-fast` (no LTO, parallel codegen,
-incremental) and stages the DLLs beside the development binary. The same
-profile is available as `cargo run-fast` if you are already in a Visual Studio
-developer prompt. Use the full build script for the final release. Pass
-`-Free` or `-Pro` to force the entitlement for that run.
+That builds the briefing worker into the same profile, then runs
+`cargo run --profile release-fast` (no LTO, parallel codegen, incremental) and
+stages the DLLs beside the development binary. The briefing worker is a
+separate package and is not a workspace default member, so a bare
+`cargo build` or `cargo run` does not produce it:
+
+```powershell
+cargo build --profile release-fast -p hippo-summarize
+```
+
+Without `hippo-summarize.exe` beside `hippo-transcribe.exe`, Summarize
+Transcript reports the helper as missing. In a Visual Studio developer prompt,
+`cargo build-fast` builds both binaries into that profile and `cargo run-fast`
+runs the GUI. Use the full build script for the final release. Pass `-Free` or `-Pro` to force
+the entitlement for that run.
 
 For the GPU edit/run loop, use `scripts\run-gpu.ps1`. It selects the Vulkan
 SDK, Ninja, and the DLL CRT, stages the sherpa/ONNX/OpenMP runtime DLLs, and

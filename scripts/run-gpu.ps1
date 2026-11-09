@@ -7,7 +7,8 @@ Run Hippo Transcribe on Windows with the GPU backend and fast iteration profile.
 Enters the Visual Studio developer environment if needed, points bindgen at
 LLVM, selects the Vulkan SDK and Ninja generator, stages the sherpa-onnx,
 ONNX Runtime, Visual C++ and OpenMP DLLs beside the development binary, and
-runs `cargo run --profile release-fast --features gpu`.
+builds the briefing worker into the same profile, then runs `cargo run
+--profile release-fast --features gpu`.
 
 The GPU feature is Pro-gated, so this sets HIPPO_TRANSCRIBE_TIER=pro by
 default. Pass -Free to test the free-tier lock instead.
@@ -121,6 +122,12 @@ try {
         throw "vcomp140.dll was not found in $openMp."
     }
     Copy-Item $vcomp $profileDir -Force
+
+    # Built here for the same reason: the briefing worker has its own package.
+    & cargo build --profile $Profile -p hippo-summarize
+    if ($LASTEXITCODE -ne 0) {
+        throw "building hippo-summarize failed with exit code $LASTEXITCODE"
+    }
 
     & cargo run --profile $Profile --features gpu
     if ($LASTEXITCODE -ne 0) {

@@ -5,7 +5,8 @@ Run Hippo Transcribe on Windows with the fast iteration profile.
 
 .DESCRIPTION
 Enters the Visual Studio developer environment if needed, points bindgen at
-LLVM, and runs `cargo run --profile release-fast`.
+LLVM, builds the briefing worker (`hippo-summarize`) into the same profile, and
+runs `cargo run --profile release-fast`.
 
 Use this for the edit/run loop. Use `scripts/build-windows.ps1` for the final
 LTO release and zip.
@@ -81,6 +82,14 @@ try {
     New-Item -ItemType Directory -Path $profileDir -Force | Out-Null
     foreach ($dll in @("sherpa-onnx-c-api.dll", "onnxruntime.dll")) {
         Copy-Item (Join-Path $sherpaLib $dll) $profileDir -Force
+    }
+
+    # The briefing worker is a separate package and is not a workspace default
+    # member, so `cargo run` alone never builds it. The app looks for it beside
+    # its own executable and Summarize Transcript fails without it.
+    & cargo build --profile $Profile -p hippo-summarize
+    if ($LASTEXITCODE -ne 0) {
+        throw "building hippo-summarize failed with exit code $LASTEXITCODE"
     }
 
     & cargo run --profile $Profile
