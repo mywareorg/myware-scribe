@@ -13978,7 +13978,7 @@ impl App {
         );
 
         let body: Element<Message> = if has_queue {
-            let mut rows = column![].spacing(4).width(Length::Fill);
+            let mut rows = file_list_column(4.0);
             for index in 0..self.queue.len() {
                 if self.queue_drag.is_some()
                     && self.queue_drag != Some(index)
@@ -14123,7 +14123,7 @@ impl App {
         let body: Element<Message> = if self.recent.is_empty() {
             self.history_empty_state(&scheme)
         } else {
-            let mut rows = column![].spacing(2).width(Length::Fill);
+            let mut rows = file_list_column(2.0);
             let mut heading = String::new();
             for index in 0..self.recent.len() {
                 let day = day_heading(self.recent[index].finished_at, now);
@@ -14375,7 +14375,7 @@ impl App {
         locked: bool,
     ) -> Element<'_, Message> {
         let scheme = *scheme;
-        let mut rows = column![].spacing(2).width(Length::Fill);
+        let mut rows = file_list_column(2.0);
         for index in indices {
             // During a recording workflow every row but the session's item is
             // dimmed; the active row is the one the right pane is describing.
@@ -22260,6 +22260,19 @@ fn briefing_cues(briefing: &Briefing, lines: &[BriefingLine]) -> (Vec<Cue>, Opti
         .map(|line| line.end.unwrap_or(line.start))
         .reduce(f32::max);
     (cues, duration)
+}
+
+/// The File pane's list column: full width, but with a gutter on the right.
+/// The scrollbar floats over the scroller's right edge, and a row's hover or
+/// selection box must stop before it rather than run underneath.
+fn file_list_column<'a>(spacing: f32) -> iced::widget::Column<'a, Message> {
+    column![]
+        .spacing(spacing)
+        .width(Length::Fill)
+        .padding(iced::Padding {
+            right: SCROLLBAR_WIDTH + theme::SPACE_XS,
+            ..iced::Padding::default()
+        })
 }
 
 fn recent_title(entry: &RecentEntry) -> String {
