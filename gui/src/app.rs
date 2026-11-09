@@ -495,6 +495,25 @@ pub enum RowSubmenu {
     Labels,
 }
 
+/// An export in flight: the document, the file it came from and the format
+/// the menu offered, captured before the native save dialog opens so the write
+/// cannot pick up whatever is on screen when the dialog returns.
+struct PendingExport {
+    /// The transcript text as the user sees it.
+    text: String,
+    /// The transcript file the text came from, for cue bounds and the sidecar
+    /// guard.
+    source: Option<PathBuf>,
+    cues: Vec<hippo_transcribe_core::export::Cue>,
+    turns: Vec<backend::Turn>,
+    duration: Option<f32>,
+    /// The format the menu offered. A recognised extension the user types
+    /// takes precedence.
+    format: ExportFormat,
+    /// The name the save dialog opens on.
+    suggested: PathBuf,
+}
+
 /// A row's full file details, captured when its Info popup opens.
 ///
 /// Deliberately holds paths rather than an index: the lists shift under it
@@ -1233,8 +1252,6 @@ pub enum Modal {
     Versions,
     /// The Add label picker for one history row.
     Labels,
-    /// The Save As format list.
-    SaveAs,
     /// The File panel row's read-only details. Last in paint order: it only
     /// appears when nothing else is open, since a context menu opens it.
     Info,
@@ -1360,12 +1377,15 @@ pub enum Message {
     OpenSummaryTranscript,
     /// Open an http(s) address in the system browser.
     OpenUrl(String),
-    SaveTranscriptAs,
-    SaveTranscriptAsPicked(Option<PathBuf>),
-    /// Close the Save As format list.
-    CloseExportFormat,
-    /// Export the shown transcript in `format`, beside its source.
+    /// Open the File menu's Export as list, from Ctrl+S or the row itself.
+    OpenExportMenu,
+    /// The pointer entered or left the File menu's Export as row.
+    FileExportHover(bool),
+    /// Export the shown transcript in `format`. The destination comes from the
+    /// native save dialog; nothing is written until it returns.
     ExportCurrentAs(ExportFormat),
+    /// The save dialog returned; `None` means it was dismissed.
+    ExportPicked(Option<PathBuf>),
     RevealOutput,
     OpenRename,
     /// Open the custom-vocabulary editor, from Edit or from Help.
@@ -1438,8 +1458,9 @@ pub enum Message {
     RetranscribeRecent(usize),
     /// Add a recent item's audio to the queue without starting it.
     EnqueueRecent(usize),
-    /// Export a history row directly in a chosen format, without the Save As
-    /// dialog. The format list is the context menu's Export submenu.
+    /// Export a history row in a chosen format. The format list is the context
+    /// menu's Export submenu and the destination comes from the native save
+    /// dialog.
     ExportRecentAs(usize, ExportFormat),
     /// Open the context menu's nested format list for the row it hangs from.
     OpenExportSubmenu,
@@ -1959,8 +1980,11 @@ pub struct App {
     label_filter: Vec<String>,
     /// The open label picker, if any.
     labels_open: Option<LabelPicker>,
-    /// The Save As format list, when open.
-    save_as_open: bool,
+    /// The export format list nested under File → Export as, open while the
+    /// pointer is on that row.
+    file_export_open: bool,
+    /// An export waiting on the native save dialog.
+    pending_export: Option<PendingExport>,
     /// Speaker names created through the line editor this session. A name lives
     /// on the document only while some row uses it; keeping it here means a
     /// just-created speaker stays reachable by the chip and the swap action.
@@ -2278,7 +2302,8 @@ impl App {
             label_assignments,
             label_filter: Vec::new(),
             labels_open: None,
-            save_as_open: false,
+            file_export_open: false,
+            pending_export: None,
             custom_speakers: Vec::new(),
             add_report: None,
             pane_cue: None,
@@ -3481,7 +3506,7 @@ impl App {
                     format!("{meta} \u{00b7} ")
                 };
                 meta = format!(
-                    "{prefix}{} \u{00b7} Save As to keep",
+                    "{prefix}{} \u{00b7} Export as to keep",
                     if self.join_lines { "Joined" } else { "Modified" }
                 );
             }
@@ -4750,7 +4775,7 @@ impl App {
             Key::Character(character) if modifiers.command() => match character.as_str() {
                 "," => Some(Message::OpenSettings),
                 "o" => Some(Message::AddFiles),
-                "s" => Some(Message::SaveTranscriptAs),
+                "s" => Some(Message::OpenExportMenu),
                 "f" => Some(Message::FocusFind),
                 "k" | "K" if modifiers.shift() => Some(Message::SplitLineAtCursor),
                 "=" | "+" => Some(Message::ZoomIn),
@@ -4989,6 +5014,7 @@ impl App {
                     )
                 {
                     self.header_menu = None;
+                    self.file_export_open = false;
                 }
                 Task::none()
             }
@@ -4998,6 +5024,7 @@ impl App {
                 }
                 // One menu at a time, whichever surface opened it.
                 self.row_menu = None;
+                self.file_export_open = false;
                 self.header_menu = if self.header_menu == Some(menu) {
                     None
                 } else {
@@ -5007,6 +5034,7 @@ impl App {
             }
             Message::CloseHeaderMenu => {
                 self.header_menu = None;
+                self.file_export_open = false;
                 Task::none()
             }
             Message::OpenRunSetup => {
@@ -5991,7 +6019,12 @@ impl App {
                     return Task::none();
                 }
                 if self.header_menu.is_some() {
-                    self.header_menu = None;
+                    // The nested export list is one step in front of its menu.
+                    if self.file_export_open {
+                        self.file_export_open = false;
+                    } else {
+                        self.header_menu = None;
+                    }
                     return Task::none();
                 }
                 if self.line_edit.is_some() {
@@ -6946,83 +6979,26 @@ impl App {
                 self.reveal_output();
                 Task::none()
             }
-            Message::SaveTranscriptAs => {
-                self.header_menu = None;
-                if self.shown_transcript().trim().is_empty() {
-                    self.toast = Some(("No transcript to save".to_string(), Instant::now()));
+            Message::OpenExportMenu => {
+                if self.popup_open() {
                     return Task::none();
                 }
-                // The same list the row menu's Export as offers, without the
-                // native save dialog: the format is an app decision, not a
-                // file-manager one.
-                self.save_as_open = true;
+                if self.shown_transcript().trim().is_empty() {
+                    self.toast = Some(("No transcript to export".to_string(), Instant::now()));
+                    return Task::none();
+                }
+                self.header_menu = Some(HeaderMenu::File);
+                self.file_export_open = true;
                 Task::none()
             }
-            Message::CloseExportFormat => {
-                self.save_as_open = false;
+            Message::FileExportHover(open) => {
+                if self.header_menu == Some(HeaderMenu::File) {
+                    self.file_export_open = open;
+                }
                 Task::none()
             }
             Message::ExportCurrentAs(format) => self.export_current_as(format),
-            Message::SaveTranscriptAsPicked(path) => {
-                if let Some(mut path) = path {
-                    let format = path
-                        .extension()
-                        .and_then(|extension| extension.to_str())
-                        .and_then(ExportFormat::from_extension)
-                        .unwrap_or(ExportFormat::Txt);
-                    if path.extension().is_none() {
-                        path.set_extension(format.extension());
-                    }
-
-                    let text = self.shown_transcript().to_string();
-                    let source = self.shown_output().map(Path::to_path_buf);
-                    let cues = backend::export_cues(source.as_deref(), self.shown_lines());
-                    let turns = self.shown_turns().to_vec();
-                    let duration = self.shown_duration();
-
-                    // The JSON sidecar is the transcript's metadata, not an
-                    // export target: writing over it would erase speaker ids
-                    // and line bounds.
-                    if source
-                        .as_deref()
-                        .and_then(hippo_transcribe_core::sidecar::locate)
-                        .as_deref()
-                        == Some(path.as_path())
-                    {
-                        self.toast = Some((
-                            "That file holds the transcript's metadata; choose another name"
-                                .to_string(),
-                            Instant::now(),
-                        ));
-                    } else if text.trim().is_empty() {
-                        self.toast = Some(("No transcript to save".to_string(), Instant::now()));
-                    } else {
-                        // Saving over the transcript itself keeps the backup
-                        // the editor has always taken before rewriting it.
-                        let saving_over_source = source.as_deref() == Some(path.as_path());
-                        let result = if saving_over_source && format == ExportFormat::Txt {
-                            write_transcript_file(&path, &text)
-                        } else {
-                            hippo_transcribe_core::export::write(
-                                &path, format, &text, &cues, &turns, duration,
-                            )
-                        };
-                        match result {
-                            Ok(()) => {
-                                self.modified = false;
-                                self.mark_version_edited(&path);
-                                self.toast =
-                                    Some((format!("Saved {}", path.display()), Instant::now()));
-                            }
-                            Err(error) => self.toast = Some((
-                                format!("Could not save {}: {error}", path.display()),
-                                Instant::now(),
-                            )),
-                        }
-                    }
-                }
-                Task::none()
-            }
+            Message::ExportPicked(path) => self.finish_export(path),
             Message::PickOutput => {
                 let default_dir = self.output_dir.clone();
                 Task::perform(
@@ -8754,9 +8730,10 @@ impl App {
         Task::none()
     }
 
-    /// Where an export of `transcript` in `format` goes. A plain-text export
-    /// beside the transcript gets an `-export` suffix so it cannot overwrite
-    /// the transcript; a JSON export never overwrites the metadata sidecar.
+    /// Where the save dialog opens for an export of `transcript` in `format`.
+    /// A plain-text export beside the transcript gets an `-export` suffix so it
+    /// cannot overwrite the transcript; a JSON export never overwrites the
+    /// metadata sidecar.
     fn export_path(transcript: &Path, format: ExportFormat) -> PathBuf {
         let stem = transcript
             .file_stem()
@@ -8774,21 +8751,10 @@ impl App {
         path
     }
 
-    /// Export the transcript on screen in `format`, beside its source. This is
-    /// File → Save As, the same list the row menu's Export as offers.
-    fn export_current_as(&mut self, format: ExportFormat) -> Task<Message> {
-        self.commit_inline_edit(false);
-        if self.shown_transcript().trim().is_empty() {
-            self.toast = Some(("No transcript to export".to_string(), Instant::now()));
-            self.save_as_open = false;
-            return Task::none();
-        }
-        let source = self
-            .shown_output()
-            .map(Path::to_path_buf)
-            .or_else(|| self.selected_view.as_ref().map(|view| view.source.clone()));
-        let target = match source {
-            Some(source) => Self::export_path(&source, format),
+    /// The name the save dialog should open on for a document with `source`.
+    fn export_suggestion(&self, source: Option<&Path>, format: ExportFormat) -> PathBuf {
+        match source {
+            Some(source) => Self::export_path(source, format),
             None => {
                 let stem = self
                     .shown_audio()
@@ -8806,46 +8772,182 @@ impl App {
                     .unwrap_or_default();
                 directory.join(format!("{stem}.{}", format.extension()))
             }
-        };
-        self.save_as_open = false;
-        self.update(Message::SaveTranscriptAsPicked(Some(target)))
+        }
     }
 
-    /// Export a history row directly in `format`, without the Save As dialog.
-    /// The file lands beside the row's transcript; a plain-text export beside
-    /// it gets an `-export` suffix so it cannot overwrite the transcript.
-    fn export_recent_as(&mut self, index: usize, format: ExportFormat) -> Task<Message> {
-        // The row may be the document on screen with an open editor; commit it
-        // first so the export reads what the user actually sees.
-        self.commit_inline_edit(false);
-        let Some(entry) = self.recent.get(index).cloned() else {
-            return Task::none();
-        };
+    /// Capture the shown transcript for an export in `format`.
+    fn pending_from_shown(&mut self, format: ExportFormat) -> Option<PendingExport> {
+        let text = self.shown_transcript().to_string();
+        if text.trim().is_empty() {
+            self.toast = Some(("No transcript to export".to_string(), Instant::now()));
+            return None;
+        }
+        let source = self
+            .shown_output()
+            .map(Path::to_path_buf)
+            .or_else(|| self.selected_view.as_ref().map(|view| view.source.clone()));
+        let cues = backend::export_cues(source.as_deref(), self.shown_lines());
+        let turns = self.shown_turns().to_vec();
+        let duration = self.shown_duration();
+        let suggested = self.export_suggestion(source.as_deref(), format);
+        Some(PendingExport {
+            text,
+            source,
+            cues,
+            turns,
+            duration,
+            format,
+            suggested,
+        })
+    }
+
+    /// Capture one history row for an export in `format`.
+    fn pending_from_recent(&mut self, index: usize, format: ExportFormat) -> Option<PendingExport> {
+        let entry = self.recent.get(index).cloned()?;
         let Some(transcript) = Self::current_transcript(&entry).map(Path::to_path_buf) else {
             self.toast = Some(("No transcript to export".to_string(), Instant::now()));
-            return Task::none();
+            return None;
         };
         let Some(text) = backend::read_transcript(&transcript) else {
             self.toast = Some((
                 format!("Could not read {}", transcript.display()),
                 Instant::now(),
             ));
-            return Task::none();
+            return None;
         };
         if text.trim().is_empty() {
             self.toast = Some(("No transcript to export".to_string(), Instant::now()));
-            return Task::none();
+            return None;
         }
-        let path = Self::export_path(&transcript, format);
         let lines = attach_confidences(parse_lines(&text), &backend::read_confidences(&transcript));
         let cues = backend::export_cues(Some(transcript.as_path()), &lines);
         let turns = turns_from_lines(&lines, entry.duration);
         let duration = entry.duration.map(|seconds| seconds as f32);
-        match hippo_transcribe_core::export::write(&path, format, &text, &cues, &turns, duration) {
-            Ok(()) => self.toast = Some((format!("Saved {}", path.display()), Instant::now())),
-            Err(error) => {
-                self.toast = Some((format!("Could not export: {error}"), Instant::now()))
+        let suggested = Self::export_path(&transcript, format);
+        Some(PendingExport {
+            text,
+            source: Some(transcript),
+            cues,
+            turns,
+            duration,
+            format,
+            suggested,
+        })
+    }
+
+    /// Hold `pending` and ask the OS for a destination. Nothing is written
+    /// until [`Message::ExportPicked`] returns the chosen path.
+    fn begin_export(&mut self, pending: PendingExport) -> Task<Message> {
+        self.header_menu = None;
+        self.file_export_open = false;
+        self.row_menu = None;
+        self.row_submenu = None;
+        let suggested = pending.suggested.clone();
+        let label = pending.format.label();
+        let extension = pending.format.extension();
+        self.pending_export = Some(pending);
+        let name = suggested
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("transcript.txt")
+            .to_string();
+        let directory = suggested.parent().map(Path::to_path_buf);
+        Task::perform(
+            async move {
+                let mut dialog = rfd::FileDialog::new()
+                    .add_filter(label, &[extension])
+                    .set_file_name(name);
+                if let Some(directory) = directory {
+                    dialog = dialog.set_directory(directory);
+                }
+                dialog.save_file()
+            },
+            Message::ExportPicked,
+        )
+    }
+
+    /// Export the transcript on screen in `format`. File → Export as and the
+    /// row menu's Export as both end here.
+    fn export_current_as(&mut self, format: ExportFormat) -> Task<Message> {
+        self.commit_inline_edit(false);
+        match self.pending_from_shown(format) {
+            Some(pending) => self.begin_export(pending),
+            None => Task::none(),
+        }
+    }
+
+    /// Export one history row in `format`, through the native save dialog.
+    fn export_recent_as(&mut self, index: usize, format: ExportFormat) -> Task<Message> {
+        // The row may be the document on screen with an open editor; commit it
+        // first so the export reads what the user actually sees.
+        self.commit_inline_edit(false);
+        match self.pending_from_recent(index, format) {
+            Some(pending) => self.begin_export(pending),
+            None => Task::none(),
+        }
+    }
+
+    /// Write the pending export to `path`. `None` means the dialog was
+    /// dismissed, which discards the payload.
+    fn finish_export(&mut self, path: Option<PathBuf>) -> Task<Message> {
+        let Some(mut path) = path else {
+            self.pending_export = None;
+            return Task::none();
+        };
+        let Some(pending) = self.pending_export.take() else {
+            return Task::none();
+        };
+        // A recognised extension wins over the format the menu offered, so a
+        // user who types `notes.md` gets Markdown.
+        let format = path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .and_then(ExportFormat::from_extension)
+            .unwrap_or(pending.format);
+        if path.extension().is_none() {
+            path.set_extension(format.extension());
+        }
+        // The JSON sidecar is the transcript's metadata, not an export target:
+        // writing over it would erase speaker ids and line bounds.
+        if pending
+            .source
+            .as_deref()
+            .and_then(hippo_transcribe_core::sidecar::locate)
+            .as_deref()
+            == Some(path.as_path())
+        {
+            self.toast = Some((
+                "That file holds the transcript's metadata; choose another name".to_string(),
+                Instant::now(),
+            ));
+            return Task::none();
+        }
+        let PendingExport {
+            text,
+            source,
+            cues,
+            turns,
+            duration,
+            ..
+        } = pending;
+        // Saving over the transcript itself keeps the backup the editor has
+        // always taken before rewriting it.
+        let saving_over_source = source.as_deref() == Some(path.as_path());
+        let result = if saving_over_source && format == ExportFormat::Txt {
+            write_transcript_file(&path, &text)
+        } else {
+            hippo_transcribe_core::export::write(&path, format, &text, &cues, &turns, duration)
+        };
+        match result {
+            Ok(()) => {
+                self.modified = false;
+                self.mark_version_edited(&path);
+                self.toast = Some((format!("Saved {}", path.display()), Instant::now()));
             }
+            Err(error) => self.toast = Some((
+                format!("Could not save {}: {error}", path.display()),
+                Instant::now(),
+            )),
         }
         Task::none()
     }
@@ -14207,7 +14309,8 @@ impl App {
         (String::new(), false)
     }
 
-    /// The Export row's hover list: one direct export per format.
+    /// The Export row's hover list: one export per format, each asking for a
+    /// destination.
     fn export_submenu_entries(&self, index: usize) -> Vec<RowMenuEntry> {
         ExportFormat::ALL
             .iter()
@@ -14531,8 +14634,8 @@ impl App {
             (!transcript_present).then_some("No transcript file."),
             Message::CopyRecentText(index),
         );
-        // The row opens a nested format list rather than the Save As dialog;
-        // each entry in it exports this row in that format directly.
+        // The row opens a nested format list, the same one File → Export as
+        // shows; each entry asks for a destination and writes this row.
         let export = row(
             "Export as\u{2026}",
             transcript_present && !review_blocked,
@@ -15418,7 +15521,9 @@ impl App {
         .into()
     }
 
-    /// The File menu: the transcript as a document, not its text.
+    /// The File menu: the transcript as a document, not its text. Export as
+    /// opens its format list on hover, the same list the row menu's Export as
+    /// shows; every entry asks for a destination.
     fn file_menu(&self, scheme: &Scheme) -> Element<'_, Message> {
         let scheme = *scheme;
         let has_text = !self.shown_transcript().is_empty();
@@ -15427,46 +15532,74 @@ impl App {
             || self.output_dir.is_some();
         let running = matches!(self.status, Status::Running);
         let summary = !running && self.has_results();
-        menu_card(
+        let rows = vec![
+            MenuRow {
+                label: "Export as\u{2026}",
+                key: Some("Ctrl+S"),
+                checked: false,
+                enabled: has_text,
+                action: has_text.then_some(Message::OpenExportMenu),
+            },
+            MenuRow {
+                label: "Reveal",
+                key: None,
+                checked: false,
+                enabled: has_target,
+                action: has_target.then_some(Message::RevealOutput),
+            },
+            MenuRow {
+                label: "Summary",
+                key: None,
+                checked: false,
+                enabled: summary,
+                action: summary.then_some(Message::OpenSummary),
+            },
+            MenuRow {
+                label: "Briefing",
+                key: None,
+                checked: false,
+                enabled: has_text,
+                action: has_text.then_some(if self.can(license::Feature::Briefing) {
+                    Message::OpenBriefing
+                } else {
+                    Message::LockedBriefing
+                }),
+            },
+        ];
+        let width = header_menu_width(rows.iter());
+        let card = menu_card_at(
+            vec![MenuSection { rows, footer: None }],
+            scheme,
+            width,
+            MenuHover::FileExport { row: 0 },
+        );
+        if !self.file_export_open || !has_text {
+            return menu_layer(card);
+        }
+        // The nested list is the row menu's Export submenu: the same formats,
+        // each of which will ask for a destination.
+        let formats: Vec<MenuRow> = ExportFormat::ALL
+            .iter()
+            .map(|format| MenuRow {
+                label: format.label(),
+                key: Some(format.extension()),
+                checked: false,
+                enabled: true,
+                action: Some(Message::ExportCurrentAs(*format)),
+            })
+            .collect();
+        let sub_width = header_menu_width(formats.iter());
+        let submenu = menu_card_at(
             vec![MenuSection {
-                rows: vec![
-                    MenuRow {
-                        label: "Save As\u{2026}",
-                        key: Some("Ctrl+S"),
-                        checked: false,
-                        enabled: has_text,
-                        action: has_text.then_some(Message::SaveTranscriptAs),
-                    },
-                    MenuRow {
-                        label: "Reveal",
-                        key: None,
-                        checked: false,
-                        enabled: has_target,
-                        action: has_target.then_some(Message::RevealOutput),
-                    },
-                    MenuRow {
-                        label: "Summary",
-                        key: None,
-                        checked: false,
-                        enabled: summary,
-                        action: summary.then_some(Message::OpenSummary),
-                    },
-                    MenuRow {
-                        label: "Briefing",
-                        key: None,
-                        checked: false,
-                        enabled: has_text,
-                        action: has_text.then_some(if self.can(license::Feature::Briefing) {
-                            Message::OpenBriefing
-                        } else {
-                            Message::LockedBriefing
-                        }),
-                    },
-                ],
+                rows: formats,
                 footer: None,
             }],
             scheme,
-        )
+            sub_width,
+            MenuHover::None,
+        );
+        // It hangs off the Export row: one card right, one card padding down.
+        stack![menu_layer(card), menu_layer_at(submenu, width + 4.0, 8.0)].into()
     }
 
     /// The Edit menu: the active line first, then transcript-wide edits.
@@ -16237,8 +16370,6 @@ impl App {
             Some(Modal::Versions)
         } else if self.labels_open.is_some() {
             Some(Modal::Labels)
-        } else if self.save_as_open {
-            Some(Modal::SaveAs)
         } else if self.info_open.is_some() {
             // Lowest priority: the Info popup only ever comes from a context
             // menu, which cannot open while another dialog is up.
@@ -16301,7 +16432,6 @@ impl App {
             }
             Modal::Versions => self.versions_open = None,
             Modal::Labels => self.labels_open = None,
-            Modal::SaveAs => self.save_as_open = false,
         }
         Task::none()
     }
@@ -17061,65 +17191,6 @@ impl App {
             );
         }
         Some(chips.into())
-    }
-
-    /// The Save As format list: the same options the row menu's Export as
-    /// offers, written beside the transcript.
-    fn save_as_dialog(&self, scheme: &Scheme) -> Element<'_, Message> {
-        let scheme = *scheme;
-        let subject = self
-            .shown_output()
-            .or_else(|| self.selected_view.as_ref().map(|view| view.source.as_path()))
-            .or_else(|| self.shown_audio())
-            .and_then(|path| path.file_name())
-            .and_then(|name| name.to_str())
-            .unwrap_or("Transcript")
-            .to_string();
-        let mut list = column![].spacing(2).width(Length::Fill);
-        for format in ExportFormat::ALL {
-            let extension = format.extension();
-            list = list.push(
-                button(
-                    container(
-                        row![
-                            text(format.label())
-                                .size(theme::TEXT_SM)
-                                .color(scheme.text),
-                            horizontal_space(),
-                            text(format!(".{extension}"))
-                                .size(theme::TEXT_XS)
-                                .color(scheme.muted),
-                        ]
-                        .spacing(theme::SPACE_SM)
-                        .align_y(iced::Alignment::Center),
-                    )
-                    .width(Length::Fill)
-                    .padding([6, 8]),
-                )
-                .width(Length::Fill)
-                .padding(0)
-                .on_press(Message::ExportCurrentAs(format))
-                .style(pill_button_secondary),
-            );
-        }
-        let body = column![
-            text("Save as").size(20).color(scheme.text),
-            text(format!("{subject} \u{00b7} written beside the transcript"))
-                .size(theme::TEXT_XS)
-                .color(scheme.muted),
-            list,
-            right_aligned(
-                row![
-                    action_text("Close")
-                        .on_press(Message::CloseExportFormat)
-                        .style(pill_button_secondary),
-                ]
-                .spacing(theme::SPACE_MD),
-            ),
-        ]
-        .spacing(theme::SPACE_MD)
-        .width(Length::Fill);
-        modal_card(body, 460.0, scheme)
     }
 
     /// The label picker: type a name to create or select it, press a label to
@@ -18843,7 +18914,6 @@ impl App {
             Some(Modal::Briefing) => self.briefing_dialog(&scheme),
             Some(Modal::Versions) => self.versions_dialog(&scheme),
             Some(Modal::Labels) => self.labels_dialog(&scheme),
-            Some(Modal::SaveAs) => self.save_as_dialog(&scheme),
             Some(Modal::Info) => self.info_dialog(&scheme),
         };
         // The Info popup is read-only and transient: its scrim dismisses it,
@@ -18852,7 +18922,6 @@ impl App {
             Some(Modal::Info) => Some(Message::CloseInfo),
             Some(Modal::Versions) => Some(Message::CloseVersions),
             Some(Modal::Labels) => Some(Message::CloseLabels),
-            Some(Modal::SaveAs) => Some(Message::CloseExportFormat),
             _ => None,
         };
         modal_overlay(base, dialog, scheme, dismiss)
@@ -22960,21 +23029,55 @@ fn menu_divider(scheme: Scheme) -> Element<'static, Message> {
 /// so only a press outside dismisses the menu.
 fn menu_card<'a>(sections: Vec<MenuSection<'a>>, scheme: Scheme) -> Element<'a, Message> {
     let width = header_menu_width(sections.iter().flat_map(|section| section.rows.iter()));
+    menu_card_at(sections, scheme, width, MenuHover::None)
+}
+
+/// Which row of a card menu reports the pointer, so a nested list can open
+/// under the row that owns it.
+#[derive(Clone, Copy)]
+enum MenuHover {
+    /// No row reports the pointer.
+    None,
+    /// The File menu: row `row` opens the export list, its neighbours close it.
+    FileExport { row: usize },
+}
+
+/// [`menu_card`] at an explicit width, with per-row pointer reporting.
+fn menu_card_at<'a>(
+    sections: Vec<MenuSection<'a>>,
+    scheme: Scheme,
+    width: f32,
+    hover: MenuHover,
+) -> Element<'a, Message> {
     let mut body = column![].spacing(theme::SPACE_SM).width(Length::Fill);
-    for (index, section) in sections.into_iter().enumerate() {
-        if index > 0 {
+    let mut index = 0usize;
+    for (section_index, section) in sections.into_iter().enumerate() {
+        if section_index > 0 {
             body = body.push(menu_divider(scheme));
         }
         let mut rows = column![].spacing(2).width(Length::Fill);
         for row in section.rows {
-            rows = rows.push(header_menu_item(
+            let item = header_menu_item(
                 row.label,
                 row.checked,
                 row.enabled,
                 row.action,
                 row.key,
                 scheme,
-            ));
+            );
+            let item: Element<'a, Message> = match hover {
+                MenuHover::None => item,
+                MenuHover::FileExport { row: export_row } => {
+                    let message = if index == export_row {
+                        Message::FileExportHover(true)
+                    } else {
+                        Message::FileExportHover(false)
+                    };
+                    mouse_area(item).on_enter(message).into()
+                }
+            };
+            rows = rows.push(item);
+            index += 1;
         }
         body = body.push(rows);
         if let Some(footer) = section.footer {
@@ -23000,6 +23103,33 @@ fn menu_card<'a>(sections: Vec<MenuSection<'a>>, scheme: Scheme) -> Element<'a, 
         .on_press(Message::Noop)
         .on_right_press(Message::Noop)
         .on_middle_press(Message::Noop)
+        .into()
+}
+
+/// A full-pane layer that places its child at the top-left, so one card menu
+/// can be stacked with a nested card beside it.
+fn menu_layer<'a>(body: Element<'a, Message>) -> Element<'a, Message> {
+    container(body)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .align_x(iced::Alignment::Start)
+        .align_y(iced::Alignment::Start)
+        .into()
+}
+
+/// [`menu_layer`], inset by `left` and `top` for a card that hangs off another.
+fn menu_layer_at<'a>(body: Element<'a, Message>, left: f32, top: f32) -> Element<'a, Message> {
+    container(body)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .align_x(iced::Alignment::Start)
+        .align_y(iced::Alignment::Start)
+        .padding(iced::Padding {
+            top,
+            right: 0.0,
+            bottom: 0.0,
+            left,
+        })
         .into()
 }
 
@@ -24131,6 +24261,18 @@ mod tests {
             content.perform(text_editor::Action::Move(text_editor::Motion::Right));
         }
         content
+    }
+
+    /// Save the shown transcript to `path` the way the export dialog does:
+    /// the format comes from the name when it is one we recognise.
+    fn save_shown_as(app: &mut App, path: PathBuf) {
+        let format = path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .and_then(ExportFormat::from_extension)
+            .unwrap_or(ExportFormat::Txt);
+        app.pending_export = app.pending_from_shown(format);
+        let _ = app.update(Message::ExportPicked(Some(path)));
     }
 
     /// Seed a finished transcript as history and return its index. The peaks
@@ -26564,24 +26706,56 @@ mod tests {
     }
 
     #[test]
-    fn save_as_lists_formats_and_writes_beside_the_transcript() {
+    fn export_as_asks_for_a_destination_and_writes_there() {
         let _guard = env_lock();
         let _config = ConfigEnv::new("save-as-formats");
         let original = "[00:00] SPEAKER 1: one\n[00:05] SPEAKER 2: two\n";
         let (mut app, transcript, media) = line_edit_fixture("save-as-formats", original);
+        let stem = transcript.file_stem().unwrap().to_str().unwrap().to_string();
 
-        let _ = app.update(Message::SaveTranscriptAs);
-        assert!(app.save_as_open, "File → Save As should open the format list");
-
-        let _ = app.update(Message::ExportCurrentAs(ExportFormat::Txt));
-        assert!(!app.save_as_open, "choosing a format should close the list");
-        let stem = transcript.file_stem().unwrap().to_str().unwrap();
-        let exported = transcript.with_file_name(format!("{stem}-export.txt"));
+        // The row opens the same format list the context menu shows.
+        let _ = app.update(Message::OpenExportMenu);
+        assert_eq!(app.header_menu, Some(HeaderMenu::File));
         assert!(
-            exported.is_file(),
-            "export missing: {}",
-            exported.display()
+            app.file_export_open,
+            "File → Export as should open the format list"
         );
+
+        // Choosing a format captures the document and waits on the dialog.
+        let _ = app.update(Message::ExportCurrentAs(ExportFormat::Txt));
+        assert!(
+            !app.file_export_open,
+            "choosing a format should close the list"
+        );
+        assert!(app.header_menu.is_none(), "the menu closes with it");
+        let pending = app
+            .pending_export
+            .as_ref()
+            .expect("the export should be waiting on a destination");
+        assert_eq!(pending.format, ExportFormat::Txt);
+        let suggested = transcript.with_file_name(format!("{stem}-export.txt"));
+        assert_eq!(
+            pending.suggested, suggested,
+            "the dialog opens beside the transcript"
+        );
+        assert!(!suggested.is_file(), "nothing is written before the dialog");
+
+        // The chosen name is the one written.
+        let chosen = media.join("chosen.txt");
+        let _ = app.update(Message::ExportPicked(Some(chosen.clone())));
+        assert!(app.pending_export.is_none());
+        assert!(
+            chosen.is_file(),
+            "export missing: {}",
+            chosen.display()
+        );
+        assert!(!suggested.is_file(), "the suggested name is only a default");
+
+        // A dismissed dialog writes nothing.
+        let _ = app.update(Message::ExportCurrentAs(ExportFormat::Srt));
+        let _ = app.update(Message::ExportPicked(None));
+        assert!(app.pending_export.is_none());
+        assert!(!media.join(format!("{stem}.srt")).is_file());
 
         let _ = std::fs::remove_dir_all(&media);
     }
@@ -26601,6 +26775,10 @@ mod tests {
             app.header_menu = Some(menu);
             let _ = app.view();
         }
+        // File → Export as draws a second card beside the menu.
+        app.header_menu = Some(HeaderMenu::File);
+        app.file_export_open = true;
+        let _ = app.view();
         let _ = std::fs::remove_dir_all(&media);
     }
 
@@ -26689,7 +26867,7 @@ mod tests {
         // each other.
         assert!(matches!(
             App::key_press(Key::Character("s".into()), Modifiers::COMMAND),
-            Some(Message::SaveTranscriptAs)
+            Some(Message::OpenExportMenu)
         ));
         assert!(matches!(
             App::key_press(Key::Character("s".into()), Modifiers::default()),
@@ -27593,7 +27771,7 @@ mod tests {
 
     /// Every dialog, so a variant added to `Modal` cannot go untested: the
     /// escape and render passes below each walk this list.
-    const ALL_MODALS: [Modal; 13] = [
+    const ALL_MODALS: [Modal; 12] = [
         Modal::Reset,
         Modal::Summary,
         Modal::DeleteLine,
@@ -27606,7 +27784,6 @@ mod tests {
         Modal::Info,
         Modal::Versions,
         Modal::Labels,
-        Modal::SaveAs,
     ];
 
     /// Raise one dialog the way the app would.
@@ -27688,7 +27865,6 @@ mod tests {
                 let index = app.recent.len() - 1;
                 app.open_labels(PaneTab::History, index);
             }
-            Modal::SaveAs => app.save_as_open = true,
         }
     }
 
@@ -28235,7 +28411,7 @@ mod tests {
             .contains("[00:00] SPEAKER 1: hello there hello again"));
 
         let joined = media.join("talk-joined.txt");
-        let _ = app.update(Message::SaveTranscriptAsPicked(Some(joined.clone())));
+        save_shown_as(&mut app, joined.clone());
         let saved = std::fs::read_to_string(&joined).unwrap();
         assert!(saved.contains("SPEAKER 1: hello there hello again"));
         assert!(!app.modified);
@@ -28280,7 +28456,7 @@ mod tests {
         open_test_item(&mut app, 0);
 
         let out = media.join("talk.srt");
-        let _ = app.update(Message::SaveTranscriptAsPicked(Some(out.clone())));
+        save_shown_as(&mut app, out.clone());
         let saved = std::fs::read_to_string(&out).unwrap();
         // Not the next line's 5.0: the sidecar knows this cue ends at 2.0.
         assert!(saved.contains("00:00:00,000 --> 00:00:02,000"), "{saved}");
@@ -28302,7 +28478,7 @@ mod tests {
 
         let sidecar = media.join("talk.json");
         let before = std::fs::read_to_string(&sidecar).unwrap();
-        let _ = app.update(Message::SaveTranscriptAsPicked(Some(sidecar.clone())));
+        save_shown_as(&mut app, sidecar.clone());
 
         assert_eq!(std::fs::read_to_string(&sidecar).unwrap(), before);
         assert!(app
@@ -32269,7 +32445,7 @@ mod tests {
     }
 
     #[test]
-    fn exporting_a_recent_row_writes_the_chosen_format_beside_it() {
+    fn exporting_a_recent_row_asks_for_a_destination_and_uses_that_rows_text() {
         let _guard = env_lock();
         let _config = ConfigEnv::new("row-export");
         let media = temp_dir("row-export-media");
@@ -32281,17 +32457,32 @@ mod tests {
         let mut app = pro_app();
         push_recent(&mut app, Some(audio), transcript.clone(), Some(10.0), vec![0.2; 16]);
 
-        // The menu's format entry exports directly; there is no dialog here.
+        // The menu's format entry only captures the row and asks for a name.
         let _ = app.update(Message::ExportRecentAs(0, ExportFormat::Srt));
         let srt = media.join("talk.srt");
+        assert!(!srt.is_file(), "export must wait for the dialog");
+        assert_eq!(
+            app.pending_export
+                .as_ref()
+                .map(|pending| pending.suggested.clone()),
+            Some(srt.clone())
+        );
+
+        let _ = app.update(Message::ExportPicked(Some(srt.clone())));
         let written = std::fs::read_to_string(&srt).expect("the SRT was not written");
         assert!(written.contains("00:00:00,000 -->"), "{written}");
         assert!(written.contains("SPEAKER 1: hi"), "{written}");
 
-        // A plain-text export beside the transcript gets its own name instead
-        // of overwriting the transcript it came from.
+        // A plain-text export defaults to its own name instead of the
+        // transcript it came from.
         let _ = app.update(Message::ExportRecentAs(0, ExportFormat::Txt));
-        assert!(media.join("talk-export.txt").is_file());
+        assert_eq!(
+            app.pending_export
+                .as_ref()
+                .map(|pending| pending.suggested.clone()),
+            Some(media.join("talk-export.txt"))
+        );
+        let _ = app.update(Message::ExportPicked(None));
         assert_eq!(
             std::fs::read_to_string(&transcript).unwrap(),
             "[00:00] SPEAKER 1: hi\n[00:05] SPEAKER 2: bye\n"
