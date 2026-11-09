@@ -202,6 +202,10 @@ const FILE_ROW_WIDTH: f32 =
 
 /// Horizontal padding inside a File pane row, per side.
 const ROW_PADDING_X: f32 = 8.0;
+/// Width of the unread dot's slot at the start of a recent row, kept even when
+/// the row is read so titles never shift, and used to hang the detail line
+/// under the title.
+const RECENT_UNREAD_SLOT: f32 = 6.0;
 /// Gap between a recent row's label and its reserved action slot.
 const RECENT_ROW_GAP: f32 = 6.0;
 /// Gap between a queue row's children.
@@ -14629,17 +14633,17 @@ impl App {
         // slot is always there so reading one does not shift its neighbours.
         let unread_mark: Element<Message> = if entry.unread {
             container(horizontal_space())
-                .width(Length::Fixed(6.0))
-                .height(Length::Fixed(6.0))
+                .width(Length::Fixed(RECENT_UNREAD_SLOT))
+                .height(Length::Fixed(RECENT_UNREAD_SLOT))
                 .style(move |_theme| container::Style {
                     background: Some(scheme.blue.into()),
-                    border: iced::border::rounded(3.0),
+                    border: iced::border::rounded(RECENT_UNREAD_SLOT / 2.0),
                     ..container::Style::default()
                 })
                 .into()
         } else {
             container(horizontal_space())
-                .width(Length::Fixed(6.0))
+                .width(Length::Fixed(RECENT_UNREAD_SLOT))
                 .into()
         };
         let title_row = row![
@@ -14681,20 +14685,16 @@ impl App {
             details = details.push(detail_row);
         }
 
-        // Favorites and History indent the detail line under the title; the
-        // queue and recordings keep the flush layout.
-        let details: Element<Message> = if matches!(tab, PaneTab::Favorites | PaneTab::History)
-        {
-            container(details)
-                .width(Length::Fill)
-                .padding(iced::Padding {
-                    left: theme::SPACE_SM,
-                    ..iced::Padding::default()
-                })
-                .into()
-        } else {
-            details.into()
-        };
+        // The detail line hangs under the title, clear of the unread dot's
+        // slot: the dot and the gap after it are what stand to the left of a
+        // title, so the duration starts at the same edge.
+        let details: Element<Message> = container(details)
+            .width(Length::Fill)
+            .padding(iced::Padding {
+                left: RECENT_UNREAD_SLOT + theme::SPACE_SM,
+                ..iced::Padding::default()
+            })
+            .into();
 
         let row_tint = Color {
             a: 0.12,
