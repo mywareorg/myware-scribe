@@ -6953,6 +6953,16 @@ impl App {
             Message::FlipLineSpeaker(index) => self.flip_line_speaker(index),
             Message::EditLine(index) => self.begin_inline_edit(index),
             Message::LineEditAction(position, action) => {
+                // The focused editor captures Enter, so the keyboard
+                // subscription never sees it. Save and leave instead of
+                // inserting a newline a transcript line cannot keep.
+                if matches!(action, text_editor::Action::Edit(text_editor::Edit::Enter)) {
+                    if self.line_edit_shortcut_blocked() {
+                        return Task::none();
+                    }
+                    self.commit_inline_edit(true);
+                    return Task::none();
+                }
                 if let Some(row) = self
                     .line_edit
                     .as_mut()
@@ -26904,6 +26914,32 @@ mod tests {
         assert!(std::fs::read_to_string(&transcript)
             .unwrap()
             .contains("edited"));
+
+        let _ = std::fs::remove_dir_all(&media);
+    }
+
+    #[test]
+    fn enter_in_the_line_editor_saves_instead_of_inserting_a_newline() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("enter-edit-config");
+        let original = "[00:00] SPEAKER 1: one\n";
+        let (mut app, transcript, media) = line_edit_fixture("enter-edit", original);
+
+        open_line_edit(&mut app, 0);
+        current_row_mut(&mut app).content = text_editor::Content::with_text("edited");
+
+        // The editor owns the key press, so Enter arrives as an action rather
+        // than through the keyboard subscription.
+        let _ = app.update(Message::LineEditAction(
+            0,
+            text_editor::Action::Edit(text_editor::Edit::Enter),
+        ));
+
+        assert!(app.line_edit.is_none(), "Enter should leave the editor");
+        assert_eq!(
+            std::fs::read_to_string(&transcript).unwrap(),
+            "[00:00] SPEAKER 1: edited\n"
+        );
 
         let _ = std::fs::remove_dir_all(&media);
     }
