@@ -259,11 +259,10 @@ const HEADER_ROW_HEIGHT: f32 = 16.0 * 1.3 + 10.0;
 const HEADER_SLOT_GAP: f32 = theme::SPACE_SM;
 
 /// Where the transcript header menus' top edge sits inside the card: the
-/// header's gap above and below its controls, the row itself, the gap to the
-/// rule, the rule and the slot's gap. Their width is not fixed: each menu is as
-/// wide as its own widest row.
+/// header's top and bottom padding, the row itself, the rule and the slot's
+/// gap. Their width is not fixed: each menu is as wide as its own widest row.
 const VIEW_MENU_TOP: f32 =
-    HEADER_GAP * 3.0 + HEADER_ROW_HEIGHT + 1.0 + HEADER_SLOT_GAP;
+    HEADER_GAP * 2.0 + HEADER_ROW_HEIGHT + 1.0 + HEADER_SLOT_GAP;
 
 /// Width of a header menu row's leading check slot. Fixed, so every label in a
 /// menu starts on the same left edge whether its row is checked or not.
@@ -15339,7 +15338,9 @@ impl App {
                 background: Some(scheme.border.into()),
                 ..container::Style::default()
             });
-        Some(column![header, divider].spacing(HEADER_GAP).into())
+        // The header's own bottom padding is the gap to the rule. Adding the
+        // column's own spacing here doubled it, leaving the top gap smaller.
+        Some(column![header, divider].spacing(0).into())
     }
 
     /// One of the transcript header's menu buttons. `label` is the menu's name;
