@@ -6865,6 +6865,11 @@ impl App {
                 Task::none()
             }
             Message::SelectTab(tab) => {
+                // A run owns the queue: the other lists stay out of reach
+                // until it ends, so the pane cannot be pulled off the work.
+                if tab != PaneTab::Queue && matches!(self.status, Status::Running) {
+                    return Task::none();
+                }
                 // Save even when the tab is already showing: clicking a tab
                 // again must keep the row the user last focused, not revert to
                 // an older remembered index.
@@ -13717,9 +13722,13 @@ impl App {
     fn pane_tabs(&self, scheme: &Scheme) -> Element<'_, Message> {
         let scheme = *scheme;
         let locked = self.record_lock();
+        // While a batch runs the queue is the only list there is a reason to
+        // look at, so the other three stay shut until it ends.
+        let running = matches!(self.status, Status::Running);
         let tab = |label: Element<'static, Message>,
                    selected: bool,
                    cue: bool,
+                   enabled: bool,
                    message: Message| {
             button(
                 container(label)
@@ -13731,15 +13740,15 @@ impl App {
             .padding(0)
             .width(Length::Fill)
             .height(Length::Fill)
-            .on_press_maybe((!locked).then_some(message))
-            .style(segment_button(scheme, selected, locked, cue))
+            .on_press_maybe(enabled.then_some(message))
+            .style(segment_button(scheme, selected, !enabled, cue))
         };
 
-        let label = |name: &str, selected: bool| {
+        let label = |name: &str, selected: bool, enabled: bool| {
             text(name.to_string())
                 .size(theme::TEXT_XS)
                 .wrapping(NO_WRAP)
-                .color(if locked { scheme.muted } else { scheme.text })
+                .color(if enabled { scheme.text } else { scheme.muted })
                 .font(Font {
                     weight: if selected {
                         font::Weight::Bold
@@ -13752,7 +13761,11 @@ impl App {
 
         let queue_label: Element<'static, Message> = if let Some(badge) = self.queue_badge() {
             row![
-                label(pane_tab_label(PaneTab::Queue), self.pane_tab == PaneTab::Queue),
+                label(
+                    pane_tab_label(PaneTab::Queue),
+                    self.pane_tab == PaneTab::Queue,
+                    !locked
+                ),
                 text(format!(" {badge}"))
                     .size(theme::TEXT_XS)
                     .wrapping(NO_WRAP)
@@ -13766,21 +13779,37 @@ impl App {
             .align_y(iced::Alignment::Center)
             .into()
         } else {
-            label(pane_tab_label(PaneTab::Queue), self.pane_tab == PaneTab::Queue).into()
+            label(
+                pane_tab_label(PaneTab::Queue),
+                self.pane_tab == PaneTab::Queue,
+                !locked,
+            )
+            .into()
         };
         let queue_tab = tab(
             queue_label,
             self.pane_tab == PaneTab::Queue,
             self.cue_active(PaneTab::Queue),
+            !locked,
             Message::SelectTab(PaneTab::Queue),
         );
 
         let favorites_selected = self.pane_tab == PaneTab::Favorites;
+        let favorites_enabled = !locked && !running;
         let favorites_label: Element<'static, Message> = if !self.favorites_locked() {
-            label(pane_tab_label(PaneTab::Favorites), favorites_selected).into()
+            label(
+                pane_tab_label(PaneTab::Favorites),
+                favorites_selected,
+                favorites_enabled,
+            )
+            .into()
         } else {
             row![
-                label(pane_tab_label(PaneTab::Favorites), favorites_selected),
+                label(
+                    pane_tab_label(PaneTab::Favorites),
+                    favorites_selected,
+                    favorites_enabled
+                ),
                 container(
                     text("Pro")
                         .size(9)
@@ -13805,33 +13834,55 @@ impl App {
             favorites_label,
             favorites_selected,
             self.cue_active(PaneTab::Favorites),
+            favorites_enabled,
             Message::SelectTab(PaneTab::Favorites),
         );
+        let lists_enabled = !locked && !running;
         let unread = self.unread_history();
         let history_label: Element<'static, Message> = if unread > 0 {
             row![
-                label(pane_tab_label(PaneTab::History), self.pane_tab == PaneTab::History),
+                label(
+                    pane_tab_label(PaneTab::History),
+                    self.pane_tab == PaneTab::History,
+                    lists_enabled
+                ),
                 text(format!(" {unread}"))
                     .size(theme::TEXT_XS)
                     .wrapping(NO_WRAP)
-                    .color(scheme.blue),
+                    .color(if lists_enabled {
+                        scheme.blue
+                    } else {
+                        scheme.muted
+                    }),
             ]
             .spacing(0)
             .align_y(iced::Alignment::Center)
             .into()
         } else {
-            label(pane_tab_label(PaneTab::History), self.pane_tab == PaneTab::History).into()
+            label(
+                pane_tab_label(PaneTab::History),
+                self.pane_tab == PaneTab::History,
+                lists_enabled,
+            )
+            .into()
         };
         let history_tab = tab(
             history_label,
             self.pane_tab == PaneTab::History,
             self.cue_active(PaneTab::History),
+            lists_enabled,
             Message::SelectTab(PaneTab::History),
         );
         let recordings_tab = tab(
-            label(pane_tab_label(PaneTab::Recordings), self.pane_tab == PaneTab::Recordings).into(),
+            label(
+                pane_tab_label(PaneTab::Recordings),
+                self.pane_tab == PaneTab::Recordings,
+                lists_enabled,
+            )
+            .into(),
             self.pane_tab == PaneTab::Recordings,
             self.cue_active(PaneTab::Recordings),
+            lists_enabled,
             Message::SelectTab(PaneTab::Recordings),
         );
 
@@ -24455,7 +24506,20 @@ fn segment_button(
             } else {
                 (Color::TRANSPARENT, scheme.muted)
             };
-            (fill.into(), color, Color::TRANSPARENT, Shadow::default())
+            // A locked tab can still be where new rows just landed: the cue's
+            // wash survives the lock, so History can blink during a run.
+            let (background, border) = if cue {
+                (
+                    Color { a: 0.12, ..scheme.blue }.into(),
+                    Color {
+                        a: 0.55,
+                        ..scheme.blue
+                    },
+                )
+            } else {
+                (fill.into(), Color::TRANSPARENT)
+            };
+            (background, color, border, Shadow::default())
         } else if selected {
             // Solid accent fill. Hover and press only move the lightness, and
             // the label is `on_accent`: dark on the light-theme sky blue,
@@ -25698,6 +25762,31 @@ mod tests {
         assert!(body.contains("no speech found"), "{body}");
 
         let _ = std::fs::remove_dir_all(&media);
+    }
+
+    #[test]
+    fn a_run_locks_the_other_tabs() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("tabs-locked");
+        let mut app = pro_app();
+        app.pane_tab = PaneTab::Queue;
+        app.queue = vec![queue_item(PathBuf::from("a.mp3"))];
+        app.queue[0].status = ItemStatus::Running;
+        app.status = Status::Running;
+
+        for tab in [PaneTab::Favorites, PaneTab::History, PaneTab::Recordings] {
+            let _ = app.update(Message::SelectTab(tab));
+            assert_eq!(app.pane_tab, PaneTab::Queue, "{tab:?} stayed open");
+        }
+
+        // The queue itself is still reachable.
+        let _ = app.update(Message::SelectTab(PaneTab::Queue));
+        assert_eq!(app.pane_tab, PaneTab::Queue);
+
+        // Once the run ends the lists open again.
+        app.status = Status::Idle;
+        let _ = app.update(Message::SelectTab(PaneTab::History));
+        assert_eq!(app.pane_tab, PaneTab::History);
     }
 
     #[test]
