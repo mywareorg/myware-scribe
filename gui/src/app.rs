@@ -8822,17 +8822,35 @@ impl App {
         }
     }
 
-    /// The focused queue row has no transcript yet, so the pane should say so
-    /// instead of leaving a transcript from another tab on screen.
-    fn focused_queue_row_untranscribed(&self) -> bool {
-        self.selected
-            .and_then(|index| self.queue.get(index))
-            .is_some_and(|item| {
-                matches!(
-                    item.status,
-                    ItemStatus::Pending | ItemStatus::Interrupted
-                )
-            })
+    /// The queue row the pane is on, when it has nothing to read: queued,
+    /// interrupted or failed. A running row has its live transcript, and a
+    /// finished row has left the list.
+    fn focused_queue_untranscribed(&self) -> Option<&QueueItem> {
+        if self.pane_tab != PaneTab::Queue {
+            return None;
+        }
+        let item = self.selected.and_then(|index| self.queue.get(index))?;
+        matches!(
+            item.status,
+            ItemStatus::Pending | ItemStatus::Interrupted | ItemStatus::Failed(_)
+        )
+        .then_some(item)
+    }
+
+    /// What the pane says for a queue row that has no transcript. `None` when
+    /// the pane is showing a document.
+    fn transcript_notice(&self) -> Option<(&'static str, String)> {
+        let item = self.focused_queue_untranscribed()?;
+        Some(match &item.status {
+            ItemStatus::Failed(message) => (
+                "Not transcribed",
+                format!("{message}. Run the queue again to retry this file."),
+            ),
+            _ => (
+                "Not transcribed yet",
+                "Run the queue to create a transcript for this file.".to_string(),
+            ),
+        })
     }
 
     /// A row was pressed. The first press does what a single click always did;
@@ -13098,12 +13116,16 @@ impl App {
             .any(|item| matches!(item.status, ItemStatus::Pending));
         // The focused queue row wins over a still-loaded history view: moving
         // from History to Queue must describe the file in front of the user.
-        let (glyph, tint, title, body) = if self.focused_queue_row_untranscribed() {
+        let (glyph, tint, title, body) = if let Some((title, body)) = self.transcript_notice() {
+            let failed = matches!(
+                self.focused_queue_untranscribed().map(|item| &item.status),
+                Some(ItemStatus::Failed(_))
+            );
             (
-                ICON_PLAY,
-                scheme.track,
-                "Not transcribed yet",
-                "Run the queue to create a transcript for this file.".to_string(),
+                if failed { ICON_X } else { ICON_PLAY },
+                if failed { scheme.danger } else { scheme.track },
+                title,
+                body,
             )
         } else if running {
             let detail = if self.stage.is_empty() || self.stage == "starting" {
@@ -15306,13 +15328,14 @@ impl App {
     /// Transcript view: per-line (search tinted) or SMS bubbles.
     fn transcript_element(&self) -> Element<'_, Message> {
         let scheme = self.scheme();
+        // A queue row with nothing to read describes itself, before the deck and
+        // before any document still loaded from the tab the user left: the pane
+        // must never show another transcript's text for the selected row.
+        if self.focused_queue_untranscribed().is_some() {
+            return self.empty_transcript_state(&scheme);
+        }
         if self.feature_deck_visible() {
             return self.tagged(license::Audience::FreeOnly, self.feature_deck(&scheme));
-        }
-        // A queue row with no transcript describes itself, even when a history
-        // transcript is still loaded behind it from the tab the user left.
-        if self.pane_tab == PaneTab::Queue && self.focused_queue_row_untranscribed() {
-            return self.empty_transcript_state(&scheme);
         }
         // The queue can be empty while a history entry or the live buffer from
         // the last run is still on screen: only a genuinely blank pane takes
@@ -15812,7 +15835,12 @@ impl App {
         .align_y(iced::Alignment::Center)
         .into();
 
-        let duration = self.shown_duration().unwrap_or(0.0).max(0.0);
+        let queued = self.focused_queue_untranscribed();
+        let duration = queued
+            .and_then(|item| item.duration.map(|seconds| seconds as f32))
+            .or_else(|| self.shown_duration())
+            .unwrap_or(0.0)
+            .max(0.0);
         let time = text(format!(
             "{} / {}",
             format_secs(self.playhead as f64),
@@ -16551,6 +16579,16 @@ impl App {
     /// What the header calls the document: the row's label, which the user can
     /// rename in the File panel, not the file's own name.
     fn shown_item_title(&self) -> String {
+        // A queued row with nothing to read names itself, ahead of any document
+        // still loaded from another tab; the header must not describe a file
+        // the pane is not showing.
+        if let Some(item) = self.focused_queue_untranscribed() {
+            return item
+                .path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| item.path.display().to_string());
+        }
         if let Some(entry) = self
             .selected_recent
             .and_then(|index| self.recent.get(index))
@@ -25588,6 +25626,43 @@ mod tests {
     }
 
     #[test]
+    fn a_selected_queued_file_never_shows_the_last_transcript() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("queue-notice");
+        let original = "[00:00] SPEAKER 1: old words\n";
+        let (mut app, _transcript, media) = line_edit_fixture("queue-notice", original);
+        // A finished transcript is on screen; the queue holds an untranscribed
+        // file the user is about to focus.
+        assert!(app.selected_view.is_some());
+        let queued = media.join("next.mp3");
+        std::fs::write(&queued, b"audio").unwrap();
+        app.queue.push(queue_item(queued));
+
+        let _ = app.update(Message::SelectTab(PaneTab::Queue));
+        assert_eq!(app.selected, Some(0));
+
+        let (title, body) = app
+            .transcript_notice()
+            .expect("the pane should describe the queue row");
+        assert_eq!(title, "Not transcribed yet");
+        assert!(body.contains("Run the queue"), "{body}");
+        assert_eq!(app.shown_item_title(), "next.mp3");
+        // The old document is still loaded behind the notice, so the guard is
+        // what keeps its text off the pane.
+        assert!(app.shown_transcript().contains("old words"));
+
+        // A failed row explains itself instead of promising a transcript.
+        app.queue[0].status = ItemStatus::Failed("no speech found".to_string());
+        let (title, body) = app
+            .transcript_notice()
+            .expect("a failed row still describes itself");
+        assert_eq!(title, "Not transcribed");
+        assert!(body.contains("no speech found"), "{body}");
+
+        let _ = std::fs::remove_dir_all(&media);
+    }
+
+    #[test]
     fn select_tab_switches_the_pane() {
         let _guard = env_lock();
         let _config = ConfigEnv::new("pane-switch");
@@ -25616,15 +25691,21 @@ mod tests {
         let _guard = env_lock();
         let _config = ConfigEnv::new("queue-untranscribed-empty");
         let mut app = pro_app();
+        app.pane_tab = PaneTab::Queue;
         app.queue = vec![queue_item(PathBuf::from("a.mp3"))];
         app.selected = Some(0);
-        assert!(app.focused_queue_row_untranscribed());
+        assert!(app.focused_queue_untranscribed().is_some());
 
         app.queue[0].status = ItemStatus::Done;
-        assert!(!app.focused_queue_row_untranscribed());
+        assert!(app.focused_queue_untranscribed().is_none());
 
         app.queue[0].status = ItemStatus::Interrupted;
-        assert!(app.focused_queue_row_untranscribed());
+        assert!(app.focused_queue_untranscribed().is_some());
+
+        // The notice belongs to the queue tab: a remembered queue selection
+        // must not describe the pane while History is showing.
+        app.pane_tab = PaneTab::History;
+        assert!(app.focused_queue_untranscribed().is_none());
     }
 
     #[test]
