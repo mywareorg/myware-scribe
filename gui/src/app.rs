@@ -9557,6 +9557,14 @@ impl App {
         }))
     }
 
+    /// Whether a finished run should raise a desktop notification. Only the
+    /// end of the whole queue counts: a targeted run or a tier that stops after
+    /// one file leaves work waiting, and each of those would otherwise notify
+    /// over and over while the user works through the list.
+    fn should_notify_completion(&self) -> bool {
+        self.notifications && self.queue_work_left() == 0
+    }
+
     /// Show the summary after the bar reaches 100%.
     /// Returns true when a summary was opened.
     fn present_completion(&mut self) -> bool {
@@ -9571,7 +9579,7 @@ impl App {
         let editing = self.can(license::Feature::Editing);
         self.pending_tips = editing && self.editing_tips;
         self.toast = None;
-        if self.notifications {
+        if self.should_notify_completion() {
             notify("Hippo Transcribe", "Finished \u{00b7} saved locally");
         }
         true
@@ -29073,6 +29081,28 @@ mod tests {
         assert!(!app.rename_open);
 
         let _ = std::fs::remove_dir_all(&media);
+    }
+
+    #[test]
+    fn completion_notifies_only_when_the_whole_queue_is_done() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("notify-end-of-queue");
+        let mut app = pro_app();
+        assert!(app.notifications);
+
+        // A finished file with another still waiting is not the end of the
+        // queue, so no notification.
+        app.batch_summary = vec![("talk.mp3".to_string(), backend::Stats::default())];
+        app.queue = vec![queue_item(PathBuf::from("next.mp3"))];
+        assert!(!app.should_notify_completion());
+
+        // With nothing left to run, the notification is due.
+        app.queue[0].status = ItemStatus::Done;
+        assert!(app.should_notify_completion());
+
+        // The setting still wins.
+        app.notifications = false;
+        assert!(!app.should_notify_completion());
     }
 
     #[test]
