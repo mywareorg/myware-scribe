@@ -281,6 +281,34 @@ pub fn kill(pid: u32) {
     }
 }
 
+/// The running executable, or the replacement at the same path.
+///
+/// A rebuild can replace the file while the GUI is still running. Linux then
+/// reports the old path as "<name> (deleted)", and spawning it fails with
+/// ENOENT — which surfaces as "could not start the transcription process" for
+/// both file runs and recordings. Prefer the live replacement next to it.
+fn live_executable(path: &Path) -> Option<PathBuf> {
+    if path.is_file() {
+        return Some(path.to_path_buf());
+    }
+    let text = path.to_string_lossy();
+    let clean = text.strip_suffix(" (deleted)")?;
+    let clean = PathBuf::from(clean);
+    clean.is_file().then_some(clean)
+}
+
+fn executable_path() -> Option<PathBuf> {
+    if let Ok(current) = std::env::current_exe() {
+        if let Some(live) = live_executable(&current) {
+            return Some(live);
+        }
+    }
+    // argv[0] survives a replaced file and is usually the same path.
+    let arg = std::env::args_os().next()?;
+    let path = PathBuf::from(arg);
+    live_executable(&path)
+}
+
 /// Run the pipeline as a child process, streaming events into the shared queue.
 ///
 /// The GUI binary re-invokes itself with `--cli`, which keeps the heavy
@@ -312,21 +340,16 @@ pub fn spawn(
             return;
         }
 
-        let exe = match std::env::current_exe() {
-            Ok(exe) => exe,
-            Err(error) => {
-                push(
-                    &events,
-                    Event::Error {
-                        message: format!(
-                            "could not locate the Hippo Transcribe executable: {error}"
-                        ),
-                    },
-                );
-                push(&events, Event::AllDone);
-                pid.store(0, Ordering::SeqCst);
-                return;
-            }
+        let Some(exe) = executable_path() else {
+            push(
+                &events,
+                Event::Error {
+                    message: "could not locate the Hippo Transcribe executable".to_string(),
+                },
+            );
+            push(&events, Event::AllDone);
+            pid.store(0, Ordering::SeqCst);
+            return;
         };
 
         let mut command = Command::new(exe);
@@ -725,8 +748,8 @@ pub fn spawn_briefing(
 
 /// The helper beside this executable.
 fn briefing_helper() -> Result<PathBuf, String> {
-    let exe = std::env::current_exe()
-        .map_err(|error| format!("could not locate the executable: {error}"))?;
+    let exe = executable_path()
+        .ok_or_else(|| "could not locate the executable".to_string())?;
     let dir = exe
         .parent()
         .ok_or_else(|| "the executable has no directory".to_string())?;
@@ -763,6 +786,21 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn a_replaced_executable_resolves_to_the_new_file() {
+        let dir = scratch("replaced-exe");
+        let exe = dir.join("hippo-transcribe");
+        std::fs::write(&exe, b"binary").unwrap();
+        assert_eq!(live_executable(&exe), Some(exe.clone()));
+
+        // Linux appends this to /proc/self/exe after a rebuild replaces the
+        // running file; the path itself no longer exists.
+        let deleted = dir.join("hippo-transcribe (deleted)");
+        assert_eq!(live_executable(&deleted), Some(exe));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn doc_line(raw: &str, speaker: &str, start: f32) -> DocLine {
