@@ -37,6 +37,9 @@ the network.
 - **Microphone recordings** — only when you press Record. Capture happens on
   the machine and the WAV is written where your transcripts go; nothing is sent
   anywhere.
+- **Entitlement** — a Pro purchase writes the tier and the last verified state to
+  `license.json` beside the settings. It holds no audio, no transcript and no
+  file metadata.
 
 - **Logs** — the last five runs write a local log (`%LOCALAPPDATA%\hippo-transcribe\logs`
   on Windows) recording app events: the version, which model was used, whether the
@@ -45,11 +48,14 @@ the network.
   text or file paths beyond the counts, and are never sent anywhere; deleting them
   is safe.
 
-Nothing is stored in a remote account: there is no account.
+Nothing is stored in a remote account. A Pro purchase is recorded by the store
+against the buyer's store account; that record is a purchase, not a transcript.
 
 ## Network use
 
-Hippo Transcribe reaches the network for one reason only: obtaining models.
+Hippo Transcribe reaches the network in two cases only: obtaining models, and,
+in a store build that has been bought or is being restored, asking the store
+whether the Pro add-on is owned.
 
 ### Model download
 
@@ -59,6 +65,20 @@ Hippo Transcribe reaches the network for one reason only: obtaining models.
 - No audio, transcript, filename, path, usage event or identifier is sent with
   those requests.
 
+### Store licensing
+
+- Only a Pro purchase or restore triggers this. The free tier never contacts a
+  store: with the models already installed, a free installation generates no
+  network traffic at all.
+- The request is made by the store client — the Microsoft Store on Windows — not
+  by Hippo Transcribe. That client supplies the account, device and purchase
+  records it already holds, under the platform operator's privacy statement.
+- It carries the application and add-on identifiers. It never carries audio,
+  transcripts, filenames, file paths, diarization output, timing data or any
+  identifier of Hippo Transcribe's own; the application creates none.
+- The answer is cached on disk, so Pro keeps working offline. The cached answer is
+  re-checked after 30 days, or when the store reports that entitlements changed.
+
 After models are installed, transcription itself has no network dependency.
 
 ## Telemetry and accounts
@@ -66,6 +86,10 @@ After models are installed, transcription itself has no network dependency.
 There is no telemetry, no analytics, no crash reporting, no advertising SDK and
 no Hippo Transcribe account. The application does not assign a device or user
 identifier and does not record which features you use.
+
+Pro buyers are signed in to their platform store account, which is how the store
+knows the purchase exists. Hippo Transcribe receives only the resulting
+entitlement answer, described above.
 
 ## Retention and deletion
 

@@ -10,22 +10,35 @@ ONNX Runtime, Visual C++ and OpenMP DLLs beside the development binary, and
 builds the briefing worker into the same profile, then runs `cargo run
 --profile release-fast --features gpu`.
 
-Every feature is included, so no tier is forced.
+The GPU feature is Pro-gated, so this sets HIPPO_TRANSCRIBE_TIER=pro by
+default. Pass -Free to test the free-tier lock instead.
 
 Use this for the GPU edit/run loop. Use `scripts/build-windows.ps1 -Gpu` for
 the final LTO release and packaging.
 
 .EXAMPLE
 powershell -ExecutionPolicy Bypass -File .\scripts\run-gpu.ps1
+
+.EXAMPLE
+powershell -ExecutionPolicy Bypass -File .\scripts\run-gpu.ps1 -Free
+
+.EXAMPLE
+powershell -ExecutionPolicy Bypass -File .\scripts\run-gpu.ps1 -Pro
 #>
 [CmdletBinding()]
 param(
     [string]$Profile = "release-fast",
-    [string]$TargetDir
+    [string]$TargetDir,
+    [switch]$Free,
+    [switch]$Pro
 )
 
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
+
+if ($Free -and $Pro) {
+    throw "Choose either -Free or -Pro, not both."
+}
 
 . (Join-Path $PSScriptRoot "windows-env.ps1")
 
@@ -57,6 +70,12 @@ try {
     # Ninja generator. The DLL CRT matches whisper.cpp's CMake default.
     $env:CMAKE_GENERATOR = "Ninja"
     $env:CMAKE_MSVC_RUNTIME_LIBRARY = "MultiThreadedDLL"
+
+    if ($Free) {
+        $env:HIPPO_TRANSCRIBE_TIER = "free"
+    } else {
+        $env:HIPPO_TRANSCRIBE_TIER = "pro"
+    }
 
     # Use the short profile-root target directory by default; ggml's nested
     # shader object paths exceed CMake's object path limit in a deep checkout.

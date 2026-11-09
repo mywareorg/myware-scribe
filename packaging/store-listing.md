@@ -47,9 +47,13 @@ counts in mind, they are the limits the form enforces.
     - Light and dark themes, and a desktop notification when the whole queue is
       done.
 
-    Every feature is included, in every install: the Speed and Accuracy models,
-    speaker labels, batch runs, transcript editing, playback and the summary.
-    There is no tier, no trial, no account and nothing to buy.
+    The free version covers the whole pipeline: the Balanced model, one speaker,
+    one file per run, unlimited files and audio length, microphone recording,
+    copy, search and the automatic transcript. Pro adds the Speed and Accuracy
+    models, speaker labels, batch runs, transcript editing, playback, GPU
+    acceleration, labels, Favorites, and every export and report from the
+    Publish menu. Pro is a one-time purchase with a 7-day trial; the interface is
+    the same in both, so you can see what it adds before you buy.
 
     Everything stays on the machine: audio files, transcripts, models and logs.
     The only network use is downloading the models. There is no telemetry and
@@ -57,19 +61,19 @@ counts in mind, they are the limits the form enforces.
 
 ## Feature bullets
 
-    - Speaker-labelled transcripts from interviews, meetings and notes
+    - Full-length transcription on your own machine, unlimited files
+    - Speaker-labelled transcripts (Pro)
+    - Export as text, .srt or .vtt subtitles, Markdown, CSV or Word (Pro)
+    - One-document reports with participants and an optional summary (Pro)
+    - Batch queue for whole folders; finished rows stay visible (Pro)
+    - History marks new transcripts unread until you open them
+    - Inline editing, speaker renaming and a custom dictionary (Pro)
+    - Word-level karaoke playback and waveform seeking (Pro)
+    - Microphone recording with a three-second countdown
+    - Automatic language detection, or pin a language
     - Works offline once the models have downloaded (about 215 MB once)
     - No account, no sign-in, no telemetry
-    - Export as text, .srt or .vtt subtitles, Markdown, CSV or Word
-    - One-document reports with a participant table and an optional summary
-    - Timestamps on or off, per export and per report
-    - Batch queue for whole folders; finished rows stay visible
-    - History marks new transcripts unread until you open them
-    - Inline editing, speaker renaming and a custom dictionary
-    - Word-level karaoke playback and waveform seeking
-    - Automatic language detection, or pin a language
     - Light and dark themes, and a notification when the queue finishes
-    - Logs stay on the machine, and the folder opens from Settings
 
 ## Search terms (seven, one per line)
 
@@ -126,9 +130,10 @@ Certification notes to paste into the submission:
       about a minute on a modern laptop, longer on an older one.
     - The microphone capability is exercised by Record: a three-second
       countdown, then capture, then a Stop control.
-    - Every feature is available from first launch: speaker labels, batch runs,
-      editing, playback and the summary need no trial, purchase or account.
-      No add-on is attached to the submission.
+    - Pro is unlocked by a one-time Store add-on purchase; a 7-day trial is
+      offered once per install from the paywall. The free tier keeps working
+      after the trial ends. A purchase needs a Store-installed build and a
+      Microsoft account; test with the add-on published and the listing hidden.
     - Files are written only to the app's own data folder and to locations the
       user chooses.
 
@@ -170,8 +175,14 @@ captures. The Store needs at least one image and accepts up to ten, each at leas
 - [ ] Confirm `packaging/identity.json` still matches Partner Center character
       for character. Current values are `SeanWu.HippoTranscribe`,
       `CN=6862352A-51D9-40F2-9242-0F769B2F87AB`, display name `Sean Wu`.
-- [ ] Confirm there is no in-app purchase: every feature is included and no
-      add-on is attached to the submission, so leave pricing and add-ons empty.
+- [ ] Create the durable Pro add-on in Partner Center before building: set its
+      product ID (the code's `PRODUCT_ID`, currently `pro`), price and markets,
+      and paste its Store ID into the Windows client. Submit the add-on with the
+      app.
+- [ ] Test the purchase flow once the app and add-on pass certification: keep
+      the listing "not discoverable", install the Store build on the dev
+      machine, then buy, restore, refund and go offline. Make the listing public
+      only after that passes.
 - [ ] Complete the IARC questionnaire, the age-rating section and the system
       requirements block.
 - [ ] Upload the `.msix`, then submit for certification.

@@ -92,7 +92,7 @@ impl Audience {
 }
 
 /// Everything the paid tier unlocks. Free keeps balanced-model transcription,
-/// copy, save and search.
+/// copy, save, search and recording.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Feature {
     /// The `speed` preset.
@@ -113,10 +113,12 @@ pub enum Feature {
     Briefing,
     /// Freeform labels for organizing files.
     Labels,
+    /// Export formats and generated reports.
+    Export,
 }
 
 impl Feature {
-    pub const ALL: [Feature; 9] = [
+    pub const ALL: [Feature; 10] = [
         Feature::SpeedPreset,
         Feature::AccuracyPreset,
         Feature::Diarization,
@@ -126,6 +128,7 @@ impl Feature {
         Feature::GpuAcceleration,
         Feature::Briefing,
         Feature::Labels,
+        Feature::Export,
     ];
 
     /// Human-readable name used by the paywall and toasts.
@@ -138,8 +141,9 @@ impl Feature {
             Feature::Editing => "Transcript editing",
             Feature::Playback => "Audio playback",
             Feature::GpuAcceleration => "GPU acceleration",
-            Feature::Briefing => "Briefing",
+            Feature::Briefing => "Summaries",
             Feature::Labels => "Labels",
+            Feature::Export => "Exports and reports",
         }
     }
 }
@@ -155,7 +159,8 @@ pub fn tier_allows(tier: Tier, feature: Feature) -> bool {
         | Feature::Playback
         | Feature::GpuAcceleration
         | Feature::Briefing
-        | Feature::Labels => tier == Tier::Pro,
+        | Feature::Labels
+        | Feature::Export => tier == Tier::Pro,
     }
 }
 
