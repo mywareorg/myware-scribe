@@ -17262,9 +17262,9 @@ impl App {
         let Some(picker) = &self.labels_open else {
             return container(horizontal_space()).into();
         };
-        let Some(entry) = self.recent.get(picker.row) else {
+        if self.recent.get(picker.row).is_none() {
             return container(horizontal_space()).into();
-        };
+        }
         let assigned = self
             .label_assignments
             .get(&picker.key)
@@ -17339,15 +17339,7 @@ impl App {
             .width(Length::Fill)
             .style(pill_input);
         let body = column![
-            text(format!("Labels \u{2014} {}", recent_title(entry)))
-                .size(20)
-                .color(scheme.text),
-            text(
-                "Labels belong to the audio file and follow every version. \
-                 Up to 8 per file."
-            )
-            .size(theme::TEXT_XS)
-            .color(scheme.muted),
+            text("Labels").size(20).color(scheme.text),
             input,
             list_area,
             right_aligned(
@@ -17361,7 +17353,7 @@ impl App {
         ]
         .spacing(theme::SPACE_MD)
         .width(Length::Fill);
-        modal_card(body, 520.0, scheme)
+        modal_card(body, 380.0, scheme)
     }
 
     /// A strip above the transcript saying an older version is on screen.
