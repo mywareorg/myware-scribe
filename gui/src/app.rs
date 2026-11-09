@@ -6446,6 +6446,12 @@ impl App {
             }
             Message::SelectTab(tab) => {
                 self.pane_tab = tab;
+                // Entering Queue with work waiting puts the cursor on the
+                // topmost row, so the pane always has a focused item and the
+                // keyboard actions have a target.
+                if tab == PaneTab::Queue && !self.queue.is_empty() {
+                    self.selected = Some(0);
+                }
                 self.version_preview = None;
                 self.recent_hover = None;
                 self.row_menu = None;
@@ -8472,6 +8478,9 @@ impl App {
         if queued > 0 {
             if let Some(index) = first_queued {
                 self.pane_tab = PaneTab::Queue;
+                // The add moved the pane to Queue, so give the new work the
+                // focus rather than leaving the tab without a selected row.
+                self.selected = Some(index);
                 self.cue_pane(PaneTab::Queue, Some(index));
             }
         } else if restored > 0 {
@@ -8669,6 +8678,20 @@ impl App {
             "Resume"
         } else if !pending && finished {
             "Retranscribe"
+        } else if self.queue_work_left() > 1 {
+            "Transcribe All"
+        } else {
+            "Transcribe"
+        }
+    }
+
+    /// The Queue footer's run button: Cancel while a run is in flight,
+    /// Transcribe All when more than one item is waiting, otherwise Transcribe.
+    fn queue_primary_label(&self) -> &'static str {
+        if matches!(self.status, Status::Running) {
+            "Cancel"
+        } else if self.queue_work_left() > 1 {
+            "Transcribe All"
         } else {
             "Transcribe"
         }
@@ -12948,7 +12971,7 @@ impl App {
 
         // One button for the whole run: Transcribe while idle, Cancel while a
         // run is in flight. It is only available when there is queued work.
-        let primary_label = if running { "Cancel" } else { "Transcribe" };
+        let primary_label = self.queue_primary_label();
         let primary_message = if running {
             Some(Message::Cancel)
         } else {
@@ -23671,6 +23694,42 @@ mod tests {
 
         let _ = app.update(Message::SelectTab(PaneTab::Queue));
         assert_eq!(app.pane_tab, PaneTab::Queue);
+    }
+
+    #[test]
+    fn entering_the_queue_tab_focuses_the_top_row() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("queue-focus-tab");
+        let mut app = pro_app();
+        app.queue = vec![
+            queue_item(PathBuf::from("a.mp3")),
+            queue_item(PathBuf::from("b.mp3")),
+        ];
+        app.selected = Some(1);
+        app.pane_tab = PaneTab::History;
+
+        let _ = app.update(Message::SelectTab(PaneTab::Queue));
+        assert_eq!(app.pane_tab, PaneTab::Queue);
+        assert_eq!(app.selected, Some(0), "the top queue row is focused");
+    }
+
+    #[test]
+    fn queue_footer_labels_multiple_items_as_transcribe_all() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("queue-all-label");
+        let mut app = pro_app();
+        app.status = Status::Idle;
+        app.queue.clear();
+        assert_eq!(app.queue_primary_label(), "Transcribe");
+
+        app.queue.push(queue_item(PathBuf::from("a.mp3")));
+        assert_eq!(app.queue_primary_label(), "Transcribe");
+
+        app.queue.push(queue_item(PathBuf::from("b.mp3")));
+        assert_eq!(app.queue_primary_label(), "Transcribe All");
+
+        app.status = Status::Running;
+        assert_eq!(app.queue_primary_label(), "Cancel");
     }
 
     #[test]
