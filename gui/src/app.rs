@@ -14068,6 +14068,21 @@ impl App {
             details = details.push(detail_row);
         }
 
+        // Favorites and History indent the detail line under the title; the
+        // queue and recordings keep the flush layout.
+        let details: Element<Message> = if matches!(tab, PaneTab::Favorites | PaneTab::History)
+        {
+            container(details)
+                .width(Length::Fill)
+                .padding(iced::Padding {
+                    left: theme::SPACE_SM,
+                    ..iced::Padding::default()
+                })
+                .into()
+        } else {
+            details.into()
+        };
+
         let row_tint = Color {
             a: 0.12,
             ..scheme.blue
