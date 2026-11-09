@@ -665,6 +665,32 @@ struct LabelPicker {
     input: String,
 }
 
+/// A report waiting on the native save dialog: the rendered document.
+struct PendingReport {
+    text: String,
+}
+
+/// One speaker's share of the conversation, for the report's table.
+struct SpeakerStat {
+    name: String,
+    seconds: f32,
+    share: f32,
+    lines: usize,
+    words: usize,
+}
+
+/// Everything the report renders, gathered by the dialog that owns the data.
+struct ReportInput<'a> {
+    title: &'a str,
+    generated: &'a str,
+    duration: Option<f32>,
+    /// Provenance rows: language, model, preset, speaker count.
+    details: Vec<(&'a str, String)>,
+    stats: &'a [SpeakerStat],
+    briefing: &'a Briefing,
+    lines: &'a [BriefingLine],
+}
+
 /// The open rename form for a history row's display name.
 struct RenameRecent {
     row: usize,
@@ -1424,6 +1450,10 @@ pub enum Message {
     ToggleBriefingExport,
     /// Export the briefing in `format`, after asking for a destination.
     ExportBriefing(ExportFormat),
+    /// Build the single-document report and ask where to save it.
+    GenerateReport,
+    /// The report's save dialog returned; `None` means it was dismissed.
+    ReportPicked(Option<PathBuf>),
     DownloadBriefingModel,
     LockedBriefing,
     EditLine(usize),
@@ -2015,6 +2045,8 @@ pub struct App {
     rename_recent: Option<RenameRecent>,
     /// The briefing dialog's export list is showing.
     briefing_export_open: bool,
+    /// A report waiting on its save dialog.
+    pending_report: Option<PendingReport>,
     /// The export format list nested under File → Export as, open while the
     /// pointer is on that row.
     file_export_open: bool,
@@ -2340,6 +2372,7 @@ impl App {
             labels_open: None,
             rename_recent: None,
             briefing_export_open: false,
+            pending_report: None,
             file_export_open: false,
             pending_export: None,
             custom_speakers: Vec::new(),
@@ -5990,6 +6023,8 @@ impl App {
                 Task::none()
             }
             Message::ExportBriefing(format) => self.export_briefing(format),
+            Message::GenerateReport => self.generate_report(),
+            Message::ReportPicked(path) => self.finish_report(path),
             Message::DownloadBriefingModel => {
                 self.start_model_download_for(vec!["briefing"]);
                 Task::none()
@@ -7738,6 +7773,119 @@ impl App {
             format,
             suggested,
         })
+    }
+
+    /// Build the single report document — summary, speaker time and the whole
+    /// transcript — and ask where to save it.
+    fn generate_report(&mut self) -> Task<Message> {
+        self.briefing_export_open = false;
+        let Some(BriefingState::Ready {
+            briefing,
+            lines,
+            source,
+        }) = self.briefing.as_ref()
+        else {
+            return Task::none();
+        };
+        let target = source
+            .clone()
+            .or_else(|| self.shown_output().map(Path::to_path_buf));
+        let Some(target) = target else {
+            self.toast = Some(("Nowhere to save the report".to_string(), Instant::now()));
+            return Task::none();
+        };
+        // The matching history row supplies the display name and the run's
+        // provenance, without another lookup on disk.
+        let entry = self
+            .recent
+            .iter()
+            .find(|entry| Self::current_transcript(entry) == source.as_deref());
+        let title = entry.map(recent_title).unwrap_or_else(|| {
+            target
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("Transcript")
+                .to_string()
+        });
+        let mut details = Vec::new();
+        if let Some(entry) = entry {
+            if let Some(language) = entry
+                .language_detected
+                .clone()
+                .or_else(|| entry.language_requested.clone())
+            {
+                details.push(("Language", language));
+            }
+            if let Some(model) = entry.model.clone() {
+                details.push(("Model", model));
+            }
+            if let Some(preset) = entry.preset.clone() {
+                details.push(("Preset", preset));
+            }
+            if let Some(speakers) = entry.speakers {
+                details.push(("Speakers", speakers.to_string()));
+            }
+        }
+        let duration = lines
+            .iter()
+            .map(|line| line.end.unwrap_or(line.start))
+            .reduce(f32::max);
+        let stats = speaker_stats(lines);
+        let text = report_markdown(&ReportInput {
+            title: &title,
+            generated: &full_datetime(unix_secs()),
+            duration,
+            details,
+            stats: &stats,
+            briefing,
+            lines,
+        });
+        let stem = target
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or("transcript");
+        let suggested = target.with_file_name(format!("{stem}-report.md"));
+        let name = suggested
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("report.md")
+            .to_string();
+        let directory = suggested.parent().map(Path::to_path_buf);
+        self.pending_report = Some(PendingReport { text });
+        Task::perform(
+            async move {
+                let mut dialog = rfd::FileDialog::new()
+                    .add_filter("Markdown", &["md"])
+                    .set_file_name(name);
+                if let Some(directory) = directory {
+                    dialog = dialog.set_directory(directory);
+                }
+                dialog.save_file()
+            },
+            Message::ReportPicked,
+        )
+    }
+
+    /// Write the pending report to `path`. `None` discards it.
+    fn finish_report(&mut self, path: Option<PathBuf>) -> Task<Message> {
+        let Some(mut path) = path else {
+            self.pending_report = None;
+            return Task::none();
+        };
+        let Some(report) = self.pending_report.take() else {
+            return Task::none();
+        };
+        if path.extension().is_none() {
+            path.set_extension("md");
+        }
+        match write_atomic(&path, &report.text) {
+            Ok(()) => self.toast = Some((format!("Saved {}", path.display()), Instant::now())),
+            Err(error) => self.toast = Some((
+                format!("Could not save {}: {error}", path.display()),
+                Instant::now(),
+            )),
+        }
+        Task::none()
     }
 
     /// Open the custom-vocabulary editor with what is stored.
@@ -18062,6 +18210,9 @@ impl App {
                 }
                 body = body.push(right_aligned(
                     row![
+                        action_text("Generate Report\u{2026}")
+                            .on_press(Message::GenerateReport)
+                            .style(pill_button_secondary),
                         action_text("Export as\u{2026}")
                             .on_press(Message::ToggleBriefingExport)
                             .style(pill_button_secondary),
@@ -21668,6 +21819,135 @@ fn recent_audio_presence_of(recent: &[RecentEntry]) -> Vec<bool> {
 
 /// The file a history row is named for: its audio, or the transcript when the
 /// audio is gone.
+/// Per-speaker time, share of the spoken total, line and word counts. A line
+/// without an end borrows the next line's start, so the shares add up.
+fn speaker_stats(lines: &[BriefingLine]) -> Vec<SpeakerStat> {
+    let mut stats: Vec<SpeakerStat> = Vec::new();
+    for (index, line) in lines.iter().enumerate() {
+        let start = line.start.max(0.0);
+        let end = line
+            .end
+            .or_else(|| lines.get(index + 1).map(|next| next.start))
+            .unwrap_or(start)
+            .max(start);
+        let seconds = end - start;
+        let name = line.speaker.trim();
+        let name = if name.is_empty() {
+            "Unattributed".to_string()
+        } else {
+            name.to_string()
+        };
+        let words = line.text.split_whitespace().count();
+        match stats.iter_mut().find(|stat| stat.name == name) {
+            Some(stat) => {
+                stat.seconds += seconds;
+                stat.lines += 1;
+                stat.words += words;
+            }
+            None => stats.push(SpeakerStat {
+                name,
+                seconds,
+                share: 0.0,
+                lines: 1,
+                words,
+            }),
+        }
+    }
+    let total: f32 = stats.iter().map(|stat| stat.seconds).sum();
+    for stat in &mut stats {
+        stat.share = if total > 0.0 {
+            stat.seconds / total
+        } else {
+            0.0
+        };
+    }
+    stats.sort_by(|a, b| {
+        b.seconds
+            .partial_cmp(&a.seconds)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    stats
+}
+
+/// The report document: title and provenance, speaker time, the summary the
+/// dialog lists, then the full transcript with timestamps.
+fn report_markdown(input: &ReportInput<'_>) -> String {
+    let mut out = format!("# {}\n\n", input.title);
+    let length = input
+        .duration
+        .map(|seconds| format!(" \u{00b7} {}", format_secs(seconds as f64)))
+        .unwrap_or_default();
+    out.push_str(&format!("_Generated {}{length}._\n\n", input.generated));
+
+    out.push_str("## At a glance\n\n");
+    if let Some(duration) = input.duration {
+        out.push_str(&format!("- **Duration:** {}\n", format_secs(duration as f64)));
+    }
+    for (label, value) in &input.details {
+        out.push_str(&format!("- **{label}:** {value}\n"));
+    }
+    if !input.stats.is_empty() {
+        out.push_str(&format!("- **Speakers:** {}\n", input.stats.len()));
+    }
+    out.push('\n');
+
+    if !input.stats.is_empty() {
+        out.push_str(
+            "## Speaker time\n\n| Speaker | Speaking time | Share | Lines | Words |\n             | --- | --- | --- | --- | --- |\n",
+        );
+        for stat in input.stats {
+            out.push_str(&format!(
+                "| {} | {} | {:.0}% | {} | {} |\n",
+                stat.name.replace('|', "/"),
+                format_secs(stat.seconds as f64),
+                stat.share * 100.0,
+                stat.lines,
+                stat.words
+            ));
+        }
+        out.push('\n');
+    }
+
+    let overview = input.briefing.overview.trim();
+    if !overview.is_empty() || !input.briefing.points.is_empty() {
+        out.push_str("## Summary\n\n");
+        if !overview.is_empty() {
+            out.push_str(overview);
+            out.push_str("\n\n");
+        }
+        if !input.briefing.points.is_empty() {
+            out.push_str("### Key points\n\n");
+            for item in &input.briefing.points {
+                out.push_str("- ");
+                out.push_str(item.text.trim());
+                if let Some(range) = hippo_briefing::citation(item, input.lines) {
+                    out.push_str(&format!(" *({range})*"));
+                }
+                out.push('\n');
+            }
+            out.push('\n');
+        }
+    }
+
+    if !input.lines.is_empty() {
+        out.push_str("## Transcript\n\n");
+        for line in input.lines {
+            let speaker = line.speaker.trim();
+            let speaker = if speaker.is_empty() {
+                "Unattributed"
+            } else {
+                speaker
+            };
+            out.push_str(&format!(
+                "**{} {speaker}:** {}\n\n",
+                format_timestamp(line.start as f64),
+                line.text.trim()
+            ));
+        }
+    }
+    out.trim_end().to_string() + "\n"
+}
+
 /// The briefing as the dialog shows it: the overview, then the key points with
 /// their citations. Decisions and action items are deliberately left out.
 fn briefing_text(briefing: &Briefing, lines: &[BriefingLine]) -> String {
@@ -29859,6 +30139,101 @@ mod tests {
             "{written}"
         );
         assert!(written.contains("The sky is blue"), "{written}");
+
+        let _ = std::fs::remove_dir_all(&media);
+    }
+
+    #[test]
+    fn generating_a_report_writes_summary_speaker_time_and_transcript() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("report-export");
+        let media = temp_dir("report-export-media");
+        let transcript = media.join("talk.txt");
+        std::fs::write(&transcript, "[00:00] SPEAKER 1: hello there\n").unwrap();
+
+        let mut app = pro_app();
+        app.recent.push(RecentEntry {
+            audio: Some(media.join("talk.mp3")),
+            transcript: Some(transcript.clone()),
+            finished_at: 5,
+            duration: Some(4.0),
+            speakers: Some(2),
+            preset: Some("Balanced".to_string()),
+            model: Some("whisper-balanced".to_string()),
+            language_detected: Some("English".to_string()),
+            ..Default::default()
+        });
+        app.briefing = Some(BriefingState::Ready {
+            briefing: Briefing {
+                overview: "Short talk.".to_string(),
+                points: vec![hippo_briefing::Item {
+                    text: "The sky is blue".to_string(),
+                    lines: vec![1],
+                }],
+                decisions: vec![hippo_briefing::Item {
+                    text: "Ship it".to_string(),
+                    lines: vec![1],
+                }],
+                actions: vec![hippo_briefing::Item {
+                    text: "Call Ada".to_string(),
+                    lines: vec![1],
+                }],
+            },
+            lines: vec![
+                BriefingLine {
+                    start: 0.0,
+                    end: Some(3.0),
+                    speaker: "SPEAKER 1".to_string(),
+                    text: "hello there".to_string(),
+                },
+                BriefingLine {
+                    start: 3.0,
+                    end: Some(4.0),
+                    speaker: "SPEAKER 2".to_string(),
+                    text: "bye".to_string(),
+                },
+            ],
+            source: Some(transcript.clone()),
+        });
+
+        let _ = app.update(Message::GenerateReport);
+        let text = app
+            .pending_report
+            .as_ref()
+            .expect("the report waits on a destination")
+            .text
+            .clone();
+
+        assert!(text.starts_with("# talk.mp3\n"), "{text}");
+        assert!(text.contains("- **Preset:** Balanced"), "{text}");
+        assert!(text.contains("## Speaker time"), "{text}");
+        assert!(
+            text.contains("| SPEAKER 1 | 0:03 | 75% | 1 | 2 |"),
+            "{text}"
+        );
+        assert!(
+            text.contains("| SPEAKER 2 | 0:01 | 25% | 1 | 1 |"),
+            "{text}"
+        );
+        assert!(text.contains("### Key points"), "{text}");
+        assert!(text.contains("The sky is blue"), "{text}");
+        assert!(
+            !text.contains("Ship it") && !text.contains("Call Ada"),
+            "the report must not list decisions or action items: {text}"
+        );
+        assert!(text.contains("## Transcript"), "{text}");
+        assert!(
+            text.contains("**[00:00] SPEAKER 1:** hello there"),
+            "{text}"
+        );
+        assert!(text.contains("**[00:03] SPEAKER 2:** bye"), "{text}");
+
+        let chosen = media.join("report.md");
+        let _ = app.update(Message::ReportPicked(Some(chosen.clone())));
+        assert!(app.pending_report.is_none());
+        let saved = std::fs::read_to_string(&chosen).unwrap();
+        assert!(saved.contains("## Speaker time"), "{saved}");
+        assert!(saved.contains("## Transcript"), "{saved}");
 
         let _ = std::fs::remove_dir_all(&media);
     }
