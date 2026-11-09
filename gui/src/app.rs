@@ -25,6 +25,7 @@ use hippo_transcribe_core::asr;
 use hippo_transcribe_core::benchmark::{self, BenchmarkEvent};
 use hippo_transcribe_core::download::{self, DownloadEvent, ModelStatus};
 use hippo_transcribe_core::export::{Cue, ExportFormat};
+use hippo_transcribe_core::report::{ReportBlock, ReportFormat};
 use hippo_transcribe_core::license;
 use hippo_transcribe_core::models;
 use hippo_briefing::{Briefing, BriefingLine};
@@ -160,19 +161,6 @@ fn editor_strip_height(editing: bool) -> f32 {
     }
 }
 
-/// Where the scroll offset has to go when the editor strip appears (`delta` is
-/// positive) or disappears, so the content does not jump on screen.
-///
-/// Inserting the strip above the list moves the list's top edge, and every row
-/// with it, so the offset moves the other way by the same amount. Two bounds: the
-/// document's top cannot be pulled in from above, so the offset stops at zero and
-/// the content simply starts lower; and `ceiling` is the highest offset that still
-/// leaves the edited row below the strip, because scrolled past that the field
-/// would sit under it.
-fn compensate_offset(offset: f32, delta: f32, ceiling: f32) -> f32 {
-    (offset + delta).min(ceiling).max(0.0)
-}
-
 /// Gap between the strip's controls.
 const LINE_EDIT_GAP: f32 = 4.0;
 
@@ -297,21 +285,22 @@ const HEADER_BADGE_WIDTH: f32 = 26.0;
 /// Fixed widths of the header's menu buttons. A menu is anchored by adding the
 /// widths of the buttons to its left, so these must be the widths the buttons
 /// are actually given.
-const FILE_BUTTON_WIDTH: f32 = 78.0;
+const PUBLISH_BUTTON_WIDTH: f32 = 96.0;
 const EDIT_BUTTON_WIDTH: f32 = 78.0;
 const VIEW_BUTTON_WIDTH: f32 = 84.0;
 const HELP_BUTTON_WIDTH: f32 = 78.0;
 
-/// Left offsets of the four menus. The header starts `[File][Edit][View][Help]`,
-/// so File's menu hangs from the card's own padding and each later one sits a
-/// button and a gap further right. The menu layer aligns its child to the start,
-/// so these are distances from the card's left edge.
-fn file_menu_offset() -> f32 {
+/// Left offsets of the four menus. The header starts
+/// `[Publish][Edit][View][Help]`, so Publish's menu hangs from the card's own
+/// padding and each later one sits a button and a gap further right. The menu
+/// layer aligns its child to the start, so these are distances from the card's
+/// left edge.
+fn publish_menu_offset() -> f32 {
     HEADER_PAD_X
 }
 
 fn edit_menu_offset() -> f32 {
-    file_menu_offset() + FILE_BUTTON_WIDTH + theme::SPACE_SM
+    publish_menu_offset() + PUBLISH_BUTTON_WIDTH + theme::SPACE_SM
 }
 
 fn view_menu_offset() -> f32 {
@@ -665,9 +654,11 @@ struct LabelPicker {
     input: String,
 }
 
-/// A report waiting on the native save dialog: the rendered document.
+/// A report waiting on the native save dialog: the rendered blocks and the
+/// format they were set for.
 struct PendingReport {
-    text: String,
+    blocks: Vec<ReportBlock>,
+    format: ReportFormat,
 }
 
 /// One speaker's share of the conversation, for the report's table.
@@ -680,15 +671,48 @@ struct SpeakerStat {
 }
 
 /// Everything the report renders, gathered by the dialog that owns the data.
-struct ReportInput<'a> {
+struct ReportContent<'a> {
     title: &'a str,
-    generated: &'a str,
+    generated: String,
     duration: Option<f32>,
-    /// Provenance rows: language, model, preset, speaker count.
-    details: Vec<(&'a str, String)>,
-    stats: &'a [SpeakerStat],
-    briefing: &'a Briefing,
-    lines: &'a [BriefingLine],
+    /// The speaker table is on.
+    participants: bool,
+    /// The summary to include, with the lines its citations point at.
+    summary: Option<(&'a Briefing, &'a [BriefingLine])>,
+    lines: &'a [DocLine],
+    timestamps: bool,
+    merge_lines: bool,
+}
+
+/// What the report dialog will produce.
+#[derive(Clone, Copy)]
+struct ReportOptions {
+    timestamps: bool,
+    merge_lines: bool,
+    participants: bool,
+    summary: bool,
+    format: ReportFormat,
+}
+
+impl Default for ReportOptions {
+    fn default() -> Self {
+        Self {
+            timestamps: true,
+            merge_lines: false,
+            participants: true,
+            summary: false,
+            format: ReportFormat::Pdf,
+        }
+    }
+}
+
+/// One switch in the report options.
+#[derive(Debug, Clone, Copy)]
+pub enum ReportToggle {
+    Timestamps,
+    MergeLines,
+    Participants,
+    Summary,
 }
 
 /// The open rename form for a history row's display name.
@@ -1258,7 +1282,7 @@ impl ViewShortcut {
 /// Which menu in the transcript header is open. One at a time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HeaderMenu {
-    File,
+    Publish,
     Edit,
     View,
     Help,
@@ -1294,6 +1318,8 @@ pub enum Modal {
     Labels,
     /// The rename form for a history row's display name.
     RenameRecent,
+    /// The report options.
+    Report,
     /// The File panel row's read-only details. Last in paint order: it only
     /// appears when nothing else is open, since a context menu opens it.
     Info,
@@ -1419,15 +1445,25 @@ pub enum Message {
     OpenSummaryTranscript,
     /// Open an http(s) address in the system browser.
     OpenUrl(String),
-    /// Open the File menu's Export as list, from Ctrl+S or the row itself.
+    /// Open Publish → Export Transcript, from Ctrl+S or the menu row itself.
     OpenExportMenu,
-    /// The pointer entered or left the File menu's Export as row.
+    /// The pointer entered or left the Publish menu's Export row.
     FileExportHover(bool),
     /// Export the shown transcript in `format`. The destination comes from the
     /// native save dialog; nothing is written until it returns.
     ExportCurrentAs(ExportFormat),
     /// The save dialog returned; `None` means it was dismissed.
     ExportPicked(Option<PathBuf>),
+    /// Close the report options without writing anything.
+    CloseReport,
+    /// Flip one of the report's switches.
+    ReportToggled(ReportToggle),
+    /// Choose the report's file type.
+    ReportFormatChanged(ReportFormat),
+    /// Render the report and ask where to save it.
+    SaveReport,
+    /// The report's save dialog returned; `None` means it was dismissed.
+    ReportPicked(Option<PathBuf>),
     RevealOutput,
     OpenRename,
     /// Open the custom-vocabulary editor, from Edit or from Help.
@@ -1450,10 +1486,8 @@ pub enum Message {
     ToggleBriefingExport,
     /// Export the briefing in `format`, after asking for a destination.
     ExportBriefing(ExportFormat),
-    /// Build the single-document report and ask where to save it.
-    GenerateReport,
-    /// The report's save dialog returned; `None` means it was dismissed.
-    ReportPicked(Option<PathBuf>),
+    /// Open the report options.
+    OpenReport,
     DownloadBriefingModel,
     LockedBriefing,
     EditLine(usize),
@@ -2047,9 +2081,13 @@ pub struct App {
     briefing_export_open: bool,
     /// A report waiting on its save dialog.
     pending_report: Option<PendingReport>,
-    /// The export format list nested under File → Export as, open while the
-    /// pointer is on that row.
-    file_export_open: bool,
+    /// The report options are showing.
+    report_open: bool,
+    /// What the report options are set to produce.
+    report: ReportOptions,
+    /// The export format list nested under Publish → Export Transcript, open
+    /// while the pointer is on that row.
+    publish_export_open: bool,
     /// An export waiting on the native save dialog.
     pending_export: Option<PendingExport>,
     /// Speaker names created through the line editor this session. A name lives
@@ -2373,7 +2411,9 @@ impl App {
             rename_recent: None,
             briefing_export_open: false,
             pending_report: None,
-            file_export_open: false,
+            report_open: false,
+            report: ReportOptions::default(),
+            publish_export_open: false,
             pending_export: None,
             custom_speakers: Vec::new(),
             add_report: None,
@@ -5083,11 +5123,11 @@ impl App {
                 if !self.popup_open()
                     && matches!(
                         self.header_menu,
-                        Some(HeaderMenu::File | HeaderMenu::Edit | HeaderMenu::View)
+                        Some(HeaderMenu::Publish | HeaderMenu::Edit | HeaderMenu::View)
                     )
                 {
                     self.header_menu = None;
-                    self.file_export_open = false;
+                    self.publish_export_open = false;
                 }
                 Task::none()
             }
@@ -5097,7 +5137,7 @@ impl App {
                 }
                 // One menu at a time, whichever surface opened it.
                 self.row_menu = None;
-                self.file_export_open = false;
+                self.publish_export_open = false;
                 self.header_menu = if self.header_menu == Some(menu) {
                     None
                 } else {
@@ -5107,7 +5147,7 @@ impl App {
             }
             Message::CloseHeaderMenu => {
                 self.header_menu = None;
-                self.file_export_open = false;
+                self.publish_export_open = false;
                 Task::none()
             }
             Message::OpenRunSetup => {
@@ -6023,7 +6063,48 @@ impl App {
                 Task::none()
             }
             Message::ExportBriefing(format) => self.export_briefing(format),
-            Message::GenerateReport => self.generate_report(),
+            Message::OpenReport => {
+                if self.shown_transcript().trim().is_empty() {
+                    self.toast = Some(("No transcript to report on".to_string(), Instant::now()));
+                    return Task::none();
+                }
+                self.header_menu = None;
+                self.publish_export_open = false;
+                self.report = ReportOptions {
+                    summary: matches!(self.briefing, Some(BriefingState::Ready { .. })),
+                    ..ReportOptions::default()
+                };
+                self.report_open = true;
+                Task::none()
+            }
+            Message::CloseReport => {
+                self.report_open = false;
+                Task::none()
+            }
+            Message::ReportToggled(toggle) => {
+                let summary_ready = matches!(self.briefing, Some(BriefingState::Ready { .. }));
+                match toggle {
+                    ReportToggle::Timestamps => {
+                        self.report.timestamps = !self.report.timestamps
+                    }
+                    ReportToggle::MergeLines => {
+                        self.report.merge_lines = !self.report.merge_lines
+                    }
+                    ReportToggle::Participants => {
+                        self.report.participants = !self.report.participants
+                    }
+                    ReportToggle::Summary if summary_ready => {
+                        self.report.summary = !self.report.summary
+                    }
+                    ReportToggle::Summary => {}
+                }
+                Task::none()
+            }
+            Message::ReportFormatChanged(format) => {
+                self.report.format = format;
+                Task::none()
+            }
+            Message::SaveReport => self.save_report(),
             Message::ReportPicked(path) => self.finish_report(path),
             Message::DownloadBriefingModel => {
                 self.start_model_download_for(vec!["briefing"]);
@@ -6096,8 +6177,8 @@ impl App {
                 }
                 if self.header_menu.is_some() {
                     // The nested export list is one step in front of its menu.
-                    if self.file_export_open {
-                        self.file_export_open = false;
+                    if self.publish_export_open {
+                        self.publish_export_open = false;
                     } else {
                         self.header_menu = None;
                     }
@@ -6979,13 +7060,13 @@ impl App {
                 match vocabulary.save() {
                     Ok(()) => {
                         self.toast = Some((
-                            "Vocabulary saved for the next run".to_string(),
+                            "Dictionary saved for the next run".to_string(),
                             Instant::now(),
                         ));
                     }
                     Err(error) => {
                         self.toast = Some((
-                            format!("Could not save vocabulary: {error}"),
+                            format!("Could not save the dictionary: {error}"),
                             Instant::now(),
                         ));
                     }
@@ -7115,13 +7196,13 @@ impl App {
                     self.toast = Some(("No transcript to export".to_string(), Instant::now()));
                     return Task::none();
                 }
-                self.header_menu = Some(HeaderMenu::File);
-                self.file_export_open = true;
+                self.header_menu = Some(HeaderMenu::Publish);
+                self.publish_export_open = true;
                 Task::none()
             }
             Message::FileExportHover(open) => {
-                if self.header_menu == Some(HeaderMenu::File) {
-                    self.file_export_open = open;
+                if self.header_menu == Some(HeaderMenu::Publish) {
+                    self.publish_export_open = open;
                 }
                 Task::none()
             }
@@ -7775,87 +7856,74 @@ impl App {
         })
     }
 
-    /// Build the single report document — summary, speaker time and the whole
-    /// transcript — and ask where to save it.
-    fn generate_report(&mut self) -> Task<Message> {
-        self.briefing_export_open = false;
-        let Some(BriefingState::Ready {
-            briefing,
-            lines,
-            source,
-        }) = self.briefing.as_ref()
-        else {
-            return Task::none();
+    /// Render the report from the options and ask where to save it.
+    fn save_report(&mut self) -> Task<Message> {
+        self.report_open = false;
+        let options = self.report;
+        let lines = self.document_lines().to_vec();
+        let duration = self.shown_duration();
+        let title = self
+            .selected_recent
+            .and_then(|index| self.recent.get(index))
+            .map(recent_title)
+            .or_else(|| {
+                self.shown_output()
+                    .or_else(|| self.shown_audio())
+                    .and_then(|path| path.file_name())
+                    .and_then(|name| name.to_str())
+                    .map(str::to_string)
+            })
+            .unwrap_or_else(|| "Transcript".to_string());
+        // The summary is only offered once one exists; the dialog greys the
+        // switch otherwise, so a stale `true` cannot smuggle in an empty
+        // section.
+        let summary = match &self.briefing {
+            Some(BriefingState::Ready {
+                briefing,
+                lines: briefing_lines,
+                ..
+            }) if options.summary => Some((briefing, briefing_lines.as_slice())),
+            _ => None,
         };
-        let target = source
-            .clone()
-            .or_else(|| self.shown_output().map(Path::to_path_buf));
+        let target = self
+            .shown_output()
+            .map(Path::to_path_buf)
+            .or_else(|| self.shown_audio().map(Path::to_path_buf));
         let Some(target) = target else {
             self.toast = Some(("Nowhere to save the report".to_string(), Instant::now()));
             return Task::none();
         };
-        // The matching history row supplies the display name and the run's
-        // provenance, without another lookup on disk.
-        let entry = self
-            .recent
-            .iter()
-            .find(|entry| Self::current_transcript(entry) == source.as_deref());
-        let title = entry.map(recent_title).unwrap_or_else(|| {
-            target
-                .file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or("Transcript")
-                .to_string()
-        });
-        let mut details = Vec::new();
-        if let Some(entry) = entry {
-            if let Some(language) = entry
-                .language_detected
-                .clone()
-                .or_else(|| entry.language_requested.clone())
-            {
-                details.push(("Language", language));
-            }
-            if let Some(model) = entry.model.clone() {
-                details.push(("Model", model));
-            }
-            if let Some(preset) = entry.preset.clone() {
-                details.push(("Preset", preset));
-            }
-            if let Some(speakers) = entry.speakers {
-                details.push(("Speakers", speakers.to_string()));
-            }
-        }
-        let duration = lines
-            .iter()
-            .map(|line| line.end.unwrap_or(line.start))
-            .reduce(f32::max);
-        let stats = speaker_stats(lines);
-        let text = report_markdown(&ReportInput {
+        let blocks = report_blocks(&ReportContent {
             title: &title,
-            generated: &full_datetime(unix_secs()),
+            generated: full_datetime(unix_secs()),
             duration,
-            details,
-            stats: &stats,
-            briefing,
-            lines,
+            participants: options.participants,
+            summary,
+            lines: &lines,
+            timestamps: options.timestamps,
+            merge_lines: options.merge_lines,
         });
         let stem = target
             .file_stem()
             .and_then(|stem| stem.to_str())
             .unwrap_or("transcript");
-        let suggested = target.with_file_name(format!("{stem}-report.md"));
+        let suggested = target.with_file_name(format!("{stem}-report.{}", options.format.extension()));
         let name = suggested
             .file_name()
             .and_then(|name| name.to_str())
-            .unwrap_or("report.md")
+            .unwrap_or("report")
             .to_string();
         let directory = suggested.parent().map(Path::to_path_buf);
-        self.pending_report = Some(PendingReport { text });
+        let label = options.format.label();
+        let extension = options.format.extension();
+        self.pending_report = Some(PendingReport {
+            blocks,
+            format: options.format,
+        });
         Task::perform(
             async move {
                 let mut dialog = rfd::FileDialog::new()
-                    .add_filter("Markdown", &["md"])
+                    .add_filter(label, &[extension])
                     .set_file_name(name);
                 if let Some(directory) = directory {
                     dialog = dialog.set_directory(directory);
@@ -7876,9 +7944,9 @@ impl App {
             return Task::none();
         };
         if path.extension().is_none() {
-            path.set_extension("md");
+            path.set_extension(report.format.extension());
         }
-        match write_atomic(&path, &report.text) {
+        match hippo_transcribe_core::report::write(&path, report.format, &report.blocks) {
             Ok(()) => self.toast = Some((format!("Saved {}", path.display()), Instant::now())),
             Err(error) => self.toast = Some((
                 format!("Could not save {}: {error}", path.display()),
@@ -9105,7 +9173,7 @@ impl App {
     /// until [`Message::ExportPicked`] returns the chosen path.
     fn begin_export(&mut self, pending: PendingExport) -> Task<Message> {
         self.header_menu = None;
-        self.file_export_open = false;
+        self.publish_export_open = false;
         self.row_menu = None;
         self.row_submenu = None;
         let suggested = pending.suggested.clone();
@@ -10830,11 +10898,10 @@ impl App {
 
     /// The scroll the editor strip's appearance or disappearance needs, if any.
     ///
-    /// The strip is inserted between the header and the list, so its height moves
-    /// the list's top edge and every row with it. Shifting the offset the other way
-    /// by the same amount holds the content still on screen; see
-    /// [`compensate_offset`] for the bounds that keeps it honest at the top of the
-    /// document and under the strip.
+    /// The strip sits below the list, so its height changes the list's bottom
+    /// edge, never its top: no content moves on screen. The one thing that can
+    /// go wrong is the edited row ending up under the panel, which is what the
+    /// follow scroll is for.
     fn strip_scroll(&mut self) -> Option<Task<Message>> {
         let height = editor_strip_height(self.line_edit.is_some());
         let applied = self.strip_height;
@@ -10842,31 +10909,17 @@ impl App {
             return None;
         }
         self.strip_height = height;
-        if self.transcript_viewport <= 0.0 {
+        let index = self.line_edit.as_ref().map(|edit| edit.index)?;
+        let viewport = self.transcript_viewport;
+        if viewport <= 0.0 {
             return None;
         }
-        let delta = height - applied;
-        let viewport = self.transcript_viewport;
-        let place = self
-            .line_edit
-            .as_ref()
-            .and_then(|edit| self.edited_row_place(edit.index));
-        let target = match place {
-            // A row that was outside the pane altogether (only the keyboard can open
-            // the editor on one) has to be brought in; holding it still would hold it
-            // out of sight.
-            Some((top, bottom)) if top < 0.0 || bottom > viewport => self
-                .line_edit
-                .as_ref()
-                .and_then(|edit| self.follow_target(edit.index))
-                .unwrap_or_else(|| compensate_offset(self.transcript_offset, delta, f32::MAX)),
-            // Otherwise hold the content still, but never scroll so far that the row's
-            // top goes above the list's top edge.
-            Some((top, _)) => {
-                compensate_offset(self.transcript_offset, delta, self.transcript_offset + top)
-            }
-            None => compensate_offset(self.transcript_offset, delta, f32::MAX),
-        };
+        let (top, bottom) = self.edited_row_place(index)?;
+        let growth = (height - applied).max(0.0);
+        if top >= 0.0 && bottom <= viewport - growth {
+            return None;
+        }
+        let target = self.follow_target(index)?;
         // A glide towards an older target would keep writing offsets over this one.
         self.scroll_anim = None;
         self.scroll_target = Some(target);
@@ -15697,18 +15750,13 @@ impl App {
         .width(Length::Fill);
 
         // A band inside the card, not a card of its own: no fill, no radius, no
-        // shadow. It is closed off from the rows by one hairline along its bottom
-        // edge, and the header above it already ends in a rule, so the strip reads
-        // as a second toolbar row rather than as something dropped on top of the
-        // transcript. The rule is the shared `scheme.border` hairline, so both
-        // palettes get the same edge without a second colour.
+        // shadow. It sits below the transcript rows, so one hairline along its
+        // top edge separates it from them and the strip reads as a second
+        // toolbar row rather than as something dropped over the transcript. The
+        // rule is the shared `scheme.border` hairline, so both palettes get the
+        // same edge without a second colour.
         Some(
             column![
-                container(controls)
-                    .width(Length::Fill)
-                    .height(Length::Fixed(LINE_EDIT_PANEL_HEIGHT - 1.0))
-                    .padding([theme::CONTROL_PADDING[0], theme::SPACE_MD as u16])
-                    .align_y(iced::Alignment::Center),
                 container(horizontal_space())
                     .width(Length::Fill)
                     .height(Length::Fixed(1.0))
@@ -15716,6 +15764,11 @@ impl App {
                         background: Some(scheme.border.into()),
                         ..container::Style::default()
                     }),
+                container(controls)
+                    .width(Length::Fill)
+                    .height(Length::Fixed(LINE_EDIT_PANEL_HEIGHT - 1.0))
+                    .padding([theme::CONTROL_PADDING[0], theme::SPACE_MD as u16])
+                    .align_y(iced::Alignment::Center),
             ]
             .spacing(0)
             .width(Length::Fill)
@@ -15737,12 +15790,12 @@ impl App {
             return None;
         }
 
-        // The header is the card's own menus, left to right File, Edit and
+        // The header is the card's own menus, left to right Publish, Edit and
         // View. Each menu hangs from its own button's left edge; the offset
         // helpers add the fixed button widths to its left. Help belongs to the
         // app header, not to this card, so it is not here.
         let menus: Element<Message> = row![
-            self.header_menu_button("File", HeaderMenu::File),
+            self.header_menu_button("Publish", HeaderMenu::Publish),
             self.header_menu_button("Edit", HeaderMenu::Edit),
             self.header_menu_button("View", HeaderMenu::View),
         ]
@@ -15781,7 +15834,7 @@ impl App {
     ) -> Element<'_, Message> {
         let open = self.header_menu == Some(menu);
         let width = match menu {
-            HeaderMenu::File => FILE_BUTTON_WIDTH,
+            HeaderMenu::Publish => PUBLISH_BUTTON_WIDTH,
             HeaderMenu::Edit => EDIT_BUTTON_WIDTH,
             HeaderMenu::View => VIEW_BUTTON_WIDTH,
             HeaderMenu::Help => HELP_BUTTON_WIDTH,
@@ -15812,7 +15865,7 @@ impl App {
     /// The File menu: the transcript as a document, not its text. Export as
     /// opens its format list on hover, the same list the row menu's Export as
     /// shows; every entry asks for a destination.
-    fn file_menu(&self, scheme: &Scheme) -> Element<'_, Message> {
+    fn publish_menu(&self, scheme: &Scheme) -> Element<'_, Message> {
         let scheme = *scheme;
         let has_text = !self.shown_transcript().is_empty();
         let has_target = self.shown_output().is_some()
@@ -15822,25 +15875,18 @@ impl App {
         let summary = !running && self.has_results();
         let rows = vec![
             MenuRow {
-                label: "Export as\u{2026}",
+                label: "Export Transcript",
                 key: Some("Ctrl+S"),
                 checked: false,
                 enabled: has_text,
                 action: has_text.then_some(Message::OpenExportMenu),
             },
             MenuRow {
-                label: "Reveal",
+                label: "Copy Transcript",
                 key: None,
                 checked: false,
-                enabled: has_target,
-                action: has_target.then_some(Message::RevealOutput),
-            },
-            MenuRow {
-                label: "Summary",
-                key: None,
-                checked: false,
-                enabled: summary,
-                action: summary.then_some(Message::OpenSummary),
+                enabled: has_text,
+                action: has_text.then_some(Message::CopyTranscript),
             },
             MenuRow {
                 label: "Summarize Transcript",
@@ -15853,15 +15899,36 @@ impl App {
                     Message::LockedBriefing
                 }),
             },
+            MenuRow {
+                label: "Generate Report\u{2026}",
+                key: None,
+                checked: false,
+                enabled: has_text,
+                action: has_text.then_some(Message::OpenReport),
+            },
+            MenuRow {
+                label: "Last Run Summary",
+                key: None,
+                checked: false,
+                enabled: summary,
+                action: summary.then_some(Message::OpenSummary),
+            },
+            MenuRow {
+                label: "Reveal",
+                key: None,
+                checked: false,
+                enabled: has_target,
+                action: has_target.then_some(Message::RevealOutput),
+            },
         ];
         let width = header_menu_width(rows.iter());
         let card = menu_card_at(
             vec![MenuSection { rows, footer: None }],
             scheme,
             width,
-            MenuHover::FileExport { row: 0 },
+            MenuHover::Export { row: 0 },
         );
-        if !self.file_export_open || !has_text {
+        if !self.publish_export_open || !has_text {
             return menu_layer(card);
         }
         // The nested list is the row menu's Export submenu: the same formats,
@@ -15908,7 +15975,6 @@ impl App {
         } else {
             None
         };
-        let has_text = !self.shown_transcript().is_empty();
         let reset = self.reset_available();
         // The same gate double-click uses: an editable transcript line is
         // present, the view is split, and no run owns the pane.
@@ -15935,28 +16001,14 @@ impl App {
                         action: rename_message,
                     },
                     MenuRow {
-                        label: "Vocabulary",
+                        label: "Dictionary",
                         key: None,
                         checked: false,
                         enabled: true,
                         action: Some(Message::OpenVocabulary),
                     },
-                    MenuRow {
-                        label: "Copy Text",
-                        key: None,
-                        checked: false,
-                        enabled: has_text,
-                        action: has_text.then_some(Message::CopyTranscript),
-                    },
-                    MenuRow {
-                        label: "Reset Edits",
-                        key: None,
-                        checked: false,
-                        enabled: reset,
-                        action: reset.then_some(Message::RequestResetTranscript),
-                    },
                 ],
-                footer: None,
+                footer: Some(reset_edits_row(reset, scheme)),
             }],
             scheme,
         )
@@ -16090,7 +16142,7 @@ impl App {
                 action: Some(Message::HelpChoice(HelpKind::EditingTips)),
             },
             MenuRow {
-                label: "Vocabulary",
+                label: "Dictionary",
                 key: None,
                 checked: false,
                 enabled: true,
@@ -16662,6 +16714,8 @@ impl App {
             Some(Modal::Labels)
         } else if self.rename_recent.is_some() {
             Some(Modal::RenameRecent)
+        } else if self.report_open {
+            Some(Modal::Report)
         } else if self.info_open.is_some() {
             // Lowest priority: the Info popup only ever comes from a context
             // menu, which cannot open while another dialog is up.
@@ -16727,6 +16781,7 @@ impl App {
             Modal::Versions => self.versions_open = None,
             Modal::Labels => self.labels_open = None,
             Modal::RenameRecent => self.rename_recent = None,
+            Modal::Report => self.report_open = false,
         }
         Task::none()
     }
@@ -17653,6 +17708,105 @@ impl App {
         modal_card(body, 420.0, scheme)
     }
 
+    /// The report options: what the document holds, and what it is written as.
+    fn report_dialog(&self, scheme: &Scheme) -> Element<'_, Message> {
+        let scheme = *scheme;
+        let summary_ready = matches!(self.briefing, Some(BriefingState::Ready { .. }));
+        let mut body = column![
+            text("Generate Report").size(20).color(scheme.text),
+            text(
+                "One document: the transcript, the people in it and, when one \
+                 exists, the summary."
+            )
+            .size(theme::TEXT_XS)
+            .color(scheme.muted),
+            report_switch_row(
+                "Timestamps",
+                "Start every line with its time.",
+                self.report.timestamps,
+                true,
+                Message::ReportToggled(ReportToggle::Timestamps),
+                scheme,
+            ),
+            report_switch_row(
+                "Merge lines",
+                "One paragraph per speaker turn.",
+                self.report.merge_lines,
+                true,
+                Message::ReportToggled(ReportToggle::MergeLines),
+                scheme,
+            ),
+            report_switch_row(
+                "Participants",
+                "Names, speaking time, turns and words per speaker.",
+                self.report.participants,
+                true,
+                Message::ReportToggled(ReportToggle::Participants),
+                scheme,
+            ),
+            report_switch_row(
+                "Include summary",
+                if summary_ready {
+                    "The overview and key points from Summarize Transcript."
+                } else {
+                    "Summarize the transcript first."
+                },
+                self.report.summary && summary_ready,
+                summary_ready,
+                Message::ReportToggled(ReportToggle::Summary),
+                scheme,
+            ),
+        ]
+        .spacing(theme::SPACE_SM)
+        .width(Length::Fill);
+
+        let mut formats = column![].spacing(2).width(Length::Fill);
+        for format in ReportFormat::ALL {
+            let current = self.report.format == format;
+            let marker = if current { ICON_CIRCLE_FILL } else { ICON_CIRCLE };
+            let ink = if current { scheme.blue } else { scheme.muted };
+            formats = formats.push(
+                button(
+                    container(
+                        row![
+                            icon_colored(marker, 10.0, ink),
+                            text(format.label())
+                                .size(theme::TEXT_SM)
+                                .color(scheme.text),
+                            horizontal_space(),
+                            text(format.extension())
+                                .size(theme::TEXT_XS)
+                                .color(scheme.muted),
+                        ]
+                        .spacing(theme::SPACE_SM)
+                        .align_y(iced::Alignment::Center),
+                    )
+                    .width(Length::Fill)
+                    .padding([6, 8]),
+                )
+                .width(Length::Fill)
+                .padding(0)
+                .on_press(Message::ReportFormatChanged(format))
+                .style(move |theme, status| row_menu_item_style(scheme, true)(theme, status)),
+            );
+        }
+        body = body
+            .push(text("File type").size(theme::TEXT_SM).color(scheme.text))
+            .push(formats)
+            .push(right_aligned(
+                row![
+                    action_text("Cancel")
+                        .on_press(Message::CloseReport)
+                        .style(pill_button_secondary),
+                    action_text("Save\u{2026}")
+                        .on_press(Message::SaveReport)
+                        .style(color_button(scheme.blue, scheme.on_accent)),
+                ]
+                .spacing(theme::SPACE_MD),
+            ));
+        modal_card(body, 460.0, scheme)
+    }
+
     /// A strip above the transcript saying an older version is on screen.
     fn version_banner(&self, scheme: &Scheme) -> Option<Element<'_, Message>> {
         let preview = self.version_preview.as_ref()?;
@@ -18210,9 +18364,6 @@ impl App {
                 }
                 body = body.push(right_aligned(
                     row![
-                        action_text("Generate Report\u{2026}")
-                            .on_press(Message::GenerateReport)
-                            .style(pill_button_secondary),
                         action_text("Export as\u{2026}")
                             .on_press(Message::ToggleBriefingExport)
                             .style(pill_button_secondary),
@@ -18266,7 +18417,7 @@ impl App {
         .spacing(theme::SPACE_XS);
 
         let mut body = column![
-            text("Custom Vocabulary").size(20),
+            text("Dictionary").size(20),
             terms,
             replacements,
         ]
@@ -19092,14 +19243,12 @@ impl App {
             bottom: if has_header { HEADER_SLOT_GAP } else { 0.0 },
             left: 0.0,
         });
-        // The editor strip sits between the header and the list, inside the card,
-        // and only its *height* changes: nothing when no editor is open, so the
-        // list runs up to the header. It is always the child before the list, so
-        // the scrollable stays child 2 in both states and `Tree::diff` matches it
-        // by index — the strip's node swaps between a `Space` and a `Row` (a
-        // `Container` has no node of its own), but the scrollable's node and its
-        // absolute pixel offset are untouched, which is why its offset is not
-        // reset. Shifting the offset to match is `strip_scroll`.
+        // The editor strip sits below the list, inside the card, and only its
+        // *height* changes: nothing when no editor is open, so the list runs to
+        // the card's bottom. It is always the last child, so the scrollable keeps
+        // the same child index in both states and `Tree::diff` never remounts it;
+        // the strip's node swaps between a `Space` and a `Row` (a `Container` has
+        // no node of its own), which costs the list nothing.
         let strip_slot = container(match self.line_edit_panel(scheme) {
             Some(panel) => panel,
             None => horizontal_space().into(),
@@ -19113,10 +19262,10 @@ impl App {
         } else {
             self.transcript_element()
         };
-        let transcript_box = column![header_slot, strip_slot, transcript_body]
+        let transcript_box = column![header_slot, transcript_body, strip_slot]
             .spacing(0)
-        .width(Length::Fill)
-        .height(Length::Fill);
+            .width(Length::Fill)
+            .height(Length::Fill);
 
         let left_panel: Element<Message> = self.queue_panel(&scheme, LEFT_PANEL_WIDTH);
 
@@ -19164,8 +19313,8 @@ impl App {
         // never change.
         let card_menu_open = !self.popup_open();
         let view_layer: Element<Message> = match self.header_menu {
-            Some(HeaderMenu::File) if card_menu_open => {
-                card_menu_layer(self.file_menu(&scheme), file_menu_offset())
+            Some(HeaderMenu::Publish) if card_menu_open => {
+                card_menu_layer(self.publish_menu(&scheme), publish_menu_offset())
             }
             Some(HeaderMenu::Edit) if card_menu_open => {
                 card_menu_layer(self.edit_menu(&scheme), edit_menu_offset())
@@ -19307,6 +19456,7 @@ impl App {
             Some(Modal::Versions) => self.versions_dialog(&scheme),
             Some(Modal::Labels) => self.labels_dialog(&scheme),
             Some(Modal::RenameRecent) => self.rename_recent_dialog(&scheme),
+            Some(Modal::Report) => self.report_dialog(&scheme),
             Some(Modal::Info) => self.info_dialog(&scheme),
         };
         // The Info popup is read-only and transient: its scrim dismisses it,
@@ -20845,7 +20995,7 @@ const ICON_JOIN_PREV: char = '\u{f115}';
 const ICON_JOIN_NEXT: char = '\u{f112}';
 /// A path forking: cut this line at the caret. Scissors were the obvious
 /// choice but collapse into an X at the panel's glyph size, next to a trash can.
-const ICON_SPLIT: char = '\u{f549}';
+const ICON_SPLIT: char = '\u{f14a}';
 const ICON_UNDO: char = '\u{f117}';
 /// Clockwise arrow: redo. Deliberately not shared with `ICON_RETRY` — one glyph
 /// for two verbs is the sort of collision that makes an icon row unreadable.
@@ -21819,15 +21969,20 @@ fn recent_audio_presence_of(recent: &[RecentEntry]) -> Vec<bool> {
 
 /// The file a history row is named for: its audio, or the transcript when the
 /// audio is gone.
+
 /// Per-speaker time, share of the spoken total, line and word counts. A line
 /// without an end borrows the next line's start, so the shares add up.
-fn speaker_stats(lines: &[BriefingLine]) -> Vec<SpeakerStat> {
+fn speaker_stats(lines: &[DocLine], duration: Option<f32>) -> Vec<SpeakerStat> {
     let mut stats: Vec<SpeakerStat> = Vec::new();
     for (index, line) in lines.iter().enumerate() {
-        let start = line.start.max(0.0);
-        let end = line
-            .end
-            .or_else(|| lines.get(index + 1).map(|next| next.start))
+        let Some(start) = line.start else {
+            continue;
+        };
+        let end = lines
+            .iter()
+            .skip(index + 1)
+            .find_map(|next| next.start)
+            .or(duration)
             .unwrap_or(start)
             .max(start);
         let seconds = end - start;
@@ -21837,7 +21992,7 @@ fn speaker_stats(lines: &[BriefingLine]) -> Vec<SpeakerStat> {
         } else {
             name.to_string()
         };
-        let words = line.text.split_whitespace().count();
+        let words = line_text(line).split_whitespace().count();
         match stats.iter_mut().find(|stat| stat.name == name) {
             Some(stat) => {
                 stat.seconds += seconds;
@@ -21869,87 +22024,124 @@ fn speaker_stats(lines: &[BriefingLine]) -> Vec<SpeakerStat> {
     stats
 }
 
-/// The report document: title and provenance, speaker time, the summary the
-/// dialog lists, then the full transcript with timestamps.
-fn report_markdown(input: &ReportInput<'_>) -> String {
-    let mut out = format!("# {}\n\n", input.title);
-    let length = input
+/// One transcript paragraph: a timestamp when asked for, the speaker, then the
+/// spoken text.
+fn report_line(speaker: &str, start: Option<f32>, text: &str, timestamps: bool) -> String {
+    let stamp = if timestamps {
+        start
+            .map(|seconds| format!("{} ", format_timestamp(seconds as f64)))
+            .unwrap_or_default()
+    } else {
+        String::new()
+    };
+    let speaker = if speaker.trim().is_empty() {
+        "Unattributed"
+    } else {
+        speaker.trim()
+    };
+    format!("{stamp}{speaker}: {text}")
+}
+
+/// The report as styled blocks: title and provenance, then the participants,
+/// the summary and the transcript the options ask for.
+fn report_blocks(content: &ReportContent<'_>) -> Vec<ReportBlock> {
+    let mut blocks = vec![ReportBlock::Title(content.title.to_string())];
+    let length = content
         .duration
         .map(|seconds| format!(" \u{00b7} {}", format_secs(seconds as f64)))
         .unwrap_or_default();
-    out.push_str(&format!("_Generated {}{length}._\n\n", input.generated));
+    blocks.push(ReportBlock::Meta(format!(
+        "Generated {}{length}",
+        content.generated
+    )));
 
-    out.push_str("## At a glance\n\n");
-    if let Some(duration) = input.duration {
-        out.push_str(&format!("- **Duration:** {}\n", format_secs(duration as f64)));
-    }
-    for (label, value) in &input.details {
-        out.push_str(&format!("- **{label}:** {value}\n"));
-    }
-    if !input.stats.is_empty() {
-        out.push_str(&format!("- **Speakers:** {}\n", input.stats.len()));
-    }
-    out.push('\n');
-
-    if !input.stats.is_empty() {
-        out.push_str(
-            "## Speaker time\n\n| Speaker | Speaking time | Share | Lines | Words |\n             | --- | --- | --- | --- | --- |\n",
-        );
-        for stat in input.stats {
-            out.push_str(&format!(
-                "| {} | {} | {:.0}% | {} | {} |\n",
-                stat.name.replace('|', "/"),
-                format_secs(stat.seconds as f64),
-                stat.share * 100.0,
-                stat.lines,
-                stat.words
-            ));
-        }
-        out.push('\n');
-    }
-
-    let overview = input.briefing.overview.trim();
-    if !overview.is_empty() || !input.briefing.points.is_empty() {
-        out.push_str("## Summary\n\n");
-        if !overview.is_empty() {
-            out.push_str(overview);
-            out.push_str("\n\n");
-        }
-        if !input.briefing.points.is_empty() {
-            out.push_str("### Key points\n\n");
-            for item in &input.briefing.points {
-                out.push_str("- ");
-                out.push_str(item.text.trim());
-                if let Some(range) = hippo_briefing::citation(item, input.lines) {
-                    out.push_str(&format!(" *({range})*"));
-                }
-                out.push('\n');
+    if content.participants {
+        let stats = speaker_stats(content.lines, content.duration);
+        if !stats.is_empty() {
+            blocks.push(ReportBlock::Heading("Participants".to_string()));
+            for stat in &stats {
+                blocks.push(ReportBlock::Bullet(format!(
+                    "{} \u{2014} {} speaking ({:.0}%), {} {}, {} {}",
+                    stat.name,
+                    format_secs(stat.seconds as f64),
+                    stat.share * 100.0,
+                    stat.lines,
+                    if stat.lines == 1 { "turn" } else { "turns" },
+                    stat.words,
+                    if stat.words == 1 { "word" } else { "words" }
+                )));
             }
-            out.push('\n');
         }
     }
 
-    if !input.lines.is_empty() {
-        out.push_str("## Transcript\n\n");
-        for line in input.lines {
-            let speaker = line.speaker.trim();
-            let speaker = if speaker.is_empty() {
-                "Unattributed"
-            } else {
-                speaker
-            };
-            out.push_str(&format!(
-                "**{} {speaker}:** {}\n\n",
-                format_timestamp(line.start as f64),
-                line.text.trim()
+    if let Some((briefing, lines)) = content.summary {
+        blocks.push(ReportBlock::Heading("Summary".to_string()));
+        if !briefing.overview.trim().is_empty() {
+            blocks.push(ReportBlock::Paragraph(
+                briefing.overview.trim().to_string(),
             ));
         }
+        for item in &briefing.points {
+            let cite = hippo_briefing::citation(item, lines)
+                .map(|range| format!(" ({range})"))
+                .unwrap_or_default();
+            blocks.push(ReportBlock::Bullet(format!(
+                "{}{cite}",
+                item.text.trim()
+            )));
+        }
     }
-    out.trim_end().to_string() + "\n"
+
+    if !content.lines.is_empty() {
+        blocks.push(ReportBlock::Heading("Transcript".to_string()));
+        if content.merge_lines {
+            let mut current: Option<(String, Option<f32>, Vec<String>)> = None;
+            let flush = |blocks: &mut Vec<ReportBlock>,
+                             speaker: String,
+                             start: Option<f32>,
+                             texts: Vec<String>| {
+                blocks.push(ReportBlock::Paragraph(report_line(
+                    &speaker,
+                    start,
+                    &texts.join(" "),
+                    content.timestamps,
+                )));
+            };
+            for line in content.lines {
+                let speaker = if line.speaker.trim().is_empty() {
+                    "Unattributed".to_string()
+                } else {
+                    line.speaker.trim().to_string()
+                };
+                let text = line_text(line);
+                match current.as_mut() {
+                    Some((who, _, texts)) if *who == speaker => texts.push(text),
+                    _ => {
+                        if let Some((who, start, texts)) = current.take() {
+                            flush(&mut blocks, who, start, texts);
+                        }
+                        current = Some((speaker, line.start, vec![text]));
+                    }
+                }
+            }
+            if let Some((who, start, texts)) = current {
+                flush(&mut blocks, who, start, texts);
+            }
+        } else {
+            for line in content.lines {
+                blocks.push(ReportBlock::Paragraph(report_line(
+                    &line.speaker,
+                    line.start,
+                    &line_text(line),
+                    content.timestamps,
+                )));
+            }
+        }
+    }
+
+    blocks
 }
 
-/// The briefing as the dialog shows it: the overview, then the key points with
-/// their citations. Decisions and action items are deliberately left out.
 fn briefing_text(briefing: &Briefing, lines: &[BriefingLine]) -> String {
     let mut out = String::new();
     if !briefing.overview.trim().is_empty() {
@@ -23629,6 +23821,36 @@ fn tips_check<'a>(checked: bool, scheme: Scheme) -> Element<'a, Message> {
         .into()
 }
 
+/// One switch in the report options: a checkbox, its name and what it does.
+fn report_switch_row<'a>(
+    label: &'a str,
+    hint: &'a str,
+    on: bool,
+    enabled: bool,
+    message: Message,
+    scheme: Scheme,
+) -> Element<'a, Message> {
+    let content = row![
+        tips_check(on, scheme),
+        column![
+            text(label)
+                .size(theme::TEXT_SM)
+                .color(if enabled { scheme.text } else { scheme.muted }),
+            text(hint).size(theme::TEXT_XS).color(scheme.muted),
+        ]
+        .spacing(1),
+    ]
+    .spacing(theme::SPACE_SM)
+    .align_y(iced::Alignment::Center)
+    .width(Length::Fill);
+    action(content)
+        .width(Length::Fill)
+        .padding([6, 8])
+        .style(move |theme, status| row_menu_item_style(scheme, enabled)(theme, status))
+        .on_press_maybe(enabled.then_some(message))
+        .into()
+}
+
 /// A hairline between two menu groups.
 fn menu_divider(scheme: Scheme) -> Element<'static, Message> {
     container(
@@ -23658,8 +23880,9 @@ fn menu_card<'a>(sections: Vec<MenuSection<'a>>, scheme: Scheme) -> Element<'a, 
 enum MenuHover {
     /// No row reports the pointer.
     None,
-    /// The File menu: row `row` opens the export list, its neighbours close it.
-    FileExport { row: usize },
+    /// The Publish menu: row `row` opens the export list, its neighbours close
+    /// it.
+    Export { row: usize },
 }
 
 /// [`menu_card`] at an explicit width, with per-row pointer reporting.
@@ -23687,7 +23910,7 @@ fn menu_card_at<'a>(
             );
             let item: Element<'a, Message> = match hover {
                 MenuHover::None => item,
-                MenuHover::FileExport { row: export_row } => {
+                MenuHover::Export { row: export_row } => {
                     let message = if index == export_row {
                         Message::FileExportHover(true)
                     } else {
@@ -23926,6 +24149,27 @@ fn row_menu_item_style(
             shadow: Shadow::default(),
         }
     }
+}
+
+/// The Edit menu's last row, set off by the section's rule: resetting is a
+/// destructive edit, so it reads red, and stays muted when there is nothing to
+/// go back to.
+fn reset_edits_row(reset: bool, scheme: Scheme) -> Element<'static, Message> {
+    let ink = if reset { scheme.danger } else { scheme.muted };
+    action(
+        container(
+            text("Reset Edits")
+                .size(16)
+                .wrapping(NO_WRAP)
+                .color(ink),
+        )
+        .width(Length::Fill),
+    )
+    .width(Length::Fill)
+    .padding([5, 6])
+    .style(move |theme, status| header_menu_item_style(scheme, reset)(theme, status))
+    .on_press_maybe(reset.then_some(Message::RequestResetTranscript))
+    .into()
 }
 
 /// One row of a header menu: a leading check slot that keeps every label on the
@@ -27420,10 +27664,10 @@ mod tests {
         // header padding plus the buttons to its left and the gaps between
         // them. Pinned here because a hardcoded offset would drift from the
         // button widths it is supposed to match.
-        assert_eq!(file_menu_offset(), HEADER_PAD_X);
+        assert_eq!(publish_menu_offset(), HEADER_PAD_X);
         assert_eq!(
-            edit_menu_offset() - file_menu_offset(),
-            FILE_BUTTON_WIDTH + theme::SPACE_SM
+            edit_menu_offset() - publish_menu_offset(),
+            PUBLISH_BUTTON_WIDTH + theme::SPACE_SM
         );
         assert_eq!(
             view_menu_offset() - edit_menu_offset(),
@@ -27441,16 +27685,16 @@ mod tests {
 
         // The row opens the same format list the context menu shows.
         let _ = app.update(Message::OpenExportMenu);
-        assert_eq!(app.header_menu, Some(HeaderMenu::File));
+        assert_eq!(app.header_menu, Some(HeaderMenu::Publish));
         assert!(
-            app.file_export_open,
-            "File → Export as should open the format list"
+            app.publish_export_open,
+            "Publish → Export Transcript should open the format list"
         );
 
         // Choosing a format captures the document and waits on the dialog.
         let _ = app.update(Message::ExportCurrentAs(ExportFormat::Txt));
         assert!(
-            !app.file_export_open,
+            !app.publish_export_open,
             "choosing a format should close the list"
         );
         assert!(app.header_menu.is_none(), "the menu closes with it");
@@ -27493,7 +27737,7 @@ mod tests {
         let original = "[00:00] SPEAKER 1: one\n[00:05] SPEAKER 2: two\n";
         let (mut app, _transcript, media) = line_edit_fixture("all-menus", original);
         for menu in [
-            HeaderMenu::File,
+            HeaderMenu::Publish,
             HeaderMenu::Edit,
             HeaderMenu::View,
             HeaderMenu::Help,
@@ -27501,9 +27745,9 @@ mod tests {
             app.header_menu = Some(menu);
             let _ = app.view();
         }
-        // File → Export as draws a second card beside the menu.
-        app.header_menu = Some(HeaderMenu::File);
-        app.file_export_open = true;
+        // Publish → Export Transcript draws a second card beside the menu.
+        app.header_menu = Some(HeaderMenu::Publish);
+        app.publish_export_open = true;
         let _ = app.view();
         let _ = std::fs::remove_dir_all(&media);
     }
@@ -28170,63 +28414,44 @@ mod tests {
     }
 
     #[test]
-    fn the_strip_shifts_the_content_back_under_the_pointer() {
-        // Opening: the offset grows by the strip's height so the content holds still.
-        assert_eq!(compensate_offset(200.0, LINE_EDIT_PANEL_HEIGHT, f32::MAX), 238.0);
-        // The edited row's top caps it: past that the field would sit under the strip.
-        assert_eq!(compensate_offset(200.0, LINE_EDIT_PANEL_HEIGHT, 210.0), 210.0);
-        // Closing: the offset shrinks by the strip's height, and stops at the top of
-        // the document — where the content simply starts lower instead.
-        assert_eq!(compensate_offset(200.0, -LINE_EDIT_PANEL_HEIGHT, f32::MAX), 162.0);
-        assert_eq!(compensate_offset(20.0, -LINE_EDIT_PANEL_HEIGHT, f32::MAX), 0.0);
-    }
-
-    #[test]
-    fn opening_the_editor_shifts_the_scroll_instead_of_the_row() {
+    fn opening_the_editor_only_brings_its_row_into_view() {
         let _guard = env_lock();
         let _config = ConfigEnv::new("strip-scroll-config");
         let original = "[00:00] SPEAKER 1: one\n[00:05] SPEAKER 2: two\n[00:09] SPEAKER 1: three\n[00:12] SPEAKER 2: four\n";
         let (mut app, _transcript, media) = line_edit_fixture("strip-scroll", original);
 
-        // Four 400 px rows in a 400 px pane; the second line is centred at 400.
+        // Four 400 px rows in a 400 px pane; the second line sits at 288..312
+        // while the list is scrolled to 300.
         app.transcript_content = 1600.0;
         app.transcript_viewport = 400.0;
         app.pane_row_height.set(Some(24.0));
         app.transcript_offset = 300.0;
         app.scroll_target = None;
 
-        // Opening the editor inserts three strip-height px above the list, so the
-        // offset takes them back: the content does not move on screen.
+        // The strip is below the list now, so opening it moves nothing and the
+        // visible row needs no scroll.
         let _ = app.update(Message::EditLine(1));
         assert!(app.line_edit.is_some());
         assert_eq!(
-            app.scroll_target,
-            Some(300.0 + LINE_EDIT_PANEL_HEIGHT),
-            "opening must shift the list back under the row"
+            app.scroll_target, None,
+            "the list must not move when the strip opens"
         );
 
-        // Closing gives the height back and the offset goes with it.
-        app.transcript_offset = 300.0 + LINE_EDIT_PANEL_HEIGHT;
+        // Closing gives the height back without touching the offset either.
         app.scroll_target = None;
         let _ = app.update(Message::CancelLineEdit);
-        assert_eq!(app.scroll_target, Some(300.0));
+        assert_eq!(app.scroll_target, None);
 
-        // A row within the strip's height of the list's top cannot hold still: it
-        // would go under the strip, so the shift stops where that row's top meets the
-        // strip's bottom edge.
-        app.transcript_offset = 560.0;
+        // A row that would end under the panel is brought in instead: at 240 the
+        // row sits at 348..372, past the 362 the shortened list can show.
+        app.transcript_offset = 240.0;
         app.scroll_target = None;
-        let (top, _) = app.edited_row_place(1).expect("the pane is measured");
-        assert!(top < LINE_EDIT_PANEL_HEIGHT, "the row should be in the band");
         let _ = app.update(Message::EditLine(1));
-        assert_eq!(app.scroll_target, Some(560.0 + top));
-
-        // At the top of the document there is nothing further up to shift in: closing
-        // stops at zero and the content simply starts lower.
-        app.transcript_offset = 20.0;
-        app.scroll_target = None;
-        let _ = app.update(Message::CancelLineEdit);
-        assert_eq!(app.scroll_target, Some(0.0));
+        assert_eq!(
+            app.scroll_target,
+            Some(400.0),
+            "the edited row must clear the panel"
+        );
 
         let _ = std::fs::remove_dir_all(&media);
     }
@@ -28497,7 +28722,7 @@ mod tests {
 
     /// Every dialog, so a variant added to `Modal` cannot go untested: the
     /// escape and render passes below each walk this list.
-    const ALL_MODALS: [Modal; 14] = [
+    const ALL_MODALS: [Modal; 15] = [
         Modal::Reset,
         Modal::ClearHistory,
         Modal::Summary,
@@ -28512,6 +28737,7 @@ mod tests {
         Modal::Versions,
         Modal::Labels,
         Modal::RenameRecent,
+        Modal::Report,
     ];
 
     /// Raise one dialog the way the app would.
@@ -28594,6 +28820,7 @@ mod tests {
                 let index = app.recent.len() - 1;
                 app.open_labels(PaneTab::History, index);
             }
+            Modal::Report => app.report_open = true,
             Modal::RenameRecent => {
                 app.recent.push(RecentEntry {
                     audio: Some(PathBuf::from("/media/talk.mp3")),
@@ -30144,25 +30371,12 @@ mod tests {
     }
 
     #[test]
-    fn generating_a_report_writes_summary_speaker_time_and_transcript() {
+    fn generating_a_report_writes_the_chosen_sections_and_format() {
         let _guard = env_lock();
         let _config = ConfigEnv::new("report-export");
-        let media = temp_dir("report-export-media");
-        let transcript = media.join("talk.txt");
-        std::fs::write(&transcript, "[00:00] SPEAKER 1: hello there\n").unwrap();
+        let original = "[00:00] SPEAKER 1: hello there\n[00:03] SPEAKER 1: again\n[00:06] SPEAKER 2: bye\n";
+        let (mut app, transcript, media) = line_edit_fixture("report-export", original);
 
-        let mut app = pro_app();
-        app.recent.push(RecentEntry {
-            audio: Some(media.join("talk.mp3")),
-            transcript: Some(transcript.clone()),
-            finished_at: 5,
-            duration: Some(4.0),
-            speakers: Some(2),
-            preset: Some("Balanced".to_string()),
-            model: Some("whisper-balanced".to_string()),
-            language_detected: Some("English".to_string()),
-            ..Default::default()
-        });
         app.briefing = Some(BriefingState::Ready {
             briefing: Briefing {
                 overview: "Short talk.".to_string(),
@@ -30170,14 +30384,8 @@ mod tests {
                     text: "The sky is blue".to_string(),
                     lines: vec![1],
                 }],
-                decisions: vec![hippo_briefing::Item {
-                    text: "Ship it".to_string(),
-                    lines: vec![1],
-                }],
-                actions: vec![hippo_briefing::Item {
-                    text: "Call Ada".to_string(),
-                    lines: vec![1],
-                }],
+                decisions: Vec::new(),
+                actions: Vec::new(),
             },
             lines: vec![
                 BriefingLine {
@@ -30188,7 +30396,13 @@ mod tests {
                 },
                 BriefingLine {
                     start: 3.0,
-                    end: Some(4.0),
+                    end: Some(6.0),
+                    speaker: "SPEAKER 1".to_string(),
+                    text: "again".to_string(),
+                },
+                BriefingLine {
+                    start: 6.0,
+                    end: Some(9.0),
                     speaker: "SPEAKER 2".to_string(),
                     text: "bye".to_string(),
                 },
@@ -30196,44 +30410,68 @@ mod tests {
             source: Some(transcript.clone()),
         });
 
-        let _ = app.update(Message::GenerateReport);
-        let text = app
+        let _ = app.update(Message::OpenReport);
+        assert!(app.report_open);
+        assert!(
+            app.report.summary,
+            "a ready summary should be offered by default"
+        );
+        assert_eq!(app.report.format, ReportFormat::Pdf);
+
+        // Merge consecutive turns and drop the timestamps.
+        let _ = app.update(Message::ReportToggled(ReportToggle::MergeLines));
+        let _ = app.update(Message::ReportToggled(ReportToggle::Timestamps));
+        let _ = app.update(Message::ReportFormatChanged(ReportFormat::Txt));
+        let _ = app.update(Message::SaveReport);
+        assert!(!app.report_open);
+        let report = app
             .pending_report
             .as_ref()
-            .expect("the report waits on a destination")
-            .text
-            .clone();
+            .expect("the report waits on a destination");
+        assert_eq!(report.format, ReportFormat::Txt);
+        let blocks = report.blocks.clone();
 
-        assert!(text.starts_with("# talk.mp3\n"), "{text}");
-        assert!(text.contains("- **Preset:** Balanced"), "{text}");
-        assert!(text.contains("## Speaker time"), "{text}");
+        assert_eq!(blocks[0], ReportBlock::Title("talk.mp3".to_string()));
+        assert!(matches!(
+            blocks.get(1),
+            Some(ReportBlock::Meta(text)) if text.starts_with("Generated ")
+        ));
+        assert!(blocks.contains(&ReportBlock::Heading("Participants".to_string())));
         assert!(
-            text.contains("| SPEAKER 1 | 0:03 | 75% | 1 | 2 |"),
-            "{text}"
+            blocks.iter().any(|block| matches!(
+                block,
+                ReportBlock::Bullet(text) if text.starts_with("SPEAKER 1 \u{2014} 0:06 speaking")
+            )),
+            "{blocks:?}"
         );
         assert!(
-            text.contains("| SPEAKER 2 | 0:01 | 25% | 1 | 1 |"),
-            "{text}"
+            blocks.contains(&ReportBlock::Paragraph(
+                "SPEAKER 1: hello there again".to_string()
+            )),
+            "{blocks:?}"
         );
-        assert!(text.contains("### Key points"), "{text}");
-        assert!(text.contains("The sky is blue"), "{text}");
-        assert!(
-            !text.contains("Ship it") && !text.contains("Call Ada"),
-            "the report must not list decisions or action items: {text}"
-        );
-        assert!(text.contains("## Transcript"), "{text}");
-        assert!(
-            text.contains("**[00:00] SPEAKER 1:** hello there"),
-            "{text}"
-        );
-        assert!(text.contains("**[00:03] SPEAKER 2:** bye"), "{text}");
+        assert!(blocks.contains(&ReportBlock::Paragraph("SPEAKER 2: bye".to_string())));
+        assert!(blocks.contains(&ReportBlock::Heading("Summary".to_string())));
+        assert!(blocks.iter().any(|block| matches!(
+            block,
+            ReportBlock::Bullet(text) if text.starts_with("The sky is blue")
+        )));
 
-        let chosen = media.join("report.md");
+        let chosen = media.join("report.txt");
         let _ = app.update(Message::ReportPicked(Some(chosen.clone())));
-        assert!(app.pending_report.is_none());
         let saved = std::fs::read_to_string(&chosen).unwrap();
-        assert!(saved.contains("## Speaker time"), "{saved}");
-        assert!(saved.contains("## Transcript"), "{saved}");
+        assert!(saved.contains("PARTICIPANTS"), "{saved}");
+        assert!(saved.contains("SPEAKER 1: hello there again"), "{saved}");
+
+        // Word output without the summary section.
+        let _ = app.update(Message::OpenReport);
+        let _ = app.update(Message::ReportToggled(ReportToggle::Summary));
+        let _ = app.update(Message::ReportFormatChanged(ReportFormat::Docx));
+        let _ = app.update(Message::SaveReport);
+        let docx = media.join("report.docx");
+        let _ = app.update(Message::ReportPicked(Some(docx.clone())));
+        let bytes = std::fs::read(&docx).unwrap();
+        assert_eq!(&bytes[..2], b"PK", "the report must be a docx package");
 
         let _ = std::fs::remove_dir_all(&media);
     }

@@ -17,6 +17,7 @@ pub mod models;
 pub mod paths;
 pub mod pipeline;
 pub mod playback;
+pub mod report;
 pub mod sidecar;
 pub mod versions;
 pub mod vocabulary;

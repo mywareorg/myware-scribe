@@ -31,7 +31,15 @@ const RELS: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 
 /// Write `cues` as a Word document.
 pub fn write(path: &Path, cues: &[Cue], duration: Option<f32>) -> io::Result<()> {
-    let document = document_xml(cues, duration);
+    write_package(path, &document_xml(cues, duration))
+}
+
+/// Write a completed `word/document.xml` into the minimal OOXML package.
+///
+/// Shared with the report writer so both document formats carry exactly the
+/// same three parts Word needs; splitting it here keeps the package details in
+/// one place.
+pub(crate) fn write_package(path: &Path, document: &str) -> io::Result<()> {
     let file = File::create(path)?;
     let mut archive = zip::ZipWriter::new(file);
     let options =
@@ -39,7 +47,7 @@ pub fn write(path: &Path, cues: &[Cue], duration: Option<f32>) -> io::Result<()>
 
     add(&mut archive, "[Content_Types].xml", CONTENT_TYPES, options)?;
     add(&mut archive, "_rels/.rels", RELS, options)?;
-    add(&mut archive, "word/document.xml", &document, options)?;
+    add(&mut archive, "word/document.xml", document, options)?;
     archive.finish().map_err(io::Error::other)?;
     Ok(())
 }
@@ -113,7 +121,7 @@ fn stamp(seconds: f32, use_hours: bool) -> String {
 }
 
 /// True when the first strong character belongs to a right-to-left script.
-fn is_rtl(text: &str) -> bool {
+pub(crate) fn is_rtl(text: &str) -> bool {
     for character in text.chars() {
         let code = character as u32;
         if (0x0590..=0x05FF).contains(&code) || (0x0600..=0x06FF).contains(&code) {
@@ -127,7 +135,7 @@ fn is_rtl(text: &str) -> bool {
 }
 
 /// XML text escaping, with control characters removed so Word can open it.
-fn escape(text: &str) -> String {
+pub(crate) fn escape(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for character in text.chars() {
         match character {
