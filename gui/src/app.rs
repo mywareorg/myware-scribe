@@ -8216,6 +8216,19 @@ impl App {
         }
     }
 
+    /// The focused queue row has no transcript yet, so the pane should say so
+    /// instead of leaving a transcript from another tab on screen.
+    fn focused_queue_row_untranscribed(&self) -> bool {
+        self.selected
+            .and_then(|index| self.queue.get(index))
+            .is_some_and(|item| {
+                matches!(
+                    item.status,
+                    ItemStatus::Pending | ItemStatus::Interrupted
+                )
+            })
+    }
+
     /// A row was pressed. The first press does what a single click always did;
     /// the second within [`ROW_DOUBLE_CLICK`] runs the row's safe action.
     fn row_pressed(&mut self, tab: PaneTab, index: usize) -> Task<Message> {
@@ -12295,8 +12308,16 @@ impl App {
             .queue
             .iter()
             .any(|item| matches!(item.status, ItemStatus::Pending));
-
-        let (glyph, tint, title, body) = if running {
+        // The focused queue row wins over a still-loaded history view: moving
+        // from History to Queue must describe the file in front of the user.
+        let (glyph, tint, title, body) = if self.focused_queue_row_untranscribed() {
+            (
+                ICON_PLAY,
+                scheme.track,
+                "Not transcribed yet",
+                "Run the queue to create a transcript for this file.".to_string(),
+            )
+        } else if running {
             let detail = if self.stage.is_empty() || self.stage == "starting" {
                 "Preparing the audio and models".to_string()
             } else {
@@ -12307,17 +12328,6 @@ impl App {
                 scheme.warn_tint,
                 "Listening for speech",
                 format!("{detail}. Lines will appear here as they are transcribed."),
-            )
-        } else if self
-            .selected
-            .and_then(|index| self.queue.get(index))
-            .is_some_and(|item| matches!(item.status, ItemStatus::Pending))
-        {
-            (
-                ICON_PLAY,
-                scheme.track,
-                "Not transcribed yet",
-                "Run the queue to create a transcript for this file.".to_string(),
             )
         } else if selected {
             (
@@ -14293,6 +14303,11 @@ impl App {
         let scheme = self.scheme();
         if self.feature_deck_visible() {
             return self.tagged(license::Audience::FreeOnly, self.feature_deck(&scheme));
+        }
+        // A queue row with no transcript describes itself, even when a history
+        // transcript is still loaded behind it from the tab the user left.
+        if self.pane_tab == PaneTab::Queue && self.focused_queue_row_untranscribed() {
+            return self.empty_transcript_state(&scheme);
         }
         // The queue can be empty while a history entry or the live buffer from
         // the last run is still on screen: only a genuinely blank pane takes
@@ -23811,6 +23826,22 @@ mod tests {
 
         let _ = app.update(Message::SelectTab(PaneTab::Queue));
         assert_eq!(app.pane_tab, PaneTab::Queue);
+    }
+
+    #[test]
+    fn a_focused_untranscribed_queue_row_takes_the_empty_state() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("queue-untranscribed-empty");
+        let mut app = pro_app();
+        app.queue = vec![queue_item(PathBuf::from("a.mp3"))];
+        app.selected = Some(0);
+        assert!(app.focused_queue_row_untranscribed());
+
+        app.queue[0].status = ItemStatus::Done;
+        assert!(!app.focused_queue_row_untranscribed());
+
+        app.queue[0].status = ItemStatus::Interrupted;
+        assert!(app.focused_queue_row_untranscribed());
     }
 
     #[test]
