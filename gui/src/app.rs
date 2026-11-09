@@ -8902,10 +8902,18 @@ impl App {
     fn restore_tab_focus(&mut self, tab: PaneTab) {
         match tab {
             PaneTab::Queue => {
+                // A run owns the queue while it lasts: entering the tab lands
+                // on the file being transcribed, whatever row was remembered
+                // from earlier.
+                let running = self
+                    .queue
+                    .iter()
+                    .position(|item| matches!(item.status, ItemStatus::Running));
                 let remembered = self
                     .queue_focus
                     .filter(|index| *index < self.queue.len());
-                self.selected = remembered.or_else(|| (!self.queue.is_empty()).then_some(0));
+                self.selected =
+                    running.or(remembered).or_else(|| (!self.queue.is_empty()).then_some(0));
             }
             PaneTab::Favorites => {
                 if self.favorites_locked() {
@@ -25673,6 +25681,36 @@ mod tests {
         let _ = app.update(Message::SelectTab(PaneTab::Queue));
         assert_eq!(app.pane_tab, PaneTab::Queue);
         assert_eq!(app.selected, Some(0), "the top queue row is focused");
+    }
+
+    #[test]
+    fn entering_the_queue_tab_focuses_the_running_item() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("queue-focus-running");
+        let mut app = pro_app();
+        app.queue = vec![
+            queue_item(PathBuf::from("a.mp3")),
+            queue_item(PathBuf::from("b.mp3")),
+            queue_item(PathBuf::from("c.mp3")),
+        ];
+        app.queue[1].status = ItemStatus::Running;
+        app.status = Status::Running;
+        app.queue_focus = Some(0);
+        app.selected = Some(2);
+        app.pane_tab = PaneTab::History;
+
+        let _ = app.update(Message::SelectTab(PaneTab::Queue));
+        assert_eq!(
+            app.selected,
+            Some(1),
+            "a run owns the tab: the file being transcribed is focused"
+        );
+
+        // Clicking the tab again re-lands on it after the user moved away.
+        app.selected = Some(2);
+        let _ = app.update(Message::SelectTab(PaneTab::Queue));
+        assert_eq!(app.selected, Some(1));
+
     }
 
     #[test]
