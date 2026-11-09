@@ -13604,16 +13604,23 @@ impl App {
         // job, so nothing is launched by the first press.
         .on_press_maybe(primary_message)
         // Dark mode fills read better with a white label; light mode keeps the
-        // dark ink it has always used.
-        .style(color_button_outlined(
-            if running { scheme.danger } else { scheme.green },
-            if theme::is_dark_scheme(&scheme) {
-                Color::WHITE
+        // dark ink it has always used. Cancel is not a destructive action, so
+        // it takes the neutral secondary surface instead of turning red.
+        .style(move |theme: &iced::Theme, status: button::Status| {
+            if running {
+                pill_button_secondary(theme, status)
             } else {
-                scheme.on_accent
-            },
-            scheme,
-        ));
+                color_button_outlined(
+                    scheme.green,
+                    if theme::is_dark_scheme(&scheme) {
+                        Color::WHITE
+                    } else {
+                        scheme.on_accent
+                    },
+                    scheme,
+                )(theme, status)
+            }
+        });
 
         let footer = row![horizontal_space(), clear]
             .align_y(iced::Alignment::Center)
