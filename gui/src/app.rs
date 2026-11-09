@@ -1505,8 +1505,11 @@ pub enum Message {
     /// format list opens on hover.
     RowMenuHover(Option<RowSubmenu>),
     CloseRowMenu,
-    /// The pointer moved onto a history row, or off every row.
+    /// The pointer moved onto a history row; `None` clears every row at once.
     RecentHover(Option<usize>),
+    /// The pointer left one specific history row. Naming the row keeps a late
+    /// exit from clearing the row a newer enter just lit.
+    RecentUnhover(usize),
     /// Switch the left pane between the queue, Favorites, History and
     /// Recordings.
     SelectTab(PaneTab),
@@ -1524,6 +1527,8 @@ pub enum Message {
     QueueDragStart(usize),
     QueueDrop(usize),
     QueueHover(Option<usize>),
+    /// The pointer left one specific queue row; see [`Message::RecentUnhover`].
+    QueueUnhover(usize),
     QueuePointerMoved(Point),
     QueuePointerLeft,
     /// Favorites-only drag reordering: press picks the row up, release on a
@@ -4822,6 +4827,7 @@ impl App {
         // the dialog closes.
         if self.open_modal().is_some() {
             self.transcript_line_hover = None;
+            self.recent_hover = None;
             self.queue_hover = None;
             self.row_menu = None;
             self.row_submenu = None;
@@ -5341,6 +5347,18 @@ impl App {
                     return Task::none();
                 }
                 self.queue_hover = index;
+                Task::none()
+            }
+            // An exit names the row it left, so it cannot clear a hover that a
+            // newer enter already set. Column children are visited in index
+            // order and both messages land in the same update when the pointer
+            // moves up a row: the entering row's `Some(i)` was being overwritten
+            // by the leaving row's `None`, and the row's own `on_enter` never
+            // fires again while the pointer stays inside it.
+            Message::QueueUnhover(index) => {
+                if self.queue_hover == Some(index) {
+                    self.queue_hover = None;
+                }
                 Task::none()
             }
             Message::QueuePointerMoved(point) => {
@@ -6582,15 +6600,24 @@ impl App {
                     return Task::none();
                 }
                 // While a favorite is being dragged, the row's enter names the
-                // row the drop marker should sit above. An exit is ignored: it
-                // can arrive after the next row's enter in the same update, and
-                // clearing on it would drop the marker the pointer is over.
+                // row the drop marker should sit above. The exit below leaves
+                // that marker alone: the pointer's row is what it tracks.
                 if self.favorite_drag.is_some() {
                     if let Some(index) = index {
                         self.favorite_hover = Some(index);
                     }
                 }
                 self.recent_hover = index;
+                Task::none()
+            }
+            // Same rule the queue row and the transcript lines follow: the exit
+            // names the row it left, so a row entered in the same update keeps
+            // its hover. It also leaves the drag marker alone, because a drag
+            // tracks the row under the pointer, not the one it came from.
+            Message::RecentUnhover(index) => {
+                if self.recent_hover == Some(index) {
+                    self.recent_hover = None;
+                }
                 Task::none()
             }
             Message::SelectTab(tab) => {
@@ -6604,7 +6631,9 @@ impl App {
                 // own memory; the recent tabs keep theirs per tab.
                 self.restore_tab_focus(tab);
                 self.version_preview = None;
+                // The hover belongs to the list being left, whichever list it is.
                 self.recent_hover = None;
+                self.queue_hover = None;
                 self.row_menu = None;
                 self.row_submenu = None;
                 self.favorite_drag = None;
@@ -14076,7 +14105,7 @@ impl App {
                 mouse::Interaction::Idle
             })
             .on_enter(Message::RecentHover(Some(index)))
-            .on_exit(Message::RecentHover(None))
+            .on_exit(Message::RecentUnhover(index))
             .on_press(Message::RowPressed(tab, index))
             .on_right_press(Message::OpenRowMenu(tab, Some(index)));
         // Only Favorites is re-orderable; release elsewhere keeps its meaning.
@@ -14786,7 +14815,7 @@ impl App {
             .on_release(Message::QueueDrop(index))
             .on_right_press(Message::OpenRowMenu(PaneTab::Queue, Some(index)))
             .on_enter(Message::QueueHover(Some(index)))
-            .on_exit(Message::QueueHover(None));
+            .on_exit(Message::QueueUnhover(index));
         row.into()
     }
 
@@ -32519,6 +32548,62 @@ mod tests {
         let _ = app.update(Message::CloseRowMenu);
         let _ = app.update(Message::RecentHover(Some(1)));
         assert_eq!(app.recent_hover, Some(1));
+    }
+
+    #[test]
+    fn an_exit_never_clears_a_newer_row_hover() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("row-hover-order");
+        let mut app = pro_app();
+        for name in ["a.txt", "b.txt"] {
+            app.recent.push(RecentEntry {
+                transcript: Some(PathBuf::from(name)),
+                finished_at: 1,
+                ..Default::default()
+            });
+        }
+        app.queue.push(pending_queue_item("a.mp3"));
+        app.queue.push(pending_queue_item("b.mp3"));
+
+        // Moving up a row enqueues the entering row's `Some(i)` and the leaving
+        // row's exit in the same update. A bare `None` on exit wiped the newer
+        // hover, and the row could not re-enter while the pointer stayed on it,
+        // so it never lit up until the pointer left and came back.
+        let _ = app.update(Message::RecentHover(Some(1)));
+        let _ = app.update(Message::RecentUnhover(0));
+        assert_eq!(app.recent_hover, Some(1));
+
+        let _ = app.update(Message::RecentUnhover(1));
+        assert_eq!(app.recent_hover, None);
+
+        let _ = app.update(Message::QueueHover(Some(1)));
+        let _ = app.update(Message::QueueUnhover(0));
+        assert_eq!(app.queue_hover, Some(1));
+
+        let _ = app.update(Message::QueueUnhover(1));
+        assert_eq!(app.queue_hover, None);
+    }
+
+    #[test]
+    fn a_dialog_drops_a_hovered_history_row() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("recent-hover-dialog");
+        let mut app = pro_app();
+        app.recent.push(RecentEntry {
+            transcript: Some(PathBuf::from("a.txt")),
+            finished_at: 1,
+            ..Default::default()
+        });
+        let _ = app.update(Message::RecentHover(Some(0)));
+        assert_eq!(app.recent_hover, Some(0));
+
+        // A dialog owns the pointer: the row behind its scrim must not stay
+        // lit, and a crossing pointer must not relight it.
+        app.settings_open = true;
+        let _ = app.update(Message::Noop);
+        assert_eq!(app.recent_hover, None);
+        let _ = app.update(Message::RecentHover(Some(0)));
+        assert_eq!(app.recent_hover, None);
     }
 
     #[test]
