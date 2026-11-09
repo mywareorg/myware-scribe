@@ -109,10 +109,11 @@ const FOLLOW_JUMP_ROWS: f32 = 10.0;
 /// the pane trailing the pointer.
 const FOLLOW_SEEK_QUIET: Duration = Duration::from_millis(200);
 
-/// How long the countdown runs between Record and capture. The stream is open
-/// for the whole of it, so the meter is live and the capture warm-up has
-/// finished before the first sample is written.
-const COUNTDOWN: Duration = Duration::from_millis(1_500);
+/// How long the countdown runs between Record and capture: three literal
+/// seconds, shown as 3, 2, 1. The stream is open for the whole of it, so the
+/// meter is live and the capture warm-up has finished before the first sample
+/// is written.
+const COUNTDOWN: Duration = Duration::from_secs(3);
 
 /// Logical 4:3 sizing for the window (default) and floors.
 // The transcript header and bottom action row need this much horizontal room
@@ -9823,8 +9824,8 @@ impl App {
         )
     }
 
-    /// The countdown's numerals and ring while one is running. The 1.5 s
-    /// count is split into three half-second steps.
+    /// The countdown's numerals and ring while one is running. Three seconds,
+    /// one numeral per second: 3, 2, 1.
     fn countdown_view(&self, now: Instant) -> Option<CountdownView> {
         let session = self.record.as_ref()?;
         if session.phase != RecordPhase::Countdown {
@@ -9833,7 +9834,7 @@ impl App {
         let ends = session.countdown_ends?;
         let remaining = ends.saturating_duration_since(now);
         let seconds = remaining.as_secs_f32();
-        let numeral = ((seconds / 0.5).ceil() as u8).clamp(1, 3);
+        let numeral = (seconds.ceil() as u8).clamp(1, 3);
         let fraction = (seconds / COUNTDOWN.as_secs_f32()).clamp(0.0, 1.0);
         Some(CountdownView {
             numeral,
@@ -32735,7 +32736,7 @@ mod tests {
     }
 
     #[test]
-    fn countdown_view_numbers_the_three_half_seconds() {
+    fn countdown_view_numbers_three_one_second_steps() {
         let _guard = env_lock();
         let _config = ConfigEnv::new("record-countdown");
         let mut app = pro_app();
@@ -32757,19 +32758,19 @@ mod tests {
             .countdown_view(base + Duration::from_millis(400))
             .unwrap();
         assert_eq!(view.numeral, 3);
-        assert_eq!(view.remaining, Duration::from_millis(1_100));
+        assert_eq!(view.remaining, Duration::from_millis(2_600));
 
         let view = app
-            .countdown_view(base + Duration::from_millis(600))
+            .countdown_view(base + Duration::from_secs(1))
             .unwrap();
         assert_eq!(view.numeral, 2);
-        assert_eq!(view.remaining, Duration::from_millis(900));
+        assert_eq!(view.remaining, Duration::from_secs(2));
 
         let view = app
-            .countdown_view(base + Duration::from_millis(1_000))
+            .countdown_view(base + Duration::from_secs(2))
             .unwrap();
         assert_eq!(view.numeral, 1);
-        assert_eq!(view.remaining, Duration::from_millis(500));
+        assert_eq!(view.remaining, Duration::from_secs(1));
 
         let view = app.countdown_view(base + COUNTDOWN).unwrap();
         assert_eq!(view.numeral, 1);
