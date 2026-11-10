@@ -19,7 +19,20 @@ function Resolve-TargetRoot {
         [Parameter(Mandatory = $true)][string]$Root,
         [string]$TargetDir = ""
     )
-    if ($TargetDir) { return $TargetDir }
+    # PowerShell has no long options: a switch typed with a double dash arrives
+    # as a bare string and binds to whichever parameter has a free position. That
+    # is how `--SkipTests` once became the target directory. Refuse the shape
+    # rather than silently building under a folder named after the flag.
+    if ($TargetDir -like "-*") {
+        $asSwitch = "-" + $TargetDir.TrimStart("-")
+        throw "-TargetDir received '$TargetDir', which looks like a switch. Write it as $asSwitch."
+    }
+    if ($TargetDir) {
+        # A relative value used to be handed to cargo, which resolves it against
+        # the current directory; anchor it here so every caller agrees.
+        if ([System.IO.Path]::IsPathRooted($TargetDir)) { return $TargetDir }
+        return (Join-Path $Root $TargetDir)
+    }
     if ($env:CARGO_TARGET_DIR) { return $env:CARGO_TARGET_DIR }
     if ($env:USERPROFILE) { return (Join-Path $env:USERPROFILE "hb") }
     return (Join-Path $Root "target")

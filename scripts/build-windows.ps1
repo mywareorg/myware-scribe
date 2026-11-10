@@ -44,7 +44,15 @@ powershell -ExecutionPolicy Bypass -File .\scripts\build-windows.ps1
 # Iterate on the step a Vulkan build usually fails in, without compiling.
 .\scripts\build-windows.ps1 -Probe
 #>
-[CmdletBinding()]
+# No positional binding. PowerShell treats a double-dash argument as a bare
+# string, so `--SkipTests` used to land in the first free position, `-TargetDir`,
+# leaving the switch false: the build ran the tests anyway and pushed
+# CARGO_TARGET_DIR to <repo>\--SkipTests. That path is long enough to overflow
+# MAX_PATH inside ggml's nested Vulkan shader configure, which cl reports as
+# "C1041: cannot open program database ... vc140.pdb" even with /FS. Every
+# parameter is named at every call site, so dropping the positions makes a
+# mistyped switch fail with "A positional parameter cannot be found" instead.
+[CmdletBinding(PositionalBinding = $false)]
 param(
     [string]$OutDir = "dist",
     [string]$Version,
@@ -494,6 +502,20 @@ try {
     # probe-shaders.ps1 resolves the same root to find cargo's unpacked whisper.cpp.
     $targetRoot = Resolve-TargetRoot -Root $root -TargetDir $TargetDir
     $env:CARGO_TARGET_DIR = $targetRoot
+
+    # ggml's Vulkan shader generator is an ExternalProject, and the deepest file
+    # it writes is
+    #   <root>\release\build\whisper-rs-sys-<hash>\out\build\ggml\src\
+    #   ggml-vulkan\vulkan-shaders-gen-prefix\src\vulkan-shaders-gen-build\
+    #   CMakeFiles\CMakeScratch\TryCompile-<rand>\CMakeFiles\<target>.dir\vc140.pdb
+    # which measured 209-211 characters below the build root. Past MAX_PATH (260)
+    # cl cannot create that PDB and the nested configure dies with "C1041: cannot
+    # open program database ... vc140.pdb, if multiple CL.EXE write to the same
+    # .PDB file, please use /FS". The /FS advice is wrong: the flag is already on
+    # the command line, and the path is what does not fit.
+    if ($useGpu -and ($targetRoot.Length + 216) -gt 255) {
+        throw "The build directory '$targetRoot' is $($targetRoot.Length) characters long; ggml's Vulkan shader project needs about 216 more and MAX_PATH is 260. Pass a short -TargetDir such as -TargetDir C:\hb, or set CARGO_TARGET_DIR to one."
+    }
 
     foreach ($command in @("cl.exe", "rc.exe", "cmake.exe", "cargo.exe", "rustc.exe")) {
         if (-not (Get-Command $command -ErrorAction SilentlyContinue)) {
