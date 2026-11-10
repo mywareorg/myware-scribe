@@ -2228,11 +2228,12 @@ impl App {
             }
         }
         let pro_override = provider.override_tier();
-        let mut license_state = license::State::load(
-            &Self::license_path().unwrap_or_else(|| PathBuf::from("license.json")),
-            now,
-        );
+        let license_file = Self::license_path().unwrap_or_else(|| PathBuf::from("license.json"));
+        let mut license_state = license::State::load(&license_file, now);
         license_state.refresh(pro_override, now);
+        // Persist the latest observed clock so a system-clock rollback cannot
+        // stretch the trial across restarts.
+        license_state.save(&license_file);
         // Free only offers the balanced model; a downgrade must never leave a
         // Pro-only preset selected.
         let mut preset = settings
@@ -2243,6 +2244,12 @@ impl App {
         if license_state.access.tier == license::Tier::Free {
             preset = Preset::Balanced;
         }
+        let num_speakers = match settings.num_speakers {
+            Some(1) => Some(1),
+            // Everything else, including settings saved before the picker
+            // became Single/Multiple, is a detect run.
+            _ => None,
+        };
         let gpu_crashed = Self::gpu_guard_path().is_some_and(|path| path.exists());
         let mut app = Self {
             output_dir: settings.output_dir.as_ref().map(PathBuf::from),
@@ -2321,12 +2328,7 @@ impl App {
             calibration: None,
             calibration_events: Arc::new(Mutex::new(VecDeque::new())),
             show_timestamps: settings.show_timestamps,
-            num_speakers: match settings.num_speakers {
-                Some(1) => Some(1),
-                // Everything else, including settings saved before the picker
-                // became Single/Multiple, is a detect run.
-                _ => None,
-            },
+            num_speakers,
             language: settings.language.clone(),
             display_order_cache: RefCell::new(None),
             speaker_order_cache: RefCell::new(None),
@@ -4409,6 +4411,24 @@ impl App {
         self.diarized() && self.num_speakers != Some(1)
     }
 
+    /// What the speaker picker shows: the stored choice, or Single on the free
+    /// tier, which has no diarization to ask for.
+    fn speaker_option(&self) -> SpeakerOpt {
+        if self.can(license::Feature::Diarization) {
+            SpeakerOpt::from_value(self.num_speakers)
+        } else {
+            SpeakerOpt::Single
+        }
+    }
+
+    /// Free is a one-speaker tier: any prefill that asks for detection is
+    /// reduced to a single speaker before it can reach a run.
+    fn clamp_speakers_to_tier(&mut self) {
+        if !self.can(license::Feature::Diarization) {
+            self.num_speakers = Some(1);
+        }
+    }
+
     fn save_license(&self) {
         if let Some(path) = Self::license_path() {
             self.license.save(&path);
@@ -5224,6 +5244,12 @@ impl App {
             }
             Message::SpeakerCountChanged(option) => {
                 if matches!(self.status, Status::Running) {
+                    return Task::none();
+                }
+                if option == SpeakerOpt::Multiple && !self.can(license::Feature::Diarization) {
+                    // Free runs one speaker; asking for more is a Pro pitch.
+                    self.num_speakers = Some(1);
+                    self.paywall_open = true;
                     return Task::none();
                 }
                 self.num_speakers = option.value();
@@ -8663,6 +8689,7 @@ impl App {
         }
         self.language = version.language_requested.clone();
         self.num_speakers = version.speakers_requested;
+        self.clamp_speakers_to_tier();
         self.normalize = version.normalize;
         self.save_settings();
         self.version_preview = None;
@@ -9154,7 +9181,14 @@ impl App {
             self.preset = preset;
         }
         self.language = entry.language_requested.clone();
-        self.num_speakers = entry.speakers_requested.map(i32::from);
+        let speakers = entry.speakers_requested.map(i32::from);
+        self.num_speakers = if self.can(license::Feature::Diarization) {
+            speakers
+        } else {
+            // A Pro row's detection count cannot turn the free tier into a
+            // multi-speaker run.
+            Some(1)
+        };
         self.normalize = entry.normalize;
         self.save_settings();
     }
@@ -10111,6 +10145,8 @@ impl App {
             }
         }
         self.cancelled.store(false, Ordering::SeqCst);
+        // Free has no diarization: run the file as a single speaker.
+        self.clamp_speakers_to_tier();
         let use_gpu = self.gpu_selected();
         self.gpu_actual = None;
         self.gpu_fallback = None;
@@ -13607,7 +13643,7 @@ impl App {
 
         let speaker_pick = pick_list(
             SpeakerOpt::ALL,
-            Some(SpeakerOpt::from_value(self.num_speakers)),
+            Some(self.speaker_option()),
             Message::SpeakerCountChanged,
         )
         .menu_style(pick_menu_style(scheme))
@@ -27872,6 +27908,27 @@ mod tests {
             view_menu_inset() - publish_menu_inset(),
             PUBLISH_BUTTON_WIDTH + HEADER_GAP + EDIT_BUTTON_WIDTH + HEADER_GAP
         );
+    }
+
+    #[test]
+    fn the_free_tier_is_one_speaker() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("free-speakers");
+
+        let mut free = App::new();
+        assert_eq!(free.speaker_option(), SpeakerOpt::Single);
+        // The stored setting may say detection; the tier still shows and runs
+        // a single speaker.
+        free.num_speakers = None;
+        assert_eq!(free.speaker_option(), SpeakerOpt::Single);
+
+        // Asking the picker for multiple speakers is a Pro pitch.
+        let _ = free.update(Message::SpeakerCountChanged(SpeakerOpt::Multiple));
+        assert!(free.paywall_open);
+        assert_eq!(free.num_speakers, Some(1));
+
+        let pro = pro_app();
+        assert_eq!(pro.speaker_option(), SpeakerOpt::Multiple);
     }
 
     #[test]
