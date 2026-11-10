@@ -47,3 +47,8 @@ build-console.txt
 dist/env-diagnose.txt
 dist/build-windows.log
 dist/cl-diagnose.txt
+audio/*.json
+audio/*.txt
+audio/*.bak
+audio/*.pdf
+audio/*.docx
