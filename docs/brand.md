@@ -33,10 +33,10 @@ after the models are installed".
 
 ## Product split
 
-- **Free:** Balanced model, one speaker, one file per run, unlimited files and
+- **Free:** Speed model, one speaker, one file per run, unlimited files and
   audio length, microphone recording, copy, search and the automatic `.txt`
   transcript.
-- **Pro:** Speed and Accuracy presets, speaker labels and diarization, batch
+- **Pro:** Balanced and Accuracy presets, speaker labels and diarization, batch
   runs, transcript editing, playback, GPU acceleration, labels, Favorites, and
   every export and report from the Publish menu. One-time purchase, with a
   7-day trial.

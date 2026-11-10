@@ -108,16 +108,18 @@ pub fn run(args: &[String]) -> i32 {
     // unlockable by adding `--cli --preset accuracy`.
     let now = SystemTime::now();
     let provider = license::provider();
-    let mut license_state = license::State::load(
-        &license::license_path().unwrap_or_else(|| std::path::PathBuf::from("license.json")),
-        now,
-    );
+    let license_file =
+        license::license_path().unwrap_or_else(|| std::path::PathBuf::from("license.json"));
+    let mut license_state = license::State::load(&license_file, now);
     license_state.refresh(provider.override_tier(), now);
+    // Keep the clock floor current so a CLI-only user cannot roll the clock back
+    // between runs and stretch the trial.
+    license_state.save(&license_file);
     let tier = license_state.access.tier;
 
     if tier == Tier::Free {
-        let preset_feature = if preset.eq_ignore_ascii_case("speed") {
-            Some(Feature::SpeedPreset)
+        let preset_feature = if preset.eq_ignore_ascii_case("balanced") {
+            Some(Feature::BalancedPreset)
         } else if preset.eq_ignore_ascii_case("accuracy") {
             Some(Feature::AccuracyPreset)
         } else {
@@ -125,7 +127,7 @@ pub fn run(args: &[String]) -> i32 {
         };
         if let Some(feature) = preset_feature {
             eprintln!(
-                "{} is a Pro feature. Use --preset balanced, or start the trial / buy Pro in the app.",
+                "{} is a Pro feature. Use --preset speed, or start the trial / buy Pro in the app.",
                 feature.label()
             );
             return 1;

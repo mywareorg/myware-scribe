@@ -141,7 +141,7 @@ a model it does not use.
 
 Every preset uses a multilingual model:
 
-- `ggml-tiny-q5_1.bin` (speed) — shipped with portable releases; Store installs download it
+- `ggml-tiny-q5_1.bin` (speed) — the free tier's model; shipped with portable releases, downloaded first on a Store install
 - `ggml-small-q5_1.bin` (balanced) — downloaded on demand
 - `ggml-large-v3-turbo-q5_0.bin` (accuracy) — downloaded on demand
 - `sherpa-onnx-pyannote-segmentation-3-0/model.onnx`
@@ -203,7 +203,7 @@ scripts/fetch-models.sh --verify-only
 
 ```bash
 hippo-transcribe --cli audio.mp3                         # default preset (speed)
-hippo-transcribe --cli audio.mp3 --preset balanced
+hippo-transcribe --cli audio.mp3 --preset speed
 hippo-transcribe --cli audio.mp3 --preset accuracy
 hippo-transcribe --cli a.mp3 b.mp3 --output-dir out/     # batch
 hippo-transcribe --cli audio.mp3 --no-timestamps
@@ -213,9 +213,8 @@ hippo-transcribe --cli probe audio.mp3 120               # duration + RMS wavefo
 ```
 
 Presets: `speed` (whisper `tiny`, multilingual), `balanced` (whisper `small`,
-multilingual) and `accuracy` (whisper `large-v3-turbo`). `balanced` is the
-default and the only preset in the free tier; `speed` and `accuracy` require
-Pro.
+multilingual) and `accuracy` (whisper `large-v3-turbo`). `speed` is the default
+and the free tier's preset; `balanced` and `accuracy` require Pro.
 
 Options: `--preset speed|balanced|accuracy`, `--language <code>|auto`,
 `--num-speakers N`, `--output-dir`, `--no-timestamps`,
@@ -268,9 +267,9 @@ over a corpus for backend and preset comparisons.
 
 ## Free and Pro
 
-The free tier is the full-length pipeline: the Balanced model, one speaker, one
+The free tier is the full-length pipeline: the Speed model, one speaker, one
 file per run, unlimited files and audio length, microphone recording, copy,
-search and the automatic `.txt` transcript. Pro adds the Speed and Accuracy
+search and the automatic `.txt` transcript. Pro adds the Balanced and Accuracy
 presets, speaker diarization and labels, batch runs, transcript editing, audio
 playback, GPU acceleration, labels, Favorites and every export or report from
 the Publish menu.
@@ -293,7 +292,7 @@ speaker count and press Transcribe. **Record** captures from the microphone
 (48 kHz mono WAV, written beside your transcripts or to the save location): a
 two-second countdown starts the take, the meter and stop control live in the
 transcription pane, and stopping transcribes it immediately with no setup —
-Speed on Pro, Balanced on free, one speaker. Pressing Record while a batch is transcribing stops the batch, leaves the
+the Speed preset, one speaker. Pressing Record while a batch is transcribing stops the batch, leaves the
 queued files for later, and records the take on its own. A recording workflow
 locks the panel until it finishes. The microphone is chosen in Settings. The Help menu holds the appearance choices (Light,
 Dark, System; System follows the desktop and is the default) and the header

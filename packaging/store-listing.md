@@ -14,7 +14,7 @@ Turn recordings into speaker-labelled transcripts on your own PC. No account, no
 
 Hippo Transcribe turns interviews, meetings and voice notes into readable, speaker-labelled transcripts without sending anything to a server.
 
-Drop in audio or video and it produces a transcript you can read, search, edit and export. Speech recognition and speaker separation run on your own computer. The models download once on first launch — about 215 MB for the standard set — and after that transcription works with the network disconnected. There is no account to create and no usage data to collect.
+Drop in audio or video and it produces a transcript you can read, search, edit and export. Speech recognition and speaker separation run on your own computer. The models download once on first launch — about 35 MB for the free tier's model — and after that transcription works with the network disconnected. There is no account to create and no usage data to collect.
 
 It is built for the recordings people actually have: interviews, panel discussions, lectures and calls recorded on a phone. A single-speaker recording is transcribed in one pass; a recording with two or more speakers is split into turns first, so each line carries the right speaker. Language detection is automatic, or you can pin a language.
 
@@ -27,7 +27,7 @@ What you get:
 - Recording from the microphone with a two-second countdown, then transcription of the take.
 - Light and dark themes, and a desktop notification when the whole queue is done.
 
-The free version covers the whole pipeline: the Balanced model, one speaker, one file per run, unlimited files and audio length, microphone recording, copy, search and the automatic transcript. Pro adds the Speed and Accuracy models, speaker labels, batch runs, transcript editing, playback, GPU acceleration, labels, Favorites, and every export and report from the Publish menu. Pro is a one-time purchase with a 7-day trial; the interface is the same in both, so you can see what it adds before you buy.
+The free version covers the whole pipeline: the Speed model, one speaker, one file per run, unlimited files and audio length, microphone recording, copy, search and the automatic transcript. Pro adds the Balanced and Accuracy models, speaker labels, batch runs, transcript editing, playback, GPU acceleration, labels, Favorites, and every export and report from the Publish menu. Pro is a one-time purchase with a 7-day trial; the interface is the same in both, so you can see what it adds before you buy.
 
 Everything stays on the machine: audio files, transcripts, models and logs. The only network use is downloading the models. There is no telemetry and nothing is uploaded.
 
@@ -43,7 +43,7 @@ Everything stays on the machine: audio files, transcripts, models and logs. The 
 - Word-level karaoke playback and waveform seeking (Pro)
 - Microphone recording with a two-second countdown
 - Automatic language detection, or pin a language
-- Works offline once the models have downloaded (about 215 MB once)
+- Works offline once the models have downloaded (about 35 MB once)
 - No account, no sign-in, no telemetry
 - Light and dark themes, and a notification when the queue finishes
 
@@ -62,7 +62,7 @@ audio to text
 - OS: Windows 10 version 1809 (build 17763) or later, Windows 11.
 - Architecture: x64.
 - Memory: 4 GB minimum, 8 GB recommended.
-- Disk: about 250 MB for the standard model set, or about 600 MB for the accuracy model; the optional summary model adds about 1.1 GB. Plus room for your transcripts and exports.
+- Disk: about 35 MB for the free tier's model, about 215 MB with the Balanced preset's diarization models, or about 600 MB for Accuracy; the optional summary model adds about 1.1 GB. Plus room for your transcripts and exports.
 - Graphics: not required; this release runs inference on the CPU.
 
 ## Support and policy
@@ -80,7 +80,7 @@ Hippo Transcribe is a packaged Win32 desktop application (Windows.FullTrustAppli
 
 Certification notes to paste into the submission:
 
-- First launch downloads the speech recognition models (about 215 MB for the standard set) with progress shown in the app. Transcription works offline afterwards; with no network the app explains that the models are missing. The short sample shipped in the package, sample-short.mp3, gives a quick pass.
+- First launch downloads the free tier's speech recognition model (about 35 MB) with progress shown in the app; Pro presets fetch their larger models when chosen. Transcription works offline afterwards; with no network the app explains that the models are missing. The short sample shipped in the package, sample-short.mp3, gives a quick pass.
 - This is a CPU build. Expect roughly real time: a minute of audio takes about a minute on a modern laptop, longer on an older one.
 - The microphone capability is exercised by Record: a two-second countdown, then capture, then a Stop control.
 - Pro is unlocked by a one-time Store add-on purchase; a 7-day trial is offered once per install from the paywall. The free tier keeps working after the trial ends. A purchase needs a Store-installed build and a Microsoft account; test with the add-on published and the listing hidden.

@@ -333,8 +333,8 @@ const FEATURE_DECK: [FeatureSlide; 7] = [
     FeatureSlide {
         eyebrow: "FREE",
         title: "Full-length transcription. Forever.",
-        body: "Balanced model \u{2014} the best free pipeline. One speaker, unlimited files, \
-             no minutes, no subscription.",
+        body: "Speed model \u{2014} quick drafts on any laptop. One speaker, unlimited \
+             files, no minutes, no subscription.",
     },
     FeatureSlide {
         eyebrow: "PRO",
@@ -2244,7 +2244,7 @@ impl App {
         // Persist the latest observed clock so a system-clock rollback cannot
         // stretch the trial across restarts.
         license_state.save(&license_file);
-        // Free only offers the balanced model; a downgrade must never leave a
+        // Free only offers the speed model; a downgrade must never leave a
         // Pro-only preset selected.
         let mut preset = settings
             .preset
@@ -2252,7 +2252,7 @@ impl App {
             .and_then(Preset::from_arg)
             .unwrap_or_default();
         if license_state.access.tier == license::Tier::Free {
-            preset = Preset::Balanced;
+            preset = Preset::Speed;
         }
         let num_speakers = match settings.num_speakers {
             Some(1) => Some(1),
@@ -4447,8 +4447,13 @@ impl App {
 
     /// Drop back to the free preset after a trial/downgrade.
     fn clamp_preset(&mut self) {
-        if self.preset != Preset::Balanced && !self.can(license::Feature::SpeedPreset) {
-            self.preset = Preset::Balanced;
+        let locked = match self.preset {
+            Preset::Speed => false,
+            Preset::Balanced => !self.can(license::Feature::BalancedPreset),
+            Preset::Accuracy => !self.can(license::Feature::AccuracyPreset),
+        };
+        if locked {
+            self.preset = Preset::Speed;
             self.save_settings();
         }
         if !self.can(license::Feature::Playback) {
@@ -4478,7 +4483,7 @@ impl App {
         };
         self.tip(
             button,
-            "Speed and Accuracy presets, speaker labels, batch, editing and playback",
+            "Balanced and Accuracy presets, speaker labels, batch, editing and playback",
             scheme,
         )
     }
@@ -4533,7 +4538,7 @@ impl App {
         }
 
         body = body.push(
-            text("Free version includes balanced model, unlimited, full length transcriptions")
+            text("Free version includes the speed model, unlimited, full length transcriptions")
                 .size(theme::TEXT_XS)
                 .color(scheme.muted),
         );
@@ -4779,14 +4784,10 @@ impl App {
         self.record.is_some() || self.run_kind == RunKind::Recording
     }
 
-    /// Recordings use their own preset: Speed when the license allows it,
-    /// otherwise Balanced. The user's batch preset is deliberately untouched.
+    /// Recordings use their own preset: Speed, which every tier has. The user's
+    /// batch preset is deliberately untouched.
     fn recording_preset(&self) -> Preset {
-        if self.can(license::Feature::SpeedPreset) {
-            Preset::Speed
-        } else {
-            Preset::Balanced
-        }
+        Preset::Speed
     }
 
     /// The spawn arguments a recording's ASR-only run always uses: one speaker
@@ -5967,10 +5968,8 @@ impl App {
                 Task::none()
             }
             Message::LockedPreset => {
-                self.toast = Some((
-                    "Speed and Accuracy presets are Pro features".to_string(),
-                    Instant::now(),
-                ));
+                // A locked preset reads the same as any other Pro surface.
+                self.paywall_open = true;
                 Task::none()
             }
             Message::FeatureAdvance => {
@@ -7331,24 +7330,14 @@ impl App {
                 if matches!(self.status, Status::Running) {
                     return Task::none();
                 }
-                if !self.shows(license::Audience::ProOnly) && preset != Preset::Balanced {
-                    self.toast = Some((
-                        "Speed and Accuracy presets are Pro features".to_string(),
-                        Instant::now(),
-                    ));
-                    return Task::none();
-                }
                 let feature = match preset {
-                    Preset::Balanced => None,
-                    Preset::Speed => Some(license::Feature::SpeedPreset),
+                    Preset::Speed => None,
+                    Preset::Balanced => Some(license::Feature::BalancedPreset),
                     Preset::Accuracy => Some(license::Feature::AccuracyPreset),
                 };
                 if let Some(feature) = feature {
                     if !self.can(feature) {
-                        self.toast = Some((
-                            format!("{} is a Pro feature", feature.label()),
-                            Instant::now(),
-                        ));
+                        self.paywall_open = true;
                         return Task::none();
                     }
                 }
@@ -8696,6 +8685,7 @@ impl App {
         };
         if let Some(preset) = Preset::from_arg(&version.preset) {
             self.preset = preset;
+            self.clamp_preset();
         }
         self.language = version.language_requested.clone();
         self.num_speakers = version.speakers_requested;
@@ -9188,7 +9178,13 @@ impl App {
             return;
         };
         if let Some(preset) = Preset::from_arg(preset) {
-            self.preset = preset;
+            // A Pro row cannot hand a free build a paid preset.
+            let allowed = match preset {
+                Preset::Speed => true,
+                Preset::Balanced => self.can(license::Feature::BalancedPreset),
+                Preset::Accuracy => self.can(license::Feature::AccuracyPreset),
+            };
+            self.preset = if allowed { preset } else { Preset::Speed };
         }
         self.language = entry.language_requested.clone();
         let speakers = entry.speakers_requested.map(i32::from);
@@ -13597,10 +13593,10 @@ impl App {
         .align_y(iced::Alignment::Center);
 
         let preset: Element<Message> = if !self.shows(license::Audience::ProOnly) {
-            // Free tier: Balanced only, and the picker cannot be opened.
+            // Free tier: Speed only, and the picker cannot be opened.
             self.tip(
                 stack![
-                    pick_list(Preset::ALL, Some(Preset::Balanced), Message::PresetChanged,)
+                    pick_list(Preset::ALL, Some(Preset::Speed), Message::PresetChanged)
                         .style(greyed_pick(scheme))
                         .menu_style(pick_menu_style(scheme))
                         .handle(caret_handle())
@@ -13613,7 +13609,7 @@ impl App {
                     .interaction(mouse::Interaction::Pointer)
                     .on_press(Message::LockedPreset),
                 ],
-                "Speed and Accuracy presets are Pro features",
+                "Balanced and Accuracy presets are Pro features",
                 &scheme,
             )
         } else {
@@ -17077,7 +17073,7 @@ impl App {
             (
                 "Transcription models are missing".to_string(),
                 format!(
-                    "Missing: {missing}. One-time download, about 650 MB. Audio never leaves this device."
+                    "Missing: {missing}. One-time download. Audio never leaves this device."
                 ),
             )
         };
@@ -18602,7 +18598,7 @@ impl App {
         } else if !self.shows(license::Audience::ProOnly) {
             self.tip(
                 stack![
-                    pick_list(Preset::ALL, Some(Preset::Balanced), Message::PresetChanged,)
+                    pick_list(Preset::ALL, Some(Preset::Speed), Message::PresetChanged)
                         .style(greyed_pick(scheme))
                         .menu_style(pick_menu_style(scheme))
                         .handle(caret_handle())
@@ -18615,7 +18611,7 @@ impl App {
                     .interaction(mouse::Interaction::Pointer)
                     .on_press(Message::LockedPreset),
                 ],
-                "Speed and Accuracy presets are Pro features",
+                "Balanced and Accuracy presets are Pro features",
                 &scheme,
             )
         } else {
@@ -30029,14 +30025,14 @@ mod tests {
     }
 
     #[test]
-    fn recording_run_args_use_speed_for_pro_and_balanced_for_free() {
+    fn recording_run_args_always_use_speed() {
         let _guard = env_lock();
         let _config = ConfigEnv::new("recording-run-args");
 
         let free = App::new();
         assert_eq!(
             free.recording_run_args(),
-            (Preset::Balanced, Some(1), false, true)
+            (Preset::Speed, Some(1), false, true)
         );
 
         let pro = pro_app();
@@ -30044,6 +30040,29 @@ mod tests {
             pro.recording_run_args(),
             (Preset::Speed, Some(1), false, true)
         );
+    }
+
+    #[test]
+    fn the_free_tier_uses_the_speed_preset() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("free-preset");
+
+        let mut free = App::new();
+        assert_eq!(free.preset, Preset::Speed);
+
+        // Balanced is the paid preset now.
+        let _ = free.update(Message::PresetChanged(Preset::Balanced));
+        assert!(free.paywall_open);
+        assert_eq!(free.preset, Preset::Speed);
+
+        free.paywall_open = false;
+        let _ = free.update(Message::PresetChanged(Preset::Speed));
+        assert_eq!(free.preset, Preset::Speed);
+
+        let mut pro = pro_app();
+        let _ = pro.update(Message::PresetChanged(Preset::Balanced));
+        assert_eq!(pro.preset, Preset::Balanced);
+        assert!(!pro.paywall_open);
     }
 
     #[test]

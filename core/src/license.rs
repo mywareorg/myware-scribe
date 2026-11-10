@@ -91,12 +91,12 @@ impl Audience {
     }
 }
 
-/// Everything the paid tier unlocks. Free keeps balanced-model transcription,
-/// copy, save, search and recording.
+/// Everything the paid tier unlocks. Free keeps speed-model transcription,
+/// one speaker, copy, save, search and recording.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Feature {
-    /// The `speed` preset.
-    SpeedPreset,
+    /// The `balanced` preset.
+    BalancedPreset,
     /// The `accuracy` preset.
     AccuracyPreset,
     /// Speaker diarization / speaker labels.
@@ -119,7 +119,7 @@ pub enum Feature {
 
 impl Feature {
     pub const ALL: [Feature; 10] = [
-        Feature::SpeedPreset,
+        Feature::BalancedPreset,
         Feature::AccuracyPreset,
         Feature::Diarization,
         Feature::Batch,
@@ -134,7 +134,7 @@ impl Feature {
     /// Human-readable name used by the paywall and toasts.
     pub fn label(self) -> &'static str {
         match self {
-            Feature::SpeedPreset => "Speed preset",
+            Feature::BalancedPreset => "Balanced preset",
             Feature::AccuracyPreset => "Accuracy preset",
             Feature::Diarization => "Speaker labels",
             Feature::Batch => "Batch transcription",
@@ -151,7 +151,7 @@ impl Feature {
 /// The single source of truth for what each tier can do.
 pub fn tier_allows(tier: Tier, feature: Feature) -> bool {
     match feature {
-        Feature::SpeedPreset
+        Feature::BalancedPreset
         | Feature::AccuracyPreset
         | Feature::Diarization
         | Feature::Batch
@@ -249,8 +249,9 @@ impl Default for Access {
     }
 }
 
-/// Persisted license record. Deliberately a plain file: the gate is a
-/// convenience, and a store receipt remains the authority. Never used to
+/// Persisted license record. The gate is a convenience and a store receipt
+/// remains the authority; `last_seen_unix` only stops a clock rollback from
+/// stretching the trial. Deleting the file still resets it. Never used to
 /// delete user data on downgrade.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Record {
@@ -262,6 +263,10 @@ pub struct Record {
     /// Unix seconds when the trial started.
     #[serde(default)]
     pub trial_started_unix: Option<u64>,
+    /// Latest wall-clock time this record has been observed at. A clock rolled
+    /// back below this cannot stretch the trial.
+    #[serde(default)]
+    pub last_seen_unix: Option<u64>,
     #[serde(default)]
     pub source: Option<String>,
     /// Local opt-out used by the development Free/Pro switch. A live trial
@@ -280,6 +285,12 @@ fn days_between(from: u64, to: u64) -> u64 {
     to.saturating_sub(from) / 86_400
 }
 
+/// The clock to judge access by: never earlier than the last moment this
+/// record was seen, so moving the system clock back cannot extend a trial.
+fn observed_now(record: &Record, now_s: u64) -> u64 {
+    now_s.max(record.last_seen_unix.unwrap_or(0))
+}
+
 /// Pure effective-access calculation. `pro_override` lets the dev provider
 /// force a tier without touching the persisted record.
 pub fn access_for(record: &Record, pro_override: Option<bool>, now: SystemTime) -> Access {
@@ -288,7 +299,7 @@ pub fn access_for(record: &Record, pro_override: Option<bool>, now: SystemTime) 
     if pro_override.is_none() && record.force_free {
         return Access::default();
     }
-    let now_s = unix(now);
+    let now_s = observed_now(record, unix(now));
     let pro = pro_override.unwrap_or(record.pro);
     if pro {
         let checked = record.checked_unix.unwrap_or(now_s);
@@ -366,6 +377,11 @@ impl State {
     /// Recompute `access` from the record. Returns true when the effective
     /// tier changed (callers may need to clamp the selected preset).
     pub fn refresh(&mut self, pro_override: Option<bool>, now: SystemTime) -> bool {
+        let now_s = unix(now);
+        self.record.last_seen_unix = Some(match self.record.last_seen_unix {
+            Some(seen) => seen.max(now_s),
+            None => now_s,
+        });
         let before = self.access.tier;
         self.access = access_for(&self.record, pro_override, now);
         if self.access.source == Source::None && self.access.tier == Tier::Free {
@@ -480,7 +496,9 @@ impl Provider for DevProvider {
         "dev"
     }
     fn price(&self) -> Option<String> {
-        Some("$14.99".to_string())
+        // A development build has no store to ask, and a wrong number on the
+        // paywall is worse than none.
+        None
     }
     fn purchase(&mut self) -> PurchaseState {
         match Self::forced() {
@@ -508,9 +526,6 @@ pub fn provider() -> Box<dyn Provider> {
         Box::new(NoneProvider)
     }
 }
-
-/// Display price used before a store client is wired up.
-pub const FALLBACK_PRICE: &str = "$14.99";
 
 #[cfg(test)]
 mod tests {
@@ -556,6 +571,40 @@ mod tests {
         let day7 = access_for(&record, None, at(1_000_000 + 7 * 86_400));
         assert_eq!(day7.tier, Tier::Free);
         assert_eq!(day7.source, Source::None);
+    }
+
+    #[test]
+    fn clock_rollback_does_not_extend_the_trial() {
+        // Five days of the trial have already been observed.
+        let record = Record {
+            trial_started_unix: Some(1_000_000),
+            last_seen_unix: Some(1_000_000 + 5 * 86_400),
+            ..Record::default()
+        };
+        // Moving the clock back to day one leaves two days left, not six.
+        let rolled_back = access_for(&record, None, at(1_000_000 + 86_400));
+        assert_eq!(rolled_back.tier, Tier::Pro);
+        assert_eq!(rolled_back.trial_days_left, Some(2));
+
+        // Once expiry has been observed, any earlier clock stays expired.
+        let expired = Record {
+            trial_started_unix: Some(1_000_000),
+            last_seen_unix: Some(1_000_000 + 8 * 86_400),
+            ..Record::default()
+        };
+        assert_eq!(access_for(&expired, None, at(1_000_000)).tier, Tier::Free);
+    }
+
+    #[test]
+    fn refresh_records_the_latest_clock() {
+        let mut state = State::default();
+        state.start_trial(at(100));
+        assert_eq!(state.record.last_seen_unix, Some(100));
+        state.refresh(None, at(100 + 86_400));
+        assert_eq!(state.record.last_seen_unix, Some(100 + 86_400));
+        // A later refresh with an earlier clock never moves the floor back.
+        state.refresh(None, at(50));
+        assert_eq!(state.record.last_seen_unix, Some(100 + 86_400));
     }
 
     #[test]
