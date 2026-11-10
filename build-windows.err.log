@@ -1,187 +1,378 @@
+   Compiling iced_glyphon v0.6.0
    Compiling whisper-rs-sys v0.15.0
-   Compiling primal-check v0.3.4
-   Compiling toml_datetime v1.1.2+spec-1.1.0
-   Compiling serde_spanned v1.1.2
-   Compiling guillotiere v0.6.2
-   Compiling softbuffer v0.4.8
-   Compiling windows-result v0.1.2
-   Compiling kurbo v0.10.4
-   Compiling windows-threading v0.2.1
-   Compiling num-complex v0.4.6
-   Compiling error-code v3.4.0
-   Compiling extended v0.1.0
-   Compiling percent-encoding v2.3.2
-   Compiling rustls v0.23.46
-   Compiling zmij v1.0.23
-   Compiling thiserror v2.0.21
-   Compiling form_urlencoded v1.2.2
-   Compiling symphonia-format-riff v0.5.5
-   Compiling clipboard-win v5.4.1
-   Compiling rustfft v6.4.1
-   Compiling windows-future v0.3.2
-   Compiling iced_tiny_skia v0.13.0
-   Compiling windows-core v0.54.0
-   Compiling iced_wgpu v0.13.5
-   Compiling toml v1.1.8+spec-1.1.0
-   Compiling idna v1.1.0
-   Compiling winit v0.30.13
-   Compiling rustls-webpki v0.103.15
-   Compiling serde_core v1.0.229
-   Compiling block-buffer v0.10.4
-   Compiling crypto-common v0.1.7
-   Compiling windows-collections v0.3.2
-   Compiling windows-numerics v0.3.1
-   Compiling webpki-roots v1.0.9
-   Compiling symphonia-format-mkv v0.5.5
-   Compiling symphonia-bundle-flac v0.5.5
-   Compiling symphonia-codec-vorbis v0.5.5
-   Compiling symphonia-format-isomp4 v0.5.5
-   Compiling symphonia-format-ogg v0.5.5
-   Compiling iced_runtime v0.13.2
-   Compiling symphonia-format-caf v0.5.5
-   Compiling symphonia-bundle-mp3 v0.5.5
-   Compiling symphonia-codec-adpcm v0.5.5
-   Compiling symphonia-codec-aac v0.5.5
-   Compiling symphonia-codec-pcm v0.5.5
-   Compiling symphonia-codec-alac v0.5.5
-   Compiling windows-sys v0.52.0
-   Compiling thiserror-impl v2.0.21
-   Compiling dpi v0.1.2
-   Compiling cpal v0.15.3
-   Compiling serde v1.0.229
-   Compiling whisper-rs v0.16.0
-   Compiling serde_json v1.0.154
-   Compiling cursor-icon v1.2.0
-   Compiling subtle v2.6.1
-   Compiling symphonia v0.5.5
-   Compiling webpki-roots v0.26.11
-   Compiling windows v0.62.2
-   Compiling digest v0.10.7
-   Compiling url v2.5.8
+   Compiling cpal v0.16.0
+   Compiling num_cpus v1.17.0
    Compiling winresource v0.1.34
-   Compiling iced_renderer v0.13.0
+   Compiling windows v0.62.2
    Compiling windows v0.54.0
-   Compiling realfft v3.5.0
-   Compiling window_clipboard v0.4.1
-   Compiling ogg v0.8.0
+   Compiling llama-cpp-sys-2 v0.1.161
+   Compiling hippo-briefing v1.0.0 (C:\Users\wuphy\Documents\hippo-transcribe\briefing)
+   Compiling num-bigint v0.4.8
+   Compiling enumflags2_derive v0.7.12
+   Compiling iced_wgpu v0.13.5
    Compiling windows-version v0.1.7
-   Compiling serde_derive v1.0.229
-   Compiling base64 v0.22.1
    Compiling pxfm v0.1.30
-   Compiling itoa v1.0.18
-   Compiling cpufeatures v0.2.17
    Compiling dasp_sample v0.11.0
    Compiling rfd v0.15.4
-   Compiling sha2 v0.10.9
-   Compiling moxcms v0.8.1
-   Compiling ureq v2.12.1
-   Compiling tauri-winrt-notification v0.8.1
-   Compiling lewton v0.10.2
-   Compiling iced_winit v0.13.0
-   Compiling rubato v0.15.0
+   Compiling num-rational v0.4.2
+   Compiling iced_renderer v0.13.0
+   Compiling enumflags2 v0.7.12
    Compiling iced_widget v0.13.4
-   Compiling hippo-transcribe-gui v0.1.0 (C:\Users\wuphy\Documents\hippo-transcribe\gui)
+   Compiling hippo-transcribe-gui v1.0.0 (C:\Users\wuphy\Documents\hippo-transcribe\gui)
    Compiling png v0.18.1
    Compiling windows-sys v0.59.0
-   Compiling claxon v0.4.3
-   Compiling num_cpus v1.17.0
-   Compiling byteorder-lite v0.1.0
-   Compiling hound v3.5.1
-   Compiling image v0.25.10
-   Compiling rodio v0.20.1
-   Compiling hippo-transcribe-core v0.1.0 (C:\Users\wuphy\Documents\hippo-transcribe\core)
-   Compiling iced v0.13.1
-   Compiling notify-rust v4.18.2
-error: linking with `link.exe` failed: exit code: 1120
-  |
-  = note: "C:\\Program Files\\Microsoft Visual Studio\\18\\Community\\VC\\Tools\\MSVC\\14.51.36231\\bin\\HostX64\\x64\\link.exe" "/NOLOGO" "<1 object files omitted>" "shell32.lib" "C:\\Users\\wuphy\\hb\\release\\deps\\rustceWFwM0/{libwindows_version-47a4f2cc38cd3716,libwindows-9990dbfc281c3f60,libwindows_future-4b160391b937a888,libwindows_threading-47647442c5549e05,libwindows_core-ead86fc2c79e56a4,libwindows_strings-11c0e4f4091b0691,libwindows_result-46a42f5cbc64a576,libring-c9eaa864e61029a6,libwhisper_rs_sys-9bfa6dd7a82bbfb7,libwindows_sys-f0c122401bd2b808,liblibloading-6dad10652d064d8e,libparking_lot_core-5b09bf83f3c85d02,libstd-3854312d46c17a37}.rlib" "<sysroot>\\lib\\rustlib\\x86_64-pc-windows-msvc\\lib/libcompiler_builtins-*.rlib" "C:\\Users\\wuphy\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\windows_x86_64_msvc-0.52.6\\lib\\windows.0.52.0.lib" "bcrypt.lib" "advapi32.lib" "advapi32.lib" "C:\\Users\\wuphy\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\windows_x86_64_msvc-0.52.6\\lib\\windows.0.52.0.lib" "C:\\Users\\wuphy\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\windows_x86_64_msvc-0.52.6\\lib\\windows.0.52.0.lib" "C:\\Users\\wuphy\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\windows_x86_64_msvc-0.52.6\\lib\\windows.0.52.0.lib" "kernel32.lib" "user32.lib" "shell32.lib" "gdi32.lib" "advapi32.lib" "C:\\Users\\wuphy\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\windows_x86_64_msvc-0.52.6\\lib\\windows.0.52.0.lib" "kernel32.lib" "ole32.lib" "opengl32.lib" "C:\\Users\\wuphy\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\windows_x86_64_msvc-0.52.6\\lib\\windows.0.52.0.lib" "C:\\Users\\wuphy\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\windows_x86_64_msvc-0.52.6\\lib\\windows.0.52.0.lib" "advapi32.lib" "cfgmgr32.lib" "d2d1.lib" "d3d12.lib" "d3dcompiler.lib" "dcomp.lib" "dwrite.lib" "dxgi.lib" "gdi32.lib" "kernel32.lib" "msimg32.lib" "ole32.lib" "oleaut32.lib" "opengl32.lib" "synchronization.lib" "user32.lib" "windowscodecs.lib" "winspool.lib" "kernel32.lib" "kernel32.lib" "kernel32.lib" "ntdll.lib" "userenv.lib" "ws2_32.lib" "dbghelp.lib" "/defaultlib:libcmt" "/NXCOMPAT" "/LIBPATH:C:\\Users\\wuphy\\hb\\release\\build\\ring-8fff6ad63c4c3b1b\\out" "/LIBPATH:C:\\Users\\wuphy\\hb\\release\\build\\whisper-rs-sys-3b14f51bf6218bdc\\out\\build" "/LIBPATH:C:\\Users\\wuphy\\hb\\release\\build\\whisper-rs-sys-3b14f51bf6218bdc\\out\\build\\CMakeFiles" "/LIBPATH:C:\\Users\\wuphy\\hb\\release\\build\\whisper-rs-sys-3b14f51bf6218bdc\\out\\build\\CMakeFiles\\4.3.1-msvc1" "/LIBPATH:C:\\Users\\wuphy\\hb\\release\\build\\whisper-rs-sys-3b14f51bf6218bdc\\out\\build\\CMakeFiles\\4.3.1-msvc1\\CompilerIdASM" "/LIBPATH:C:\\Users\\wuphy\\hb\\release\\build\\whisper-rs-sys-3b14f51bf6218bdc\\out\\build\\CMakeFiles\\4.3.1-msvc1\\CompilerIdC" "/LIBPATH:C:\\Users\\wuphy\\hb\\release\\build\\whisper-rs-sys-3b14f51bf6218bdc\\out\\build\\CMakeFiles\\4.3.1-msvc1\\CompilerIdC\\tmp" "/LIBPATH:C:\\Users\\wuphy\\hb\\release\\build\\whisper-rs-sys-3b14f51bf6218bdc\\out\\build\\CMakeFiles\\4.3.1-msvc1\\CompilerIdCXX" "/LIBPATH:C:\\Users\\wuphy\\hb\\release\\build\\whisper-rs-sys-3b14f51bf6218bdc\\out\\build\\CMakeFiles\\4.3.1-msvc1\\CompilerIdCXX\\tmp" "/LIBPATH:C:\\Users\\wuphy\\hb\\release\\build\\whisper-rs-sys-3b14f51bf6218bdc\\out\\build\\CMakeFiles\\CMakeScratch" "/LIBPATH:C:\\Users\\wuphy\\hb\\release\\build\\whisper-rs-sys-3b14f51bf6218bdc\\out\\build\\CMakeFiles\\pkgRedirects" "/LIBPATH:C:\\Users\\wuphy\\hb\\release\\build\\whisper-rs-sys-3b14f51bf6218bdc\\out\\build\\CMakeFiles\\ShowIncludes" "/LIBPATH:C:\\Users\\wuphy\\hb\\release\\build\\whisper-rs-sys-3b14f51bf6218bdc\\out\\build\\ggml" "/LIBPATH:C:\\Users\\wuphy\\hb\\release\\build\\whisper-rs-sys-3b14f51bf6218bdc\\out\\build\\ggml\\CMakeFiles" "/LIBPATH:C:\\Users\\wuphy\\hb\\release\\build\\whisper-rs-sys-3b14f51bf6218bdc\\out\\build\\ggml\\src" "/LIBPATH:C:\\Users\\wuphy\\hb\\release\\build\\whisper-rs-sys-3b14f51bf6218bdc\\out\\build\\ggml\\src\\CMakeFiles" "/LIBPATH:C:\\Users\\wuphy\\hb\\release\\build\\whisper-rs-sys-3b14f51bf6218bdc\\out\\build\\ggml\\src\\CMakeFiles\\ggml-base.dir" "/LIBPATH:C:\\Users\\wuphy\\hb\\release\\build\\whisper-rs-sys-3b14f51bf6218bdc\\out\\build\\ggml\\src\\CMakeFiles\\ggml-cpu.dir" "/LIBPATH:C:\\Users\\wuphy\\hb\\release\\build\\whisper-rs-sys-3b14f51bf6218bdc\\out\\build\\ggml\\src\\CMakeFiles\\ggml-cpu.dir\\ggml-cpu" "/LIBPATH:C:\\Users\\wuphy\\hb\\release\\build\\whisper-rs-sys-3b14f51bf6218bdc\\out\\build\\ggml\\src\\CMakeFiles\\ggml-cpu.dir\\ggml-cpu\\amx" "/LIBPATH:C:\\Users\\wuphy\\hb\\release\\build\\whisper-rs-sys-3b14f51bf6218bdc\\out\\build\\ggml\\src\\CMakeFiles\\ggml-cpu.dir\\ggml-cpu\\arch" "/LIBPATH:C:\\Users\\wuphy\\hb\\release\\build\\whisper-rs-sys-3b14f51bf6218bdc\\out\\build\\ggml\\src\\CMakeFiles\\ggml-cpu.dir\\ggml-cpu\\arch\\x86" "/LIBPATH:C:\\Users\\wuphy\\hb\\release\\build\\whisper-rs-sys-3b14f51bf6218bdc\\out\\build\\ggml\\src\\CMakeFiles\\ggml.dir" "/LIBPATH:C:\\Users\\wuphy\\hb\\release\\build\\whisper-rs-sys-3b14f51bf6218bdc\\out\\build\\ggml\\src\\ggml-cpu" "/LIBPATH:C:\\Users\\wuphy\\hb\\release\\build\\whisper-rs-sys-3b14f51bf6218bdc\\out\\build\\ggml\\src\\ggml-cpu\\CMakeFiles" "/LIBPATH:C:\\Users\\wuphy\\hb\\release\\build\\whisper-rs-sys-3b14f51bf6218bdc\\out\\build\\src" "/LIBPATH:C:\\Users\\wuphy\\hb\\release\\build\\whisper-rs-sys-3b14f51bf6218bdc\\out\\build\\src\\CMakeFiles" "/LIBPATH:C:\\Users\\wuphy\\hb\\release\\build\\whisper-rs-sys-3b14f51bf6218bdc\\out\\build\\src\\CMakeFiles\\whisper.dir" "/LIBPATH:C:\\Users\\wuphy\\hb\\release\\build\\whisper-rs-sys-3b14f51bf6218bdc\\out" "/LIBPATH:C:\\Users\\wuphy\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\windows_x86_64_msvc-0.52.6\\lib" "/OUT:C:\\Users\\wuphy\\hb\\release\\deps\\hippo_transcribe.exe" "/SUBSYSTEM:windows" "/ENTRY:mainCRTStartup" "/OPT:REF,ICF" "/DEBUG" "/PDBALTPATH:%_PDB%" "/NATVIS:<sysroot>\\lib\\rustlib\\etc\\intrinsic.natvis" "/NATVIS:<sysroot>\\lib\\rustlib\\etc\\liballoc.natvis" "/NATVIS:<sysroot>\\lib\\rustlib\\etc\\libcore.natvis" "/NATVIS:<sysroot>\\lib\\rustlib\\etc\\libstd.natvis" "/NATVIS:C:\\Users\\wuphy\\hb\\release\\deps\\rustceWFwM0\\hippo_transcribe-0.natvis" "/NATVIS:C:\\Users\\wuphy\\hb\\release\\deps\\rustceWFwM0\\hippo_transcribe-1.natvis" "/NATVIS:C:\\Users\\wuphy\\hb\\release\\deps\\rustceWFwM0\\hippo_transcribe-2.natvis" "C:\\Users\\wuphy\\hb\\release\\build\\hippo-transcribe-gui-902adefe5e59b0b7\\out\\main_res.res"
-  = note: some arguments are omitted. use `--verbose` to show all linker arguments
-  = note: LINK : warning LNK4098: defaultlib 'MSVCRT' conflicts with use of other libs; use /NODEFAULTLIB:library
-          LINK : warning LNK4286: symbol '__acrt_iob_func' defined in 'libucrt.lib(_file.obj)' is imported by 'libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(unary-ops.cpp.obj)'
-          LINK : warning LNK4217: symbol '__acrt_iob_func' defined in 'libucrt.lib(_file.obj)' is imported by 'libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(whisper.cpp.obj)' in function '"void __cdecl whisper_log_callback_default(enum ggml_log_level,char const *,void *)" (?whisper_log_callback_default@@YAXW4ggml_log_level@@PEBDPEAX@Z)'
-          LINK : warning LNK4286: symbol '__acrt_iob_func' defined in 'libucrt.lib(_file.obj)' is imported by 'libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(ggml.c.obj)'
-          LINK : warning LNK4286: symbol '__acrt_iob_func' defined in 'libucrt.lib(_file.obj)' is imported by 'libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(ggml-quants.c.obj)'
-          LINK : warning LNK4286: symbol '__acrt_iob_func' defined in 'libucrt.lib(_file.obj)' is imported by 'libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(ggml-cpu.c.obj)'
-          LINK : warning LNK4217: symbol '_get_stream_buffer_pointers' defined in 'libucrt.lib(_file.obj)' is imported by 'libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(whisper.cpp.obj)' in function '"public: __cdecl std::basic_ifstream<char,struct std::char_traits<char> >::basic_ifstream<char,struct std::char_traits<char> >(wchar_t const *,int,int)" (??0?$basic_ifstream@DU?$char_traits@D@std@@@std@@QEAA@PEB_WHH@Z)'
-          LINK : warning LNK4217: symbol 'fclose' defined in 'libucrt.lib(fclose.obj)' is imported by 'libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(whisper.cpp.obj)' in function '"public: class std::basic_filebuf<char,struct std::char_traits<char> > * __cdecl std::basic_filebuf<char,struct std::char_traits<char> >::close(void)" (?close@?$basic_filebuf@DU?$char_traits@D@std@@@std@@QEAAPEAV12@XZ)'
-          LINK : warning LNK4286: symbol 'fclose' defined in 'libucrt.lib(fclose.obj)' is imported by 'libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(ggml.c.obj)'
-          LINK : warning LNK4217: symbol 'fflush' defined in 'libucrt.lib(fflush.obj)' is imported by 'libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(whisper.cpp.obj)' in function '"void __cdecl whisper_log_callback_default(enum ggml_log_level,char const *,void *)" (?whisper_log_callback_default@@YAXW4ggml_log_level@@PEBDPEAX@Z)'
-          LINK : warning LNK4286: symbol 'fflush' defined in 'libucrt.lib(fflush.obj)' is imported by 'libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(ggml.c.obj)'
-          LINK : warning LNK4217: symbol 'fputc' defined in 'libucrt.lib(fputc.obj)' is imported by 'libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(whisper.cpp.obj)' in function '"bool __cdecl std::_Fputc<char>(char,struct _iobuf *)" (??$_Fputc@D@std@@YA_NDPEAU_iobuf@@@Z)'
-          LINK : warning LNK4217: symbol '_lock_file' defined in 'libucrt.lib(_file.obj)' is imported by 'libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(whisper.cpp.obj)' in function '"public: virtual void __cdecl std::basic_filebuf<char,struct std::char_traits<char> >::_Lock(void)" (?_Lock@?$basic_filebuf@DU?$char_traits@D@std@@@std@@UEAAXXZ)'
-          LINK : warning LNK4217: symbol '_unlock_file' defined in 'libucrt.lib(_file.obj)' is imported by 'libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(whisper.cpp.obj)' in function '"public: virtual void __cdecl std::basic_filebuf<char,struct std::char_traits<char> >::_Unlock(void)" (?_Unlock@?$basic_filebuf@DU?$char_traits@D@std@@@std@@UEAAXXZ)'
-          LINK : warning LNK4286: symbol '__stdio_common_vfprintf' defined in 'libucrt.lib(output.obj)' is imported by 'libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(unary-ops.cpp.obj)'
-          LINK : warning LNK4217: symbol '__stdio_common_vfprintf' defined in 'libucrt.lib(output.obj)' is imported by 'libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(whisper.cpp.obj)' in function '_vfprintf_l'
-          LINK : warning LNK4286: symbol '__stdio_common_vfprintf' defined in 'libucrt.lib(output.obj)' is imported by 'libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(ggml.c.obj)'
-          LINK : warning LNK4286: symbol '__stdio_common_vfprintf' defined in 'libucrt.lib(output.obj)' is imported by 'libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(ggml-quants.c.obj)'
-          LINK : warning LNK4286: symbol '__stdio_common_vfprintf' defined in 'libucrt.lib(output.obj)' is imported by 'libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(ggml-cpu.c.obj)'
-          LINK : warning LNK4217: symbol '__stdio_common_vsprintf' defined in 'libucrt.lib(output.obj)' is imported by 'libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(whisper.cpp.obj)' in function '"class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > __cdecl format(char const *,...)" (?format@@YA?AV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@PEBDZZ)'
-          LINK : warning LNK4286: symbol '__stdio_common_vsprintf' defined in 'libucrt.lib(output.obj)' is imported by 'libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(ggml.c.obj)'
-          LINK : warning LNK4286: symbol '__stdio_common_vsprintf' defined in 'libucrt.lib(output.obj)' is imported by 'libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(ggml-backend.cpp.obj)'
-          LINK : warning LNK4286: symbol 'calloc' defined in 'libucrt.lib(calloc.obj)' is imported by 'libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(ggml-backend-reg.cpp.obj)'
-          LINK : warning LNK4217: symbol 'calloc' defined in 'libucrt.lib(calloc.obj)' is imported by 'libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(whisper.cpp.obj)' in function '"protected: void __cdecl std::time_get<char,class std::istreambuf_iterator<char,struct std::char_traits<char> > >::_Getvals<wchar_t>(wchar_t,class std::_Locinfo const &)" (??$_Getvals@_W@?$time_get@DV?$istreambuf_iterator@DU?$char_traits@D@std@@@std@@@std@@IEAAX_WAEBV_Locinfo@1@@Z)'
-          LINK : warning LNK4286: symbol 'calloc' defined in 'libucrt.lib(calloc.obj)' is imported by 'libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(ggml.c.obj)'
-          LINK : warning LNK4286: symbol 'calloc' defined in 'libucrt.lib(calloc.obj)' is imported by 'libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(ggml-alloc.c.obj)'
-          LINK : warning LNK4286: symbol 'calloc' defined in 'libucrt.lib(calloc.obj)' is imported by 'libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(ggml-backend.cpp.obj)'
-          LINK : warning LNK4286: symbol 'free' defined in 'libucrt.lib(free.obj)' is imported by 'libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(ggml-quants.c.obj)'
-          LINK : warning LNK4286: symbol 'free' defined in 'libucrt.lib(free.obj)' is imported by 'msvcprt.lib(locale0_implib.obj)'
-          LINK : warning LNK4286: symbol 'free' defined in 'libucrt.lib(free.obj)' is imported by 'msvcprt.lib(regex.obj)'
-          LINK : warning LNK4286: symbol 'free' defined in 'libucrt.lib(free.obj)' is imported by 'msvcprt.lib(filesystem.obj)'
-          LINK : warning LNK4217: symbol 'free' defined in 'libucrt.lib(free.obj)' is imported by 'libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(whisper.cpp.obj)' in function '"public: __cdecl std::_Buf<char>::~_Buf<char>(void)" (??1?$_Buf@D@std@@QEAA@XZ)'
-          LINK : warning LNK4286: symbol 'free' defined in 'libucrt.lib(free.obj)' is imported by 'libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(ggml.c.obj)'
-          LINK : warning LNK4286: symbol 'free' defined in 'libucrt.lib(free.obj)' is imported by 'libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(ggml-alloc.c.obj)'
-          LINK : warning LNK4286: symbol 'free' defined in 'libucrt.lib(free.obj)' is imported by 'libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(ggml-backend.cpp.obj)'
-          LINK : warning LNK4286: symbol 'malloc' defined in 'libucrt.lib(malloc.obj)' is imported by 'libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(ggml-quants.c.obj)'
-          LINK : warning LNK4286: symbol 'malloc' defined in 'libucrt.lib(malloc.obj)' is imported by 'msvcprt.lib(locale0_implib.obj)'
-          LINK : warning LNK4286: symbol 'malloc' defined in 'libucrt.lib(malloc.obj)' is imported by 'msvcprt.lib(regex.obj)'
-          LINK : warning LNK4286: symbol 'malloc' defined in 'libucrt.lib(malloc.obj)' is imported by 'msvcprt.lib(filesystem.obj)'
-          LINK : warning LNK4217: symbol 'malloc' defined in 'libucrt.lib(malloc.obj)' is imported by 'libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(whisper.cpp.obj)' in function '"struct whisper_batch __cdecl whisper_batch_init(int,int)" (?whisper_batch_init@@YA?AUwhisper_batch@@HH@Z)'
-          LINK : warning LNK4286: symbol 'malloc' defined in 'libucrt.lib(malloc.obj)' is imported by 'libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(ggml.c.obj)'
-          LINK : warning LNK4286: symbol 'malloc' defined in 'libucrt.lib(malloc.obj)' is imported by 'libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(ggml-alloc.c.obj)'
-          LINK : warning LNK4286: symbol 'malloc' defined in 'libucrt.lib(malloc.obj)' is imported by 'libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(ggml-backend.cpp.obj)'
-          LINK : warning LNK4217: symbol 'abort' defined in 'libucrt.lib(abort.obj)' is imported by 'libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(whisper.cpp.obj)' in function '"struct ggml_tensor * __cdecl dtw_and_backtrace(struct ggml_context *,struct ggml_tensor *)" (?dtw_and_backtrace@@YAPEAUggml_tensor@@PEAUggml_context@@PEAU1@@Z)'
-          LINK : warning LNK4286: symbol 'abort' defined in 'libucrt.lib(abort.obj)' is imported by 'libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(ggml.c.obj)'
-          LINK : warning LNK4286: symbol 'abort' defined in 'libucrt.lib(abort.obj)' is imported by 'msvcprt.lib(filesystem.obj)'
-          LINK : warning LNK4217: symbol 'terminate' defined in 'libucrt.lib(terminate.obj)' is imported by 'libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(whisper.cpp.obj)' in function '"void __cdecl std::_Destroy_range<class std::allocator<class std::thread> >(class std::thread *,class std::thread * const,class std::allocator<class std::thread> &)" (??$_Destroy_range@V?$allocator@Vthread@std@@@std@@@std@@YAXPEAVthread@0@QEAV10@AEAV?$allocator@Vthread@std@@@0@@Z)'
-          LINK : warning LNK4217: symbol '_errno' defined in 'libucrt.lib(errno.obj)' is imported by 'libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(ggml.c.obj)' in function 'ggml_fopen'
-          LINK : warning LNK4217: symbol 'atoi' defined in 'libucrt.lib(atox.obj)' is imported by 'libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(ggml-backend.cpp.obj)' in function 'ggml_backend_sched_new'
-          LINK : warning LNK4217: symbol 'roundf' defined in 'libucrt.lib(round.obj)' is imported by 'libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(ggml-quants.c.obj)' in function 'quantize_row_q8_0_ref'
-          LINK : warning LNK4286: symbol 'roundf' defined in 'libucrt.lib(round.obj)' is imported by 'libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(repack.cpp.obj)'
-          LINK : warning LNK4286: symbol 'roundf' defined in 'libucrt.lib(round.obj)' is imported by 'libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(unary-ops.cpp.obj)'
-          LINK : warning LNK4217: symbol 'qsort' defined in 'libucrt.lib(qsort.obj)' is imported by 'libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(ggml-quants.c.obj)' in function 'iq2xs_init_impl'
-          LINK : warning LNK4217: symbol 'truncf' defined in 'libucrt.lib(truncf.obj)' is imported by 'libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(unary-ops.cpp.obj)' in function '"void __cdecl apply_unary_op<&float __cdecl op_trunc(float),unsigned short,unsigned short>(struct ggml_compute_params const *,struct ggml_tensor *)" (??$apply_unary_op@$1?op_trunc@@YAMM@ZGG@@YAXPEBUggml_compute_params@@PEAUggml_tensor@@@Z)'
-          LINK : warning LNK4217: symbol '___lc_locale_name_func' defined in 'libucrt.lib(initctype.obj)' is imported by 'msvcprt.lib(regex.obj)' in function '__std_regex_transform_primary_char'
-          LINK : warning LNK4217: symbol '___lc_collate_cp_func' defined in 'libucrt.lib(initctype.obj)' is imported by 'msvcprt.lib(regex.obj)' in function '__std_regex_transform_primary_char'
-          LINK : warning LNK4217: symbol '___lc_codepage_func' defined in 'libucrt.lib(initctype.obj)' is imported by 'msvcprt.lib(filesystem.obj)' in function '__std_fs_code_page'
-          libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(whisper.cpp.obj) : error LNK2019: unresolved external symbol __imp_fgetc referenced in function "bool __cdecl std::_Fgetc<char>(char &,struct _iobuf *)" (??$_Fgetc@D@std@@YA_NAEADPEAU_iobuf@@@Z)
-          libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(whisper.cpp.obj) : error LNK2019: unresolved external symbol __imp_fgetpos referenced in function "protected: virtual class std::fpos<struct _Mbstatet> __cdecl std::basic_filebuf<char,struct std::char_traits<char> >::seekoff(__int64,int,int)" (?seekoff@?$basic_filebuf@DU?$char_traits@D@std@@@std@@MEAA?AV?$fpos@U_Mbstatet@@@2@_JHH@Z)
-          libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(whisper.cpp.obj) : error LNK2019: unresolved external symbol __imp_fputs referenced in function "void __cdecl whisper_log_callback_default(enum ggml_log_level,char const *,void *)" (?whisper_log_callback_default@@YAXW4ggml_log_level@@PEBDPEAX@Z)
-          libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(ggml.c.obj) : error LNK2001: unresolved external symbol __imp_fputs
-          libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(whisper.cpp.obj) : error LNK2019: unresolved external symbol __imp_fread referenced in function "protected: virtual __int64 __cdecl std::basic_filebuf<char,struct std::char_traits<char> >::xsgetn(char *,__int64)" (?xsgetn@?$basic_filebuf@DU?$char_traits@D@std@@@std@@MEAA_JPEAD_J@Z)
-          libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(whisper.cpp.obj) : error LNK2019: unresolved external symbol __imp_fsetpos referenced in function "protected: virtual class std::fpos<struct _Mbstatet> __cdecl std::basic_filebuf<char,struct std::char_traits<char> >::seekpos(class std::fpos<struct _Mbstatet>,int)" (?seekpos@?$basic_filebuf@DU?$char_traits@D@std@@@std@@MEAA?AV?$fpos@U_Mbstatet@@@2@V32@H@Z)
-          libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(whisper.cpp.obj) : error LNK2019: unresolved external symbol __imp__fseeki64 referenced in function "protected: virtual class std::fpos<struct _Mbstatet> __cdecl std::basic_filebuf<char,struct std::char_traits<char> >::seekoff(__int64,int,int)" (?seekoff@?$basic_filebuf@DU?$char_traits@D@std@@@std@@MEAA?AV?$fpos@U_Mbstatet@@@2@_JHH@Z)
-          libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(whisper.cpp.obj) : error LNK2019: unresolved external symbol __imp_fwrite referenced in function "protected: bool __cdecl std::basic_filebuf<char,struct std::char_traits<char> >::_Endwrite(void)" (?_Endwrite@?$basic_filebuf@DU?$char_traits@D@std@@@std@@IEAA_NXZ)
-          libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(whisper.cpp.obj) : error LNK2019: unresolved external symbol __imp_setvbuf referenced in function "protected: virtual class std::basic_streambuf<char,struct std::char_traits<char> > * __cdecl std::basic_filebuf<char,struct std::char_traits<char> >::setbuf(char *,__int64)" (?setbuf@?$basic_filebuf@DU?$char_traits@D@std@@@std@@MEAAPEAV?$basic_streambuf@DU?$char_traits@D@std@@@2@PEAD_J@Z)
-          libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(whisper.cpp.obj) : error LNK2019: unresolved external symbol __imp_ungetc referenced in function "bool __cdecl std::_Ungetc<char>(char const &,struct _iobuf *)" (??$_Ungetc@D@std@@YA_NAEBDPEAU_iobuf@@@Z)
-          libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(whisper.cpp.obj) : error LNK2019: unresolved external symbol __imp_realloc referenced in function "public: void __cdecl std::_Buf<char>::_Insert2<char const *>(char const *,char const *)" (??$_Insert2@PEBD@?$_Buf@D@std@@QEAAXPEBD0@Z)
-          libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(ggml-alloc.c.obj) : error LNK2001: unresolved external symbol __imp_realloc
-          libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(ggml-backend.cpp.obj) : error LNK2001: unresolved external symbol __imp_realloc
-          libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(whisper.cpp.obj) : error LNK2019: unresolved external symbol __imp_rand referenced in function "public: __cdecl <lambda_8af2dce33bc0acf83d1812eae579f0bc>::operator()(int)const " (??R<lambda_8af2dce33bc0acf83d1812eae579f0bc>@@QEBA@H@Z)
-          libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(whisper.cpp.obj) : error LNK2019: unresolved external symbol __imp__beginthreadex referenced in function "public: __cdecl std::thread::thread<int (__cdecl&)(struct whisper_context *,struct whisper_state *,struct whisper_full_params,float const *,int),struct whisper_context * &,struct whisper_state * &,struct whisper_full_params,float const *,int const &,0>(int (__cdecl&)(struct whisper_context *,struct whisper_state *,struct whisper_full_params,float const *,int),struct whisper_context * &,struct whisper_state * &,struct whisper_full_params &&,float const * &&,int const &)" (??$?0A6AHPEAUwhisper_context@@PEAUwhisper_state@@Uwhisper_full_params@@PEBMH@ZAEAPEAU0@AEAPEAU1@U2@PEBMAEBH$0A@@thread@std@@QEAA@A6AHPEAUwhisper_context@@PEAUwhisper_state@@Uwhisper_full_params@@PEBMH@ZAEAPEAU2@AEAPEAU3@$$QEAU4@$$QEAPEBMAEBH@Z)
-          libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(ggml.c.obj) : error LNK2019: unresolved external symbol __imp__wfopen referenced in function ggml_fopen
-          libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(ggml.c.obj) : error LNK2019: unresolved external symbol __imp__aligned_free referenced in function ggml_aligned_free
-          libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(ggml.c.obj) : error LNK2019: unresolved external symbol __imp__aligned_malloc referenced in function ggml_aligned_malloc
-          libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(ggml.c.obj) : error LNK2019: unresolved external symbol __imp_clock referenced in function ggml_cycles
-          libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(ggml-backend.cpp.obj) : error LNK2019: unresolved external symbol __imp_getenv referenced in function ggml_backend_sched_new
-          libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(ggml-backend-reg.cpp.obj) : error LNK2001: unresolved external symbol __imp_getenv
-          libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(ggml-backend-reg.cpp.obj) : error LNK2019: unresolved external symbol __imp_tolower referenced in function "bool __cdecl striequals(char const *,char const *)" (?striequals@@YA_NPEBD0@Z)
-          libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(ggml-quants.c.obj) : error LNK2019: unresolved external symbol __imp_lroundf referenced in function quantize_row_tq1_0_ref
-          libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(unary-ops.cpp.obj) : error LNK2019: unresolved external symbol __imp_expm1f referenced in function "void __cdecl apply_unary_op<&float __cdecl op_elu(float),unsigned short,unsigned short>(struct ggml_compute_params const *,struct ggml_tensor *)" (??$apply_unary_op@$1?op_elu@@YAMM@ZGG@@YAXPEBUggml_compute_params@@PEAUggml_tensor@@@Z)
-          libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(unary-ops.cpp.obj) : error LNK2019: unresolved external symbol __imp_fmaxf referenced in function "void __cdecl apply_unary_op<&float __cdecl op_hardsigmoid(float),unsigned short,unsigned short>(struct ggml_compute_params const *,struct ggml_tensor *)" (??$apply_unary_op@$1?op_hardsigmoid@@YAMM@ZGG@@YAXPEBUggml_compute_params@@PEAUggml_tensor@@@Z)
-          libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(ops.cpp.obj) : error LNK2001: unresolved external symbol __imp_fmaxf
-          libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(unary-ops.cpp.obj) : error LNK2019: unresolved external symbol __imp_fminf referenced in function "void __cdecl apply_unary_op<&float __cdecl op_hardsigmoid(float),unsigned short,unsigned short>(struct ggml_compute_params const *,struct ggml_tensor *)" (??$apply_unary_op@$1?op_hardsigmoid@@YAMM@ZGG@@YAXPEBUggml_compute_params@@PEAUggml_tensor@@@Z)
-          libwhisper_rs_sys-9bfa6dd7a82bbfb7.rlib(ops.cpp.obj) : error LNK2019: unresolved external symbol __imp_erff referenced in function "void __cdecl ggml_compute_forward_geglu_erf_f16(struct ggml_compute_params const *,struct ggml_tensor *)" (?ggml_compute_forward_geglu_erf_f16@@YAXPEBUggml_compute_params@@PEAUggml_tensor@@@Z)
-          C:\Users\wuphy\hb\release\deps\hippo_transcribe.exe : fatal error LNK1120: 23 unresolved externals
-          
+error: failed to run custom build command for `whisper-rs-sys v0.15.0`
 
-error: could not compile `hippo-transcribe-gui` (bin "hippo-transcribe") due to 1 previous error
+Caused by:
+  process didn't exit successfully: `C:\Users\wuphy\Documents\hippo-transcribe\--SkipTests\release\build\whisper-rs-sys-0546f7bf5aface69\build-script-build` (exit code: 101)
+  --- stdout
+  cargo:rerun-if-changed=wrapper.h
+  cargo:rerun-if-env-changed=TARGET
+  cargo:rerun-if-env-changed=BINDGEN_EXTRA_CLANG_ARGS_x86_64-pc-windows-msvc
+  cargo:rerun-if-env-changed=BINDGEN_EXTRA_CLANG_ARGS_x86_64_pc_windows_msvc
+  cargo:rerun-if-env-changed=BINDGEN_EXTRA_CLANG_ARGS
+  cargo:rerun-if-changed=wrapper.h
+  cargo:rerun-if-changed=whisper.cpp/ggml/include/ggml-vulkan.h
+  cargo:rerun-if-changed=./whisper.cpp\include/whisper.h
+  cargo:rerun-if-changed=./whisper.cpp/ggml/include\ggml.h
+  cargo:rerun-if-changed=C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\include\stdbool.h
+  cargo:rerun-if-changed=C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\ucrt\stddef.h
+  cargo:rerun-if-changed=C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\ucrt\corecrt.h
+  cargo:rerun-if-changed=C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\include\vcruntime.h
+  cargo:rerun-if-changed=C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\include\sal.h
+  cargo:rerun-if-changed=C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\include\concurrencysal.h
+  cargo:rerun-if-changed=C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\include\vadefs.h
+  cargo:rerun-if-changed=C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\include\stdint.h
+  cargo:rerun-if-changed=C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\include\vcruntime.h
+  cargo:rerun-if-changed=C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\ucrt\stdio.h
+  cargo:rerun-if-changed=C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\ucrt\corecrt.h
+  cargo:rerun-if-changed=C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\ucrt\corecrt_wstdio.h
+  cargo:rerun-if-changed=C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\ucrt\corecrt.h
+  cargo:rerun-if-changed=C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\ucrt\corecrt_stdio_config.h
+  cargo:rerun-if-changed=C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\ucrt\corecrt.h
+  cargo:rerun-if-changed=./whisper.cpp/ggml/include\ggml-cpu.h
+  cargo:rerun-if-changed=./whisper.cpp/ggml/include\ggml.h
+  cargo:rerun-if-changed=./whisper.cpp/ggml/include\ggml-backend.h
+  cargo:rerun-if-changed=./whisper.cpp/ggml/include\ggml.h
+  cargo:rerun-if-changed=./whisper.cpp/ggml/include\ggml-alloc.h
+  cargo:rerun-if-changed=./whisper.cpp/ggml/include\ggml.h
+  cargo:rerun-if-changed=C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\ucrt\stddef.h
+  cargo:rerun-if-changed=C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\include\stdint.h
+  cargo:rerun-if-changed=C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\include\stdbool.h
+  cargo:rerun-if-changed=./whisper.cpp\ggml/include/ggml.h
+  cargo:rerun-if-changed=./whisper.cpp/ggml/include\ggml-vulkan.h
+  cargo:rerun-if-changed=./whisper.cpp/ggml/include\ggml.h
+  cargo:rerun-if-changed=./whisper.cpp/ggml/include\ggml-backend.h
+  cargo:rerun-if-changed=whisper.cpp/ggml/include\ggml.h
+  cargo:rerun-if-changed=whisper.cpp/ggml/include\ggml-backend.h
+  cargo:rustc-link-lib=advapi32
+  cargo:rerun-if-env-changed=VULKAN_SDK
+  cargo:rustc-link-lib=vulkan-1
+  cargo:rustc-link-search=C:\VulkanSDK\1.4.363.0\Lib
+  CMAKE_TOOLCHAIN_FILE_x86_64-pc-windows-msvc = None
+  CMAKE_TOOLCHAIN_FILE_x86_64_pc_windows_msvc = None
+  HOST_CMAKE_TOOLCHAIN_FILE = None
+  CMAKE_TOOLCHAIN_FILE = None
+  CMAKE_GENERATOR_x86_64-pc-windows-msvc = None
+  CMAKE_GENERATOR_x86_64_pc_windows_msvc = None
+  HOST_CMAKE_GENERATOR = None
+  CMAKE_GENERATOR = Some("Ninja")
+  CMAKE_PREFIX_PATH_x86_64-pc-windows-msvc = None
+  CMAKE_PREFIX_PATH_x86_64_pc_windows_msvc = None
+  HOST_CMAKE_PREFIX_PATH = None
+  CMAKE_PREFIX_PATH = None
+  CMAKE_x86_64-pc-windows-msvc = None
+  CMAKE_x86_64_pc_windows_msvc = None
+  HOST_CMAKE = None
+  CMAKE = None
+  Running with debug output on.
+  -- Warning: ccache not found - consider installing it for faster compilation or disable this warning with GGML_CCACHE=OFF
+     Called from: [1]	C:/Users/wuphy/Documents/hippo-transcribe/--SkipTests/release/build/whisper-rs-sys-ffe76b042736d632/out/whisper.cpp/ggml/src/CMakeLists.txt
+  -- CMAKE_SYSTEM_PROCESSOR: AMD64
+     Called from: [1]	C:/Users/wuphy/Documents/hippo-transcribe/--SkipTests/release/build/whisper-rs-sys-ffe76b042736d632/out/whisper.cpp/ggml/src/CMakeLists.txt
+  -- CMAKE_GENERATOR_PLATFORM: 
+     Called from: [1]	C:/Users/wuphy/Documents/hippo-transcribe/--SkipTests/release/build/whisper-rs-sys-ffe76b042736d632/out/whisper.cpp/ggml/src/CMakeLists.txt
+  -- GGML_SYSTEM_ARCH: x86
+     Called from: [1]	C:/Users/wuphy/Documents/hippo-transcribe/--SkipTests/release/build/whisper-rs-sys-ffe76b042736d632/out/whisper.cpp/ggml/src/CMakeLists.txt
+  -- Including CPU backend
+     Called from: [2]	C:/Users/wuphy/Documents/hippo-transcribe/--SkipTests/release/build/whisper-rs-sys-ffe76b042736d632/out/whisper.cpp/ggml/src/CMakeLists.txt
+                  [1]	C:/Users/wuphy/Documents/hippo-transcribe/--SkipTests/release/build/whisper-rs-sys-ffe76b042736d632/out/whisper.cpp/ggml/src/CMakeLists.txt
+  -- x86 detected
+     Called from: [2]	C:/Users/wuphy/Documents/hippo-transcribe/--SkipTests/release/build/whisper-rs-sys-ffe76b042736d632/out/whisper.cpp/ggml/src/CMakeLists.txt
+                  [1]	C:/Users/wuphy/Documents/hippo-transcribe/--SkipTests/release/build/whisper-rs-sys-ffe76b042736d632/out/whisper.cpp/ggml/src/ggml-cpu/CMakeLists.txt
+  -- Adding CPU backend variant ggml-cpu: /arch:AVX512 GGML_AVX512
+     Called from: [2]	C:/Users/wuphy/Documents/hippo-transcribe/--SkipTests/release/build/whisper-rs-sys-ffe76b042736d632/out/whisper.cpp/ggml/src/CMakeLists.txt
+                  [1]	C:/Users/wuphy/Documents/hippo-transcribe/--SkipTests/release/build/whisper-rs-sys-ffe76b042736d632/out/whisper.cpp/ggml/src/ggml-cpu/CMakeLists.txt
+  -- Vulkan found
+     Called from: [1]	C:/Users/wuphy/Documents/hippo-transcribe/--SkipTests/release/build/whisper-rs-sys-ffe76b042736d632/out/whisper.cpp/ggml/src/ggml-vulkan/CMakeLists.txt
+  -- GL_KHR_cooperative_matrix supported by glslc
+     Called from: [2]	C:/Users/wuphy/Documents/hippo-transcribe/--SkipTests/release/build/whisper-rs-sys-ffe76b042736d632/out/whisper.cpp/ggml/src/ggml-vulkan/CMakeLists.txt
+                  [1]	C:/Users/wuphy/Documents/hippo-transcribe/--SkipTests/release/build/whisper-rs-sys-ffe76b042736d632/out/whisper.cpp/ggml/src/ggml-vulkan/CMakeLists.txt
+  -- GL_NV_cooperative_matrix2 supported by glslc
+     Called from: [2]	C:/Users/wuphy/Documents/hippo-transcribe/--SkipTests/release/build/whisper-rs-sys-ffe76b042736d632/out/whisper.cpp/ggml/src/ggml-vulkan/CMakeLists.txt
+                  [1]	C:/Users/wuphy/Documents/hippo-transcribe/--SkipTests/release/build/whisper-rs-sys-ffe76b042736d632/out/whisper.cpp/ggml/src/ggml-vulkan/CMakeLists.txt
+  -- GL_EXT_integer_dot_product supported by glslc
+     Called from: [2]	C:/Users/wuphy/Documents/hippo-transcribe/--SkipTests/release/build/whisper-rs-sys-ffe76b042736d632/out/whisper.cpp/ggml/src/ggml-vulkan/CMakeLists.txt
+                  [1]	C:/Users/wuphy/Documents/hippo-transcribe/--SkipTests/release/build/whisper-rs-sys-ffe76b042736d632/out/whisper.cpp/ggml/src/ggml-vulkan/CMakeLists.txt
+  -- GL_EXT_bfloat16 supported by glslc
+     Called from: [2]	C:/Users/wuphy/Documents/hippo-transcribe/--SkipTests/release/build/whisper-rs-sys-ffe76b042736d632/out/whisper.cpp/ggml/src/ggml-vulkan/CMakeLists.txt
+                  [1]	C:/Users/wuphy/Documents/hippo-transcribe/--SkipTests/release/build/whisper-rs-sys-ffe76b042736d632/out/whisper.cpp/ggml/src/ggml-vulkan/CMakeLists.txt
+  -- Including Vulkan backend
+     Called from: [2]	C:/Users/wuphy/Documents/hippo-transcribe/--SkipTests/release/build/whisper-rs-sys-ffe76b042736d632/out/whisper.cpp/ggml/src/CMakeLists.txt
+                  [1]	C:/Users/wuphy/Documents/hippo-transcribe/--SkipTests/release/build/whisper-rs-sys-ffe76b042736d632/out/whisper.cpp/ggml/src/CMakeLists.txt
+  -- ggml version: 0.9.5
+     Called from: [1]	C:/Users/wuphy/Documents/hippo-transcribe/--SkipTests/release/build/whisper-rs-sys-ffe76b042736d632/out/whisper.cpp/ggml/CMakeLists.txt
+  -- ggml commit:  772217d
+     Called from: [1]	C:/Users/wuphy/Documents/hippo-transcribe/--SkipTests/release/build/whisper-rs-sys-ffe76b042736d632/out/whisper.cpp/ggml/CMakeLists.txt
+  -- Configuring done (4.1s)
+  -- Generating C:/Users/wuphy/Documents/hippo-transcribe/--SkipTests/release/build/whisper-rs-sys-ffe76b042736d632/out/build
+     Called from: [1]	C:/Users/wuphy/Documents/hippo-transcribe/--SkipTests/release/build/whisper-rs-sys-ffe76b042736d632/out/whisper.cpp/CMakeLists.txt
+  -- Generating C:/Users/wuphy/Documents/hippo-transcribe/--SkipTests/release/build/whisper-rs-sys-ffe76b042736d632/out/build/ggml
+     Called from: [1]	C:/Users/wuphy/Documents/hippo-transcribe/--SkipTests/release/build/whisper-rs-sys-ffe76b042736d632/out/whisper.cpp/ggml/CMakeLists.txt
+  -- Generating C:/Users/wuphy/Documents/hippo-transcribe/--SkipTests/release/build/whisper-rs-sys-ffe76b042736d632/out/build/ggml/src
+     Called from: [1]	C:/Users/wuphy/Documents/hippo-transcribe/--SkipTests/release/build/whisper-rs-sys-ffe76b042736d632/out/whisper.cpp/ggml/src/CMakeLists.txt
+  -- Generating C:/Users/wuphy/Documents/hippo-transcribe/--SkipTests/release/build/whisper-rs-sys-ffe76b042736d632/out/build/ggml/src/ggml-cpu
+     Called from: [1]	C:/Users/wuphy/Documents/hippo-transcribe/--SkipTests/release/build/whisper-rs-sys-ffe76b042736d632/out/whisper.cpp/ggml/src/ggml-cpu/CMakeLists.txt
+  -- Generating C:/Users/wuphy/Documents/hippo-transcribe/--SkipTests/release/build/whisper-rs-sys-ffe76b042736d632/out/build/ggml/src/ggml-vulkan
+     Called from: [1]	C:/Users/wuphy/Documents/hippo-transcribe/--SkipTests/release/build/whisper-rs-sys-ffe76b042736d632/out/whisper.cpp/ggml/src/ggml-vulkan/CMakeLists.txt
+  -- Generating C:/Users/wuphy/Documents/hippo-transcribe/--SkipTests/release/build/whisper-rs-sys-ffe76b042736d632/out/build/src
+     Called from: [1]	C:/Users/wuphy/Documents/hippo-transcribe/--SkipTests/release/build/whisper-rs-sys-ffe76b042736d632/out/whisper.cpp/src/CMakeLists.txt
+  -- Generating done (0.5s)
+  -- Build files have been written to: C:/Users/wuphy/Documents/hippo-transcribe/--SkipTests/release/build/whisper-rs-sys-ffe76b042736d632/out/build
+  Change Dir: 'C:/Users/wuphy/Documents/hippo-transcribe/--SkipTests/release/build/whisper-rs-sys-ffe76b042736d632/out/build'
+
+  Run Build Command(s): C:/Users/wuphy/AppData/Local/Microsoft/WinGet/Packages/Ninja-build.Ninja_Microsoft.Winget.Source_8wekyb3d8bbwe/ninja.exe -v -j 8 install
+  [0/2] "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe" -P C:\Users\wuphy\Documents\hippo-transcribe\--SkipTests\release\build\whisper-rs-sys-ffe76b042736d632\out\build\CMakeFiles\VerifyGlobs.cmake
+  [1/317] C:\PROGRA~2\MICROS~2\2022\BUILDT~1\VC\Tools\MSVC\1444~1.352\bin\HostX64\x64\cl.exe   -DGGML_COMMIT=\"772217d\" -DGGML_SCHED_MAX_COPIES=4 -DGGML_VERSION=\"0.9.5\" -D_CRT_SECURE_NO_WARNINGS -D_DISABLE_CONSTEXPR_MUTEX_CONSTRUCTOR -D_XOPEN_SOURCE=600 -IC:\Users\wuphy\Documents\hippo-transcribe\--SkipTests\release\build\whisper-rs-sys-ffe76b042736d632\out\whisper.cpp\ggml\src\. -IC:\Users\wuphy\Documents\hippo-transcribe\--SkipTests\release\build\whisper-rs-sys-ffe76b042736d632\out\whisper.cpp\ggml\src\..\include -nologo -MD -Brepro -W0 /MD /O2 /Ob2 /DNDEBUG -std:c11 /utf-8 /wd4005 /wd4244 /wd4267 /wd4305 /wd4566 /wd4996 /wd4702 /showIncludes /Foggml\src\CMakeFiles\ggml-base.dir\ggml-alloc.c.obj /Fdggml\src\CMakeFiles\ggml-base.dir\ggml-base.pdb /FS -c C:\Users\wuphy\Documents\hippo-transcribe\--SkipTests\release\build\whisper-rs-sys-ffe76b042736d632\out\whisper.cpp\ggml\src\ggml-alloc.c
+  [2/317] C:\PROGRA~2\MICROS~2\2022\BUILDT~1\VC\Tools\MSVC\1444~1.352\bin\HostX64\x64\cl.exe   /TP -DGGML_COMMIT=\"772217d\" -DGGML_SCHED_MAX_COPIES=4 -DGGML_VERSION=\"0.9.5\" -D_CRT_SECURE_NO_WARNINGS -D_DISABLE_CONSTEXPR_MUTEX_CONSTRUCTOR -D_XOPEN_SOURCE=600 -IC:\Users\wuphy\Documents\hippo-transcribe\--SkipTests\release\build\whisper-rs-sys-ffe76b042736d632\out\whisper.cpp\ggml\src\. -IC:\Users\wuphy\Documents\hippo-transcribe\--SkipTests\release\build\whisper-rs-sys-ffe76b042736d632\out\whisper.cpp\ggml\src\..\include /utf-8 -nologo -MD -Brepro -W0 /MD /O2 /Ob2 /DNDEBUG -std:c++17 /utf-8 /wd4005 /wd4244 /wd4267 /wd4305 /wd4566 /wd4996 /wd4702 /showIncludes /Foggml\src\CMakeFiles\ggml-base.dir\ggml.cpp.obj /Fdggml\src\CMakeFiles\ggml-base.dir\ggml-base.pdb /FS -c C:\Users\wuphy\Documents\hippo-transcribe\--SkipTests\release\build\whisper-rs-sys-ffe76b042736d632\out\whisper.cpp\ggml\src\ggml.cpp
+  [3/317] C:\PROGRA~2\MICROS~2\2022\BUILDT~1\VC\Tools\MSVC\1444~1.352\bin\HostX64\x64\cl.exe   /TP -DGGML_COMMIT=\"772217d\" -DGGML_SCHED_MAX_COPIES=4 -DGGML_VERSION=\"0.9.5\" -D_CRT_SECURE_NO_WARNINGS -D_DISABLE_CONSTEXPR_MUTEX_CONSTRUCTOR -D_XOPEN_SOURCE=600 -IC:\Users\wuphy\Documents\hippo-transcribe\--SkipTests\release\build\whisper-rs-sys-ffe76b042736d632\out\whisper.cpp\ggml\src\. -IC:\Users\wuphy\Documents\hippo-transcribe\--SkipTests\release\build\whisper-rs-sys-ffe76b042736d632\out\whisper.cpp\ggml\src\..\include /utf-8 -nologo -MD -Brepro -W0 /MD /O2 /Ob2 /DNDEBUG -std:c++17 /utf-8 /wd4005 /wd4244 /wd4267 /wd4305 /wd4566 /wd4996 /wd4702 /showIncludes /Foggml\src\CMakeFiles\ggml-base.dir\ggml-threading.cpp.obj /Fdggml\src\CMakeFiles\ggml-base.dir\ggml-base.pdb /FS -c C:\Users\wuphy\Documents\hippo-transcribe\--SkipTests\release\build\whisper-rs-sys-ffe76b042736d632\out\whisper.cpp\ggml\src\ggml-threading.cpp
+  [4/317] C:\PROGRA~2\MICROS~2\2022\BUILDT~1\VC\Tools\MSVC\1444~1.352\bin\HostX64\x64\cl.exe   /TP -DGGML_COMMIT=\"772217d\" -DGGML_SCHED_MAX_COPIES=4 -DGGML_VERSION=\"0.9.5\" -D_CRT_SECURE_NO_WARNINGS -D_DISABLE_CONSTEXPR_MUTEX_CONSTRUCTOR -D_XOPEN_SOURCE=600 -IC:\Users\wuphy\Documents\hippo-transcribe\--SkipTests\release\build\whisper-rs-sys-ffe76b042736d632\out\whisper.cpp\ggml\src\. -IC:\Users\wuphy\Documents\hippo-transcribe\--SkipTests\release\build\whisper-rs-sys-ffe76b042736d632\out\whisper.cpp\ggml\src\..\include /utf-8 -nologo -MD -Brepro -W0 /MD /O2 /Ob2 /DNDEBUG -std:c++17 /utf-8 /wd4005 /wd4244 /wd4267 /wd4305 /wd4566 /wd4996 /wd4702 /showIncludes /Foggml\src\CMakeFiles\ggml-base.dir\ggml-backend.cpp.obj /Fdggml\src\CMakeFiles\ggml-base.dir\ggml-base.pdb /FS -c C:\Users\wuphy\Documents\hippo-transcribe\--SkipTests\release\build\whisper-rs-sys-ffe76b042736d632\out\whisper.cpp\ggml\src\ggml-backend.cpp
+  [5/317] C:\PROGRA~2\MICROS~2\2022\BUILDT~1\VC\Tools\MSVC\1444~1.352\bin\HostX64\x64\cl.exe   -DGGML_COMMIT=\"772217d\" -DGGML_SCHED_MAX_COPIES=4 -DGGML_VERSION=\"0.9.5\" -D_CRT_SECURE_NO_WARNINGS -D_DISABLE_CONSTEXPR_MUTEX_CONSTRUCTOR -D_XOPEN_SOURCE=600 -IC:\Users\wuphy\Documents\hippo-transcribe\--SkipTests\release\build\whisper-rs-sys-ffe76b042736d632\out\whisper.cpp\ggml\src\. -IC:\Users\wuphy\Documents\hippo-transcribe\--SkipTests\release\build\whisper-rs-sys-ffe76b042736d632\out\whisper.cpp\ggml\src\..\include -nologo -MD -Brepro -W0 /MD /O2 /Ob2 /DNDEBUG -std:c11 /utf-8 /wd4005 /wd4244 /wd4267 /wd4305 /wd4566 /wd4996 /wd4702 /showIncludes /Foggml\src\CMakeFiles\ggml-base.dir\ggml.c.obj /Fdggml\src\CMakeFiles\ggml-base.dir\ggml-base.pdb /FS -c C:\Users\wuphy\Documents\hippo-transcribe\--SkipTests\release\build\whisper-rs-sys-ffe76b042736d632\out\whisper.cpp\ggml\src\ggml.c
+  [6/317] C:\PROGRA~2\MICROS~2\2022\BUILDT~1\VC\Tools\MSVC\1444~1.352\bin\HostX64\x64\cl.exe   /TP -DGGML_COMMIT=\"772217d\" -DGGML_SCHED_MAX_COPIES=4 -DGGML_VERSION=\"0.9.5\" -D_CRT_SECURE_NO_WARNINGS -D_DISABLE_CONSTEXPR_MUTEX_CONSTRUCTOR -D_XOPEN_SOURCE=600 -IC:\Users\wuphy\Documents\hippo-transcribe\--SkipTests\release\build\whisper-rs-sys-ffe76b042736d632\out\whisper.cpp\ggml\src\. -IC:\Users\wuphy\Documents\hippo-transcribe\--SkipTests\release\build\whisper-rs-sys-ffe76b042736d632\out\whisper.cpp\ggml\src\..\include /utf-8 -nologo -MD -Brepro -W0 /MD /O2 /Ob2 /DNDEBUG -std:c++17 /utf-8 /wd4005 /wd4244 /wd4267 /wd4305 /wd4566 /wd4996 /wd4702 /showIncludes /Foggml\src\CMakeFiles\ggml-base.dir\ggml-opt.cpp.obj /Fdggml\src\CMakeFiles\ggml-base.dir\ggml-base.pdb /FS -c C:\Users\wuphy\Documents\hippo-transcribe\--SkipTests\release\build\whisper-rs-sys-ffe76b042736d632\out\whisper.cpp\ggml\src\ggml-opt.cpp
+  C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\include\vector(1224): warning C4530: C++ exception handler used, but unwind semantics are not enabled. Specify /EHsc
+  C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\include\vector(1224): note: the template instantiation context (the oldest one first) is
+  C:\Users\wuphy\Documents\hippo-transcribe\--SkipTests\release\build\whisper-rs-sys-ffe76b042736d632\out\whisper.cpp\ggml\src\ggml-opt.cpp(863): note: see reference to function template instantiation 'std::_Vector_iterator<std::_Vector_val<std::_Simple_types<_Ty>>> std::vector<_Ty,std::allocator<_Ty>>::insert<std::_Vector_iterator<std::_Vector_val<std::_Simple_types<_Ty>>>,0>(std::_Vector_const_iterator<std::_Vector_val<std::_Simple_types<_Ty>>>,_Iter,_Iter)' being compiled
+          with
+          [
+              _Ty=int32_t,
+              _Iter=std::_Vector_iterator<std::_Vector_val<std::_Simple_types<int32_t>>>
+          ]
+  C:\Users\wuphy\Documents\hippo-transcribe\--SkipTests\release\build\whisper-rs-sys-ffe76b042736d632\out\whisper.cpp\ggml\src\ggml-opt.cpp(863): note: see the first reference to 'std::vector<int32_t,std::allocator<int>>::insert' in 'ggml_opt_eval'
+  C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\include\vector(1282): note: see reference to function template instantiation 'void std::vector<int32_t,std::allocator<int>>::_Insert_counted_range<int*>(std::_Vector_const_iterator<std::_Vector_val<std::_Simple_types<_Ty>>>,_Iter,const unsigned __int64)' being compiled
+          with
+          [
+              _Ty=int32_t,
+              _Iter=int *
+          ]
+  [7/317] C:\PROGRA~2\MICROS~2\2022\BUILDT~1\VC\Tools\MSVC\1444~1.352\bin\HostX64\x64\cl.exe   -DGGML_COMMIT=\"772217d\" -DGGML_SCHED_MAX_COPIES=4 -DGGML_VERSION=\"0.9.5\" -D_CRT_SECURE_NO_WARNINGS -D_DISABLE_CONSTEXPR_MUTEX_CONSTRUCTOR -D_XOPEN_SOURCE=600 -IC:\Users\wuphy\Documents\hippo-transcribe\--SkipTests\release\build\whisper-rs-sys-ffe76b042736d632\out\whisper.cpp\ggml\src\. -IC:\Users\wuphy\Documents\hippo-transcribe\--SkipTests\release\build\whisper-rs-sys-ffe76b042736d632\out\whisper.cpp\ggml\src\..\include -nologo -MD -Brepro -W0 /MD /O2 /Ob2 /DNDEBUG -std:c11 /utf-8 /wd4005 /wd4244 /wd4267 /wd4305 /wd4566 /wd4996 /wd4702 /showIncludes /Foggml\src\CMakeFiles\ggml-base.dir\ggml-quants.c.obj /Fdggml\src\CMakeFiles\ggml-base.dir\ggml-base.pdb /FS -c C:\Users\wuphy\Documents\hippo-transcribe\--SkipTests\release\build\whisper-rs-sys-ffe76b042736d632\out\whisper.cpp\ggml\src\ggml-quants.c
+  [8/317] C:\PROGRA~2\MICROS~2\2022\BUILDT~1\VC\Tools\MSVC\1444~1.352\bin\HostX64\x64\cl.exe   /TP -DGGML_COMMIT=\"772217d\" -DGGML_SCHED_MAX_COPIES=4 -DGGML_VERSION=\"0.9.5\" -D_CRT_SECURE_NO_WARNINGS -D_DISABLE_CONSTEXPR_MUTEX_CONSTRUCTOR -D_XOPEN_SOURCE=600 -IC:\Users\wuphy\Documents\hippo-transcribe\--SkipTests\release\build\whisper-rs-sys-ffe76b042736d632\out\whisper.cpp\ggml\src\. -IC:\Users\wuphy\Documents\hippo-transcribe\--SkipTests\release\build\whisper-rs-sys-ffe76b042736d632\out\whisper.cpp\ggml\src\..\include /utf-8 -nologo -MD -Brepro -W0 /MD /O2 /Ob2 /DNDEBUG -std:c++17 /utf-8 /wd4005 /wd4244 /wd4267 /wd4305 /wd4566 /wd4996 /wd4702 /showIncludes /Foggml\src\CMakeFiles\ggml-base.dir\gguf.cpp.obj /Fdggml\src\CMakeFiles\ggml-base.dir\ggml-base.pdb /FS -c C:\Users\wuphy\Documents\hippo-transcribe\--SkipTests\release\build\whisper-rs-sys-ffe76b042736d632\out\whisper.cpp\ggml\src\gguf.cpp
+  C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\include\vector(1224): warning C4530: C++ exception handler used, but unwind semantics are not enabled. Specify /EHsc
+  C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\include\vector(1224): note: the template instantiation context (the oldest one first) is
+  C:\Users\wuphy\Documents\hippo-transcribe\--SkipTests\release\build\whisper-rs-sys-ffe76b042736d632\out\whisper.cpp\ggml\src\gguf.cpp(1182): note: see reference to function template instantiation 'std::_Vector_iterator<std::_Vector_val<std::_Simple_types<_Ty>>> std::vector<_Ty,std::allocator<_Ty>>::insert<std::_Vector_const_iterator<std::_Vector_val<std::_Simple_types<_Ty>>>,0>(std::_Vector_const_iterator<std::_Vector_val<std::_Simple_types<_Ty>>>,_Iter,_Iter)' being compiled
+          with
+          [
+              _Ty=int8_t,
+              _Iter=std::_Vector_const_iterator<std::_Vector_val<std::_Simple_types<int8_t>>>
+          ]
+  C:\Users\wuphy\Documents\hippo-transcribe\--SkipTests\release\build\whisper-rs-sys-ffe76b042736d632\out\whisper.cpp\ggml\src\gguf.cpp(1182): note: see the first reference to 'std::vector<int8_t,std::allocator<int8_t>>::insert' in 'gguf_writer::write'
+  C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\include\vector(1282): note: see reference to function template instantiation 'void std::vector<int8_t,std::allocator<int8_t>>::_Insert_counted_range<const signed char*>(std::_Vector_const_iterator<std::_Vector_val<std::_Simple_types<_Ty>>>,_Iter,const unsigned __int64)' being compiled
+          with
+          [
+              _Ty=int8_t,
+              _Iter=const signed char *
+          ]
+  [9/317] C:\Windows\system32\cmd.exe /C "cd . && C:\PROGRA~2\MICROS~2\2022\BUILDT~1\VC\Tools\MSVC\1444~1.352\bin\Hostx64\x64\lib.exe  /machine:x64 /out:ggml\src\ggml-base.lib ggml\src\CMakeFiles\ggml-base.dir\ggml.c.obj ggml\src\CMakeFiles\ggml-base.dir\ggml.cpp.obj ggml\src\CMakeFiles\ggml-base.dir\ggml-alloc.c.obj ggml\src\CMakeFiles\ggml-base.dir\ggml-backend.cpp.obj ggml\src\CMakeFiles\ggml-base.dir\ggml-opt.cpp.obj ggml\src\CMakeFiles\ggml-base.dir\ggml-threading.cpp.obj ggml\src\CMakeFiles\ggml-base.dir\ggml-quants.c.obj ggml\src\CMakeFiles\ggml-base.dir\gguf.cpp.obj && cd ."
+  Microsoft (R) Library Manager Version 14.44.35229.0
+  Copyright (C) Microsoft Corporation.  All rights reserved.
+
+  [10/317] C:\Windows\system32\cmd.exe /C "cd . && C:\PROGRA~2\MICROS~2\2022\BUILDT~1\VC\Tools\MSVC\1444~1.352\bin\Hostx64\x64\lib.exe  /machine:x64 /out:ggml\src\ggml-cpu.lib ggml\src\CMakeFiles\ggml-cpu.dir\ggml-cpu\ggml-cpu.c.obj ggml\src\CMakeFiles\ggml-cpu.dir\ggml-cpu\ggml-cpu.cpp.obj ggml\src\CMakeFiles\ggml-cpu.dir\ggml-cpu\repack.cpp.obj ggml\src\CMakeFiles\ggml-cpu.dir\ggml-cpu\hbm.cpp.obj ggml\src\CMakeFiles\ggml-cpu.dir\ggml-cpu\quants.c.obj ggml\src\CMakeFiles\ggml-cpu.dir\ggml-cpu\traits.cpp.obj ggml\src\CMakeFiles\ggml-cpu.dir\ggml-cpu\amx\amx.cpp.obj ggml\src\CMakeFiles\ggml-cpu.dir\ggml-cpu\amx\mmq.cpp.obj ggml\src\CMakeFiles\ggml-cpu.dir\ggml-cpu\binary-ops.cpp.obj ggml\src\CMakeFiles\ggml-cpu.dir\ggml-cpu\unary-ops.cpp.obj ggml\src\CMakeFiles\ggml-cpu.dir\ggml-cpu\vec.cpp.obj ggml\src\CMakeFiles\ggml-cpu.dir\ggml-cpu\ops.cpp.obj ggml\src\CMakeFiles\ggml-cpu.dir\ggml-cpu\arch\x86\quants.c.obj ggml\src\CMakeFiles\ggml-cpu.dir\ggml-cpu\arch\x86\repack.cpp.obj && cd ."
+  Microsoft (R) Library Manager Version 14.44.35229.0
+  Copyright (C) Microsoft Corporation.  All rights reserved.
+
+  [11/317] C:\Windows\system32\cmd.exe /C "cd /D C:\Users\wuphy\Documents\hippo-transcribe\--SkipTests\release\build\whisper-rs-sys-ffe76b042736d632\out\build\ggml\src\ggml-vulkan\vulkan-shaders-gen-prefix\src\vulkan-shaders-gen-build && "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe" -DCMAKE_INSTALL_PREFIX=C:/Users/wuphy/Documents/hippo-transcribe/--SkipTests/release/build/whisper-rs-sys-ffe76b042736d632/out/build/Release -DCMAKE_INSTALL_BINDIR=. -DCMAKE_BUILD_TYPE=Release -DGGML_VULKAN_COOPMAT_GLSLC_SUPPORT=ON -DGGML_VULKAN_COOPMAT2_GLSLC_SUPPORT=ON -DGGML_VULKAN_INTEGER_DOT_GLSLC_SUPPORT=ON -DGGML_VULKAN_BFLOAT16_GLSLC_SUPPORT=ON -GNinja -S C:/Users/wuphy/Documents/hippo-transcribe/--SkipTests/release/build/whisper-rs-sys-ffe76b042736d632/out/whisper.cpp/ggml/src/ggml-vulkan/vulkan-shaders -B C:/Users/wuphy/Documents/hippo-transcribe/--SkipTests/release/build/whisper-rs-sys-ffe76b042736d632/out/build/ggml/src/ggml-vulkan/vulkan-shaders-gen-prefix/src/vulkan-shaders-gen-build && "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe" -E touch C:/Users/wuphy/Documents/hippo-transcribe/--SkipTests/release/build/whisper-rs-sys-ffe76b042736d632/out/build/ggml/src/ggml-vulkan/vulkan-shaders-gen-prefix/src/vulkan-shaders-gen-stamp/vulkan-shaders-gen-configure"
+  FAILED: [code=1] ggml/src/ggml-vulkan/vulkan-shaders-gen-prefix/src/vulkan-shaders-gen-stamp/vulkan-shaders-gen-configure C:/Users/wuphy/Documents/hippo-transcribe/--SkipTests/release/build/whisper-rs-sys-ffe76b042736d632/out/build/ggml/src/ggml-vulkan/vulkan-shaders-gen-prefix/src/vulkan-shaders-gen-stamp/vulkan-shaders-gen-configure 
+  C:\Windows\system32\cmd.exe /C "cd /D C:\Users\wuphy\Documents\hippo-transcribe\--SkipTests\release\build\whisper-rs-sys-ffe76b042736d632\out\build\ggml\src\ggml-vulkan\vulkan-shaders-gen-prefix\src\vulkan-shaders-gen-build && "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe" -DCMAKE_INSTALL_PREFIX=C:/Users/wuphy/Documents/hippo-transcribe/--SkipTests/release/build/whisper-rs-sys-ffe76b042736d632/out/build/Release -DCMAKE_INSTALL_BINDIR=. -DCMAKE_BUILD_TYPE=Release -DGGML_VULKAN_COOPMAT_GLSLC_SUPPORT=ON -DGGML_VULKAN_COOPMAT2_GLSLC_SUPPORT=ON -DGGML_VULKAN_INTEGER_DOT_GLSLC_SUPPORT=ON -DGGML_VULKAN_BFLOAT16_GLSLC_SUPPORT=ON -GNinja -S C:/Users/wuphy/Documents/hippo-transcribe/--SkipTests/release/build/whisper-rs-sys-ffe76b042736d632/out/whisper.cpp/ggml/src/ggml-vulkan/vulkan-shaders -B C:/Users/wuphy/Documents/hippo-transcribe/--SkipTests/release/build/whisper-rs-sys-ffe76b042736d632/out/build/ggml/src/ggml-vulkan/vulkan-shaders-gen-prefix/src/vulkan-shaders-gen-build && "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe" -E touch C:/Users/wuphy/Documents/hippo-transcribe/--SkipTests/release/build/whisper-rs-sys-ffe76b042736d632/out/build/ggml/src/ggml-vulkan/vulkan-shaders-gen-prefix/src/vulkan-shaders-gen-stamp/vulkan-shaders-gen-configure"
+  -- The C compiler identification is MSVC 19.44.35229.0
+  -- The CXX compiler identification is MSVC 19.44.35229.0
+  -- Detecting C compiler ABI info
+  CMake Warning in C:/Users/wuphy/Documents/hippo-transcribe/--SkipTests/release/build/whisper-rs-sys-ffe76b042736d632/out/build/ggml/src/ggml-vulkan/vulkan-shaders-gen-prefix/src/vulkan-shaders-gen-build/CMakeFiles/CMakeScratch/TryCompile-763kp0/CMakeLists.txt:
+    The object file directory
+
+      C:/Users/wuphy/Documents/hippo-transcribe/--SkipTests/release/build/whisper-rs-sys-ffe76b042736d632/out/build/ggml/src/ggml-vulkan/vulkan-shaders-gen-prefix/src/vulkan-shaders-gen-build/CMakeFiles/CMakeScratch/TryCompile-763kp0/CMakeFiles/cmTC_1ef20.dir/./
+
+    has 256 characters.  The maximum full path to an object file is 250
+    characters (see CMAKE_OBJECT_PATH_MAX).  Object file
+
+      CMakeCCompilerABI.c.obj
+
+    cannot be safely placed under this directory.  The build may not work
+    correctly.
+
+
+  -- Detecting C compiler ABI info - failed
+  -- Check for working C compiler: C:/Program Files (x86)/Microsoft Visual Studio/2022/BuildTools/VC/Tools/MSVC/14.44.35207/bin/Hostx64/x64/cl.exe
+  CMake Warning in C:/Users/wuphy/Documents/hippo-transcribe/--SkipTests/release/build/whisper-rs-sys-ffe76b042736d632/out/build/ggml/src/ggml-vulkan/vulkan-shaders-gen-prefix/src/vulkan-shaders-gen-build/CMakeFiles/CMakeScratch/TryCompile-twgqiq/CMakeLists.txt:
+    The object file directory
+
+      C:/Users/wuphy/Documents/hippo-transcribe/--SkipTests/release/build/whisper-rs-sys-ffe76b042736d632/out/build/ggml/src/ggml-vulkan/vulkan-shaders-gen-prefix/src/vulkan-shaders-gen-build/CMakeFiles/CMakeScratch/TryCompile-twgqiq/CMakeFiles/cmTC_7ca67.dir/./
+
+    has 256 characters.  The maximum full path to an object file is 250
+    characters (see CMAKE_OBJECT_PATH_MAX).  Object file
+
+      testCCompiler.c.obj
+
+    cannot be safely placed under this directory.  The build may not work
+    correctly.
+
+
+  -- Check for working C compiler: C:/Program Files (x86)/Microsoft Visual Studio/2022/BuildTools/VC/Tools/MSVC/14.44.35207/bin/Hostx64/x64/cl.exe - broken
+  CMake Error at C:/Program Files (x86)/Microsoft Visual Studio/2022/BuildTools/Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/share/cmake-3.31/Modules/CMakeTestCCompiler.cmake:67 (message):
+    The C compiler
+
+      "C:/Program Files (x86)/Microsoft Visual Studio/2022/BuildTools/VC/Tools/MSVC/14.44.35207/bin/Hostx64/x64/cl.exe"
+
+    is not able to compile a simple test program.
+
+    It fails with the following output:
+
+      Change Dir: 'C:/Users/wuphy/Documents/hippo-transcribe/--SkipTests/release/build/whisper-rs-sys-ffe76b042736d632/out/build/ggml/src/ggml-vulkan/vulkan-shaders-gen-prefix/src/vulkan-shaders-gen-build/CMakeFiles/CMakeScratch/TryCompile-twgqiq'
+      
+      Run Build Command(s): C:/Users/wuphy/AppData/Local/Microsoft/WinGet/Packages/Ninja-build.Ninja_Microsoft.Winget.Source_8wekyb3d8bbwe/ninja.exe -v cmTC_7ca67
+      [1/2] C:\PROGRA~2\MICROS~2\2022\BUILDT~1\VC\Tools\MSVC\1444~1.352\bin\Hostx64\x64\cl.exe  /nologo   /DWIN32 /D_WINDOWS  /Zi /Ob0 /Od /RTC1 -MDd /showIncludes /FoCMakeFiles\cmTC_7ca67.dir\testCCompiler.c.obj /FdCMakeFiles\cmTC_7ca67.dir\ /FS -c C:\Users\wuphy\Documents\hippo-transcribe\--SkipTests\release\build\whisper-rs-sys-ffe76b042736d632\out\build\ggml\src\ggml-vulkan\vulkan-shaders-gen-prefix\src\vulkan-shaders-gen-build\CMakeFiles\CMakeScratch\TryCompile-twgqiq\testCCompiler.c
+      FAILED: [code=2] CMakeFiles/cmTC_7ca67.dir/testCCompiler.c.obj 
+      C:\PROGRA~2\MICROS~2\2022\BUILDT~1\VC\Tools\MSVC\1444~1.352\bin\Hostx64\x64\cl.exe  /nologo   /DWIN32 /D_WINDOWS  /Zi /Ob0 /Od /RTC1 -MDd /showIncludes /FoCMakeFiles\cmTC_7ca67.dir\testCCompiler.c.obj /FdCMakeFiles\cmTC_7ca67.dir\ /FS -c C:\Users\wuphy\Documents\hippo-transcribe\--SkipTests\release\build\whisper-rs-sys-ffe76b042736d632\out\build\ggml\src\ggml-vulkan\vulkan-shaders-gen-prefix\src\vulkan-shaders-gen-build\CMakeFiles\CMakeScratch\TryCompile-twgqiq\testCCompiler.c
+      C:\Users\wuphy\Documents\hippo-transcribe\--SkipTests\release\build\whisper-rs-sys-ffe76b042736d632\out\build\ggml\src\ggml-vulkan\vulkan-shaders-gen-prefix\src\vulkan-shaders-gen-build\CMakeFiles\CMakeScratch\TryCompile-twgqiq\testCCompiler.c: fatal error C1041: cannot open program database 'C:\Users\wuphy\Documents\hippo-transcribe\--SkipTests\release\build\whisper-rs-sys-ffe76b042736d632\out\build\ggml\src\ggml-vulkan\vulkan-shaders-gen-prefix\src\vulkan-shaders-gen-build\CMakeFiles\CMakeScratch\TryCompile-twgqiq\CMakeFiles\cmTC_7ca67.dir\vc140.pdb'; if multiple CL.EXE write to the same .PDB file, please use /FS
+      ninja: build stopped: subcommand failed.
+      
+      
+
+    
+
+    CMake will not be able to correctly generate this project.
+  Call Stack (most recent call first):
+    CMakeLists.txt:2 (project)
+
+
+  -- Configuring incomplete, errors occurred!
+  ninja: build stopped: subcommand failed.
+
+
+  --- stderr
+  running: "cmake" "-Wdev" "--debug-output" "C:\\Users\\wuphy\\Documents\\hippo-transcribe\\--SkipTests\\release\\build\\whisper-rs-sys-ffe76b042736d632\\out\\whisper.cpp" "-B" "C:\\Users\\wuphy\\Documents\\hippo-transcribe\\--SkipTests\\release\\build\\whisper-rs-sys-ffe76b042736d632\\out\\build" "-G" "Ninja" "-DBUILD_SHARED_LIBS=OFF" "-DWHISPER_ALL_WARNINGS=OFF" "-DWHISPER_ALL_WARNINGS_3RD_PARTY=OFF" "-DWHISPER_BUILD_TESTS=OFF" "-DWHISPER_BUILD_EXAMPLES=OFF" "-DGGML_VULKAN=ON" "-DGGML_METAL=OFF" "-DCMAKE_BUILD_TYPE=Release" "-DCMAKE_GENERATOR=Ninja" "-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDLL" "-DCMAKE_INSTALL_PREFIX=C:\\Users\\wuphy\\Documents\\hippo-transcribe\\--SkipTests\\release\\build\\whisper-rs-sys-ffe76b042736d632\\out" "-DCMAKE_C_FLAGS= -nologo -MD -Brepro -W0" "-DCMAKE_C_COMPILER=C:/Program Files (x86)/Microsoft Visual Studio/2022/BuildTools/VC/Tools/MSVC/14.44.35207/bin/HostX64/x64/cl.exe" "-DCMAKE_CXX_FLAGS= /utf-8 -nologo -MD -Brepro -W0" "-DCMAKE_CXX_COMPILER=C:/Program Files (x86)/Microsoft Visual Studio/2022/BuildTools/VC/Tools/MSVC/14.44.35207/bin/HostX64/x64/cl.exe" "-DCMAKE_ASM_FLAGS= -nologo -MD -Brepro -W0" "-DCMAKE_ASM_COMPILER=C:/Program Files (x86)/Microsoft Visual Studio/2022/BuildTools/VC/Tools/MSVC/14.44.35207/bin/HostX64/x64/cl.exe" "-DCMAKE_VERBOSE_MAKEFILE:BOOL=ON"
+  CMake Deprecation Warning at CMakeLists.txt:1 (cmake_minimum_required):
+    Compatibility with CMake < 3.10 will be removed from a future version of
+    CMake.
+
+    Update the VERSION argument <min> value.  Or, use the <min>...<max> syntax
+    to tell CMake that the project requires at least <min> but has been updated
+    to work with policies introduced by <max> or earlier.
+
+
+     Called from: [1]	C:/Users/wuphy/Documents/hippo-transcribe/--SkipTests/release/build/whisper-rs-sys-ffe76b042736d632/out/whisper.cpp/CMakeLists.txt
+     Entering             C:/Users/wuphy/Documents/hippo-transcribe/--SkipTests/release/build/whisper-rs-sys-ffe76b042736d632/out/whisper.cpp/ggml
+     Called from: [1]	C:/Users/wuphy/Documents/hippo-transcribe/--SkipTests/release/build/whisper-rs-sys-ffe76b042736d632/out/whisper.cpp/CMakeLists.txt
+     Entering             C:/Users/wuphy/Documents/hippo-transcribe/--SkipTests/release/build/whisper-rs-sys-ffe76b042736d632/out/whisper.cpp/ggml/src
+     Called from: [1]	C:/Users/wuphy/Documents/hippo-transcribe/--SkipTests/release/build/whisper-rs-sys-ffe76b042736d632/out/whisper.cpp/ggml/CMakeLists.txt
+     Entering             C:/Users/wuphy/Documents/hippo-transcribe/--SkipTests/release/build/whisper-rs-sys-ffe76b042736d632/out/whisper.cpp/ggml/src/ggml-cpu
+     Called from: [2]	C:/Users/wuphy/Documents/hippo-transcribe/--SkipTests/release/build/whisper-rs-sys-ffe76b042736d632/out/whisper.cpp/ggml/src/CMakeLists.txt
+                  [1]	C:/Users/wuphy/Documents/hippo-transcribe/--SkipTests/release/build/whisper-rs-sys-ffe76b042736d632/out/whisper.cpp/ggml/src/CMakeLists.txt
+     Returning to         C:/Users/wuphy/Documents/hippo-transcribe/--SkipTests/release/build/whisper-rs-sys-ffe76b042736d632/out/whisper.cpp/ggml/src
+     Called from: [2]	C:/Users/wuphy/Documents/hippo-transcribe/--SkipTests/release/build/whisper-rs-sys-ffe76b042736d632/out/whisper.cpp/ggml/src/CMakeLists.txt
+                  [1]	C:/Users/wuphy/Documents/hippo-transcribe/--SkipTests/release/build/whisper-rs-sys-ffe76b042736d632/out/whisper.cpp/ggml/src/CMakeLists.txt
+     Entering             C:/Users/wuphy/Documents/hippo-transcribe/--SkipTests/release/build/whisper-rs-sys-ffe76b042736d632/out/whisper.cpp/ggml/src/ggml-vulkan
+     Called from: [2]	C:/Users/wuphy/Documents/hippo-transcribe/--SkipTests/release/build/whisper-rs-sys-ffe76b042736d632/out/whisper.cpp/ggml/src/CMakeLists.txt
+                  [1]	C:/Users/wuphy/Documents/hippo-transcribe/--SkipTests/release/build/whisper-rs-sys-ffe76b042736d632/out/whisper.cpp/ggml/src/CMakeLists.txt
+     Returning to         C:/Users/wuphy/Documents/hippo-transcribe/--SkipTests/release/build/whisper-rs-sys-ffe76b042736d632/out/whisper.cpp/ggml/src
+     Called from: [2]	C:/Users/wuphy/Documents/hippo-transcribe/--SkipTests/release/build/whisper-rs-sys-ffe76b042736d632/out/whisper.cpp/ggml/src/CMakeLists.txt
+                  [1]	C:/Users/wuphy/Documents/hippo-transcribe/--SkipTests/release/build/whisper-rs-sys-ffe76b042736d632/out/whisper.cpp/ggml/src/CMakeLists.txt
+     Returning to         C:/Users/wuphy/Documents/hippo-transcribe/--SkipTests/release/build/whisper-rs-sys-ffe76b042736d632/out/whisper.cpp/ggml
+     Called from: [1]	C:/Users/wuphy/Documents/hippo-transcribe/--SkipTests/release/build/whisper-rs-sys-ffe76b042736d632/out/whisper.cpp/ggml/CMakeLists.txt
+     Returning to         C:/Users/wuphy/Documents/hippo-transcribe/--SkipTests/release/build/whisper-rs-sys-ffe76b042736d632/out/whisper.cpp
+     Called from: [1]	C:/Users/wuphy/Documents/hippo-transcribe/--SkipTests/release/build/whisper-rs-sys-ffe76b042736d632/out/whisper.cpp/CMakeLists.txt
+     Entering             C:/Users/wuphy/Documents/hippo-transcribe/--SkipTests/release/build/whisper-rs-sys-ffe76b042736d632/out/whisper.cpp/src
+     Called from: [1]	C:/Users/wuphy/Documents/hippo-transcribe/--SkipTests/release/build/whisper-rs-sys-ffe76b042736d632/out/whisper.cpp/CMakeLists.txt
+     Returning to         C:/Users/wuphy/Documents/hippo-transcribe/--SkipTests/release/build/whisper-rs-sys-ffe76b042736d632/out/whisper.cpp
+     Called from: [1]	C:/Users/wuphy/Documents/hippo-transcribe/--SkipTests/release/build/whisper-rs-sys-ffe76b042736d632/out/whisper.cpp/CMakeLists.txt
+  CMake Warning (dev) in CMakeLists.txt:
+    Policy CMP0082 is not set: Install rules from add_subdirectory() are
+    interleaved with those in caller.  Run "cmake --help-policy CMP0082" for
+    policy details.  Use the cmake_policy command to set the policy and
+    suppress this warning.
+
+  This warning is for project developers.  Use -Wno-dev to suppress it.
+
+     Called from: [1]	C:/Users/wuphy/Documents/hippo-transcribe/--SkipTests/release/build/whisper-rs-sys-ffe76b042736d632/out/whisper.cpp/CMakeLists.txt
+  CMake Warning (dev) at ggml/src/CMakeLists.txt:192 (add_library):
+    Policy CMP0156 is not set: De-duplicate libraries on link lines based on
+    linker capabilities.  Run "cmake --help-policy CMP0156" for policy details.
+    Use the cmake_policy command to set the policy and suppress this warning.
+
+    Since the policy is not set, legacy libraries de-duplication strategy will
+    be applied.
+  This warning is for project developers.  Use -Wno-dev to suppress it.
+
+     Called from: [1]	C:/Users/wuphy/Documents/hippo-transcribe/--SkipTests/release/build/whisper-rs-sys-ffe76b042736d632/out/whisper.cpp/ggml/src/CMakeLists.txt
+  CMake Warning (dev) at ggml/src/CMakeLists.txt:224 (add_library):
+    Policy CMP0156 is not set: De-duplicate libraries on link lines based on
+    linker capabilities.  Run "cmake --help-policy CMP0156" for policy details.
+    Use the cmake_policy command to set the policy and suppress this warning.
+
+    Since the policy is not set, legacy libraries de-duplication strategy will
+    be applied.
+  This warning is for project developers.  Use -Wno-dev to suppress it.
+
+     Called from: [1]	C:/Users/wuphy/Documents/hippo-transcribe/--SkipTests/release/build/whisper-rs-sys-ffe76b042736d632/out/whisper.cpp/ggml/src/CMakeLists.txt
+  CMake Warning (dev) at ggml/src/CMakeLists.txt:259 (add_library):
+    Policy CMP0156 is not set: De-duplicate libraries on link lines based on
+    linker capabilities.  Run "cmake --help-policy CMP0156" for policy details.
+    Use the cmake_policy command to set the policy and suppress this warning.
+
+    Since the policy is not set, legacy libraries de-duplication strategy will
+    be applied.
+  Call Stack (most recent call first):
+    ggml/src/ggml-cpu/CMakeLists.txt:22 (ggml_add_backend_library)
+    ggml/src/CMakeLists.txt:444 (ggml_add_cpu_backend_variant_impl)
+  This warning is for project developers.  Use -Wno-dev to suppress it.
+
+     Called from: [1]	C:/Users/wuphy/Documents/hippo-transcribe/--SkipTests/release/build/whisper-rs-sys-ffe76b042736d632/out/whisper.cpp/ggml/src/CMakeLists.txt
+  CMake Warning (dev) at ggml/src/CMakeLists.txt:259 (add_library):
+    Policy CMP0156 is not set: De-duplicate libraries on link lines based on
+    linker capabilities.  Run "cmake --help-policy CMP0156" for policy details.
+    Use the cmake_policy command to set the policy and suppress this warning.
+
+    Since the policy is not set, legacy libraries de-duplication strategy will
+    be applied.
+  Call Stack (most recent call first):
+    ggml/src/ggml-vulkan/CMakeLists.txt:57 (ggml_add_backend_library)
+  This warning is for project developers.  Use -Wno-dev to suppress it.
+
+     Called from: [1]	C:/Users/wuphy/Documents/hippo-transcribe/--SkipTests/release/build/whisper-rs-sys-ffe76b042736d632/out/whisper.cpp/ggml/src/ggml-vulkan/CMakeLists.txt
+  CMake Warning (dev) in src/CMakeLists.txt:
+    Policy CMP0128 is not set: Selection of language standard and extension
+    flags improved.  Run "cmake --help-policy CMP0128" for policy details.  Use
+    the cmake_policy command to set the policy and suppress this warning.
+
+    For compatibility with older versions of CMake, compiler extensions won't
+    be enabled.
+  This warning is for project developers.  Use -Wno-dev to suppress it.
+
+     Called from: [1]	C:/Users/wuphy/Documents/hippo-transcribe/--SkipTests/release/build/whisper-rs-sys-ffe76b042736d632/out/whisper.cpp/src/CMakeLists.txt
+  CMake Warning (dev) at src/CMakeLists.txt:106 (add_library):
+    Policy CMP0156 is not set: De-duplicate libraries on link lines based on
+    linker capabilities.  Run "cmake --help-policy CMP0156" for policy details.
+    Use the cmake_policy command to set the policy and suppress this warning.
+
+    Since the policy is not set, legacy libraries de-duplication strategy will
+    be applied.
+  This warning is for project developers.  Use -Wno-dev to suppress it.
+
+     Called from: [1]	C:/Users/wuphy/Documents/hippo-transcribe/--SkipTests/release/build/whisper-rs-sys-ffe76b042736d632/out/whisper.cpp/src/CMakeLists.txt
+  running: "cmake" "--build" "C:\\Users\\wuphy\\Documents\\hippo-transcribe\\--SkipTests\\release\\build\\whisper-rs-sys-ffe76b042736d632\\out\\build" "--target" "install" "--config" "Release" "--parallel" "8"
+
+  thread 'main' (9076) panicked at C:\Users\wuphy\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\cmake-0.1.58\src\lib.rs:1132:5:
+
+  command did not execute successfully, got: exit code: 1
+
+  build script failed, must exit now
+  note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+warning: build failed, waiting for other jobs to finish...
