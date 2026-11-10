@@ -21,19 +21,28 @@ function Resolve-TargetRoot {
     )
     # PowerShell has no long options: a switch typed with a double dash arrives
     # as a bare string and binds to whichever parameter has a free position. That
-    # is how `--SkipTests` once became the target directory. Refuse the shape
-    # rather than silently building under a folder named after the flag.
-    if ($TargetDir -like "-*") {
-        $asSwitch = "-" + $TargetDir.TrimStart("-")
-        throw "-TargetDir received '$TargetDir', which looks like a switch. Write it as $asSwitch."
-    }
+    # is how `--SkipTests` once became the target directory. A failed run also
+    # leaves CARGO_TARGET_DIR set in the session, so the same flag-shaped name
+    # comes back through the environment on the next attempt. Check both sources,
+    # and anchor relative values: cargo resolves them against the current
+    # directory, which is how `<repo>\--SkipTests` survived the first fix.
+    $source = $null
+    $value = $null
     if ($TargetDir) {
-        # A relative value used to be handed to cargo, which resolves it against
-        # the current directory; anchor it here so every caller agrees.
-        if ([System.IO.Path]::IsPathRooted($TargetDir)) { return $TargetDir }
-        return (Join-Path $Root $TargetDir)
+        $source = "-TargetDir"
+        $value = $TargetDir
+    } elseif ($env:CARGO_TARGET_DIR) {
+        $source = "CARGO_TARGET_DIR"
+        $value = $env:CARGO_TARGET_DIR
     }
-    if ($env:CARGO_TARGET_DIR) { return $env:CARGO_TARGET_DIR }
+    if ($value) {
+        if ($value -like "-*") {
+            $asSwitch = "-" + $value.TrimStart("-")
+            throw "$source is '$value', which looks like a switch. Write it as $asSwitch; if it came from the environment, remove or correct CARGO_TARGET_DIR."
+        }
+        if ([System.IO.Path]::IsPathRooted($value)) { return $value }
+        return (Join-Path $Root $value)
+    }
     if ($env:USERPROFILE) { return (Join-Path $env:USERPROFILE "hb") }
     return (Join-Path $Root "target")
 }
