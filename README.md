@@ -291,7 +291,7 @@ queue and the finished transcripts. Add files/folders from its action row, or
 drag audio files and folders anywhere into the window, then choose a preset and
 speaker count and press Transcribe. **Record** captures from the microphone
 (48 kHz mono WAV, written beside your transcripts or to the save location): a
-1.5 s countdown starts the take, the meter and stop control live in the
+two-second countdown starts the take, the meter and stop control live in the
 transcription pane, and stopping transcribes it immediately with no setup —
 Speed on Pro, Balanced on free, one speaker. Pressing Record while a batch is transcribing stops the batch, leaves the
 queued files for later, and records the take on its own. A recording workflow

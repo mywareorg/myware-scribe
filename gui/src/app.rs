@@ -114,7 +114,7 @@ const FOLLOW_SEEK_QUIET: Duration = Duration::from_millis(200);
 /// seconds, shown as 3, 2, 1. The stream is open for the whole of it, so the
 /// meter is live and the capture warm-up has finished before the first sample
 /// is written.
-const COUNTDOWN: Duration = Duration::from_secs(3);
+const COUNTDOWN: Duration = Duration::from_secs(2);
 
 /// Logical 4:3 sizing for the window (default) and floors.
 // The transcript header and bottom action row need this much horizontal room
@@ -329,7 +329,7 @@ struct FeatureSlide {
     body: &'static str,
 }
 
-const FEATURE_DECK: [FeatureSlide; 5] = [
+const FEATURE_DECK: [FeatureSlide; 7] = [
     FeatureSlide {
         eyebrow: "FREE",
         title: "Full-length transcription. Forever.",
@@ -339,7 +339,17 @@ const FEATURE_DECK: [FeatureSlide; 5] = [
     FeatureSlide {
         eyebrow: "PRO",
         title: "Separate every speaker.",
-        body: "Shows who said what, labels each voice, and lets you rename speakers in the transcript.",
+        body: "Multi-speaker recordings are split into turns, so every line carries the right voice.",
+    },
+    FeatureSlide {
+        eyebrow: "PRO",
+        title: "Use the graphics card.",
+        body: "GPU acceleration transcribes faster on a supported card. Calibrate it once and the app remembers the result.",
+    },
+    FeatureSlide {
+        eyebrow: "PRO",
+        title: "Publish a report.",
+        body: "One document from a finished transcript: the participants, how long each one spoke, and a summary, saved as PDF, Word or text.",
     },
     FeatureSlide {
         eyebrow: "PRO",
@@ -10450,8 +10460,8 @@ impl App {
         )
     }
 
-    /// The countdown's numerals and ring while one is running. Three seconds,
-    /// one numeral per second: 3, 2, 1.
+    /// The countdown's numerals and ring while one is running. Two seconds,
+    /// one numeral per second: 2, 1.
     fn countdown_view(&self, now: Instant) -> Option<CountdownView> {
         let session = self.record.as_ref()?;
         if session.phase != RecordPhase::Countdown {
@@ -10460,7 +10470,7 @@ impl App {
         let ends = session.countdown_ends?;
         let remaining = ends.saturating_duration_since(now);
         let seconds = remaining.as_secs_f32();
-        let numeral = (seconds.ceil() as u8).clamp(1, 3);
+        let numeral = (seconds.ceil() as u8).clamp(1, 2);
         let fraction = (seconds / COUNTDOWN.as_secs_f32()).clamp(0.0, 1.0);
         Some(CountdownView {
             numeral,
@@ -10535,36 +10545,6 @@ impl App {
 
     /// The compact status that replaces the run readout while a recording is
     /// being transcribed.
-    fn transcribing_status(&self, scheme: &Scheme) -> Element<'_, Message> {
-        let scheme = *scheme;
-        container(
-            row![
-                icon_colored(ICON_MIC, 14.0, scheme.green),
-                text("Transcribing\u{2026}")
-                    .size(theme::TEXT_SM)
-                    .color(scheme.text),
-                horizontal_space(),
-                action_text("Cancel")
-                    .on_press(Message::Cancel)
-                    .style(pill_button_secondary),
-            ]
-            .spacing(theme::SPACE_SM)
-            .align_y(iced::Alignment::Center),
-        )
-        .width(Length::Fill)
-        .padding([6, 10])
-        .style(move |_theme| container::Style {
-            background: Some(scheme.field_bg.into()),
-            border: iced::border::Border {
-                color: scheme.border,
-                width: 1.0,
-                radius: 12.0.into(),
-            },
-            ..container::Style::default()
-        })
-        .into()
-    }
-
     /// The right pane while a session owns it: countdown, capture or model
     /// preparation. Transcribing is handled by the normal transcript path.
     fn recording_surface_element(&self, scheme: &Scheme) -> Element<'_, Message> {
@@ -12245,6 +12225,10 @@ impl App {
     fn overall_progress_target(&self) -> f32 {
         if !matches!(self.status, Status::Running) && !self.completion_pending {
             return self.overall_shown;
+        }
+        if self.run_kind == RunKind::Recording {
+            // A take has no batch weight: its own stage progress is the bar.
+            return self.progress.clamp(0.0, 1.0);
         }
         if self.batch_total <= 0.0 {
             return 0.0;
@@ -19322,13 +19306,10 @@ impl App {
 
         let mut middle = column![].spacing(8).width(Length::Fill);
         if running || self.completion_pending {
-            middle = middle.push(if transport_muted {
-                // The full progress readout belongs to batch runs. A recording
-                // gets one compact line, where that readout normally sits.
-                self.transcribing_status(&scheme)
-            } else {
-                status_box.into()
-            });
+            // The same readout for every run: a recording's transcription is
+            // still a transcription, and the player behind it is only washed
+            // out, not the status.
+            middle = middle.push(status_box);
         }
         middle = middle.push(player_box);
 
@@ -27911,6 +27892,32 @@ mod tests {
     }
 
     #[test]
+    fn the_feature_deck_covers_gpu_reports_and_speakers() {
+        let text = FEATURE_DECK
+            .iter()
+            .map(|slide| format!("{} {}", slide.title, slide.body))
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_lowercase();
+        assert!(text.contains("gpu"), "no GPU slide");
+        assert!(text.contains("report"), "no report slide");
+        assert!(text.contains("multi-speaker"), "no speaker slide");
+        assert_eq!(FEATURE_DECK.len(), 7);
+    }
+
+    #[test]
+    fn a_recording_transcription_drives_the_bar_from_its_progress() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("record-bar");
+        let mut app = pro_app();
+        app.run_kind = RunKind::Recording;
+        app.status = Status::Running;
+        app.batch_total = 0.0;
+        app.progress = 0.4;
+        assert!((app.overall_progress_target() - 0.4).abs() < 0.001);
+    }
+
+    #[test]
     fn the_free_tier_is_one_speaker() {
         let _guard = env_lock();
         let _config = ConfigEnv::new("free-speakers");
@@ -34699,7 +34706,7 @@ mod tests {
     }
 
     #[test]
-    fn countdown_view_numbers_three_one_second_steps() {
+    fn countdown_view_numbers_two_one_second_steps() {
         let _guard = env_lock();
         let _config = ConfigEnv::new("record-countdown");
         let mut app = pro_app();
@@ -34713,24 +34720,18 @@ mod tests {
         });
 
         let view = app.countdown_view(base).expect("countdown view");
-        assert_eq!(view.numeral, 3);
+        assert_eq!(view.numeral, 2);
         assert_eq!(view.remaining, COUNTDOWN);
         assert_eq!(view.fraction, 1.0);
 
         let view = app
             .countdown_view(base + Duration::from_millis(400))
             .unwrap();
-        assert_eq!(view.numeral, 3);
-        assert_eq!(view.remaining, Duration::from_millis(2_600));
+        assert_eq!(view.numeral, 2);
+        assert_eq!(view.remaining, Duration::from_millis(1_600));
 
         let view = app
             .countdown_view(base + Duration::from_secs(1))
-            .unwrap();
-        assert_eq!(view.numeral, 2);
-        assert_eq!(view.remaining, Duration::from_secs(2));
-
-        let view = app
-            .countdown_view(base + Duration::from_secs(2))
             .unwrap();
         assert_eq!(view.numeral, 1);
         assert_eq!(view.remaining, Duration::from_secs(1));
