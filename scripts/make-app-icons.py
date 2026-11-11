@@ -51,7 +51,7 @@ def render(badge: Image.Image, size: int, fill) -> Image.Image:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--source", default="icons/red-pencil.png")
+    parser.add_argument("--source", default="icons/scroll-quill.png")
     parser.add_argument("--out", default="gui/assets")
     parser.add_argument("--icons-out", default="icons")
     parser.add_argument(
