@@ -12,7 +12,7 @@ Use this for the edit/run loop. Use `scripts/build-windows.ps1` for the final
 LTO release and zip.
 
 Pass -Free or -Pro to force the entitlement for this run. Without either
-switch the persisted license/trial decides the tier.
+switch the persisted licence decides the tier.
 
 .EXAMPLE
 powershell -ExecutionPolicy Bypass -File .\scripts\run-windows.ps1

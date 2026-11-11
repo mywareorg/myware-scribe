@@ -1,20 +1,18 @@
 #![allow(dead_code)] // The store seam is exercised by the Windows/macOS clients.
 //!
-//! Free/Pro entitlement: tiers, features, trial, offline grace and the
-//! platform store provider seam.
+//! Free/Pro entitlement: tiers, features, offline grace and the platform
+//! store provider seam.
 //!
 //! Nothing here talks to a store. A `Provider` implementation supplies the
 //! purchased state; `State` turns that into an effective tier, honouring a
-//! 7-day trial and a 30-day offline grace period. The Windows/Mac store
-//! clients plug in behind [`Provider`] without touching the gating code.
+//! 30-day offline grace period. The Windows/Mac store clients plug in behind
+//! [`Provider`] without touching the gating code.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
-/// Length of the in-app Pro trial.
-pub const TRIAL_DAYS: u64 = 7;
 /// How long a previously verified Pro entitlement survives offline.
 pub const GRACE_DAYS: u64 = 30;
 /// How often a Pro entitlement should be re-verified with the store.
@@ -171,8 +169,6 @@ pub enum Source {
     None,
     /// A store receipt (or the dev override).
     Store,
-    /// The in-app trial.
-    Trial,
     /// Compiled in: the always-Pro edition, which has nothing to buy and
     /// nothing that can lapse.
     Bundled,
@@ -183,7 +179,6 @@ impl Source {
         match self {
             Source::None => "Free",
             Source::Store => "purchased",
-            Source::Trial => "trial",
             Source::Bundled => "included",
         }
     }
@@ -192,7 +187,6 @@ impl Source {
         match self {
             Source::None => "none",
             Source::Store => "store",
-            Source::Trial => "trial",
             Source::Bundled => "bundled",
         }
     }
@@ -200,7 +194,6 @@ impl Source {
     fn parse(value: Option<&str>) -> Self {
         match value {
             Some("store") => Source::Store,
-            Some("trial") => Source::Trial,
             Some("bundled") => Source::Bundled,
             _ => Source::None,
         }
@@ -209,8 +202,8 @@ impl Source {
 
 /// True in the always-Pro edition (`--features pro`, the direct-download
 /// build). The tier is a property of the binary: there is no store to ask and
-/// no receipt that can lapse, so the grace window and the trial clock below do
-/// not apply. Tests keep the normal rules so those paths stay covered.
+/// no receipt that can lapse, so the grace window below does not apply. Tests
+/// keep the normal rules so those paths stay covered.
 pub const UNLOCKED: bool = cfg!(feature = "pro");
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -244,8 +237,6 @@ impl PurchaseState {
 pub struct Access {
     pub tier: Tier,
     pub source: Source,
-    /// Whole days left in the trial, when the trial is active.
-    pub trial_days_left: Option<u64>,
     /// True when a Pro entitlement is older than `RECHECK_AFTER_HOURS`.
     pub needs_recheck: bool,
 }
@@ -255,7 +246,6 @@ impl Default for Access {
         Self {
             tier: Tier::Free,
             source: Source::None,
-            trial_days_left: None,
             needs_recheck: false,
         }
     }
@@ -263,8 +253,8 @@ impl Default for Access {
 
 /// Persisted license record. The gate is a convenience and a store receipt
 /// remains the authority; `last_seen_unix` only stops a clock rollback from
-/// stretching the trial. Deleting the file still resets it. Never used to
-/// delete user data on downgrade.
+/// stretching the offline grace window. Deleting the file still resets it.
+/// Never used to delete user data on downgrade.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Record {
     #[serde(default)]
@@ -272,17 +262,13 @@ pub struct Record {
     /// Unix seconds of the last successful entitlement check.
     #[serde(default)]
     pub checked_unix: Option<u64>,
-    /// Unix seconds when the trial started.
-    #[serde(default)]
-    pub trial_started_unix: Option<u64>,
     /// Latest wall-clock time this record has been observed at. A clock rolled
-    /// back below this cannot stretch the trial.
+    /// back below this cannot stretch the grace window.
     #[serde(default)]
     pub last_seen_unix: Option<u64>,
     #[serde(default)]
     pub source: Option<String>,
-    /// Local opt-out used by the development Free/Pro switch. A live trial
-    /// would otherwise keep granting Pro after a downgrade.
+    /// Local opt-out used by the development Free/Pro switch.
     #[serde(default)]
     pub force_free: bool,
 }
@@ -298,7 +284,8 @@ fn days_between(from: u64, to: u64) -> u64 {
 }
 
 /// The clock to judge access by: never earlier than the last moment this
-/// record was seen, so moving the system clock back cannot extend a trial.
+/// record was seen, so moving the system clock back cannot stretch the offline
+/// grace window.
 fn observed_now(record: &Record, now_s: u64) -> u64 {
     now_s.max(record.last_seen_unix.unwrap_or(0))
 }
@@ -306,17 +293,16 @@ fn observed_now(record: &Record, now_s: u64) -> u64 {
 /// Pure effective-access calculation. `pro_override` lets the dev provider
 /// force a tier without touching the persisted record.
 pub fn access_for(record: &Record, pro_override: Option<bool>, now: SystemTime) -> Access {
-    // The always-Pro edition never consults a receipt, a trial or the clock.
+    // The always-Pro edition never consults a receipt or the clock.
     if UNLOCKED && !cfg!(test) {
         return Access {
             tier: Tier::Pro,
             source: Source::Bundled,
-            trial_days_left: None,
             needs_recheck: false,
         };
     }
     // An explicit development override wins; otherwise a local opt-out beats
-    // both a purchased entitlement and an active trial.
+    // a purchased entitlement.
     if pro_override.is_none() && record.force_free {
         return Access::default();
     }
@@ -333,20 +319,8 @@ pub fn access_for(record: &Record, pro_override: Option<bool>, now: SystemTime) 
             } else {
                 Source::None
             },
-            trial_days_left: None,
             needs_recheck: stale_hours >= RECHECK_AFTER_HOURS,
         };
-    }
-    if let Some(started) = record.trial_started_unix {
-        let elapsed = days_between(started, now_s);
-        if elapsed < TRIAL_DAYS {
-            return Access {
-                tier: Tier::Pro,
-                source: Source::Trial,
-                trial_days_left: Some(TRIAL_DAYS - elapsed),
-                needs_recheck: false,
-            };
-        }
     }
     Access::default()
 }
@@ -371,13 +345,11 @@ impl State {
             record,
             purchase: PurchaseState::Idle,
         };
-        // The record only says where a store receipt or a local trial came
-        // from; the always-Pro edition reports its own source.
+        // The record only says where a store receipt came from; the always-Pro
+        // edition reports its own source.
         if !(UNLOCKED && !cfg!(test)) {
             state.access.source = if state.record.pro {
                 Source::parse(state.record.source.as_deref())
-            } else if state.access.tier == Tier::Pro {
-                Source::Trial
             } else {
                 Source::None
             };
@@ -417,17 +389,6 @@ impl State {
         before != self.access.tier
     }
 
-    /// Start the one-time trial. Returns false when it was already used.
-    pub fn start_trial(&mut self, now: SystemTime) -> bool {
-        if self.record.trial_started_unix.is_some() || self.record.pro {
-            return false;
-        }
-        self.record.trial_started_unix = Some(unix(now));
-        self.record.source = Some(Source::Trial.as_str().to_string());
-        self.refresh(None, now);
-        true
-    }
-
     /// Record a successful store entitlement check.
     pub fn grant_pro(&mut self, now: SystemTime) {
         self.record.force_free = false;
@@ -448,16 +409,12 @@ impl State {
 
     /// Drop a store entitlement the store no longer reports (a refund, or a
     /// subscription that ended). Unlike [`Self::revoke_pro`] this leaves the
-    /// local trial and the development switch alone.
+    /// development switch alone.
     pub fn expire_store(&mut self, now: SystemTime) {
         self.record.pro = false;
         self.record.checked_unix = Some(unix(now));
         self.record.source = Some(Source::None.as_str().to_string());
         self.refresh(None, now);
-    }
-
-    pub fn trial_used(&self) -> bool {
-        self.record.trial_started_unix.is_some()
     }
 }
 
@@ -480,7 +437,8 @@ pub trait Provider {
     }
 }
 
-/// No store: the portable/unsigned build. Buying is not possible, the trial is.
+/// No store: the portable/unsigned build. Buying is not possible, so the tier
+/// stays free unless the `pro` feature is compiled in.
 #[derive(Debug, Default)]
 pub struct NoneProvider;
 
@@ -543,7 +501,7 @@ impl Provider for DevProvider {
 }
 
 /// Pick the provider for this build. Store implementations are added later;
-/// until then every build reports no store and relies on the trial/dev env.
+/// until then every build reports no store and relies on the dev env override.
 pub fn provider() -> Box<dyn Provider> {
     if DevProvider::forced().is_some() {
         Box::new(DevProvider)
@@ -579,51 +537,9 @@ mod tests {
     }
 
     #[test]
-    fn trial_runs_for_seven_days() {
-        let record = Record {
-            trial_started_unix: Some(1_000_000),
-            ..Record::default()
-        };
-        let day0 = access_for(&record, None, at(1_000_000));
-        assert_eq!(day0.tier, Tier::Pro);
-        assert_eq!(day0.source, Source::Trial);
-        assert_eq!(day0.trial_days_left, Some(7));
-
-        let day6 = access_for(&record, None, at(1_000_000 + 6 * 86_400));
-        assert_eq!(day6.tier, Tier::Pro);
-        assert_eq!(day6.trial_days_left, Some(1));
-
-        let day7 = access_for(&record, None, at(1_000_000 + 7 * 86_400));
-        assert_eq!(day7.tier, Tier::Free);
-        assert_eq!(day7.source, Source::None);
-    }
-
-    #[test]
-    fn clock_rollback_does_not_extend_the_trial() {
-        // Five days of the trial have already been observed.
-        let record = Record {
-            trial_started_unix: Some(1_000_000),
-            last_seen_unix: Some(1_000_000 + 5 * 86_400),
-            ..Record::default()
-        };
-        // Moving the clock back to day one leaves two days left, not six.
-        let rolled_back = access_for(&record, None, at(1_000_000 + 86_400));
-        assert_eq!(rolled_back.tier, Tier::Pro);
-        assert_eq!(rolled_back.trial_days_left, Some(2));
-
-        // Once expiry has been observed, any earlier clock stays expired.
-        let expired = Record {
-            trial_started_unix: Some(1_000_000),
-            last_seen_unix: Some(1_000_000 + 8 * 86_400),
-            ..Record::default()
-        };
-        assert_eq!(access_for(&expired, None, at(1_000_000)).tier, Tier::Free);
-    }
-
-    #[test]
     fn refresh_records_the_latest_clock() {
         let mut state = State::default();
-        state.start_trial(at(100));
+        state.grant_pro(at(100));
         assert_eq!(state.record.last_seen_unix, Some(100));
         state.refresh(None, at(100 + 86_400));
         assert_eq!(state.record.last_seen_unix, Some(100 + 86_400));
@@ -669,9 +585,9 @@ mod tests {
     }
 
     #[test]
-    fn a_local_opt_out_beats_an_active_trial() {
+    fn a_local_opt_out_beats_a_paid_entitlement() {
         let mut state = State::default();
-        state.start_trial(at(10));
+        state.grant_pro(at(10));
         assert_eq!(state.access.tier, Tier::Pro);
         state.revoke_pro(at(20));
         assert_eq!(state.access.tier, Tier::Free);
@@ -680,24 +596,15 @@ mod tests {
     }
 
     #[test]
-    fn trial_can_only_start_once() {
-        let mut state = State::default();
-        assert!(state.start_trial(at(10)));
-        assert!(!state.start_trial(at(20)));
-        assert!(state.trial_used());
-        assert_eq!(state.access.tier, Tier::Pro);
-    }
-
-    #[test]
     fn state_round_trips_through_disk() {
         let dir = std::env::temp_dir().join(format!("hippo-license-{}", std::process::id()));
         let path = dir.join("license.json");
         let mut state = State::default();
-        state.start_trial(at(5_000));
+        state.grant_pro(at(5_000));
         state.save(&path);
         let loaded = State::load(&path, at(5_000));
         assert_eq!(loaded.access.tier, Tier::Pro);
-        assert_eq!(loaded.access.source, Source::Trial);
+        assert_eq!(loaded.access.source, Source::Store);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

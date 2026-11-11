@@ -113,7 +113,7 @@ pub fn run(args: &[String]) -> i32 {
     let mut license_state = license::State::load(&license_file, now);
     license_state.refresh(provider.override_tier(), now);
     // Keep the clock floor current so a CLI-only user cannot roll the clock back
-    // between runs and stretch the trial.
+    // between runs and stretch the offline grace window.
     license_state.save(&license_file);
     let tier = license_state.access.tier;
 
@@ -127,7 +127,7 @@ pub fn run(args: &[String]) -> i32 {
         };
         if let Some(feature) = preset_feature {
             eprintln!(
-                "{} is a Pro feature. Use --preset speed, or start the trial / buy Pro in the app.",
+                "{} is a Pro feature. Use --preset speed, or buy Pro in the app.",
                 feature.label()
             );
             return 1;

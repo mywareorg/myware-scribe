@@ -38,8 +38,7 @@ after the models are installed".
   transcript.
 - **Pro:** Balanced and Accuracy presets, speaker labels and diarization, batch
   runs, transcript editing, playback, GPU acceleration, labels, Favorites, and
-  every export and report from the Publish menu. One-time purchase, with a
-  7-day trial.
+  every export and report from the Publish menu. One-time purchase.
 
 The interface is the same in both: Pro surfaces are visible and locked, so the
 free tier shows what the purchase adds.

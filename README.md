@@ -274,18 +274,19 @@ presets, speaker diarization and labels, batch runs, transcript editing, audio
 playback, GPU acceleration, labels, Favorites and every export or report from
 the Publish menu.
 
-Pro is a one-time purchase on the Store, with a 7-day trial once per install.
-The packaged Windows build asks `Windows.Services.Store` whether the durable
-`pro` add-on is owned and starts the purchase from the paywall; portable builds
-offer the trial only. Entitlement lives in `license.json` beside the settings and
-never deletes transcripts or queue items; a lapsed licence falls back to the free
-tier, and a checked entitlement survives 30 days offline before it re-verifies.
+Pro is a one-time purchase on the Store. The packaged Windows build asks
+`Windows.Services.Store` whether the durable `pro` add-on is owned and starts
+the purchase from the paywall; portable builds have no purchase path, so they
+stay on the free tier unless the `pro` feature is compiled in. Entitlement lives
+in `license.json` beside the settings and never deletes transcripts or queue
+items; a lapsed licence falls back to the free tier, and a checked entitlement
+survives 30 days offline before it re-verifies.
 
 `HIPPO_TRANSCRIBE_TIER=pro` (or `free`) forces the tier for development.
 
 ### The always-Pro edition (direct download)
 
-For a build that is Pro without a Store, a receipt or a trial, compile the `pro`
+For a build that is Pro without a Store or a receipt, compile the `pro`
 feature in:
 
     .\scripts\build-windows.ps1 -SkipTests -Gpu -Unlocked -BundleModels

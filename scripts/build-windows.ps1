@@ -42,7 +42,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\build-windows.ps1
 
 .EXAMPLE
 # The always-Pro edition for direct download: Pro is compiled in, so the app
-# needs no Store listing, purchase or trial. Never publish this to the Store.
+# needs no Store listing or purchase. Never publish this to the Store.
 .\scripts\build-windows.ps1 -SkipTests -Gpu -Unlocked -BundleModels
 
 .EXAMPLE
@@ -96,7 +96,7 @@ param(
     [switch]$Cpu,
     # The always-Pro edition for direct download: the tier is compiled in
     # (--features pro) instead of coming from a Store receipt, so the app runs as
-    # Pro on a machine with no store, no purchase and no trial clock. The Store
+    # Pro on a machine with no store and no purchase. The Store
     # package must never set this. Named -Unlocked because -Pro would collide
     # with -Probe.
     [switch]$Unlocked,

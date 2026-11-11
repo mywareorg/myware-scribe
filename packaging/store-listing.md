@@ -27,7 +27,7 @@ What you get:
 - Recording from the microphone with a two-second countdown, then transcription of the take.
 - Light and dark themes, and a desktop notification when the whole queue is done.
 
-The free version covers the whole pipeline: the Speed model, one speaker, one file per run, unlimited files and audio length, microphone recording, copy, search and the automatic transcript. Pro adds the Balanced and Accuracy models, speaker labels, batch runs, transcript editing, playback, GPU acceleration, labels, Favorites, and every export and report from the Publish menu. Pro is a one-time purchase with a 7-day trial; the interface is the same in both, so you can see what it adds before you buy.
+The free version covers the whole pipeline: the Speed model, one speaker, one file per run, unlimited files and audio length, microphone recording, copy, search and the automatic transcript. Pro adds the Balanced and Accuracy models, speaker labels, batch runs, transcript editing, playback, GPU acceleration, labels, Favorites, and every export and report from the Publish menu. Pro is a one-time purchase; the interface is the same in both, so you can see what it adds before you buy.
 
 Everything stays on the machine: audio files, transcripts, models and logs. The only network use is downloading the models. There is no telemetry and nothing is uploaded.
 
@@ -83,7 +83,7 @@ Certification notes to paste into the submission:
 - First launch downloads the free tier's speech recognition model (about 35 MB) with progress shown in the app; Pro presets fetch their larger models when chosen. Transcription works offline afterwards; with no network the app explains that the models are missing. The short sample shipped in the package, sample-short.mp3, gives a quick pass.
 - This is a CPU build. Expect roughly real time: a minute of audio takes about a minute on a modern laptop, longer on an older one.
 - The microphone capability is exercised by Record: a two-second countdown, then capture, then a Stop control.
-- Pro is unlocked by a one-time Store add-on purchase; a 7-day trial is offered once per install from the paywall. The free tier keeps working after the trial ends. A purchase needs a Store-installed build and a Microsoft account; test with the add-on published and the listing hidden.
+- Pro is unlocked by a one-time Store add-on purchase. The free tier keeps working without a purchase. A purchase needs a Store-installed build and a Microsoft account; test with the add-on published and the listing hidden.
 - Files are written only to the app's own data folder and to locations the user chooses.
 
 ## Screenshot shot list

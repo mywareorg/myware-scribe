@@ -1378,7 +1378,6 @@ pub enum Message {
     FeatureAdvance,
     PurchasePro,
     RestorePro,
-    StartTrial,
     ToggleTier,
     DownloadModels,
     CancelModelDownload,
@@ -2242,7 +2241,7 @@ impl App {
         let mut license_state = license::State::load(&license_file, now);
         license_state.refresh(pro_override, now);
         // Persist the latest observed clock so a system-clock rollback cannot
-        // stretch the trial across restarts.
+        // stretch the offline grace window across restarts.
         license_state.save(&license_file);
         // Free only offers the speed model; a downgrade must never leave a
         // Pro-only preset selected.
@@ -4515,7 +4514,7 @@ impl App {
         }
     }
 
-    /// Drop back to the free preset after a trial/downgrade.
+    /// Drop back to the free preset after a downgrade.
     fn clamp_preset(&mut self) {
         let locked = match self.preset {
             Preset::Speed => false,
@@ -4531,24 +4530,17 @@ impl App {
         }
     }
 
-    /// Header control showing the current tier and opening the paywall. Once
-    /// the tier is Pro there is nothing left to sell, so the header draws
-    /// nothing in its place instead of renaming the pill.
+    /// Header control opening the paywall on the free tier. Once the tier is
+    /// Pro there is nothing left to sell, so the header draws nothing in its
+    /// place instead of renaming the pill.
     fn license_button<'a>(&'a self, scheme: &Scheme) -> Element<'a, Message> {
         if self.license.access.tier == license::Tier::Pro {
             return iced::widget::Space::new(Length::Fixed(0.0), Length::Fixed(0.0)).into();
         }
-        let button: Element<Message> = if self.shows(license::Audience::ProOnly) {
-            action_text("Get Pro")
-                .on_press(Message::OpenPaywall)
-                .style(pill_button_secondary)
-                .into()
-        } else {
-            action_text("Get Pro")
-                .on_press(Message::OpenPaywall)
-                .style(color_button(scheme.blue, scheme.on_accent))
-                .into()
-        };
+        let button: Element<Message> = action_text("Get Pro")
+            .on_press(Message::OpenPaywall)
+            .style(color_button(scheme.blue, scheme.on_accent))
+            .into();
         self.tip(
             button,
             "Balanced and Accuracy presets, speaker labels, batch, editing and playback",
@@ -4623,29 +4615,19 @@ impl App {
                 .size(theme::TEXT_SM)
                 .color(scheme.green),
             );
+        } else if self.provider.name() == "none" {
+            // No store client: there is nothing to buy or restore here.
+            actions = actions.push(
+                text("Purchasing is available in the Store version.")
+                    .size(theme::TEXT_XS)
+                    .color(scheme.muted),
+            );
         } else {
-            if !self.license.trial_used() {
-                actions = actions.push(
-                    action_text("Start 7-day trial")
-                        .on_press(Message::StartTrial)
-                        .style(pill_button_secondary),
-                );
-            }
-
-            if self.provider.name() == "none" {
-                // A build without a store client can only offer the trial.
-                actions = actions.push(
-                    text("Purchasing is available in the Store version.")
-                        .size(theme::TEXT_XS)
-                        .color(scheme.muted),
-                );
-            } else {
-                actions = actions.push(
-                    action_text("Buy Pro")
-                        .on_press(Message::PurchasePro)
-                        .style(color_button(scheme.blue, scheme.on_accent)),
-                );
-            }
+            actions = actions.push(
+                action_text("Buy Pro")
+                    .on_press(Message::PurchasePro)
+                    .style(color_button(scheme.blue, scheme.on_accent)),
+            );
             // Keep restore on its own line so the label never wraps.
             secondary = secondary.push(
                 action_text("Restore purchase")
@@ -6062,20 +6044,6 @@ impl App {
                 self.paywall_open = false;
                 Task::none()
             }
-            Message::StartTrial => {
-                let now = SystemTime::now();
-                if self.license.start_trial(now) {
-                    self.save_license();
-                    self.clamp_preset();
-                    self.toast = Some(("Pro trial started".to_string(), Instant::now()));
-                } else {
-                    self.toast = Some((
-                        "The Pro trial has already been used".to_string(),
-                        Instant::now(),
-                    ));
-                }
-                Task::none()
-            }
             Message::PurchasePro => {
                 let now = SystemTime::now();
                 let state = self.provider.purchase();
@@ -6090,7 +6058,7 @@ impl App {
                     }
                     license::PurchaseState::Unavailable => {
                         self.toast = Some((
-                            "The Store purchase arrives in 1.1; the trial is open now".to_string(),
+                            "Purchasing is not available right now".to_string(),
                             Instant::now(),
                         ));
                     }
@@ -7191,9 +7159,9 @@ impl App {
                             self.save_license();
                             self.clamp_preset();
                         }
-                    } else if was_pro && self.license.access.source != license::Source::Trial {
-                        // A refund or a lapsed subscription; a local trial is not
-                        // the store's to take away.
+                    } else if was_pro {
+                        // A refund or a lapsed subscription; the Store is the
+                        // authority on the receipt.
                         self.license.expire_store(now);
                         self.save_license();
                         self.clamp_preset();
@@ -22681,7 +22649,6 @@ fn toast_tone(message: &str) -> ToastTone {
         "queued",
         "stopping",
         "purchase",
-        "trial",
         "restored",
         "switched",
         "player is",

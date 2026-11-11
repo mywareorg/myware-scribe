@@ -15,9 +15,9 @@ gpu = ["whisper-rs/vulkan", "whisper-rs/openmp"]
 # beside each model; without one whisper falls back to Metal.
 coreml = ["whisper-rs/coreml"]
 # The always-Pro edition: the tier is compiled in instead of coming from a
-# Store receipt, so the binary works as Pro without a store, an entitlement or
-# a trial clock. Used for the direct-download build; the Store package does not
-# enable it. See `license::UNLOCKED`.
+# Store receipt, so the binary works as Pro without a store or an entitlement.
+# Used for the direct-download build; the Store package does not enable it.
+# See `license::UNLOCKED`.
 pro = []
 
 [dependencies]
