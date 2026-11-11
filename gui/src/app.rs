@@ -3336,12 +3336,33 @@ impl App {
         let Some(entry) = self.recent.get(index).cloned() else {
             return;
         };
-        if self
-            .version_preview
-            .as_ref()
-            .is_some_and(|preview| preview.row == index)
-        {
-            self.version_preview = None;
+        // Read this before the indices below shift: after a removal every
+        // stored row number is remapped, and a neighbour would answer for the
+        // row that just went away.
+        let showing_removed = self.recent_row_is_shown(index, &entry);
+        match self.version_preview.as_ref().map(|preview| preview.row) {
+            Some(row) if row == index => self.version_preview = None,
+            Some(row) if row > index => {
+                if let Some(preview) = self.version_preview.as_mut() {
+                    preview.row -= 1;
+                }
+            }
+            _ => {}
+        }
+        // The tabs keep a remembered row too; it names the same item, not the
+        // same position.
+        for focus in [
+            &mut self.favorites_focus,
+            &mut self.history_focus,
+            &mut self.recordings_focus,
+        ] {
+            if let Some(row) = *focus {
+                *focus = match row.cmp(&index) {
+                    std::cmp::Ordering::Equal => None,
+                    std::cmp::Ordering::Greater => Some(row - 1),
+                    std::cmp::Ordering::Less => Some(row),
+                };
+            }
         }
         if let Some(key) = favorite_key(&entry) {
             self.favorite_order.retain(|other| other != &key);
@@ -3370,14 +3391,24 @@ impl App {
             }
         }
         self.save_queue();
-        let source = entry.transcript.or(entry.audio);
-        let showing_removed = self
-            .selected_view
-            .as_ref()
-            .is_some_and(|view| source.as_deref() == Some(view.source.as_path()));
         if showing_removed {
             self.return_to_live();
         }
+    }
+
+    /// True when the open document belongs to recent row `index`. The row the
+    /// view was opened from counts alongside the path, because a version
+    /// preview (or a view opened from a finished queue row) has a source the
+    /// entry's current transcript does not name.
+    fn recent_row_is_shown(&self, index: usize, entry: &RecentEntry) -> bool {
+        let Some(view) = &self.selected_view else {
+            return false;
+        };
+        if view.finished && self.selected_recent == Some(index) {
+            return true;
+        }
+        let source = entry.transcript.as_deref().or(entry.audio.as_deref());
+        source == Some(view.source.as_path())
     }
 
     /// Move every finished row into History and drop those rows from the
@@ -3417,6 +3448,10 @@ impl App {
             return;
         }
         let preview = self.selected == Some(index) && self.selected_view.is_some();
+        // The live buffer is the transcript of the row being transcribed, or of
+        // the finished row it still holds. Removing either must take that text
+        // with it: falling back to "live" would keep the removed item on screen.
+        let live = self.live_buffer_shows_queue_row(index);
         self.queue.remove(index);
         let remap = |stored: &mut Option<usize>| {
             if let Some(value) = *stored {
@@ -3437,7 +3472,42 @@ impl App {
             self.player = None;
             self.playhead = 0.0;
             self.last_tick = None;
+        } else if live {
+            self.drop_live_view();
         }
+        self.invalidate_derived();
+    }
+
+    /// True when the pane's live buffer is this queue row's transcript: the row
+    /// being transcribed, or the finished row whose output the buffer still
+    /// holds. A pinned document is never the live buffer.
+    fn live_buffer_shows_queue_row(&self, index: usize) -> bool {
+        if self.selected_view.is_some() {
+            return false;
+        }
+        if self.current == Some(index) || self.current_index == Some(index) {
+            return true;
+        }
+        self.queue.get(index).is_some_and(|item| {
+            item.transcript
+                .as_deref()
+                .is_some_and(|path| Some(path) == self.output_txt.as_deref())
+        })
+    }
+
+    /// Drop the live buffer when the queue row that owns it is removed. The
+    /// pane falls back to an empty transcript rather than to "live", because
+    /// the live text *is* the removed row's transcript.
+    fn drop_live_view(&mut self) {
+        self.return_to_live();
+        self.transcript.clear();
+        self.lines.clear();
+        self.pending_lines.clear();
+        self.turns.clear();
+        self.peaks = Arc::new(Vec::new());
+        self.peaks_for = None;
+        self.timeline_duration = None;
+        self.output_txt = None;
         self.invalidate_derived();
     }
 
@@ -4461,22 +4531,20 @@ impl App {
         }
     }
 
-    /// Header control showing the current tier and opening the paywall.
+    /// Header control showing the current tier and opening the paywall. Once
+    /// the tier is Pro there is nothing left to sell, so the header draws
+    /// nothing in its place instead of renaming the pill.
     fn license_button<'a>(&'a self, scheme: &Scheme) -> Element<'a, Message> {
-        let label = match self.license.access.tier {
-            license::Tier::Pro if self.license.access.source == license::Source::Trial => {
-                "Pro trial"
-            }
-            license::Tier::Pro => "Pro",
-            license::Tier::Free => "Get Pro",
-        };
+        if self.license.access.tier == license::Tier::Pro {
+            return iced::widget::Space::new(Length::Fixed(0.0), Length::Fixed(0.0)).into();
+        }
         let button: Element<Message> = if self.shows(license::Audience::ProOnly) {
-            action_text(label)
+            action_text("Get Pro")
                 .on_press(Message::OpenPaywall)
                 .style(pill_button_secondary)
                 .into()
         } else {
-            action_text(label)
+            action_text("Get Pro")
                 .on_press(Message::OpenPaywall)
                 .style(color_button(scheme.blue, scheme.on_accent))
                 .into()
@@ -6656,6 +6724,7 @@ impl App {
                     // The edited document may be the row about to be removed.
                     self.commit_inline_edit(false);
                     let was_viewing = self.selected_view.is_some();
+                    let live = self.live_buffer_shows_queue_row(index);
                     if let Some(audio) = self.queue[index].audio.clone() {
                         let _ = std::fs::remove_file(
                             hippo_transcribe_core::pipeline::checkpoint_path(&audio),
@@ -6683,7 +6752,10 @@ impl App {
                             std::cmp::Ordering::Greater => Some(selected - 1),
                             std::cmp::Ordering::Less => Some(selected),
                         });
-                    if self.selected.is_none() {
+                    if live {
+                        // The removed row owned the live transcript on screen.
+                        self.drop_live_view();
+                    } else if self.selected.is_none() {
                         self.selected_view = None;
                         self.view_error = None;
                         if was_viewing {
@@ -25660,6 +25732,174 @@ mod tests {
         assert_eq!(app.selected, None);
         assert_eq!(app.playhead, 0.0);
         assert!(app.recent.is_empty());
+
+        let _ = std::fs::remove_dir_all(&media);
+    }
+
+    /// Seed two finished entries in the given list order, with both starred or
+    /// recorded as the caller asks. Every row points at a real file.
+    fn two_recent_items(tag: &str, star: bool, recording: bool) -> (App, PathBuf, PathBuf, PathBuf) {
+        let media = temp_dir(tag);
+        let mut transcripts = Vec::new();
+        let mut entries = Vec::new();
+        for name in ["a", "b"] {
+            let audio = media.join(format!("{name}.mp3"));
+            std::fs::write(&audio, b"audio").unwrap();
+            let transcript = media.join(format!("{name}.txt"));
+            std::fs::write(&transcript, format!("[00:00] SPEAKER 1: {name}\n")).unwrap();
+            transcripts.push(transcript.clone());
+            entries.push(RecentEntry {
+                audio: Some(audio),
+                transcript: Some(transcript),
+                finished_at: if name == "a" { 20 } else { 10 },
+                duration: Some(1.0),
+                favorite: star,
+                recording,
+                ..Default::default()
+            });
+        }
+        let mut app = pro_app();
+        app.recent = entries;
+        (
+            app,
+            media,
+            transcripts[0].clone(),
+            transcripts[1].clone(),
+        )
+    }
+
+    #[test]
+    fn removing_an_open_favorite_clears_the_pane() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("remove-favorite-open");
+        let (mut app, media, transcript_a, _transcript_b) =
+            two_recent_items("remove-favorite-open-media", true, false);
+
+        open_test_item(&mut app, 0);
+        let _ = app.update(Message::SelectTab(PaneTab::Favorites));
+        assert_eq!(app.pane_tab, PaneTab::Favorites);
+        assert_eq!(
+            app.selected_view.as_ref().unwrap().source.as_path(),
+            transcript_a.as_path()
+        );
+
+        let _ = app.update(Message::RemoveRecent(0));
+        assert!(app.selected_view.is_none(), "the favorite's transcript stayed");
+        assert_eq!(app.selected_recent, None);
+        assert_eq!(app.playhead, 0.0);
+        assert_eq!(app.recent.len(), 1);
+
+        let _ = std::fs::remove_dir_all(&media);
+    }
+
+    #[test]
+    fn removing_an_open_recording_clears_the_pane() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("remove-recording-open");
+        let (mut app, media, transcript_a, _transcript_b) =
+            two_recent_items("remove-recording-open-media", false, true);
+
+        open_test_item(&mut app, 0);
+        let _ = app.update(Message::SelectTab(PaneTab::Recordings));
+        assert_eq!(app.pane_tab, PaneTab::Recordings);
+        assert_eq!(
+            app.selected_view.as_ref().unwrap().source.as_path(),
+            transcript_a.as_path()
+        );
+
+        let _ = app.update(Message::RemoveRecent(0));
+        assert!(app.selected_view.is_none(), "the recording's transcript stayed");
+        assert_eq!(app.selected_recent, None);
+        assert_eq!(app.playhead, 0.0);
+        assert_eq!(app.recent.len(), 1);
+
+        let _ = std::fs::remove_dir_all(&media);
+    }
+
+    #[test]
+    fn removing_another_row_keeps_the_open_transcript() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("remove-other-row");
+        let (mut app, media, _transcript_a, transcript_b) =
+            two_recent_items("remove-other-row-media", true, false);
+
+        // The open row is index 1; the removal is index 0, so the remembered
+        // row must be remapped before it is compared with the removal.
+        open_test_item(&mut app, 1);
+        app.favorites_focus = Some(1);
+        let _ = app.update(Message::SelectTab(PaneTab::Favorites));
+        assert_eq!(
+            app.selected_view.as_ref().unwrap().source.as_path(),
+            transcript_b.as_path()
+        );
+
+        let _ = app.update(Message::RemoveRecent(0));
+        assert_eq!(
+            app.selected_view.as_ref().unwrap().source.as_path(),
+            transcript_b.as_path(),
+            "removing a neighbour must not clear the open transcript"
+        );
+        assert_eq!(app.selected_recent, Some(0));
+        assert_eq!(app.recent.len(), 1);
+
+        let _ = std::fs::remove_dir_all(&media);
+    }
+
+    #[test]
+    fn removing_the_queue_row_that_owns_the_live_transcript_clears_the_pane() {
+        let _guard = env_lock();
+        let _config = ConfigEnv::new("remove-queue-live");
+        let media = temp_dir("remove-queue-live-media");
+        let audio_a = media.join("a.mp3");
+        std::fs::write(&audio_a, b"audio").unwrap();
+        let transcript_a = media.join("a.txt");
+        std::fs::write(&transcript_a, "[00:00] SPEAKER 1: a\n").unwrap();
+        let audio_b = media.join("b.mp3");
+        std::fs::write(&audio_b, b"audio").unwrap();
+        let transcript_b = media.join("b.txt");
+        std::fs::write(&transcript_b, "[00:00] SPEAKER 1: b\n").unwrap();
+
+        let mut app = pro_app();
+        app.queue = vec![
+            QueueItem {
+                path: audio_a.clone(),
+                audio: Some(audio_a),
+                status: ItemStatus::Done,
+                duration: Some(1.0),
+                transcript: Some(transcript_a.clone()),
+            },
+            QueueItem {
+                path: audio_b.clone(),
+                audio: Some(audio_b),
+                status: ItemStatus::Done,
+                duration: Some(1.0),
+                transcript: Some(transcript_b),
+            },
+        ];
+        // The batch has ended: the Done rows stay in the queue, and the pane
+        // still holds the live buffer the first one produced.
+        app.status = Status::Done;
+        app.pane_tab = PaneTab::Queue;
+        app.selected = Some(0);
+        app.output_txt = Some(transcript_a);
+        let live_text = "[00:00] SPEAKER 1: a\n".to_string();
+        app.lines = parse_lines(&live_text);
+        app.transcript = live_text;
+        app.playhead = 4.0;
+
+        // Removing the other row leaves the live text alone.
+        let _ = app.update(Message::RemoveItem(1));
+        assert_eq!(app.lines.len(), 1);
+        assert_eq!(app.transcript, "[00:00] SPEAKER 1: a\n");
+
+        // Removing the row the live buffer belongs to takes the text with it.
+        let _ = app.update(Message::RemoveItem(0));
+        assert!(app.queue.is_empty());
+        assert!(app.lines.is_empty(), "the removed row's transcript stayed");
+        assert!(app.transcript.is_empty());
+        assert!(app.selected_view.is_none());
+        assert_eq!(app.playhead, 0.0);
+        assert!(app.output_txt.is_none());
 
         let _ = std::fs::remove_dir_all(&media);
     }
