@@ -10,8 +10,8 @@ ONNX Runtime, Visual C++ and OpenMP DLLs beside the development binary, and
 builds the briefing worker into the same profile, then runs `cargo run
 --profile release-fast --features gpu`.
 
-The GPU feature is Pro-gated, so this sets HIPPO_TRANSCRIBE_TIER=pro by
-default. Pass -Free to test the free-tier lock instead.
+The GPU feature is Pro-gated, so this writes the Pro tier to the development
+licence record by default. Pass -Free to test the free-tier lock instead.
 
 Use this for the GPU edit/run loop. Use `scripts/build-windows.ps1 -Gpu` for
 the final LTO release and packaging.
@@ -72,9 +72,9 @@ try {
     $env:CMAKE_MSVC_RUNTIME_LIBRARY = "MultiThreadedDLL"
 
     if ($Free) {
-        $env:HIPPO_TRANSCRIBE_TIER = "free"
+        Set-DevTier -Tier free
     } else {
-        $env:HIPPO_TRANSCRIBE_TIER = "pro"
+        Set-DevTier -Tier pro
     }
 
     # Use the short profile-root target directory by default; ggml's nested

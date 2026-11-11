@@ -11,6 +11,41 @@ function Write-Warn {
     Write-Warning $Message
 }
 
+# Development-only tier switch. It writes the persisted licence record the app
+# reads at startup; shipped binaries contain no tier override of their own, so
+# this cannot unlock a release build. The record is what the Store check would
+# otherwise fill in, and a loose (unpackaged) run never contacts the Store.
+function Set-DevTier {
+    param([Parameter(Mandatory = $true)][ValidateSet("pro", "free")][string]$Tier)
+    $base = $env:APPDATA
+    if (-not $base) {
+        throw "APPDATA is not set; cannot locate the licence record."
+    }
+    $dir = Join-Path $base "hippo-transcribe"
+    $path = Join-Path $dir "license.json"
+    $now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+    New-Item -ItemType Directory -Path $dir -Force | Out-Null
+    if ($Tier -eq "pro") {
+        $record = [ordered]@{
+            pro             = $true
+            checked_unix    = $now
+            last_seen_unix  = $now
+            source          = "store"
+            force_free      = $false
+        }
+    } else {
+        $record = [ordered]@{
+            pro             = $false
+            checked_unix    = $now
+            last_seen_unix  = $now
+            source          = "none"
+            force_free      = $true
+        }
+    }
+    ($record | ConvertTo-Json) | Set-Content -Path $path -Encoding UTF8
+    Write-Step "Dev tier: $Tier ($path)"
+}
+
 function Resolve-TargetRoot {
     # One value for cargo, the CMake generator reset, and the CMake runtime
     # reset. An explicit -TargetDir wins, then CARGO_TARGET_DIR, then the

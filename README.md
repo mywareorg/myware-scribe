@@ -95,12 +95,12 @@ Without `hippo-summarize.exe` beside `hippo-transcribe.exe`, Summarize
 Transcript reports the helper as missing. In a Visual Studio developer prompt,
 `cargo build-fast` builds both binaries into that profile and `cargo run-fast`
 runs the GUI. Use the full build script for the final release. Pass `-Free` or
-`-Pro` to force the entitlement for that run.
+`-Pro` to write the development licence record before the run.
 
 For the GPU edit/run loop, use `scripts\run-gpu.ps1`. It selects the Vulkan
 SDK, Ninja, and the DLL CRT, stages the sherpa/ONNX/OpenMP runtime DLLs, and
-runs `cargo run --profile release-fast --features gpu`. It defaults to
-`HIPPO_TRANSCRIBE_TIER=pro` so GPU calibration is visible; pass `-Free` to test
+runs `cargo run --profile release-fast --features gpu`. It defaults to the Pro
+tier in the licence record so GPU calibration is visible; pass `-Free` to test
 the free-tier lock.
 
 Prerequisites: Visual Studio 2022 Build Tools with the "Desktop development with
@@ -282,7 +282,10 @@ in `license.json` beside the settings and never deletes transcripts or queue
 items; a lapsed licence falls back to the free tier, and a checked entitlement
 survives 30 days offline before it re-verifies.
 
-`HIPPO_TRANSCRIBE_TIER=pro` (or `free`) forces the tier for development.
+There is no tier override in a shipped binary. Development builds switch tiers
+with the debug-only header toggle, and `scripts\run-windows.ps1 -Pro` / `-Free`
+write the licence record before launching; neither path exists in a release
+build.
 
 ### The always-Pro edition (direct download)
 

@@ -431,10 +431,6 @@ pub trait Provider {
     fn restore(&mut self) -> PurchaseState;
     /// Deep link to the store's manage/cancel page.
     fn manage_url(&self) -> Option<String>;
-    /// Force a tier in development (`HIPPO_TRANSCRIBE_TIER=pro|free`).
-    fn override_tier(&self) -> Option<bool> {
-        None
-    }
 }
 
 /// No store: the portable/unsigned build. Buying is not possible, so the tier
@@ -460,54 +456,12 @@ impl Provider for NoneProvider {
     }
 }
 
-/// Development override: `HIPPO_TRANSCRIBE_TIER=pro` (or `free`).
-#[derive(Debug, Default)]
-pub struct DevProvider;
-
-impl DevProvider {
-    fn forced() -> Option<bool> {
-        match std::env::var("HIPPO_TRANSCRIBE_TIER") {
-            Ok(value) if value.eq_ignore_ascii_case("pro") => Some(true),
-            Ok(value) if value.eq_ignore_ascii_case("free") => Some(false),
-            _ => None,
-        }
-    }
-}
-
-impl Provider for DevProvider {
-    fn name(&self) -> &'static str {
-        "dev"
-    }
-    fn price(&self) -> Option<String> {
-        // A development build has no store to ask, and a wrong number on the
-        // paywall is worse than none.
-        None
-    }
-    fn purchase(&mut self) -> PurchaseState {
-        match Self::forced() {
-            Some(true) => PurchaseState::Active,
-            _ => PurchaseState::Unavailable,
-        }
-    }
-    fn restore(&mut self) -> PurchaseState {
-        self.purchase()
-    }
-    fn manage_url(&self) -> Option<String> {
-        None
-    }
-    fn override_tier(&self) -> Option<bool> {
-        Self::forced()
-    }
-}
-
-/// Pick the provider for this build. Store implementations are added later;
-/// until then every build reports no store and relies on the dev env override.
+/// Pick the provider for this build. There is deliberately no development
+/// override: a shipped binary must not be able to grant itself Pro. Store
+/// clients are selected by the platform client, and the always-Pro edition is
+/// compiled in instead.
 pub fn provider() -> Box<dyn Provider> {
-    if DevProvider::forced().is_some() {
-        Box::new(DevProvider)
-    } else {
-        Box::new(NoneProvider)
-    }
+    Box::new(NoneProvider)
 }
 
 #[cfg(test)]

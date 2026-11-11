@@ -43,10 +43,10 @@ $root = Split-Path -Parent $PSScriptRoot
 Push-Location $root
 try {
     if ($Free) {
-        $env:HIPPO_TRANSCRIBE_TIER = "free"
+        Set-DevTier -Tier free
         Write-Step "Testing the Free tier"
     } elseif ($Pro) {
-        $env:HIPPO_TRANSCRIBE_TIER = "pro"
+        Set-DevTier -Tier pro
         Write-Step "Testing the Pro tier"
     }
 

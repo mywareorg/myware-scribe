@@ -107,11 +107,10 @@ pub fn run(args: &[String]) -> i32 {
     // The CLI shares the GUI's entitlement gate: the Store build must not be
     // unlockable by adding `--cli --preset accuracy`.
     let now = SystemTime::now();
-    let provider = license::provider();
     let license_file =
         license::license_path().unwrap_or_else(|| std::path::PathBuf::from("license.json"));
     let mut license_state = license::State::load(&license_file, now);
-    license_state.refresh(provider.override_tier(), now);
+    license_state.refresh(None, now);
     // Keep the clock floor current so a CLI-only user cannot roll the clock back
     // between runs and stretch the offline grace window.
     license_state.save(&license_file);
