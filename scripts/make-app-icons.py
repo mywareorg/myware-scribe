@@ -2,9 +2,10 @@
 """Render the executable and window icons from the source artwork.
 
 `gui/assets/pencil-icon.ico` is embedded into the .exe by gui/build.rs, and
-`icons/pencil-icon.png` is the bitmap the window decodes at startup. Both come
-from the same badge as the Store assets, so the app looks the same everywhere.
-`gui/assets/icon.*` and `logo.png` are still written for older references.
+`icons/pencil-icon.png` is the bitmap the window decodes at startup. They come
+from the desktop icon artwork, which is kept separate from the Store tiles that
+`make-store-assets.py` renders. `gui/assets/icon.*` and `logo.png` are still
+written for older references.
 
 By default the badge keeps transparency outside its ring. Pass --fill to keep
 the artwork's flat background instead, which is what a tile-shaped icon looks
@@ -51,7 +52,7 @@ def render(badge: Image.Image, size: int, fill) -> Image.Image:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--source", default="icons/scroll-quill.png")
+    parser.add_argument("--source", default="icons/desktop-clipboard.png")
     parser.add_argument("--out", default="gui/assets")
     parser.add_argument("--icons-out", default="icons")
     parser.add_argument(
