@@ -452,11 +452,11 @@ struct RecentEntry {
 /// finished output no longer share a list, so the pane has a four-tab switch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PaneTab {
+    /// The pane opens here: a launch starts on the queue, which is also where
+    /// the first drop lands. History and the rest are one click away.
+    #[default]
     Queue,
     Favorites,
-    /// The pane opens here: a launch shows what has already been transcribed,
-    /// and the add flow moves to Queue only when something needs a run.
-    #[default]
     History,
     Recordings,
 }
@@ -25274,8 +25274,11 @@ mod tests {
         (app, transcript, media)
     }
 
-    /// Open a finished history entry through the real message path.
+    /// Open a finished history entry through the real message path, from the tab
+    /// that owns it. `open_recent` keeps the current tab by design, and the app
+    /// launches on Queue, where the transcript is read-only.
     fn open_test_item(app: &mut App, index: usize) {
+        let _ = app.update(Message::SelectTab(PaneTab::History));
         let _ = app.update(Message::OpenRecent(index));
     }
 
@@ -25662,11 +25665,11 @@ mod tests {
     }
 
     #[test]
-    fn pane_starts_on_the_history_tab() {
+    fn pane_starts_on_the_queue_tab() {
         let _guard = env_lock();
         let _config = ConfigEnv::new("pane-default");
         let app = pro_app();
-        assert_eq!(app.pane_tab, PaneTab::History);
+        assert_eq!(app.pane_tab, PaneTab::Queue);
     }
 
     #[test]
