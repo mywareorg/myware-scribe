@@ -51,7 +51,7 @@ def save(image: Image.Image, width: int, height: int, path: Path, fill) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--source", default="icons/scroll-quill.png")
+    parser.add_argument("--source", default="icons/desktop-clipboard.png")
     parser.add_argument("--out", default="packaging/assets")
     parser.add_argument(
         "--background",
