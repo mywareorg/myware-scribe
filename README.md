@@ -283,6 +283,25 @@ tier, and a checked entitlement survives 30 days offline before it re-verifies.
 
 `HIPPO_TRANSCRIBE_TIER=pro` (or `free`) forces the tier for development.
 
+### The always-Pro edition (direct download)
+
+For a build that is Pro without a Store, a receipt or a trial, compile the `pro`
+feature in:
+
+    .\scripts\build-windows.ps1 -SkipTests -Gpu -Unlocked -BundleModels
+
+`-Unlocked` passes `--features pro`, so `license::UNLOCKED` pins `Tier::Pro`
+with `Source::Bundled` and the app never asks the Store anything: no
+entitlement check, no purchase dialog, no price. The artefact is named
+`hippo-transcribe-<version>-windows-x64-pro.zip` so it cannot be confused with
+the Store package. Add `-Msix -Sign` to ship it as an MSIX instead of a zip;
+outside the Store the package is only accepted on machines that trust the
+signing certificate, which is what makes the zip the easier distribution
+channel.
+
+Do not submit an `-Unlocked` package to the Store: the tier would be Pro for
+everyone, and Partner Center would have no purchase to attribute.
+
 ## GUI
 
 Run `hippo-transcribe` with no arguments. The File panel on the left holds the

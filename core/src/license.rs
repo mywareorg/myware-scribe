@@ -173,6 +173,9 @@ pub enum Source {
     Store,
     /// The in-app trial.
     Trial,
+    /// Compiled in: the always-Pro edition, which has nothing to buy and
+    /// nothing that can lapse.
+    Bundled,
 }
 
 impl Source {
@@ -181,6 +184,7 @@ impl Source {
             Source::None => "Free",
             Source::Store => "purchased",
             Source::Trial => "trial",
+            Source::Bundled => "included",
         }
     }
 
@@ -189,6 +193,7 @@ impl Source {
             Source::None => "none",
             Source::Store => "store",
             Source::Trial => "trial",
+            Source::Bundled => "bundled",
         }
     }
 
@@ -196,10 +201,17 @@ impl Source {
         match value {
             Some("store") => Source::Store,
             Some("trial") => Source::Trial,
+            Some("bundled") => Source::Bundled,
             _ => Source::None,
         }
     }
 }
+
+/// True in the always-Pro edition (`--features pro`, the direct-download
+/// build). The tier is a property of the binary: there is no store to ask and
+/// no receipt that can lapse, so the grace window and the trial clock below do
+/// not apply. Tests keep the normal rules so those paths stay covered.
+pub const UNLOCKED: bool = cfg!(feature = "pro");
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PurchaseState {
@@ -294,6 +306,15 @@ fn observed_now(record: &Record, now_s: u64) -> u64 {
 /// Pure effective-access calculation. `pro_override` lets the dev provider
 /// force a tier without touching the persisted record.
 pub fn access_for(record: &Record, pro_override: Option<bool>, now: SystemTime) -> Access {
+    // The always-Pro edition never consults a receipt, a trial or the clock.
+    if UNLOCKED && !cfg!(test) {
+        return Access {
+            tier: Tier::Pro,
+            source: Source::Bundled,
+            trial_days_left: None,
+            needs_recheck: false,
+        };
+    }
     // An explicit development override wins; otherwise a local opt-out beats
     // both a purchased entitlement and an active trial.
     if pro_override.is_none() && record.force_free {
@@ -350,13 +371,17 @@ impl State {
             record,
             purchase: PurchaseState::Idle,
         };
-        state.access.source = if state.record.pro {
-            Source::parse(state.record.source.as_deref())
-        } else if state.access.tier == Tier::Pro {
-            Source::Trial
-        } else {
-            Source::None
-        };
+        // The record only says where a store receipt or a local trial came
+        // from; the always-Pro edition reports its own source.
+        if !(UNLOCKED && !cfg!(test)) {
+            state.access.source = if state.record.pro {
+                Source::parse(state.record.source.as_deref())
+            } else if state.access.tier == Tier::Pro {
+                Source::Trial
+            } else {
+                Source::None
+            };
+        }
         state.purchase = if state.access.tier == Tier::Pro {
             PurchaseState::Active
         } else {

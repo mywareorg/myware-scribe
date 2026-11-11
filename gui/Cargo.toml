@@ -13,6 +13,9 @@ default = []
 # without these the flag fails with "does not contain this feature".
 gpu = ["hippo-transcribe-core/gpu"]
 coreml = ["hippo-transcribe-core/coreml"]
+# The always-Pro edition for the direct-download build; see
+# `hippo_transcribe_core::license::UNLOCKED`.
+pro = ["hippo-transcribe-core/pro"]
 
 [dependencies]
 hippo-briefing = { path = "../briefing" }

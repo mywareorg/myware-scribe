@@ -41,6 +41,11 @@ powershell -ExecutionPolicy Bypass -File .\scripts\build-windows.ps1
 .\scripts\build-windows.ps1 -SkipTests -Msix -Sign -CertificatePath C:\keys\hippo-test.pfx -CertificatePassword hunter2
 
 .EXAMPLE
+# The always-Pro edition for direct download: Pro is compiled in, so the app
+# needs no Store listing, purchase or trial. Never publish this to the Store.
+.\scripts\build-windows.ps1 -SkipTests -Gpu -Unlocked -BundleModels
+
+.EXAMPLE
 # Iterate on the step a Vulkan build usually fails in, without compiling.
 .\scripts\build-windows.ps1 -Probe
 #>
@@ -89,6 +94,12 @@ param(
     # the CPU-only build even on a machine that has the SDK.
     [switch]$Gpu,
     [switch]$Cpu,
+    # The always-Pro edition for direct download: the tier is compiled in
+    # (--features pro) instead of coming from a Store receipt, so the app runs as
+    # Pro on a machine with no store, no purchase and no trial clock. The Store
+    # package must never set this. Named -Unlocked because -Pro would collide
+    # with -Probe.
+    [switch]$Unlocked,
     # Replay only ggml's nested Vulkan shader configure and exit. No cargo, no
     # compiler work: the step the build usually fails in, in a few seconds.
     [switch]$Probe
@@ -226,7 +237,15 @@ if ($cpuExplicit) {
 if ($useGpu -and $Msix) {
     Write-Step "Packaging for the Store with Vulkan; machines without a Vulkan driver fall back to the CPU"
 }
-$featureArgs = if ($useGpu) { @("--features", "gpu") } else { @() }
+$featureArgs = if ($useGpu -or $Unlocked) {
+    $features = @()
+    if ($useGpu) { $features += "gpu" }
+    if ($Unlocked) { $features += "pro" }
+    @("--features") + ($features -join ",")
+} else { @() }
+if ($Unlocked) {
+    Write-Step "Compiling the always-Pro edition (-Unlocked); this package is not for the Store"
+}
 
 
 function Invoke-Native {
@@ -631,6 +650,9 @@ try {
     New-Item -ItemType Directory -Path $outRoot -Force | Out-Null
 
     $name = "hippo-transcribe-$releaseVersion-windows-x64"
+    # A Pro build must not be mistakable for the Store package: same code, but the
+    # tier is compiled in, so the artefact says so.
+    if ($Unlocked) { $name = "$name-pro" }
     $stage = Join-Path $outRoot $name
     if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }
     New-Item -ItemType Directory -Path $stage -Force | Out-Null

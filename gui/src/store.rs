@@ -54,6 +54,12 @@ mod windows_impl {
 
     /// The Store client, when this is a packaged build with a Store identity.
     pub fn provider() -> Option<Box<dyn Provider>> {
+        // The always-Pro edition has nothing to sell and nothing to restore; a
+        // Store context would only add a network call and a price the paywall
+        // never needs.
+        if cfg!(feature = "pro") {
+            return None;
+        }
         StoreProvider::new().map(|provider| Box::new(provider) as Box<dyn Provider>)
     }
 
@@ -61,6 +67,10 @@ mod windows_impl {
     /// portable build), `Some(false)` when the Store says the add-on is not
     /// owned.
     pub fn entitlement_check() -> Option<bool> {
+        // Never let the Store take away a tier that is compiled in.
+        if cfg!(feature = "pro") {
+            return None;
+        }
         if !packaged() {
             return None;
         }
