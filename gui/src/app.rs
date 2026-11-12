@@ -18,6 +18,9 @@ use rodio::{OutputStream, OutputStreamBuilder, Sink, Source};
 use serde::{Deserialize, Serialize};
 
 use crate::backend::{self, Event};
+use hippo_ui::buttons::{
+    action, action_text, icon, icon_circle, icon_colored, icon_pill, toggle_button,
+};
 use hippo_ui::dialog::modal_card;
 use hippo_ui::gauges::{CountdownRing, IndeterminateBar, ProgressTrack, RecordingMeter};
 use hippo_ui::menu::{self as menus, MenuRow, MenuSection};
@@ -26,8 +29,7 @@ use hippo_ui::rows::{
 };
 use hippo_ui::styles::*;
 use hippo_ui::tokens::{
-    self as theme, AppTheme, Scheme, CONTROL_HEIGHT, ICON_ONLY_SIZE, ICON_SIZE,
-    PANEL_ICON_DIAMETER, PILL,
+    self as theme, AppTheme, Scheme, CONTROL_HEIGHT, PILL,
 };
 use crate::{documents::*, files::*, format::*, options::*};
 use hippo_transcribe_core::asr;
@@ -170,14 +172,7 @@ fn editor_strip_height(editing: bool) -> f32 {
 /// Gap between the strip's controls.
 const LINE_EDIT_GAP: f32 = 4.0;
 
-/// The type size of every button label. One value on purpose: a button that
-/// needs to look smaller changes its kind, never its text. Buttons used to set
-/// their own size at the call site, which is how a 12 px label ended up beside a
-/// 16 px one in the same row.
-const BUTTON_LABEL_SIZE: f32 = 16.0;
 
-/// Width of an on/off button. Fixed so `On` and `Off` share one box.
-const TOGGLE_WIDTH: f32 = 64.0;
 
 /// Width held at the right of a history row for its star, so revealing the
 /// filled star never reflows the name.
@@ -16042,7 +16037,7 @@ impl App {
         .width(Length::Fixed(EDIT_BUTTON_WIDTH))
         .on_press_maybe(controls.then_some(Message::ToggleEditMode))
         .padding([5, 0])
-        .style(move |theme, status| edit_mode_button_style(self.edit_mode)(theme, status))
+        .style(move |theme, status| pill_button_latched(self.edit_mode)(theme, status))
         .into();
         let menus: Element<Message> = row![
             self.header_menu_button("View", HeaderMenu::View, controls),
@@ -20212,22 +20207,7 @@ fn header_logo_handle() -> iced::widget::image::Handle {
     .clone()
 }
 
-/// A Bootstrap Icons glyph rendered as an element.
-fn icon(code: char, size: f32) -> Element<'static, Message> {
-    text(code.to_string())
-        .font(Font::with_name("bootstrap-icons"))
-        .size(size)
-        .into()
-}
 
-/// A Bootstrap Icons glyph with an explicit colour.
-fn icon_colored(code: char, size: f32, color: Color) -> Element<'static, Message> {
-    text(code.to_string())
-        .font(Font::with_name("bootstrap-icons"))
-        .size(size)
-        .style(move |_theme| text::Style { color: Some(color) })
-        .into()
-}
 
 /// Queue status indicator: a glyph on a filled circular badge, so the running
 /// arrow and completed check stand out without changing the row text size.
@@ -23126,83 +23106,10 @@ const SWAP_ICON_SIZE: f32 = 20.0;
 /// both states so the bubble never rewraps when the button appears.
 const SWAP_RESERVED_WIDTH: f32 = SWAP_ICON_SIZE + 2.0 * theme::CONTROL_PADDING[1] as f32 + theme::SPACE_SM;
 
-/// A button (content-sized / minimum width).
-fn action<'a>(content: impl Into<Element<'a, Message>>) -> iced::widget::Button<'a, Message> {
-    button(content)
-}
 
-/// A compact icon button, sized by `theme::CONTROL_PADDING` alone.
-///
-/// Every icon control row builds its buttons through this, so the Find row and
-/// the line editor panel cannot drift apart: no `Length::Fixed` height, which
-/// would set the box *inside* the padding and squeeze the glyph's line box.
-fn icon_pill(code: char, colour: Color) -> iced::widget::Button<'static, Message> {
-    action(icon_colored(code, ICON_SIZE, colour)).padding(theme::CONTROL_PADDING)
-}
 
-/// A circular icon button: a square box whose radius is half its side, with the
-/// glyph centred by layout rather than by padding.
-///
-/// The line box comes from [`icon_line_height`], so the node the container
-/// centres is the glyph itself rather than a taller box with the ink at its top.
-fn icon_circle(code: char, colour: Color) -> iced::widget::Button<'static, Message> {
-    let glyph = text(code.to_string())
-        .font(Font::with_name("bootstrap-icons"))
-        .size(ICON_ONLY_SIZE)
-        .line_height(icon_line_height(ICON_ONLY_SIZE))
-        .style(move |_theme| text::Style { color: Some(colour) });
-    action(
-        container(glyph)
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .center_x(Length::Fill)
-            .center_y(Length::Fill),
-    )
-    .width(Length::Fixed(PANEL_ICON_DIAMETER))
-    .height(Length::Fixed(PANEL_ICON_DIAMETER))
-    .padding(0)
-}
 
-/// A button with a single-line text label.
-///
-/// The box is a fixed height with no vertical padding and the label is centred
-/// inside it by layout, so the label's line box can never move the text up or
-/// down: the size decides the box, not the padding. Every text button in the app
-/// comes through here, which is what keeps one row's buttons the same height as
-/// the next row's.
-fn action_text<'a>(label: &'a str) -> iced::widget::Button<'a, Message> {
-    action(
-        container(text(label).size(BUTTON_LABEL_SIZE).wrapping(NO_WRAP))
-            .height(Length::Fill)
-            .center_y(Length::Fill),
-    )
-    .width(Length::Fixed(action_width(label)))
-    .height(Length::Fixed(CONTROL_HEIGHT))
-    .padding([0, 10])
-}
 
-/// An on/off button: the same box as [`action_text`], filled when on.
-///
-/// The three toggles in Settings were three copies of this, each choosing its
-/// own type size; they now differ only by what they toggle.
-fn toggle_button<'a>(label: &'a str, on: bool, message: Message) -> iced::widget::Button<'a, Message> {
-    action(
-        container(text(label).size(BUTTON_LABEL_SIZE))
-            .height(Length::Fill)
-            .center_y(Length::Fill),
-    )
-    .on_press(message)
-    .style(move |theme, status| {
-        if on {
-            pill_button_active(theme, status)
-        } else {
-            pill_button_secondary(theme, status)
-        }
-    })
-    .width(Length::Fixed(TOGGLE_WIDTH))
-    .height(Length::Fixed(CONTROL_HEIGHT))
-    .padding([0, 10])
-}
 
 /// The transcript card's menu layer: `body` hangs `offset` from the card's left
 /// edge and `VIEW_MENU_TOP` from its top.
@@ -23475,37 +23382,6 @@ fn muted_controls_overlay(scheme: Scheme) -> Element<'static, Message> {
     .into()
 }
 
-/// The Edit button in its latched state: a well darker than the chrome around
-/// it, with no drop shadow, so the mode reads as pressed in rather than as a
-/// card sitting on top.
-fn edit_mode_button_style(on: bool) -> impl Fn(&iced::Theme, button::Status) -> button::Style {
-    move |theme, status| {
-        let base = pill_button_secondary(theme, status);
-        if !on {
-            return base;
-        }
-        let color = style_background_color(&base).unwrap_or(theme.palette().background);
-        let hot = matches!(
-            status,
-            button::Status::Hovered | button::Status::Pressed
-        );
-        let (top, bottom) = if hot {
-            (theme::darken(color, 0.10), theme::darken(color, 0.16))
-        } else {
-            (theme::darken(color, 0.16), theme::darken(color, 0.20))
-        };
-        button::Style {
-            background: Some(linear_gradient(top, bottom)),
-            text_color: base.text_color,
-            border: iced::border::Border {
-                color: theme::darken(color, 0.34),
-                width: 1.0,
-                radius: PILL.into(),
-            },
-            shadow: Shadow::default(),
-        }
-    }
-}
 
 /// Byte ranges in `raw` matching `query`, honouring case and word options.
 fn search_match_ranges(
