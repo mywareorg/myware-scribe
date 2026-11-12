@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["briefing", "core", "gui", "summarizer", "ui-kit"]
+members = ["briefing", "core", "gui", "summarizer"]
 default-members = ["gui"]
 
 [profile.release]

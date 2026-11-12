@@ -20,6 +20,9 @@ pro = ["hippo-transcribe-core/pro"]
 [dependencies]
 hippo-briefing = { path = "../briefing" }
 hippo-transcribe-core = { path = "../core" }
+# Shared design tokens and UI vocabulary. During co-development this is a path
+# dependency; it becomes a pinned git dependency once the API settles.
+hippo-ui = { path = "../../hippo-ui/crates/hippo-ui", features = ["serde"] }
 iced = { version = "0.13", features = ["tokio", "advanced", "canvas", "image-without-codecs"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
 rfd = "0.15"
