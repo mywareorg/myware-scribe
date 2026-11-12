@@ -18,9 +18,11 @@ use rodio::{OutputStream, OutputStreamBuilder, Sink, Source};
 use serde::{Deserialize, Serialize};
 
 use crate::backend::{self, Event};
+use hippo_ui::dialog::modal_card;
+use hippo_ui::menu::{self as menus, MenuRow, MenuSection};
 use hippo_ui::styles::*;
 use hippo_ui::tokens::{
-    self as theme, AppTheme, Scheme, CONTROL_HEIGHT, ICON_ONLY_SIZE, ICON_SIZE, MODAL_PADDING,
+    self as theme, AppTheme, Scheme, CONTROL_HEIGHT, ICON_ONLY_SIZE, ICON_SIZE,
     PANEL_ICON_DIAMETER, PILL,
 };
 use crate::{documents::*, files::*, format::*, options::*};
@@ -247,7 +249,6 @@ const VIEW_MENU_TOP: f32 =
 
 /// Width of a header menu row's leading check slot. Fixed, so every label in a
 /// menu starts on the same left edge whether its row is checked or not.
-const HEADER_MENU_CHECK: f32 = 16.0;
 
 /// The app header's logo, which is the tallest thing in that row and therefore
 /// sets its height. The Help menu hangs from the row's bottom edge, so its top
@@ -16164,7 +16165,7 @@ impl App {
                 }),
             },
         ];
-        let width = header_menu_width(rows.iter());
+        let width = menus::menu_width(rows.iter());
         let card = menu_card_at(
             vec![MenuSection { rows, footer: None }],
             scheme,
@@ -16176,7 +16177,7 @@ impl App {
         }
         // The nested list is the row menu's Export submenu: the same formats,
         // each of which will ask for a destination.
-        let formats: Vec<MenuRow> = ExportFormat::ALL
+        let formats: Vec<MenuRow<'_, Message>> = ExportFormat::ALL
             .iter()
             .map(|format| MenuRow {
                 label: format.label(),
@@ -16186,7 +16187,7 @@ impl App {
                 action: Some(Message::ExportCurrentAs(*format)),
             })
             .collect();
-        let sub_width = header_menu_width(formats.iter());
+        let sub_width = menus::menu_width(formats.iter());
         let submenu = menu_card_at(
             vec![MenuSection {
                 rows: formats,
@@ -16287,12 +16288,13 @@ impl App {
             .width(Length::Fill)
             .align_x(iced::Alignment::Center)
             .into();
-        menu_card(
+        menus::menu_card(
             vec![MenuSection {
                 rows,
                 footer: Some(footer),
             }],
             scheme,
+            Message::Noop,
         )
     }
 
@@ -16351,7 +16353,7 @@ impl App {
         // One row per mode, in the order `AppTheme::ALL` declares, checked when
         // it is the mode in force. One pass: the rows are both the body and the
         // width, so the modes cannot appear twice.
-        let appearance: Vec<MenuRow> = AppTheme::ALL
+        let appearance: Vec<MenuRow<'_, Message>> = AppTheme::ALL
             .iter()
             .map(|mode| MenuRow {
                 label: mode.label(),
@@ -16361,7 +16363,7 @@ impl App {
                 action: Some(Message::SetTheme(*mode)),
             })
             .collect();
-        menu_card(
+        menus::menu_card(
             vec![
                 MenuSection {
                     rows: actions,
@@ -16373,6 +16375,7 @@ impl App {
                 },
             ],
             scheme,
+            Message::Noop,
         )
     }
 
@@ -21184,30 +21187,6 @@ fn drop_card<'a>(scheme: Scheme) -> Element<'a, Message> {
 }
 
 /// Standard dialog surface shared by every modal.
-fn modal_card<'a>(
-    content: impl Into<Element<'a, Message>>,
-    width: f32,
-    scheme: Scheme,
-) -> Element<'a, Message> {
-    container(content)
-        .width(Length::Fixed(width))
-        .padding(MODAL_PADDING)
-        .style(move |_theme| container::Style {
-            background: Some(scheme.dialog_bg.into()),
-            border: if theme::is_dark_scheme(&scheme) {
-                iced::border::Border {
-                    color: scheme.border,
-                    width: 1.0,
-                    radius: 16.0.into(),
-                }
-            } else {
-                iced::border::rounded(16.0)
-            },
-            shadow: dialog_shadow(),
-            ..container::Style::default()
-        })
-        .into()
-}
 
 fn settings_row<'a>(
     label: &'a str,
@@ -23651,51 +23630,6 @@ fn toggle_button<'a>(label: &'a str, on: bool, message: Message) -> iced::widget
     .padding([0, 10])
 }
 
-/// One row of a transcript header menu. The label, trailing key, check state and
-/// action are one value, so the card's body and the width it is sized to cannot
-/// disagree — the duplication the old parallel `rows` arrays allowed.
-#[derive(Debug, Clone)]
-struct MenuRow<'a> {
-    label: &'a str,
-    key: Option<&'a str>,
-    checked: bool,
-    enabled: bool,
-    action: Option<Message>,
-}
-
-/// A group of rows in a header menu, optionally followed by custom controls
-/// (the View menu's zoom pair). Groups are separated by a hairline.
-struct MenuSection<'a> {
-    rows: Vec<MenuRow<'a>>,
-    footer: Option<Element<'a, Message>>,
-}
-
-/// Width a header menu needs: the widest of its rows, each being the check slot
-/// and its gap, the label, the minimum gap before a trailing key and the key,
-/// plus the row's and the card's padding.
-///
-/// The rows are the same values the body is built from. Rows keep their `Fill`
-/// width inside the card so every row — and its hover tint — is the menu's full
-/// width and the trailing keys line up in one column.
-fn header_menu_width<'r, 'a: 'r>(rows: impl IntoIterator<Item = &'r MenuRow<'a>>) -> f32 {
-    let row_width = |label: &str, shortcut: Option<&str>| {
-        theme::SPACE_MD * 2.0                       // card padding, both sides
-            + theme::SPACE_SM * 2.0                 // row padding `[5, 6]`, both sides
-            + HEADER_MENU_CHECK
-            + theme::SPACE_SM                       // check slot to label
-            + estimated_text_width(label, 16.0)
-            + shortcut.map_or(0.0, |key| {
-                theme::SPACE_2XL + estimated_text_width(key, theme::TEXT_XS)
-            })
-    };
-    rows.into_iter()
-        .map(|row| row_width(row.label, row.key))
-        .fold(0.0, f32::max)
-}
-
-/// The card every transcript-header menu is drawn in: raised, hairline-outlined
-/// and sized to `rows`. Clicks inside it, including its padding, are consumed so
-/// only a press outside dismisses the menu.
 /// The transcript card's menu layer: `body` hangs `offset` from the card's left
 /// edge and `VIEW_MENU_TOP` from its top.
 fn card_menu_layer<'a>(body: Element<'a, Message>, right: f32) -> Element<'a, Message> {
@@ -23799,27 +23733,10 @@ fn report_switch_row<'a>(
 }
 
 /// A hairline between two menu groups.
-fn menu_divider(scheme: Scheme) -> Element<'static, Message> {
-    container(
-        container(horizontal_space())
-            .width(Length::Fill)
-            .height(Length::Fixed(1.0))
-            .style(move |_theme| container::Style {
-                background: Some(scheme.border.into()),
-                ..container::Style::default()
-            }),
-    )
-    .padding([4, 0])
-    .into()
-}
 
 /// The card every transcript-header menu is drawn in: raised, hairline-outlined
 /// and sized to its rows. Clicks inside it, including its padding, are consumed
 /// so only a press outside dismisses the menu.
-fn menu_card<'a>(sections: Vec<MenuSection<'a>>, scheme: Scheme) -> Element<'a, Message> {
-    let width = header_menu_width(sections.iter().flat_map(|section| section.rows.iter()));
-    menu_card_at(sections, scheme, width, MenuHover::None)
-}
 
 /// Which row of a card menu reports the pointer, so a nested list can open
 /// under the row that owns it.
@@ -23834,66 +23751,28 @@ enum MenuHover {
 
 /// [`menu_card`] at an explicit width, with per-row pointer reporting.
 fn menu_card_at<'a>(
-    sections: Vec<MenuSection<'a>>,
+    sections: Vec<MenuSection<'a, Message>>,
     scheme: Scheme,
     width: f32,
     hover: MenuHover,
 ) -> Element<'a, Message> {
-    let mut body = column![].spacing(theme::SPACE_SM).width(Length::Fill);
-    let mut index = 0usize;
-    for (section_index, section) in sections.into_iter().enumerate() {
-        if section_index > 0 {
-            body = body.push(menu_divider(scheme));
-        }
-        let mut rows = column![].spacing(2).width(Length::Fill);
-        for row in section.rows {
-            let item = header_menu_item(
-                row.label,
-                row.checked,
-                row.enabled,
-                row.action,
-                row.key,
-                scheme,
-            );
-            let item: Element<'a, Message> = match hover {
-                MenuHover::None => item,
-                MenuHover::Export { row: export_row } => {
-                    let message = if index == export_row {
-                        Message::FileExportHover(true)
-                    } else {
-                        Message::FileExportHover(false)
-                    };
-                    mouse_area(item).on_enter(message).into()
-                }
-            };
-            rows = rows.push(item);
-            index += 1;
-        }
-        body = body.push(rows);
-        if let Some(footer) = section.footer {
-            body = body.push(menu_divider(scheme));
-            body = body.push(footer);
-        }
-    }
-    let card = container(body)
-        .width(Length::Fixed(width))
-        .padding(8)
-        .style(move |_theme| container::Style {
-            background: Some(scheme.dialog_bg.into()),
-            border: iced::border::Border {
-                color: scheme.border,
-                width: 1.0,
-                radius: theme::RADIUS_MD.into(),
-            },
-            shadow: soft_shadow(),
-            ..container::Style::default()
-        });
-    mouse_area(card)
-        .interaction(mouse::Interaction::Idle)
-        .on_press(Message::Noop)
-        .on_right_press(Message::Noop)
-        .on_middle_press(Message::Noop)
-        .into()
+    menus::menu_card_at_width(
+        sections,
+        scheme,
+        width,
+        Message::Noop,
+        move |index, item: Element<'a, Message>| match hover {
+            MenuHover::None => item,
+            MenuHover::Export { row } => {
+                let message = if index == row {
+                    Message::FileExportHover(true)
+                } else {
+                    Message::FileExportHover(false)
+                };
+                mouse_area(item).on_enter(message).into()
+            }
+        },
+    )
 }
 
 /// A full-pane layer that places its child at the top-right, inset by `right`
@@ -24096,87 +23975,11 @@ fn row_menu_item_style(
 /// same left edge, the label, then the key that toggles it at the trailing
 /// edge. Disabled rows stay in place so the menu's height does not change with
 /// the transcript's data.
-fn header_menu_item<'a>(
-    label: &'a str,
-    checked: bool,
-    enabled: bool,
-    message: Option<Message>,
-    shortcut: Option<&'a str>,
-    scheme: Scheme,
-) -> Element<'a, Message> {
-    let check: Element<'static, Message> = if checked && enabled {
-        icon(ICON_CHECK, theme::TEXT_XS)
-    } else {
-        horizontal_space().into()
-    };
-    let mut content = row![
-        container(check)
-            .width(Length::Fixed(HEADER_MENU_CHECK))
-            .center_x(Length::Fixed(HEADER_MENU_CHECK)),
-        // The label carries the same 16 px as the button that opens the menu,
-        // which is also the app's body size: a menu is a reading surface, so it
-        // does not drop to the caption size.
-        text(label).wrapping(NO_WRAP),
-    ]
-    .spacing(theme::SPACE_SM)
-    .align_y(iced::Alignment::Center)
-    .width(Length::Fill);
-    // The key that toggles this row, at the far right where a shortcut hint
-    // belongs. A row without one keeps the same label edge and no trailing text.
-    if let Some(key) = shortcut {
-        content = content.push(horizontal_space());
-        content = content.push(
-            text(key)
-                .size(theme::TEXT_XS)
-                .wrapping(NO_WRAP)
-                .color(scheme.muted),
-        );
-    }
-    // Every row is pressable, disabled ones included: iced only reports the
-    // `Hovered` status for a button that has a press handler, so a row without
-    // one could never tint. The disabled row's handler does nothing; its style
-    // is what keeps it from reading as actionable.
-    action(content)
-        .width(Length::Fill)
-        .padding([5, 6])
-        .style(header_menu_item_style(scheme, enabled))
-        .on_press(message.unwrap_or(Message::Noop))
-        .into()
-}
 
 /// A menu row: no chrome until hovered. A disabled row still tints when the
 /// pointer is over it — the menu should read as one live surface — but with a
 /// weaker wash, because nothing about it is on offer; its label stays muted and
 /// its press does nothing.
-fn header_menu_item_style(
-    scheme: Scheme,
-    enabled: bool,
-) -> impl Fn(&iced::Theme, button::Status) -> button::Style {
-    move |_theme, status| {
-        let hot = matches!(
-            status,
-            button::Status::Hovered | button::Status::Pressed
-        );
-        let tint = if enabled {
-            hover_band(&scheme)
-        } else {
-            Color {
-                a: 0.45,
-                ..hover_band(&scheme)
-            }
-        };
-        button::Style {
-            background: hot.then(|| tint.into()),
-            text_color: if enabled { scheme.ink } else { scheme.muted },
-            border: iced::border::Border {
-                color: Color::TRANSPARENT,
-                width: 0.0,
-                radius: theme::RADIUS_SM.into(),
-            },
-            shadow: Shadow::default(),
-        }
-    }
-}
 
 /// A wash that sits over controls the recording session owns. It mutes them
 /// visually and swallows their presses, so the pane reads as busy rather than
@@ -27426,19 +27229,19 @@ mod tests {
             enabled: true,
             action: None,
         }];
-        assert!(header_menu_width(&wide) > header_menu_width(&narrow));
+        assert!(hippo_ui::menu::menu_width(&wide) > hippo_ui::menu::menu_width(&narrow));
 
         // The card is sized from the same row value the body is built from: one
         // card padding, one row padding, the check slot, its gap, the label, the
         // minimum gap before a key and the key itself.
         let expected = theme::SPACE_MD * 2.0
             + theme::SPACE_SM * 2.0
-            + HEADER_MENU_CHECK
+            + hippo_ui::styles::MENU_CHECK_WIDTH
             + theme::SPACE_SM
             + estimated_text_width("Timestamps", 16.0)
             + theme::SPACE_2XL
             + estimated_text_width("t", theme::TEXT_XS);
-        assert!((header_menu_width(&wide) - expected).abs() < 0.01);
+        assert!((hippo_ui::menu::menu_width(&wide) - expected).abs() < 0.01);
     }
 
     #[test]
