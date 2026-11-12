@@ -6,7 +6,6 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime};
 
 use iced::keyboard::{self, Key, Modifiers};
-use iced::overlay::menu;
 use iced::widget::{
     button, canvas, column, container, horizontal_rule, horizontal_space, mouse_area, pick_list,
     progress_bar, rich_text, row, scrollable, stack, text, text_editor, text_input, tooltip,
@@ -19,7 +18,11 @@ use rodio::{OutputStream, OutputStreamBuilder, Sink, Source};
 use serde::{Deserialize, Serialize};
 
 use crate::backend::{self, Event};
-use crate::theme::{self, AppTheme, Scheme};
+use hippo_ui::styles::*;
+use hippo_ui::tokens::{
+    self as theme, AppTheme, Scheme, CONTROL_HEIGHT, ICON_ONLY_SIZE, ICON_SIZE, MODAL_PADDING,
+    PANEL_ICON_DIAMETER, PILL,
+};
 use crate::{documents::*, files::*, format::*, options::*};
 use hippo_transcribe_core::asr;
 use hippo_transcribe_core::benchmark::{self, BenchmarkEvent};
@@ -133,9 +136,6 @@ const LEFT_PANEL_WIDTH: f32 = 380.0;
 /// Shape of `queue.json`. Additive changes keep older builds reading it.
 const QUEUE_SCHEMA_VERSION: u32 = 1;
 
-/// UI chrome never wraps; labels are shortened or ellipsized instead.
-const NO_WRAP: iced::widget::text::Wrapping = iced::widget::text::Wrapping::None;
-
 /// Transcript text scale when nothing has been stored yet: 70 % of the base size.
 const DEFAULT_FONT_SCALE: f32 = 0.7;
 
@@ -164,12 +164,6 @@ fn editor_strip_height(editing: bool) -> f32 {
 /// Gap between the strip's controls.
 const LINE_EDIT_GAP: f32 = 4.0;
 
-/// Outer height of a control that carries one line of text: iced's 1.3 line box
-/// at the 16 px UI size (20.8 px) plus the 5 px of vertical padding every text
-/// button uses. Icon-only controls take the same height so a row that mixes the
-/// two is one control height rather than as tall as its tallest child.
-const CONTROL_HEIGHT: f32 = 30.8;
-
 /// The type size of every button label. One value on purpose: a button that
 /// needs to look smaller changes its kind, never its text. Buttons used to set
 /// their own size at the call site, which is how a 12 px label ended up beside a
@@ -178,10 +172,6 @@ const BUTTON_LABEL_SIZE: f32 = 16.0;
 
 /// Width of an on/off button. Fixed so `On` and `Off` share one box.
 const TOGGLE_WIDTH: f32 = 64.0;
-
-/// Diameter of the panel's circular icon buttons: a standard control height, so
-/// they line up with the text buttons around them.
-const PANEL_ICON_DIAMETER: f32 = CONTROL_HEIGHT;
 
 /// Width held at the right of a history row for its star, so revealing the
 /// filled star never reflows the name.
@@ -234,10 +224,6 @@ const ROW_MENU_WIDTH: f32 = 236.0;
 /// Height of one context-menu row, including its padding and gap. Used only to
 /// keep the card inside the window.
 const ROW_MENU_ROW_HEIGHT: f32 = 32.0;
-
-/// Glyph size for an icon-only control. Matches the queue's clear button, which
-/// is the reference the panel was asked to follow.
-const ICON_ONLY_SIZE: f32 = 15.0;
 
 /// Gap above the header's controls, below them, and between them and the rule.
 /// One number for all three, so the strip is evenly inset instead of sitting
@@ -309,9 +295,6 @@ fn view_menu_inset() -> f32 {
 
 /// iced's default text line height, as a multiple of the font size.
 const LINE_HEIGHT_FACTOR: f32 = 1.3;
-
-/// Padding inside every modal card (see `modal_card`).
-const MODAL_PADDING: f32 = 16.0;
 
 /// Mean token log-probability below which an utterance is treated as unsure.
 const LOW_CONFIDENCE: f32 = -0.55;
@@ -21201,21 +21184,6 @@ fn drop_card<'a>(scheme: Scheme) -> Element<'a, Message> {
 }
 
 /// Standard dialog surface shared by every modal.
-/// Outline shared by every card ("island") in the review pane: the same hairline
-/// the run card already draws. In the light theme the shadow separates cards;
-/// on a dark window a shadow barely registers, so the outline does the work.
-fn island_border(scheme: &Scheme) -> iced::border::Border {
-    if theme::is_dark_scheme(scheme) {
-        iced::border::Border {
-            color: scheme.border,
-            width: 1.0,
-            radius: 16.0.into(),
-        }
-    } else {
-        iced::border::rounded(16.0)
-    }
-}
-
 fn modal_card<'a>(
     content: impl Into<Element<'a, Message>>,
     width: f32,
@@ -22745,13 +22713,6 @@ fn rename_recent_id() -> text_input::Id {
     text_input::Id::new("rename-recent")
 }
 
-/// Scrollbar thickness shared by every scrollable in the app.
-///
-/// iced defaults both the lane and the scroller to 10 px, which reads as a
-/// panel edge in a UI this dense. Six pixels keeps the scroller a quiet pill
-/// while leaving the lane a sliver of gutter.
-const SCROLLBAR_WIDTH: f32 = 6.0;
-
 /// The one scrollbar geometry every scrollable in the app uses.
 fn app_scrollbar() -> scrollable::Scrollbar {
     scrollable::Scrollbar::new()
@@ -22762,52 +22723,6 @@ fn app_scrollbar() -> scrollable::Scrollbar {
 /// Vertical direction carrying [`app_scrollbar`], for `Scrollable::direction`.
 fn app_scroll_direction() -> scrollable::Direction {
     scrollable::Direction::Vertical(app_scrollbar())
-}
-
-fn scrollbar_style(theme: &iced::Theme, status: scrollable::Status) -> scrollable::Style {
-    let mut style = scrollable::default(theme, status);
-    let visible = matches!(
-        status,
-        scrollable::Status::Hovered { .. } | scrollable::Status::Dragged { .. }
-    );
-    let ink = theme.palette().text;
-    for rail in [&mut style.vertical_rail, &mut style.horizontal_rail] {
-        // The lane is a gutter, not a panel: no fill, just the pill floating in it.
-        rail.background = None;
-        rail.border = iced::border::rounded(SCROLLBAR_WIDTH / 2.0);
-        rail.scroller.border = iced::border::rounded(SCROLLBAR_WIDTH / 2.0);
-        rail.scroller.color = if visible {
-            Color { a: 0.5, ..ink }
-        } else {
-            Color::TRANSPARENT
-        };
-    }
-    style
-}
-
-/// Always-visible scrollbar, for the queue and any dialog that scrolls.
-///
-/// A dialog's scroller is its only cue that more rows exist below the fold, and
-/// a rail that only appears on hover reads as an empty gutter until then.
-fn visible_scrollbar_style(theme: &iced::Theme, status: scrollable::Status) -> scrollable::Style {
-    let mut style = scrollable::default(theme, status);
-    let active = matches!(
-        status,
-        scrollable::Status::Hovered { .. } | scrollable::Status::Dragged { .. }
-    );
-    let ink = theme.palette().text;
-    for rail in [&mut style.vertical_rail, &mut style.horizontal_rail] {
-        // The lane is a gutter, not a panel: no fill, just the pill floating in it.
-        rail.background = None;
-        rail.border = iced::border::rounded(SCROLLBAR_WIDTH / 2.0);
-        rail.scroller.border = iced::border::rounded(SCROLLBAR_WIDTH / 2.0);
-        rail.scroller.color = if active {
-            Color { a: 0.55, ..ink }
-        } else {
-            Color { a: 0.28, ..ink }
-        };
-    }
-    style
 }
 
 /// Turn a pixel budget into a character budget for `ellipsize_middle`, using
@@ -23636,11 +23551,6 @@ fn line_element(
         .into()
 }
 
-const PILL: f32 = 1000.0;
-
-/// Glyph size of every compact control-row icon.
-const ICON_SIZE: f32 = 14.0;
-
 /// Ceiling for a believable audio-seconds-per-wall-second sample. See
 /// `App::usable_throughput`.
 const MAX_THROUGHPUT: f32 = 200.0;
@@ -23677,17 +23587,6 @@ fn icon_pill(code: char, colour: Color) -> iced::widget::Button<'static, Message
     action(icon_colored(code, ICON_SIZE, colour)).padding(theme::CONTROL_PADDING)
 }
 
-/// The line box of an icon glyph, tightened to its own em size.
-///
-/// This icon font is 300/300 em: ascent exactly one em, descent zero, and its
-/// glyph inks are symmetric about the em box's centre (measured: the join
-/// arrows and the cancel cross land on 7.00 px of a 14 px box, the trash and
-/// the undo arrows within 0.75 px). A line box the size of the glyph therefore
-/// centres the ink, which is what lets a circle centre it by layout.
-fn icon_line_height(size: f32) -> iced::advanced::text::LineHeight {
-    iced::advanced::text::LineHeight::Absolute(Pixels(size))
-}
-
 /// A circular icon button: a square box whose radius is half its side, with the
 /// glyph centred by layout rather than by padding.
 ///
@@ -23709,13 +23608,6 @@ fn icon_circle(code: char, colour: Color) -> iced::widget::Button<'static, Messa
     .width(Length::Fixed(PANEL_ICON_DIAMETER))
     .height(Length::Fixed(PANEL_ICON_DIAMETER))
     .padding(0)
-}
-
-/// Fixed width for a text button so its label can never wrap. The iced default
-/// 16 px UI font averages close to 10 px per character for mixed-case Latin
-/// text, and the button adds 10 px of padding on each side.
-fn action_width(label: &str) -> f32 {
-    (label.chars().count() as f32 * 10.0 + 28.0).max(44.0)
 }
 
 /// A button with a single-line text label.
@@ -23757,14 +23649,6 @@ fn toggle_button<'a>(label: &'a str, on: bool, message: Message) -> iced::widget
     .width(Length::Fixed(TOGGLE_WIDTH))
     .height(Length::Fixed(CONTROL_HEIGHT))
     .padding([0, 10])
-}
-
-/// Rough advance width of a run of text: the same 10 px per character
-/// `action_width` assumes at iced's 16 px UI size, scaled for a smaller size. A
-/// menu is built before any glyph is measured and its labels never wrap, so the
-/// estimate is deliberately generous.
-fn estimated_text_width(text: &str, size: f32) -> f32 {
-    text.chars().count() as f32 * size * 0.625
 }
 
 /// One row of a transcript header menu. The label, trailing key, check state and
@@ -24320,54 +24204,6 @@ fn muted_controls_overlay(scheme: Scheme) -> Element<'static, Message> {
     .into()
 }
 
-/// A subtle drop shadow that gives surfaces a soft, raised look.
-fn soft_shadow() -> Shadow {
-    Shadow {
-        color: Color::from_rgba(0.0, 0.0, 0.0, 0.22),
-        offset: Vector::new(0.0, 3.0),
-        blur_radius: 9.0,
-    }
-}
-
-/// A top-to-bottom gradient background.
-fn linear_gradient(top: Color, bottom: Color) -> iced::Background {
-    iced::Background::Gradient(iced::Gradient::Linear(
-        iced::gradient::Linear::new(iced::Degrees(180.0))
-            .add_stop(0.0, top)
-            .add_stop(1.0, bottom),
-    ))
-}
-
-fn style_background_color(style: &button::Style) -> Option<Color> {
-    match &style.background {
-        Some(iced::Background::Color(color)) => Some(*color),
-        _ => None,
-    }
-}
-
-/// A larger shadow for floating dialogs.
-fn dialog_shadow() -> Shadow {
-    Shadow {
-        color: Color::from_rgba(0.0, 0.0, 0.0, 0.35),
-        offset: Vector::new(0.0, 6.0),
-        blur_radius: 24.0,
-    }
-}
-
-/// Label colour for neutral (unfilled) buttons.
-///
-/// Dark mode gets pure white so the label reads at full strength against the
-/// dark panels; light mode keeps the theme's primary text, since white on a
-/// near-white panel would vanish. Filled accent buttons do not use this — they
-/// keep `on_accent`, which is chosen for contrast against their own fill.
-fn button_label(theme: &iced::Theme) -> Color {
-    if theme::is_dark(theme) {
-        Color::WHITE
-    } else {
-        theme.palette().text
-    }
-}
-
 /// The Edit button in its latched state: a well darker than the chrome around
 /// it, with no drop shadow, so the mode reads as pressed in rather than as a
 /// card sitting on top.
@@ -24396,524 +24232,6 @@ fn edit_mode_button_style(on: bool) -> impl Fn(&iced::Theme, button::Status) -> 
                 radius: PILL.into(),
             },
             shadow: Shadow::default(),
-        }
-    }
-}
-
-fn pill_button_secondary(theme: &iced::Theme, status: button::Status) -> button::Style {
-    let base = button::secondary(theme, status);
-    let color = style_background_color(&base).unwrap_or(theme.palette().background);
-    let (top, bottom, shadow) = match status {
-        button::Status::Hovered => (
-            theme::lighten(color, 0.16),
-            theme::lighten(color, 0.02),
-            soft_shadow(),
-        ),
-        button::Status::Pressed => (
-            theme::darken(color, 0.12),
-            theme::darken(color, 0.02),
-            Shadow::default(),
-        ),
-        button::Status::Disabled => (color, color, Shadow::default()),
-        button::Status::Active => (
-            theme::lighten(color, 0.07),
-            theme::darken(color, 0.05),
-            soft_shadow(),
-        ),
-    };
-    // Disabled keeps iced's dimmed label; only the live states go white in
-    // dark mode, so a dead button never looks live.
-    let text_color = match status {
-        button::Status::Disabled => base.text_color,
-        _ => button_label(theme),
-    };
-    button::Style {
-        background: Some(linear_gradient(top, bottom)),
-        text_color,
-        border: iced::border::Border {
-            color: theme::lighten(color, 0.28),
-            width: 1.0,
-            radius: PILL.into(),
-        },
-        shadow,
-    }
-}
-
-/// A secondary button tinted with the accent colour to show a toggled-on state.
-fn pill_button_active(theme: &iced::Theme, status: button::Status) -> button::Style {
-    let primary = theme.palette().primary;
-    let (alpha, border_alpha, shadow): (f32, f32, Shadow) = match status {
-        button::Status::Hovered => (0.30, 0.65, soft_shadow()),
-        button::Status::Pressed => (0.38, 0.70, Shadow::default()),
-        button::Status::Disabled => (0.12, 0.30, Shadow::default()),
-        button::Status::Active => (0.22, 0.55, soft_shadow()),
-    };
-    button::Style {
-        background: Some(linear_gradient(
-            Color {
-                a: (alpha + 0.10).min(0.95),
-                ..primary
-            },
-            Color {
-                a: alpha,
-                ..primary
-            },
-        )),
-        text_color: match status {
-            // A disabled tinted pill keeps the label it had, so the state still
-            // reads as unavailable rather than switching to full-strength white.
-            button::Status::Disabled => theme.palette().text,
-            _ => button_label(theme),
-        },
-        border: iced::border::Border {
-            color: Color {
-                a: border_alpha,
-                ..primary
-            },
-            width: 1.0,
-            radius: PILL.into(),
-        },
-        shadow,
-    }
-}
-
-/// Selected toggle: an opaque grey fill, so it reads as a pressed state rather
-/// than a translucent tint over the transcript.
-fn pill_button_toggled(theme: &iced::Theme, status: button::Status) -> button::Style {
-    let base = button::secondary(theme, status);
-    let color = style_background_color(&base).unwrap_or(theme.palette().background);
-    // Drives the label and the fill tint alike: in dark mode the grey fill is
-    // mixed toward white, so the pressed state stays visible.
-    let text = button_label(theme);
-    let (amount, border_alpha, shadow): (f32, f32, Shadow) = match status {
-        button::Status::Hovered => (0.24, 0.55, soft_shadow()),
-        button::Status::Pressed => (0.30, 0.65, Shadow::default()),
-        button::Status::Disabled => (0.10, 0.25, Shadow::default()),
-        button::Status::Active => (0.17, 0.45, soft_shadow()),
-    };
-    button::Style {
-        background: Some(linear_gradient(
-            theme::mix(color, text, (amount + 0.05).min(1.0)),
-            theme::mix(color, text, amount),
-        )),
-        text_color: text,
-        border: iced::border::Border {
-            color: Color {
-                a: border_alpha,
-                ..text
-            },
-            width: 1.0,
-            radius: PILL.into(),
-        },
-        shadow,
-    }
-}
-
-/// One half of the CPU/GPU segmented toggle.
-///
-/// The selected half is a solid accent thumb with an `on_accent` label — the
-/// same fill/label pairing as the filled primary buttons — plus a rim border
-/// and [`soft_shadow`], so the current choice is unmistakably the blue one.
-/// The other half stays a live-looking label (text at reduced alpha, not the
-/// muted grey) so the control reads as two options. `muted` (locked /
-/// unavailable) is never blue, so it cannot be mistaken for the selection.
-fn segment_button(
-    scheme: Scheme,
-    selected: bool,
-    muted: bool,
-    cue: bool,
-) -> impl Fn(&iced::Theme, button::Status) -> button::Style {
-    move |theme, status| {
-        let text = button_label(theme);
-        // Unselected but selectable: full-strength text at reduced alpha. This
-        // is the colour of a choice you can still make, as opposed to the
-        // muted grey of one you cannot.
-        let idle = Color { a: 0.75, ..text };
-
-        let (background, color, border, shadow) = if muted {
-            // Locked or unavailable: no blue at all. When it is nonetheless
-            // the saved setting it keeps a faint neutral pill, so the state
-            // still reads without looking like an active blue selection.
-            let (fill, color) = if selected {
-                (
-                    Color { a: 0.08, ..text },
-                    Color {
-                        a: 0.60,
-                        ..scheme.muted
-                    },
-                )
-            } else {
-                (Color::TRANSPARENT, scheme.muted)
-            };
-            // A locked tab can still be where new rows just landed: the cue's
-            // wash survives the lock, so History can blink during a run.
-            let (background, border) = if cue {
-                (
-                    Color { a: 0.12, ..scheme.blue }.into(),
-                    Color {
-                        a: 0.55,
-                        ..scheme.blue
-                    },
-                )
-            } else {
-                (fill.into(), Color::TRANSPARENT)
-            };
-            (background, color, border, Shadow::default())
-        } else if selected {
-            // Solid accent fill. Hover and press only move the lightness, and
-            // the label is `on_accent`: dark on the light-theme sky blue,
-            // light on the dark-theme blue, in both cases well above 7:1.
-            let base = match status {
-                button::Status::Hovered => theme::lighten(scheme.blue, 0.12),
-                button::Status::Pressed => theme::darken(scheme.blue, 0.12),
-                _ => scheme.blue,
-            };
-            let shadow = match status {
-                button::Status::Pressed => Shadow::default(),
-                _ => soft_shadow(),
-            };
-            (
-                linear_gradient(theme::lighten(base, 0.08), theme::darken(base, 0.08)),
-                scheme.on_accent,
-                // Rim blended toward the label colour: a deeper blue edge on
-                // the solid fill in both themes.
-                theme::mix(scheme.blue, scheme.on_accent, 0.25),
-                shadow,
-            )
-        } else {
-            // Hover and press still read on the unselected side. `Disabled`
-            // here only means "not clickable right now" (the run is in
-            // progress), not locked, so it dims but stays a visible label.
-            let (fill, color) = match status {
-                button::Status::Hovered => (0.12, text),
-                button::Status::Pressed => (0.18, text),
-                button::Status::Disabled => (0.0, Color { a: 0.45, ..scheme.text }),
-                button::Status::Active => (0.0, idle),
-            };
-            // A cue is a quiet wash of the accent plus a rim: the same blue the
-            // selected half uses, at an alpha that reads as "look here" without
-            // competing with the actual selection.
-            let background = if cue {
-                Color {
-                    a: 0.16,
-                    ..scheme.blue
-                }
-            } else {
-                Color { a: fill, ..text }
-            };
-            let border = if cue {
-                Color {
-                    a: 0.70,
-                    ..scheme.blue
-                }
-            } else {
-                Color::TRANSPARENT
-            };
-            (background.into(), color, border, Shadow::default())
-        };
-        button::Style {
-            background: Some(background),
-            text_color: color,
-            border: iced::border::Border {
-                color: border,
-                width: if selected || cue { 1.0 } else { 0.0 },
-                radius: PILL.into(),
-            },
-            shadow,
-        }
-    }
-}
-
-/// Verb-phrase action used beside the toggle, not as a third segment.
-fn text_action_button(scheme: Scheme) -> impl Fn(&iced::Theme, button::Status) -> button::Style {
-    move |theme, status| {
-        let label = button_label(theme);
-        let (background, color) = match status {
-            button::Status::Hovered => (
-                Color {
-                    a: 0.08,
-                    ..label
-                },
-                label,
-            ),
-            button::Status::Pressed => (
-                Color {
-                    a: 0.16,
-                    ..label
-                },
-                label,
-            ),
-            button::Status::Disabled => (
-                Color::TRANSPARENT,
-                Color {
-                    a: 0.30,
-                    ..scheme.text
-                },
-            ),
-            _ => (Color::TRANSPARENT, label),
-        };
-        button::Style {
-            background: Some(background.into()),
-            text_color: color,
-            border: iced::border::rounded(6.0),
-            shadow: Shadow::default(),
-        }
-    }
-}
-
-/// A quiet, borderless icon button for row-level actions.
-fn subtle_icon_button(theme: &iced::Theme, status: button::Status) -> button::Style {
-    let text = theme.palette().text;
-    let (background, text_color) = match status {
-        button::Status::Hovered => (Color { a: 0.10, ..text }, text),
-        button::Status::Pressed => (Color { a: 0.16, ..text }, text),
-        button::Status::Disabled => (Color::TRANSPARENT, Color { a: 0.30, ..text }),
-        button::Status::Active => (Color::TRANSPARENT, Color { a: 0.65, ..text }),
-    };
-    button::Style {
-        background: Some(background.into()),
-        text_color,
-        border: iced::border::rounded(6.0),
-        shadow: Shadow::default(),
-    }
-}
-
-fn pill_input(theme: &iced::Theme, status: text_input::Status) -> text_input::Style {
-    let mut style = text_input::default(theme, status);
-    style.border.radius = PILL.into();
-    style
-}
-
-/// The wash under the row the pointer is on, for every menu in the app.
-///
-/// Both the header menus and the pick lists are drawn on `dialog_bg`, so one
-/// rule serves both. The band is the surface mixed away from itself rather than
-/// a fixed token: `track` equals `dialog_bg` in the dark palette (both Gray 80),
-/// which is why the header menus' hover was invisible there, and `timeline_bg`
-/// was only about 1.3:1 against the same surface. These mixes give roughly
-/// 1.6:1 in light and 1.75:1 in dark — a clear row under the pointer that is
-/// still a wash and not a filled button.
-fn hover_band(scheme: &Scheme) -> Color {
-    if theme::is_dark_scheme(scheme) {
-        theme::lighten(scheme.dialog_bg, 0.18)
-    } else {
-        theme::darken(scheme.dialog_bg, 0.20)
-    }
-}
-
-/// The surface every pick-list menu is drawn on.
-///
-/// iced's default menu is a square popup filled with the window colour and edged
-/// with a `background.strong` hairline, which floats with no elevation cue and
-/// matches none of the app's surfaces. `menu::Style` has no shadow field, so the
-/// fill and the hairline *are* the elevation: this puts it on the raised dialog
-/// surface with the card radius, and replaces the row highlight.
-///
-/// iced has one index for the row under the pointer and for the row that is the
-/// current value (`hovered_option`, seeded from the selection when the menu
-/// opens), so a single `selected_background` paints both and they cannot be told
-/// apart by colour. The band is therefore the same wash the header menus use,
-/// and the chosen value stays legible in the closed control above the menu.
-fn pick_menu_style(scheme: Scheme) -> impl Fn(&iced::Theme) -> menu::Style {
-    move |_theme| menu::Style {
-        background: scheme.dialog_bg.into(),
-        border: iced::border::Border {
-            color: scheme.border,
-            width: 1.0,
-            radius: theme::RADIUS_MD.into(),
-        },
-        text_color: scheme.text,
-        selected_text_color: scheme.text,
-        selected_background: hover_band(&scheme).into(),
-    }
-}
-
-fn pill_pick(scheme: Scheme) -> impl Fn(&iced::Theme, pick_list::Status) -> pick_list::Style {
-    move |theme, status| {
-        let mut style = pick_list::default(theme, status);
-        style.border.radius = PILL.into();
-        // Open: the handle takes the menu's surface, so the list reads as this
-        // control opening rather than as a popup landing under a pill. iced's own
-        // open state only tints the border with the accent, which would draw a
-        // blue edge above the menu's grey hairline.
-        if matches!(status, pick_list::Status::Opened) {
-            style.background = scheme.dialog_bg.into();
-            style.border.color = scheme.border;
-        }
-        style
-    }
-}
-
-/// Borderless pick list whose colours mirror the secondary (Advanced) button.
-fn speed_pick(scheme: Scheme) -> impl Fn(&iced::Theme, pick_list::Status) -> pick_list::Style {
-    move |theme, status| {
-        let button_status = match status {
-            pick_list::Status::Hovered | pick_list::Status::Opened => button::Status::Hovered,
-            pick_list::Status::Active => button::Status::Active,
-        };
-        let base = button::secondary(theme, button_status);
-        // The speed label is a button-level label, so it follows the same rule:
-        // pure white on a dark theme, the theme text otherwise.
-        let text = button_label(theme);
-        pick_list::Style {
-            text_color: text,
-            placeholder_color: text,
-            handle_color: text,
-            // Open: the same surface as its list, like the pill handles. The
-            // border stays transparent — this idiom has no chrome when closed, and
-            // growing one only while open would be a new shape rather than the same
-            // control opening.
-            background: if matches!(status, pick_list::Status::Opened) {
-                scheme.dialog_bg.into()
-            } else {
-                base.background.unwrap_or_else(|| Color::TRANSPARENT.into())
-            },
-            border: iced::border::Border {
-                color: Color::TRANSPARENT,
-                width: 0.0,
-                radius: PILL.into(),
-            },
-        }
-    }
-}
-
-fn greyed_pick(scheme: Scheme) -> impl Fn(&iced::Theme, pick_list::Status) -> pick_list::Style {
-    move |theme, status| {
-        let mut style = pick_list::default(theme, status);
-        style.text_color = scheme.muted;
-        style.handle_color = scheme.muted;
-        style.background = scheme.track.into();
-        style.border = iced::border::Border {
-            color: Color::TRANSPARENT,
-            width: 0.0,
-            radius: PILL.into(),
-        };
-        style
-    }
-}
-
-fn greyed_button(scheme: Scheme) -> impl Fn(&iced::Theme, button::Status) -> button::Style {
-    move |theme, status| {
-        let mut style = button::secondary(theme, status);
-        style.background = Some(
-            Color {
-                a: 0.12,
-                ..scheme.muted
-            }
-            .into(),
-        );
-        style.text_color = scheme.muted;
-        style.border.radius = PILL.into();
-        style
-    }
-}
-
-/// A control in the line editor panel: the live pill, or the greyed one when
-/// the panel already knows the action would refuse. One style function for both
-/// states keeps the row's buttons a single type, and the radius is pinned to
-/// half the diameter so hover, pressed and disabled all draw a circle rather
-/// than a pill whose ends depend on the box's height.
-fn panel_icon_button(
-    scheme: Scheme,
-    enabled: bool,
-) -> impl Fn(&iced::Theme, button::Status) -> button::Style {
-    move |theme, status| {
-        let mut style = if enabled {
-            pill_button_secondary(theme, status)
-        } else {
-            greyed_button(scheme)(theme, status)
-        };
-        style.border.radius = (PANEL_ICON_DIAMETER / 2.0).into();
-        style
-    }
-}
-
-/// The accent fill with the card hairline around it.
-///
-/// `color_button` outlines a filled button with a lighter tint of its own hue,
-/// which on a dark window leaves the two queue actions looking flush with the
-/// panel. In dark mode this wraps them in the same border every card uses.
-fn color_button_outlined(
-    bg: Color,
-    ink: Color,
-    scheme: Scheme,
-) -> impl Fn(&iced::Theme, button::Status) -> button::Style {
-    move |theme, status| {
-        let mut style = color_button(bg, ink)(theme, status);
-        if theme::is_dark_scheme(&scheme) {
-            style.border.color = scheme.border;
-        }
-        style
-    }
-}
-
-fn color_button(bg: Color, ink: Color) -> impl Fn(&iced::Theme, button::Status) -> button::Style {
-    move |theme, status| {
-        let (top, bottom, text, border, border_width, shadow) = match status {
-            button::Status::Hovered => (
-                theme::lighten(bg, 0.30),
-                theme::lighten(bg, 0.10),
-                ink,
-                Color {
-                    a: 0.95,
-                    ..theme::lighten(bg, 0.78)
-                },
-                2.0,
-                Shadow {
-                    color: Color::from_rgba(0.0, 0.0, 0.0, 0.30),
-                    offset: Vector::new(0.0, 4.0),
-                    blur_radius: 12.0,
-                },
-            ),
-            button::Status::Pressed => (
-                theme::darken(bg, 0.18),
-                theme::darken(bg, 0.06),
-                ink,
-                Color {
-                    a: 0.80,
-                    ..theme::lighten(bg, 0.65)
-                },
-                2.0,
-                Shadow::default(),
-            ),
-            // Filled buttons keep their hue when disabled, but they must read
-            // as unavailable: a dimmer fill and grey text rather than the full
-            // strength label.
-            button::Status::Disabled => {
-                let faded = Color { a: 0.26, ..bg };
-                (
-                    faded,
-                    faded,
-                    Color {
-                        a: 0.55,
-                        ..theme.palette().text
-                    },
-                    Color { a: 0.14, ..bg },
-                    1.0,
-                    Shadow::default(),
-                )
-            }
-            _ => (
-                theme::lighten(bg, 0.12),
-                theme::darken(bg, 0.04),
-                ink,
-                Color {
-                    a: 0.45,
-                    ..theme::lighten(bg, 0.55)
-                },
-                1.0,
-                soft_shadow(),
-            ),
-        };
-        button::Style {
-            background: Some(linear_gradient(top, bottom)),
-            text_color: text,
-            border: iced::border::Border {
-                color: border,
-                width: border_width,
-                radius: PILL.into(),
-            },
-            shadow,
         }
     }
 }

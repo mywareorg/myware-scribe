@@ -8,7 +8,6 @@ mod format;
 mod options;
 mod recording;
 mod store;
-mod theme;
 
 use app::App;
 
