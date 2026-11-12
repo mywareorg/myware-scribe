@@ -20,6 +20,9 @@ use serde::{Deserialize, Serialize};
 use crate::backend::{self, Event};
 use hippo_ui::dialog::modal_card;
 use hippo_ui::menu::{self as menus, MenuRow, MenuSection};
+use hippo_ui::rows::{
+    day_header, drop_card, info_row, settings_divider, settings_row, shortcut_row, switch_row,
+};
 use hippo_ui::styles::*;
 use hippo_ui::tokens::{
     self as theme, AppTheme, Scheme, CONTROL_HEIGHT, ICON_ONLY_SIZE, ICON_SIZE,
@@ -17719,7 +17722,7 @@ impl App {
                         .padding(0)
                         .on_press(Message::ToggleLabel(id))
                         .style(move |theme, status| {
-                            row_menu_item_style(scheme, true)(theme, status)
+                            menu_item_style(scheme, true)(theme, status)
                         }),
                     action(icon(ICON_X, 11.0))
                         .padding([2, 4])
@@ -17818,7 +17821,7 @@ impl App {
             )
             .size(theme::TEXT_XS)
             .color(scheme.muted),
-            report_switch_row(
+            switch_row(
                 "Timestamps",
                 "Start every line with its time.",
                 self.report.timestamps,
@@ -17826,7 +17829,7 @@ impl App {
                 Message::ReportToggled(ReportToggle::Timestamps),
                 scheme,
             ),
-            report_switch_row(
+            switch_row(
                 "Merge lines",
                 "One paragraph per speaker turn.",
                 self.report.merge_lines,
@@ -17834,7 +17837,7 @@ impl App {
                 Message::ReportToggled(ReportToggle::MergeLines),
                 scheme,
             ),
-            report_switch_row(
+            switch_row(
                 "Participants",
                 "Names, speaking time, turns and words per speaker.",
                 self.report.participants,
@@ -17842,7 +17845,7 @@ impl App {
                 Message::ReportToggled(ReportToggle::Participants),
                 scheme,
             ),
-            report_switch_row(
+            switch_row(
                 "Include summary",
                 if !can_summarize {
                     "Summarizing is a Pro feature."
@@ -17995,7 +17998,7 @@ impl App {
                     .padding(0)
                     .on_press_maybe(exists.then_some(Message::PreviewVersion(id)))
                     .style(move |theme, status| {
-                        row_menu_item_style(scheme, exists)(theme, status)
+                        menu_item_style(scheme, exists)(theme, status)
                     }),
             );
         }
@@ -18439,7 +18442,7 @@ impl App {
                             .padding(0)
                             .on_press(Message::ExportBriefing(format))
                             .style(move |theme, status| {
-                                row_menu_item_style(scheme, true)(theme, status)
+                                menu_item_style(scheme, true)(theme, status)
                             }),
                         );
                     }
@@ -21137,7 +21140,12 @@ fn drop_overlay<'a>(
     hovering: bool,
 ) -> Element<'a, Message> {
     let overlay: Element<'a, Message> = if hovering {
-        drop_card(scheme)
+        drop_card(
+            ICON_DOWNLOAD,
+            "Drop to add audio",
+            "MP3, WAV, M4A, FLAC, and more",
+            scheme,
+        )
     } else {
         horizontal_space().into()
     };
@@ -21145,67 +21153,9 @@ fn drop_overlay<'a>(
     stack![base.into(), overlay].into()
 }
 
-/// The card shown while a file is dragged over the window.
-fn drop_card<'a>(scheme: Scheme) -> Element<'a, Message> {
-    let card = container(
-        column![
-            icon_colored(ICON_DOWNLOAD, 32.0, scheme.blue),
-            text("Drop to add audio").size(22).font(Font {
-                weight: font::Weight::Bold,
-                ..Font::DEFAULT
-            }),
-            text("MP3, WAV, M4A, FLAC, and more")
-                .size(13)
-                .color(scheme.muted),
-        ]
-        .spacing(8)
-        .align_x(iced::Alignment::Center),
-    )
-    .padding(36)
-    .style(move |_theme| container::Style {
-        background: Some(scheme.dialog_bg.into()),
-        border: iced::border::Border {
-            color: scheme.blue,
-            width: 2.0,
-            radius: 16.0.into(),
-        },
-        shadow: dialog_shadow(),
-        ..container::Style::default()
-    });
-
-    let overlay = container(card)
-        .center(Length::Fill)
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .padding(24)
-        .style(move |_theme| container::Style {
-            background: Some(scheme.scrim.into()),
-            ..container::Style::default()
-        });
-
-    overlay.into()
-}
 
 /// Standard dialog surface shared by every modal.
 
-fn settings_row<'a>(
-    label: &'a str,
-    control: impl Into<Element<'a, Message>>,
-    scheme: Scheme,
-) -> Element<'a, Message> {
-    row![
-        text(label)
-            .size(theme::TEXT_SM)
-            .wrapping(NO_WRAP)
-            .color(scheme.text)
-            .width(Length::Fill),
-        control.into(),
-    ]
-    .spacing(theme::SPACE_LG)
-    .align_y(iced::Alignment::Center)
-    .width(Length::Fill)
-    .into()
-}
 
 fn settings_control<'a>(control: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
     container(control)
@@ -21226,16 +21176,6 @@ fn settings_section_label<'a>(label: &'a str, scheme: Scheme) -> Element<'a, Mes
         .into()
 }
 
-fn settings_divider<'a>(scheme: Scheme) -> Element<'a, Message> {
-    container(horizontal_space())
-        .width(Length::Fill)
-        .height(Length::Fixed(1.0))
-        .style(move |_theme| container::Style {
-            background: Some(scheme.border.into()),
-            ..container::Style::default()
-        })
-        .into()
-}
 
 /// The surface shared by the Summary and Help dialogs: no built-in padding, so
 /// each sheet can draw full-width header and footer rules.
@@ -21403,26 +21343,6 @@ fn report_metric_row<'a>(label: &'a str, value: String, scheme: Scheme) -> Eleme
     .into()
 }
 
-/// One label/value line in the Info popup. The label keeps a fixed column so
-/// every value starts on the same left edge.
-fn info_row<'a>(
-    label: &'static str,
-    value: impl Into<Element<'a, Message>>,
-    scheme: Scheme,
-) -> Element<'a, Message> {
-    row![
-        text(label)
-            .size(theme::TEXT_XS)
-            .wrapping(NO_WRAP)
-            .color(scheme.muted)
-            .width(Length::Fixed(104.0)),
-        value.into(),
-    ]
-    .spacing(theme::SPACE_MD)
-    .align_y(iced::Alignment::Start)
-    .width(Length::Fill)
-    .into()
-}
 
 /// A full path and whether it is on disk. Paths wrap rather than ellipsize:
 /// the whole path is what the popup exists to show.
@@ -21571,42 +21491,7 @@ fn report_meta_row<'a>(label: &'a str, value: &'a str, scheme: Scheme) -> Elemen
     .into()
 }
 
-fn keycap<'a>(label: &'a str, scheme: Scheme) -> Element<'a, Message> {
-    container(
-        text(label)
-            .size(theme::TEXT_XS)
-            .wrapping(NO_WRAP)
-            .color(scheme.text),
-    )
-    .width(Length::Fixed(132.0))
-    .align_x(iced::Alignment::Center)
-    .padding([theme::SPACE_XS as u16, theme::SPACE_SM as u16])
-    .style(move |_theme| container::Style {
-        background: Some(scheme.field_bg.into()),
-        border: iced::border::Border {
-            color: scheme.border,
-            width: 1.0,
-            radius: 4.0.into(),
-        },
-        ..container::Style::default()
-    })
-    .into()
-}
 
-fn shortcut_row<'a>(key: &'a str, description: &'a str, scheme: Scheme) -> Element<'a, Message> {
-    row![
-        keycap(key, scheme),
-        text(description)
-            .size(theme::TEXT_SM)
-            .wrapping(iced::widget::text::Wrapping::WordOrGlyph)
-            .width(Length::Fill)
-            .color(scheme.muted),
-    ]
-    .spacing(theme::SPACE_LG)
-    .align_y(iced::Alignment::Center)
-    .width(Length::Fill)
-    .into()
-}
 
 fn link_button(label: String, url: String, scheme: Scheme) -> Element<'static, Message> {
     mouse_area(
@@ -22245,23 +22130,6 @@ struct FooterAction {
     tooltip: &'static str,
 }
 
-/// A day heading above a run of history rows.
-fn day_header(day: &str, scheme: &Scheme) -> Element<'static, Message> {
-    let scheme = *scheme;
-    container(
-        text(day.to_string())
-            .size(11)
-            .color(scheme.muted),
-    )
-    .padding(iced::Padding {
-        top: 8.0,
-        right: 2.0,
-        bottom: 2.0,
-        left: 2.0,
-    })
-    .width(Length::Fill)
-    .into()
-}
 
 /// Distinct speaker names in a turn list, clamped to the `u8` the history
 /// stores. `None` when there are no turns to count.
@@ -23655,82 +23523,7 @@ fn right_aligned<'a>(content: impl Into<Element<'a, Message>>) -> Element<'a, Me
         .into()
 }
 
-/// A square checkbox that fills when set, with the tick centred inside it.
-///
-/// The tick goes *inside* the bordered box, at the tightened icon line height,
-/// so the paragraph it is measured from fits within the box. A line box taller
-/// than the space offered leaves cosmic-text with no vertical room for the
-/// baseline and it then yields no layout run at all, which measures and draws as
-/// nothing.
-fn check_box<'a>(checked: bool, scheme: Scheme) -> Element<'a, Message> {
-    const BOX: f32 = 14.0;
-    const TICK: f32 = 12.0;
 
-    let content: Element<'a, Message> = if checked {
-        text(ICON_CHECK.to_string())
-            .font(Font::with_name("bootstrap-icons"))
-            .size(TICK)
-            .line_height(icon_line_height(TICK))
-            .wrapping(NO_WRAP)
-            .style(move |_theme| text::Style {
-                color: Some(scheme.blue),
-            })
-            .into()
-    } else {
-        horizontal_space().into()
-    };
-
-    container(content)
-        .width(Length::Fixed(BOX))
-        .height(Length::Fixed(BOX))
-        .align_x(iced::Alignment::Center)
-        .align_y(iced::Alignment::Center)
-        .style(move |_theme| container::Style {
-            background: checked.then(|| scheme.dialog_bg.into()),
-            border: iced::border::Border {
-                color: if checked { scheme.blue } else { scheme.border },
-                width: 1.0,
-                radius: 3.0.into(),
-            },
-            ..container::Style::default()
-        })
-        .into()
-}
-
-/// One switch in the report options: a checkbox, its name and what it does.
-fn report_switch_row<'a>(
-    label: &'a str,
-    hint: &'a str,
-    on: bool,
-    enabled: bool,
-    message: Message,
-    scheme: Scheme,
-) -> Element<'a, Message> {
-    // The box is the control; the words beside it are text, not a second
-    // target, so a stray click on the label cannot change the report.
-    let check = action(check_box(on, scheme))
-        .padding([2, 2])
-        .style(move |theme, status| row_menu_item_style(scheme, enabled)(theme, status))
-        .on_press_maybe(enabled.then_some(message));
-    container(
-        row![
-            check,
-            column![
-                text(label)
-                    .size(theme::TEXT_SM)
-                    .color(if enabled { scheme.text } else { scheme.muted }),
-                text(hint).size(theme::TEXT_XS).color(scheme.muted),
-            ]
-            .spacing(1),
-        ]
-        .spacing(theme::SPACE_SM)
-        .align_y(iced::Alignment::Center)
-        .width(Length::Fill),
-    )
-    .width(Length::Fill)
-    .padding([6, 8])
-    .into()
-}
 
 /// A hairline between two menu groups.
 
@@ -23914,7 +23707,7 @@ fn row_menu_item(row: RowMenuEntry, scheme: Scheme) -> Element<'static, Message>
     let button = action(content)
         .width(Length::Fill)
         .padding([5, 6])
-        .style(row_menu_item_style(scheme, row.enabled))
+        .style(menu_item_style(scheme, row.enabled))
         .on_press(row.action.unwrap_or(Message::Noop));
     match row.hint {
         Some(hint) => tooltip(
@@ -23939,37 +23732,6 @@ fn row_menu_item(row: RowMenuEntry, scheme: Scheme) -> Element<'static, Message>
     }
 }
 
-/// A context-menu row's chrome: no wash until hovered, a weaker wash when the
-/// action is disabled.
-fn row_menu_item_style(
-    scheme: Scheme,
-    enabled: bool,
-) -> impl Fn(&iced::Theme, button::Status) -> button::Style {
-    move |_theme, status| {
-        let hot = matches!(
-            status,
-            button::Status::Hovered | button::Status::Pressed
-        );
-        let tint = if enabled {
-            hover_band(&scheme)
-        } else {
-            Color {
-                a: 0.45,
-                ..hover_band(&scheme)
-            }
-        };
-        button::Style {
-            background: hot.then(|| tint.into()),
-            text_color: if enabled { scheme.ink } else { scheme.muted },
-            border: iced::border::Border {
-                color: Color::TRANSPARENT,
-                width: 0.0,
-                radius: theme::RADIUS_SM.into(),
-            },
-            shadow: Shadow::default(),
-        }
-    }
-}
 
 /// One row of a header menu: a leading check slot that keeps every label on the
 /// same left edge, the label, then the key that toggles it at the trailing
