@@ -1,4 +1,4 @@
-# Hippo Transcribe
+# MyWare Transcribe
 
 **Private by design. Offline by default.**
 
@@ -29,9 +29,9 @@ speaker count with `--num-speakers N` (default 2); there is no auto-detect.
 
 - `PRIVACY.md` — data flows, storage locations, network use and retention.
 - `docs/brand.md` — approved privacy messaging and banned claims.
-- `core/` — `hippo-transcribe-core` library: audio, diarization, ASR, model/cache paths,
+- `core/` — `myware-transcribe-core` library: audio, diarization, ASR, model/cache paths,
   pipeline, CLI.
-- `gui/` — `hippo-transcribe-gui` binary: the iced GUI and the `--cli` entry point.
+- `gui/` — `myware-transcribe-gui` binary: the iced GUI and the `--cli` entry point.
 
 ## Build
 
@@ -40,7 +40,7 @@ MSVC on Windows). `whisper.cpp` is built from source; on Linux `sherpa-onnx` is
 too, while Windows loads prebuilt sherpa-onnx DLLs at runtime.
 
 ```bash
-cargo build --release            # target/release/hippo-transcribe
+cargo build --release            # target/release/myware-transcribe
 ```
 
 - On Linux x86_64 the non-PIC relocation flag needed for the static sherpa
@@ -55,25 +55,25 @@ powershell -ExecutionPolicy Bypass -File .\scripts\build-windows.ps1
 ```
 
 It enters the Visual Studio developer environment, runs the release tests,
-builds both executables (`hippo-transcribe` and the briefing worker
-`hippo-summarize`), then stages them together with the sherpa-onnx and Visual C++
+builds both executables (`myware-transcribe` and the briefing worker
+`myware-summarize`), then stages them together with the sherpa-onnx and Visual C++
 runtime DLLs and the bundled model set from `models.lock.json`, and writes a
 release folder and zip under `dist\`. Use `-SkipModels` to stage only the
 executable and DLLs. With `-Msix` the package leaves the models out (the Store
 build downloads them on first run); `-BundleModels` packs them in anyway.
 
 The app loads `sherpa-onnx-c-api.dll` and `onnxruntime.dll` from beside
-`hippo-transcribe.exe` at runtime; no native library is linked into the executable. Only
+`myware-transcribe.exe` at runtime; no native library is linked into the executable. Only
 `whisper.cpp` is compiled locally. The release folder contains the executable,
 both DLLs, the deploy scripts, README, LICENSE, and the sample. Set
-`HIPPO_TRANSCRIBE_SHERPA_DLL` to an explicit path to override the DLL location.
+`MYWARE_TRANSCRIBE_SHERPA_DLL` to an explicit path to override the DLL location.
 
 The sherpa-onnx release is a `.tar.bz2`. Windows' built-in tar has no bzip2
 support, so the script uses installed 7-Zip or Git for Windows' `bzip2` when
 available. If neither is present, it downloads a small standalone 7-Zip
-extractor into `%LOCALAPPDATA%\hippo-transcribe\cache` automatically. Alternatively,
+extractor into `%LOCALAPPDATA%\myware-transcribe\cache` automatically. Alternatively,
 extract the archive manually into
-`%LOCALAPPDATA%\hippo-transcribe\cache\sherpa-onnx-v1.12.9-win-x64-shared`.
+`%LOCALAPPDATA%\myware-transcribe\cache\sherpa-onnx-v1.12.9-win-x64-shared`.
 
 For the edit/run loop, use the fast iteration profile:
 
@@ -88,10 +88,10 @@ separate package and is not a workspace default member, so a bare
 `cargo build` or `cargo run` does not produce it:
 
 ```powershell
-cargo build --profile release-fast -p hippo-summarize
+cargo build --profile release-fast -p myware-summarize
 ```
 
-Without `hippo-summarize.exe` beside `hippo-transcribe.exe`, Summarize
+Without `myware-summarize.exe` beside `myware-transcribe.exe`, Summarize
 Transcript reports the helper as missing. In a Visual Studio developer prompt,
 `cargo build-fast` builds both binaries into that profile and `cargo run-fast`
 runs the GUI. Use the full build script for the final release. Pass `-Free` or
@@ -100,7 +100,7 @@ runs the GUI. Use the full build script for the final release. Pass `-Free` or
 For the GPU edit/run loop, use `scripts\run-gpu.ps1`. It selects the Vulkan
 SDK, Ninja, and the DLL CRT, stages the sherpa/ONNX/OpenMP runtime DLLs, and
 runs `cargo run --profile release-fast --features gpu`. It defaults to
-`HIPPO_TRANSCRIBE_TIER=pro` so GPU calibration is visible; pass `-Free` to test
+`MYWARE_TRANSCRIBE_TIER=pro` so GPU calibration is visible; pass `-Free` to test
 the free-tier lock.
 
 Prerequisites: Visual Studio 2022 Build Tools with the "Desktop development with
@@ -122,15 +122,15 @@ reports what the profile actually contains to `dist\shortcuts-diagnose.txt`.
 
 ## Models
 
-Models are non-gated and installed into `%LOCALAPPDATA%\hippo-transcribe\models`
-(Windows) or `~/.cache/hippo-transcribe/models` (Linux/macOS). Downloading models
+Models are non-gated and installed into `%LOCALAPPDATA%\myware-transcribe\models`
+(Windows) or `~/.cache/myware-transcribe/models` (Linux/macOS). Downloading models
 and confirming a Pro purchase are the only reasons the app uses the network; the
 transcription pipeline itself never does.
 
 Download everything at once:
 
 ```bash
-hippo-transcribe --cli models download --verify
+myware-transcribe --cli models download --verify
 ```
 
 If models are missing on first launch, the GUI shows a **Download models** card
@@ -158,9 +158,9 @@ SHA-256 hashes, licenses and mirrors. The application compiles it in, and
 `scripts/fetch-models.sh` / `.ps1` stage the same pinned files, so packaging and
 runtime downloads cannot disagree.
 
-Downloads try, in order: `HIPPO_TRANSCRIBE_MODEL_MIRROR` (an extra base URL that
+Downloads try, in order: `MYWARE_TRANSCRIBE_MODEL_MIRROR` (an extra base URL that
 serves `<file>`), the public GitLab package mirror
-(`librewarelive/hippo-transcribe-models`), then the pinned upstream Hugging Face
+(`librewarelive/myware-transcribe-models`), then the pinned upstream Hugging Face
 / k2-fsa URLs as fallbacks.
 
 Portable release packages ship a `models/` directory beside the executable. It
@@ -168,11 +168,11 @@ is read-only and used as-is; downloads always go to the writable models
 directory. Store packages leave the models out and download them on first run,
 so the package and its updates stay small.
 
-Overrides: `HIPPO_TRANSCRIBE_MODELS_DIR` (root),
-`HIPPO_TRANSCRIBE_MODEL_MIRROR` (extra download mirror),
-`HIPPO_TRANSCRIBE_SEGMENTATION_MODEL`, `HIPPO_TRANSCRIBE_EMBEDDING_MODEL`,
-`HIPPO_TRANSCRIBE_WHISPER_MODEL`. Diarization is cached under
-`HIPPO_TRANSCRIBE_CACHE_DIR` (or the platform cache dir) and reused on re-runs;
+Overrides: `MYWARE_TRANSCRIBE_MODELS_DIR` (root),
+`MYWARE_TRANSCRIBE_MODEL_MIRROR` (extra download mirror),
+`MYWARE_TRANSCRIBE_SEGMENTATION_MODEL`, `MYWARE_TRANSCRIBE_EMBEDDING_MODEL`,
+`MYWARE_TRANSCRIBE_WHISPER_MODEL`. Diarization is cached under
+`MYWARE_TRANSCRIBE_CACHE_DIR` (or the platform cache dir) and reused on re-runs;
 the cache key includes the model set version. The legacy `TRANSIEL_*` names are
 still read as a fallback, and data under the old `transiel` directories is
 adopted on first launch.
@@ -181,13 +181,13 @@ Report what is present (exit non-zero if anything is missing or has the wrong
 size):
 
 ```bash
-hippo-transcribe --cli models
+myware-transcribe --cli models
 ```
 
 Print model attribution (names, hashes, licenses, sources):
 
 ```bash
-hippo-transcribe --cli models notice
+myware-transcribe --cli models notice
 ```
 
 Stage the bundled model set for packaging (verified, cached under
@@ -202,14 +202,14 @@ scripts/fetch-models.sh --verify-only
 ## CLI
 
 ```bash
-hippo-transcribe --cli audio.mp3                         # default preset (speed)
-hippo-transcribe --cli audio.mp3 --preset speed
-hippo-transcribe --cli audio.mp3 --preset accuracy
-hippo-transcribe --cli a.mp3 b.mp3 --output-dir out/     # batch
-hippo-transcribe --cli audio.mp3 --no-timestamps
-hippo-transcribe --cli audio.mp3 --language es           # or auto
-hippo-transcribe --cli audio.mp3 --progress-json         # line-delimited JSON events
-hippo-transcribe --cli probe audio.mp3 120               # duration + RMS waveform
+myware-transcribe --cli audio.mp3                         # default preset (speed)
+myware-transcribe --cli audio.mp3 --preset speed
+myware-transcribe --cli audio.mp3 --preset accuracy
+myware-transcribe --cli a.mp3 b.mp3 --output-dir out/     # batch
+myware-transcribe --cli audio.mp3 --no-timestamps
+myware-transcribe --cli audio.mp3 --language es           # or auto
+myware-transcribe --cli audio.mp3 --progress-json         # line-delimited JSON events
+myware-transcribe --cli probe audio.mp3 120               # duration + RMS waveform
 ```
 
 Presets: `speed` (whisper `tiny`, multilingual), `balanced` (whisper `small`,
@@ -239,7 +239,7 @@ whisper.cpp uses the fastest backend the build provides:
   (`vcomp140.dll`) beside the executable.
   This path has never been run on real hardware, so treat it as experimental.
 - **CPU fallback** — if GPU context creation fails, the run continues on the CPU
-  and the console reports why. `HIPPO_TRANSCRIBE_ACCEL=cpu` forces CPU.
+  and the console reports why. `MYWARE_TRANSCRIBE_ACCEL=cpu` forces CPU.
 - **Acceleration** — Pro chooses CPU or GPU below Preset/Speakers. CPU is
   the `1×` baseline; GPU shows the measured speed multiplier once calibrated.
   The `Now:` line reports the backend actually used by the running pipeline.
@@ -281,11 +281,11 @@ offer the trial only. Entitlement lives in `license.json` beside the settings an
 never deletes transcripts or queue items; a lapsed licence falls back to the free
 tier, and a checked entitlement survives 30 days offline before it re-verifies.
 
-`HIPPO_TRANSCRIBE_TIER=pro` (or `free`) forces the tier for development.
+`MYWARE_TRANSCRIBE_TIER=pro` (or `free`) forces the tier for development.
 
 ## GUI
 
-Run `hippo-transcribe` with no arguments. The File panel on the left holds the
+Run `myware-transcribe` with no arguments. The File panel on the left holds the
 queue and the finished transcripts. Add files/folders from its action row, or
 drag audio files and folders anywhere into the window, then choose a preset and
 speaker count and press Transcribe. **Record** captures from the microphone
@@ -312,8 +312,8 @@ saves as PDF, Word or plain text through the native save dialog. It is a derived
 document, not a record: the transcript stays the source of truth.
 
 The briefing helper runs on the CPU by default. Built with
-`cargo build -p hippo-summarize --features vulkan` (or `metal`/`cuda`), set
-`HIPPO_BRIEFING_GPU_LAYERS` to the number of layers to offload; a CPU-only build
+`cargo build -p myware-summarize --features vulkan` (or `metal`/`cuda`), set
+`MYWARE_BRIEFING_GPU_LAYERS` to the number of layers to offload; a CPU-only build
 ignores the variable.
 
 The Export picker (Pro) writes the current transcript as plain text, SRT,
@@ -342,7 +342,7 @@ Transcript search supports a speaker filter, match case (`Aa`) and whole-word
 (`W`) matching. Right-click a line to edit it; the editor can copy the line,
 merge it with the next line, or split it at the playhead. Line deletion asks for
 confirmation. Saves are written atomically and keep a
-`<transcript>.hippo-transcribe.bak` backup beside the source file.
+`<transcript>.myware-transcribe.bak` backup beside the source file.
 
 Finished files land in the **History** tab the moment they complete, and the
 **Queue** keeps its finished rows visible for the rest of the session.
@@ -376,16 +376,16 @@ Resume until nothing is left to continue.
 
 ## Deploy (Windows)
 
-`deploy.bat` (shipped beside `hippo-transcribe.exe`) installs the exe to
-`%LOCALAPPDATA%\Programs\hippo-transcribe`, creates a Start Menu shortcut named
-`Hippo Transcribe`, adds it to the user `PATH`, and reports whether the bundled
+`deploy.bat` (shipped beside `myware-transcribe.exe`) installs the exe to
+`%LOCALAPPDATA%\Programs\myware-transcribe`, creates a Start Menu shortcut named
+`MyWare Transcribe`, adds it to the user `PATH`, and reports whether the bundled
 models are present. The app downloads any missing models on first launch. Then
-open a new terminal and run `hippo-transcribe`. `undeploy.bat` removes the
+open a new terminal and run `myware-transcribe`. `undeploy.bat` removes the
 install and shortcut (`/keepmodels` keeps the models).
 
 ## Logs
 
-Each run appends to `%LOCALAPPDATA%\hippo-transcribe\logs\hippo.log`, keeping the last
+Each run appends to `%LOCALAPPDATA%\myware-transcribe\logs\myware.log`, keeping the last
 five files at 2 MB each; crashes write `crash-<timestamp>.txt` beside them with a
 backtrace and a message box pointing at the folder. Settings → Diagnostics → Open
 log folder opens it, so a user reporting a problem always has something to send.
@@ -399,7 +399,7 @@ them with `python3 scripts/make-privacy-page.py` after editing `PRIVACY.md`.
 ## Privacy
 
 Audio, transcripts, diarization caches, models and settings stay on the machine
-that runs Hippo Transcribe. There is no cloud service, no account, no telemetry
+that runs MyWare Transcribe. There is no cloud service, no account, no telemetry
 and no analytics. Network access is the one-time model download (with optional
 checksum-verified mirror overrides) and, only for a Pro purchase or restore, the
 store's entitlement check: the store reports whether the add-on is owned, and
@@ -409,7 +409,7 @@ See [`PRIVACY.md`](PRIVACY.md) for the full data-flow and retention details.
 
 ## Licenses
 
-Hippo Transcribe itself is free software, licensed under the GNU Lesser General
+MyWare Transcribe itself is free software, licensed under the GNU Lesser General
 Public License v2.1 (LGPL-2.1). Copyright (C) 2026 Sean Wu. It is provided
 without warranty; see LICENSE for details.
 

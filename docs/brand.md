@@ -2,7 +2,7 @@
 
 ## Identity
 
-Hippo Transcribe is named for HIPAA. The name is the signal; the product
+MyWare Transcribe is named for HIPAA. The name is the signal; the product
 behavior is the proof. Do not claim certification or literal compliance.
 
 ## Approved lines
@@ -11,8 +11,8 @@ behavior is the proof. Do not claim certification or literal compliance.
 - **Origin:** The name comes from HIPAA. Your recordings stay on this machine.
 - **Proof:** No cloud · No accounts · No telemetry · Audio and transcripts stay
   on this device.
-- **Positioning:** Hippo Transcribe is HIPAA inspired. Built to serve the needs of doctors
-  and medical professionals, Hippo keeps recordings on the machine that made
+- **Positioning:** MyWare Transcribe is HIPAA inspired. Built to serve the needs of doctors
+  and medical professionals, MyWare keeps recordings on the machine that made
   them.
 - **Technical:** Local diarization and transcription. Network access is limited
   to the model download.
@@ -46,9 +46,9 @@ free tier shows what the purchase adds.
 
 ## Visual system
 
-- Mark: hippo head inside a shield. Calm, not cartoonish.
+- Mark: myware head inside a shield. Calm, not cartoonish.
 - Green signals verified-local, privacy and completed states.
-- Use the hippo mark with the wordmark `Hippo Transcribe`. At small sizes keep
+- Use the myware mark with the wordmark `MyWare Transcribe`. At small sizes keep
   the shield silhouette and face readable; do not add detail.
 
 ## Surfaces
