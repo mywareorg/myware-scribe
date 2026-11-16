@@ -29,7 +29,7 @@ timing <name> [classic|overlap]: decode X.XXs hash X.XXs prepare X.XXs diarize X
 
 ## Schedules
 
-`MYWARE_TRANSCRIBE_PIPELINE` (legacy `TRANSIEL_PIPELINE`) selects the schedule:
+`MYWARE_SCRIBE_PIPELINE` (legacy `TRANSIEL_PIPELINE`) selects the schedule:
 
 - `classic` — diarize first, then transcribe the resulting speaker clips. Lines
   stream while transcription runs.
@@ -46,17 +46,17 @@ schedule: overlap (12 physical core(s), 4 ASR worker(s) x 2 requested thread(s))
 
 Thread budgets:
 
-- `MYWARE_TRANSCRIBE_ASR_WORKERS` (legacy `TRANSIEL_ASR_WORKERS`) — worker pool size.
-- `MYWARE_TRANSCRIBE_ASR_THREADS` (legacy `TRANSIEL_ASR_THREADS`) — threads per call.
-- `MYWARE_TRANSCRIBE_DIARIZE_THREADS` (legacy `TRANSIEL_DIARIZE_THREADS`) — sherpa
+- `MYWARE_SCRIBE_ASR_WORKERS` (legacy `TRANSIEL_ASR_WORKERS`) — worker pool size.
+- `MYWARE_SCRIBE_ASR_THREADS` (legacy `TRANSIEL_ASR_THREADS`) — threads per call.
+- `MYWARE_SCRIBE_DIARIZE_THREADS` (legacy `TRANSIEL_DIARIZE_THREADS`) — sherpa
   threads. In overlap mode the run reserves about a third of the physical cores
   for diarization and gives the rest to the ASR pool.
 
 Other knobs:
 
-- `MYWARE_TRANSCRIBE_BEST_OF` (legacy `TRANSIEL_BEST_OF`) — decoder samples per
+- `MYWARE_SCRIBE_BEST_OF` (legacy `TRANSIEL_BEST_OF`) — decoder samples per
   segment. Default 1; raise it to A/B the quality tiers.
-- `MYWARE_TRANSCRIBE_PREFETCH_MAX_S` (legacy `TRANSIEL_PREFETCH_MAX_S`) — cap on
+- `MYWARE_SCRIBE_PREFETCH_MAX_S` (legacy `TRANSIEL_PREFETCH_MAX_S`) — cap on
   the next file's duration that may be decoded in the background. Default 0 (no
   cap). Prefetch holds two decoded buffers: ~230 MB per hour of 16 kHz f32.
 
@@ -106,7 +106,7 @@ ASR, or its tail becomes the file's critical path. Measured on
 ```
 run                                  diarize   asr    total
 default (overlap)                      9.91s  47.97s   73.57s
-with MYWARE_TRANSCRIBE_DIARIZE_SPLIT    10.16s*  -         -
+with MYWARE_SCRIBE_DIARIZE_SPLIT    10.16s*  -         -
 ```
 
 `*` measured through `--diarize-only` on the same file, because a cached run
@@ -141,7 +141,7 @@ not the memory constraint.
 1. Run one file per preset with the default settings and keep the timing line.
 2. Re-run with the change and compare `total` and `x realtime`.
 3. For overlap, also diff the transcript against a `classic` run:
-   `MYWARE_TRANSCRIBE_PIPELINE=classic`. Attribution can differ where a window
+   `MYWARE_SCRIBE_PIPELINE=classic`. Attribution can differ where a window
    boundary meets a speaker change; that diff is the acceptance check for the
    schedule.
 4. Watch the `busy` figure: a low utilisation with a long `asr` wall time means

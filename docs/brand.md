@@ -2,18 +2,21 @@
 
 ## Identity
 
-MyWare Transcribe is named for HIPAA. The name is the signal; the product
-behavior is the proof. Do not claim certification or literal compliance.
+MyWare Scribe is named for ownership: the software is yours, and so is
+everything you record with it. The name is the promise; the product behaviour
+is the proof. Do not claim compliance, certification or an audit the product
+has not had.
 
 ## Approved lines
 
 - **Hero:** Private by design. Offline by default.
-- **Origin:** The name comes from HIPAA. Your recordings stay on this machine.
+- **Origin:** The name says whose it is — yours. Your recordings stay on the
+  machine that made them.
 - **Proof:** No cloud · No accounts · No telemetry · Audio and transcripts stay
   on this device.
-- **Positioning:** MyWare Transcribe is HIPAA inspired. Built to serve the needs of doctors
-  and medical professionals, MyWare keeps recordings on the machine that made
-  them.
+- **Positioning:** MyWare Scribe is for people who cannot hand a recording to
+  someone else's computer: doctors, lawyers, researchers, and anyone with a duty
+  of confidence. The work happens on the machine that made the recording.
 - **Technical:** Local diarization and transcription. Network access is limited
   to the model download.
 - **Store builds:** A Pro purchase or restore asks the store whether the add-on
@@ -23,7 +26,8 @@ behavior is the proof. Do not claim certification or literal compliance.
 
 Do not use: HIPAA compliant, HIPAA certified, guaranteed private, unhackable,
 zero risk, or any wording that implies a certification, audit or Business
-Associate Agreement.
+Associate Agreement. The product is used in medical settings; that is exactly
+why it must not imply an agreement it has not signed.
 
 Also banned, because the first launch downloads models and a purchase checks the
 store: "never phones home", "100% offline", "works without any network access
@@ -46,10 +50,15 @@ free tier shows what the purchase adds.
 
 ## Visual system
 
-- Mark: myware head inside a shield. Calm, not cartoonish.
+- **Mark: not yet designed.** Every shipped icon is still the hippo head in a
+  shield, drawn for the previous name. It must not appear on a MyWare release.
+  The replacement has to survive 16 px, read in one colour, and carry no animal
+  or medical allusion.
 - Green signals verified-local, privacy and completed states.
-- Use the myware mark with the wordmark `MyWare Transcribe`. At small sizes keep
-  the shield silhouette and face readable; do not add detail.
+- Pair the mark with the wordmark `MyWare Scribe`; at small sizes the mark
+  carries the product on its own and needs no detail.
+- The icon files keep their names during the rename. Replacing their contents
+  is the open task; renaming them again is not needed.
 
 ## Surfaces
 

@@ -5,7 +5,7 @@ values in `identity.json`, then packs the executable and its runtime DLLs.
 
 ## Before the first submission
 
-1. In Partner Center open **Apps and games → MyWare Transcribe → Product
+1. In Partner Center open **Apps and games → MyWare Scribe → Product
    identity** (the draft submission must exist).
 2. Copy the three values into `identity.json`, replacing the placeholders:
    - `Package/Identity/Name` → `packageName`
@@ -40,7 +40,7 @@ needed when the zip should be slim too.
 To sign a package that already exists (for example one a build left unsigned),
 run the same signing step on its own:
 
-    .\scripts\sign-msix.ps1 -Msix dist\myware-transcribe-0.1.0-windows-x64.msix
+    .\scripts\sign-msix.ps1 -Msix dist\myware-scribe-0.1.0-windows-x64.msix
 
 Installing needs the certificate in the machine store, because
 `Add-AppxPackage` validates in the deployment service rather than the caller's

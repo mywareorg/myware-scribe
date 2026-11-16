@@ -1,4 +1,4 @@
-#+TITLE: MyWare Transcribe store deployment
+#+TITLE: MyWare Scribe store deployment
 
 * Store listing copy
 
@@ -36,7 +36,7 @@ privacy policy to =PRIVACY.md= in the repository.
 
 ** Prerequisites
 - [ ] Enroll in the Apple Developer Program (organization or individual).
-- [ ] Create the App ID / bundle identifier, e.g. =app.mywaretranscribe.gui=.
+- [ ] Create the App ID / bundle identifier, e.g. =app.mywarescribe.gui=.
 - [ ] Create a Mac App Store provisioning profile for that App ID.
 - [ ] Create =Apple Distribution= and =Mac Installer Distribution= certificates.
 - [ ] Confirm the minimum macOS version and set =LSMinimumSystemVersion=.
@@ -100,7 +100,7 @@ privacy policy to =PRIVACY.md= in the repository.
 - [ ] Build x64 and arm64 packages if those architectures are supported.
 - [ ] Set the minimum Windows version, e.g. Windows 10 1809 or later.
 - [ ] Make the app self-contained or bundle the required Visual C++ runtime.
-- [ ] Write user data to =%LOCALAPPDATA%\myware-transcribe=, never the install directory.
+- [ ] Write user data to =%LOCALAPPDATA%\myware-scribe=, never the install directory.
 - [ ] Add file-type associations only if they are genuinely supported.
 - [ ] Verify install, upgrade, repair, and uninstall on a clean Windows VM.
 

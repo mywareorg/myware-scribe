@@ -1,4 +1,4 @@
-# MyWare Transcribe
+# MyWare Scribe
 
 **Private by design. Offline by default.**
 
@@ -29,9 +29,9 @@ speaker count with `--num-speakers N` (default 2); there is no auto-detect.
 
 - `PRIVACY.md` — data flows, storage locations, network use and retention.
 - `docs/brand.md` — approved privacy messaging and banned claims.
-- `core/` — `myware-transcribe-core` library: audio, diarization, ASR, model/cache paths,
+- `core/` — `myware-scribe-core` library: audio, diarization, ASR, model/cache paths,
   pipeline, CLI.
-- `gui/` — `myware-transcribe-gui` binary: the iced GUI and the `--cli` entry point.
+- `gui/` — `myware-scribe-gui` binary: the iced GUI and the `--cli` entry point.
 
 ## Build
 
@@ -40,7 +40,7 @@ MSVC on Windows). `whisper.cpp` is built from source; on Linux `sherpa-onnx` is
 too, while Windows loads prebuilt sherpa-onnx DLLs at runtime.
 
 ```bash
-cargo build --release            # target/release/myware-transcribe
+cargo build --release            # target/release/myware-scribe
 ```
 
 - On Linux x86_64 the non-PIC relocation flag needed for the static sherpa
@@ -55,7 +55,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\build-windows.ps1
 ```
 
 It enters the Visual Studio developer environment, runs the release tests,
-builds both executables (`myware-transcribe` and the briefing worker
+builds both executables (`myware-scribe` and the briefing worker
 `myware-summarize`), then stages them together with the sherpa-onnx and Visual C++
 runtime DLLs and the bundled model set from `models.lock.json`, and writes a
 release folder and zip under `dist\`. Use `-SkipModels` to stage only the
@@ -63,17 +63,17 @@ executable and DLLs. With `-Msix` the package leaves the models out (the Store
 build downloads them on first run); `-BundleModels` packs them in anyway.
 
 The app loads `sherpa-onnx-c-api.dll` and `onnxruntime.dll` from beside
-`myware-transcribe.exe` at runtime; no native library is linked into the executable. Only
+`myware-scribe.exe` at runtime; no native library is linked into the executable. Only
 `whisper.cpp` is compiled locally. The release folder contains the executable,
 both DLLs, the deploy scripts, README, LICENSE, and the sample. Set
-`MYWARE_TRANSCRIBE_SHERPA_DLL` to an explicit path to override the DLL location.
+`MYWARE_SCRIBE_SHERPA_DLL` to an explicit path to override the DLL location.
 
 The sherpa-onnx release is a `.tar.bz2`. Windows' built-in tar has no bzip2
 support, so the script uses installed 7-Zip or Git for Windows' `bzip2` when
 available. If neither is present, it downloads a small standalone 7-Zip
-extractor into `%LOCALAPPDATA%\myware-transcribe\cache` automatically. Alternatively,
+extractor into `%LOCALAPPDATA%\myware-scribe\cache` automatically. Alternatively,
 extract the archive manually into
-`%LOCALAPPDATA%\myware-transcribe\cache\sherpa-onnx-v1.12.9-win-x64-shared`.
+`%LOCALAPPDATA%\myware-scribe\cache\sherpa-onnx-v1.12.9-win-x64-shared`.
 
 For the edit/run loop, use the fast iteration profile:
 
@@ -91,7 +91,7 @@ separate package and is not a workspace default member, so a bare
 cargo build --profile release-fast -p myware-summarize
 ```
 
-Without `myware-summarize.exe` beside `myware-transcribe.exe`, Summarize
+Without `myware-summarize.exe` beside `myware-scribe.exe`, Summarize
 Transcript reports the helper as missing. In a Visual Studio developer prompt,
 `cargo build-fast` builds both binaries into that profile and `cargo run-fast`
 runs the GUI. Use the full build script for the final release. Pass `-Free` or
@@ -100,7 +100,7 @@ runs the GUI. Use the full build script for the final release. Pass `-Free` or
 For the GPU edit/run loop, use `scripts\run-gpu.ps1`. It selects the Vulkan
 SDK, Ninja, and the DLL CRT, stages the sherpa/ONNX/OpenMP runtime DLLs, and
 runs `cargo run --profile release-fast --features gpu`. It defaults to
-`MYWARE_TRANSCRIBE_TIER=pro` so GPU calibration is visible; pass `-Free` to test
+`MYWARE_SCRIBE_TIER=pro` so GPU calibration is visible; pass `-Free` to test
 the free-tier lock.
 
 Prerequisites: Visual Studio 2022 Build Tools with the "Desktop development with
@@ -122,15 +122,15 @@ reports what the profile actually contains to `dist\shortcuts-diagnose.txt`.
 
 ## Models
 
-Models are non-gated and installed into `%LOCALAPPDATA%\myware-transcribe\models`
-(Windows) or `~/.cache/myware-transcribe/models` (Linux/macOS). Downloading models
+Models are non-gated and installed into `%LOCALAPPDATA%\myware-scribe\models`
+(Windows) or `~/.cache/myware-scribe/models` (Linux/macOS). Downloading models
 and confirming a Pro purchase are the only reasons the app uses the network; the
 transcription pipeline itself never does.
 
 Download everything at once:
 
 ```bash
-myware-transcribe --cli models download --verify
+myware-scribe --cli models download --verify
 ```
 
 If models are missing on first launch, the GUI shows a **Download models** card
@@ -158,9 +158,9 @@ SHA-256 hashes, licenses and mirrors. The application compiles it in, and
 `scripts/fetch-models.sh` / `.ps1` stage the same pinned files, so packaging and
 runtime downloads cannot disagree.
 
-Downloads try, in order: `MYWARE_TRANSCRIBE_MODEL_MIRROR` (an extra base URL that
+Downloads try, in order: `MYWARE_SCRIBE_MODEL_MIRROR` (an extra base URL that
 serves `<file>`), the public GitLab package mirror
-(`librewarelive/myware-transcribe-models`), then the pinned upstream Hugging Face
+(`librewarelive/hippo-transcribe-models`), then the pinned upstream Hugging Face
 / k2-fsa URLs as fallbacks.
 
 Portable release packages ship a `models/` directory beside the executable. It
@@ -168,11 +168,11 @@ is read-only and used as-is; downloads always go to the writable models
 directory. Store packages leave the models out and download them on first run,
 so the package and its updates stay small.
 
-Overrides: `MYWARE_TRANSCRIBE_MODELS_DIR` (root),
-`MYWARE_TRANSCRIBE_MODEL_MIRROR` (extra download mirror),
-`MYWARE_TRANSCRIBE_SEGMENTATION_MODEL`, `MYWARE_TRANSCRIBE_EMBEDDING_MODEL`,
-`MYWARE_TRANSCRIBE_WHISPER_MODEL`. Diarization is cached under
-`MYWARE_TRANSCRIBE_CACHE_DIR` (or the platform cache dir) and reused on re-runs;
+Overrides: `MYWARE_SCRIBE_MODELS_DIR` (root),
+`MYWARE_SCRIBE_MODEL_MIRROR` (extra download mirror),
+`MYWARE_SCRIBE_SEGMENTATION_MODEL`, `MYWARE_SCRIBE_EMBEDDING_MODEL`,
+`MYWARE_SCRIBE_WHISPER_MODEL`. Diarization is cached under
+`MYWARE_SCRIBE_CACHE_DIR` (or the platform cache dir) and reused on re-runs;
 the cache key includes the model set version. The legacy `TRANSIEL_*` names are
 still read as a fallback, and data under the old `transiel` directories is
 adopted on first launch.
@@ -181,13 +181,13 @@ Report what is present (exit non-zero if anything is missing or has the wrong
 size):
 
 ```bash
-myware-transcribe --cli models
+myware-scribe --cli models
 ```
 
 Print model attribution (names, hashes, licenses, sources):
 
 ```bash
-myware-transcribe --cli models notice
+myware-scribe --cli models notice
 ```
 
 Stage the bundled model set for packaging (verified, cached under
@@ -202,14 +202,14 @@ scripts/fetch-models.sh --verify-only
 ## CLI
 
 ```bash
-myware-transcribe --cli audio.mp3                         # default preset (speed)
-myware-transcribe --cli audio.mp3 --preset speed
-myware-transcribe --cli audio.mp3 --preset accuracy
-myware-transcribe --cli a.mp3 b.mp3 --output-dir out/     # batch
-myware-transcribe --cli audio.mp3 --no-timestamps
-myware-transcribe --cli audio.mp3 --language es           # or auto
-myware-transcribe --cli audio.mp3 --progress-json         # line-delimited JSON events
-myware-transcribe --cli probe audio.mp3 120               # duration + RMS waveform
+myware-scribe --cli audio.mp3                         # default preset (speed)
+myware-scribe --cli audio.mp3 --preset speed
+myware-scribe --cli audio.mp3 --preset accuracy
+myware-scribe --cli a.mp3 b.mp3 --output-dir out/     # batch
+myware-scribe --cli audio.mp3 --no-timestamps
+myware-scribe --cli audio.mp3 --language es           # or auto
+myware-scribe --cli audio.mp3 --progress-json         # line-delimited JSON events
+myware-scribe --cli probe audio.mp3 120               # duration + RMS waveform
 ```
 
 Presets: `speed` (whisper `tiny`, multilingual), `balanced` (whisper `small`,
@@ -239,7 +239,7 @@ whisper.cpp uses the fastest backend the build provides:
   (`vcomp140.dll`) beside the executable.
   This path has never been run on real hardware, so treat it as experimental.
 - **CPU fallback** — if GPU context creation fails, the run continues on the CPU
-  and the console reports why. `MYWARE_TRANSCRIBE_ACCEL=cpu` forces CPU.
+  and the console reports why. `MYWARE_SCRIBE_ACCEL=cpu` forces CPU.
 - **Acceleration** — Pro chooses CPU or GPU below Preset/Speakers. CPU is
   the `1×` baseline; GPU shows the measured speed multiplier once calibrated.
   The `Now:` line reports the backend actually used by the running pipeline.
@@ -281,11 +281,11 @@ offer the trial only. Entitlement lives in `license.json` beside the settings an
 never deletes transcripts or queue items; a lapsed licence falls back to the free
 tier, and a checked entitlement survives 30 days offline before it re-verifies.
 
-`MYWARE_TRANSCRIBE_TIER=pro` (or `free`) forces the tier for development.
+`MYWARE_SCRIBE_TIER=pro` (or `free`) forces the tier for development.
 
 ## GUI
 
-Run `myware-transcribe` with no arguments. The File panel on the left holds the
+Run `myware-scribe` with no arguments. The File panel on the left holds the
 queue and the finished transcripts. Add files/folders from its action row, or
 drag audio files and folders anywhere into the window, then choose a preset and
 speaker count and press Transcribe. **Record** captures from the microphone
@@ -342,7 +342,7 @@ Transcript search supports a speaker filter, match case (`Aa`) and whole-word
 (`W`) matching. Right-click a line to edit it; the editor can copy the line,
 merge it with the next line, or split it at the playhead. Line deletion asks for
 confirmation. Saves are written atomically and keep a
-`<transcript>.myware-transcribe.bak` backup beside the source file.
+`<transcript>.myware-scribe.bak` backup beside the source file.
 
 Finished files land in the **History** tab the moment they complete, and the
 **Queue** keeps its finished rows visible for the rest of the session.
@@ -376,16 +376,16 @@ Resume until nothing is left to continue.
 
 ## Deploy (Windows)
 
-`deploy.bat` (shipped beside `myware-transcribe.exe`) installs the exe to
-`%LOCALAPPDATA%\Programs\myware-transcribe`, creates a Start Menu shortcut named
-`MyWare Transcribe`, adds it to the user `PATH`, and reports whether the bundled
+`deploy.bat` (shipped beside `myware-scribe.exe`) installs the exe to
+`%LOCALAPPDATA%\Programs\myware-scribe`, creates a Start Menu shortcut named
+`MyWare Scribe`, adds it to the user `PATH`, and reports whether the bundled
 models are present. The app downloads any missing models on first launch. Then
-open a new terminal and run `myware-transcribe`. `undeploy.bat` removes the
+open a new terminal and run `myware-scribe`. `undeploy.bat` removes the
 install and shortcut (`/keepmodels` keeps the models).
 
 ## Logs
 
-Each run appends to `%LOCALAPPDATA%\myware-transcribe\logs\myware.log`, keeping the last
+Each run appends to `%LOCALAPPDATA%\myware-scribe\logs\myware.log`, keeping the last
 five files at 2 MB each; crashes write `crash-<timestamp>.txt` beside them with a
 backtrace and a message box pointing at the folder. Settings → Diagnostics → Open
 log folder opens it, so a user reporting a problem always has something to send.
@@ -399,7 +399,7 @@ them with `python3 scripts/make-privacy-page.py` after editing `PRIVACY.md`.
 ## Privacy
 
 Audio, transcripts, diarization caches, models and settings stay on the machine
-that runs MyWare Transcribe. There is no cloud service, no account, no telemetry
+that runs MyWare Scribe. There is no cloud service, no account, no telemetry
 and no analytics. Network access is the one-time model download (with optional
 checksum-verified mirror overrides) and, only for a Pro purchase or restore, the
 store's entitlement check: the store reports whether the add-on is owned, and
@@ -409,7 +409,7 @@ See [`PRIVACY.md`](PRIVACY.md) for the full data-flow and retention details.
 
 ## Licenses
 
-MyWare Transcribe itself is free software, licensed under the GNU Lesser General
+MyWare Scribe itself is free software, licensed under the GNU Lesser General
 Public License v2.1 (LGPL-2.1). Copyright (C) 2026 Sean Wu. It is provided
 without warranty; see LICENSE for details.
 
