@@ -6,7 +6,7 @@
 //! the build-time fetch and the runtime downloader can never disagree.
 //!
 //! Resolution order for a model file:
-//! 1. explicit environment override (`HIPPO_TRANSCRIBE_*_MODEL`),
+//! 1. explicit environment override (`MYWARE_SCRIBE_*_MODEL`),
 //! 2. a complete file in the user's writable models directory,
 //! 3. a `models/` directory beside the executable (bundled/read-only).
 //!
@@ -80,18 +80,18 @@ fn root_dir() -> PathBuf {
     if cfg!(windows) {
         if let Ok(base) = std::env::var("LOCALAPPDATA") {
             let base = PathBuf::from(base);
-            return crate::adopt_dir(base.join("hippo-transcribe"), base.join("transiel"));
+            return crate::adopt_dir(base.join("myware-scribe"), base.join("transiel"));
         }
     } else if let Ok(home) = std::env::var("HOME") {
         let cache = PathBuf::from(home).join(".cache");
-        return crate::adopt_dir(cache.join("hippo-transcribe"), cache.join("transiel"));
+        return crate::adopt_dir(cache.join("myware-scribe"), cache.join("transiel"));
     }
     PathBuf::from(".")
 }
 
 /// Writable root directory holding models (downloads always land here).
 pub fn models_dir() -> PathBuf {
-    if let Some(dir) = crate::env_compat("HIPPO_TRANSCRIBE_MODELS_DIR", "TRANSIEL_MODELS_DIR") {
+    if let Some(dir) = crate::env_compat("MYWARE_SCRIBE_MODELS_DIR", "TRANSIEL_MODELS_DIR") {
         return PathBuf::from(dir);
     }
     root_dir().join("models")
@@ -159,7 +159,7 @@ pub fn source_of(path: &Path) -> &'static str {
 
 pub fn segmentation_model() -> PathBuf {
     if let Some(path) = crate::env_compat(
-        "HIPPO_TRANSCRIBE_SEGMENTATION_MODEL",
+        "MYWARE_SCRIBE_SEGMENTATION_MODEL",
         "TRANSIEL_SEGMENTATION_MODEL",
     ) {
         return PathBuf::from(path);
@@ -171,7 +171,7 @@ pub fn segmentation_model() -> PathBuf {
 /// speaker changes than ResNet34 and does not cost measurable time.
 pub fn embedding_model() -> PathBuf {
     if let Some(path) = crate::env_compat(
-        "HIPPO_TRANSCRIBE_EMBEDDING_MODEL",
+        "MYWARE_SCRIBE_EMBEDDING_MODEL",
         "TRANSIEL_EMBEDDING_MODEL",
     ) {
         return PathBuf::from(path);
@@ -199,7 +199,7 @@ pub fn whisper_relative(preset: &str) -> String {
 
 pub fn whisper_model(preset: &str) -> PathBuf {
     if let Some(path) =
-        crate::env_compat("HIPPO_TRANSCRIBE_WHISPER_MODEL", "TRANSIEL_WHISPER_MODEL")
+        crate::env_compat("MYWARE_SCRIBE_WHISPER_MODEL", "TRANSIEL_WHISPER_MODEL")
     {
         return PathBuf::from(path);
     }
@@ -214,7 +214,7 @@ pub fn whisper_model(preset: &str) -> PathBuf {
 /// cache instead of returning segments decoded by another model.
 pub fn whisper_identity(preset: &str) -> String {
     let Some(path) =
-        crate::env_compat("HIPPO_TRANSCRIBE_WHISPER_MODEL", "TRANSIEL_WHISPER_MODEL")
+        crate::env_compat("MYWARE_SCRIBE_WHISPER_MODEL", "TRANSIEL_WHISPER_MODEL")
     else {
         return whisper_relative(preset);
     };
@@ -365,7 +365,7 @@ mod tests {
 
     #[test]
     fn a_model_identity_tracks_the_override_file() {
-        let dir = std::env::temp_dir().join(format!("hippo-model-id-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("myware-model-id-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("custom.bin");

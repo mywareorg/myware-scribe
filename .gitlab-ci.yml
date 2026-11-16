@@ -26,7 +26,7 @@ windows-build:
 # models.lock.json (not this app project) and MODELS_UPLOAD_TOKEN (a project,
 # group or personal access token with `api` scope, masked). The package project
 # must be public if the app downloads it without credentials; otherwise point
-# HIPPO_TRANSCRIBE_MODEL_MIRROR at a public mirror instead.
+# MYWARE_SCRIBE_MODEL_MIRROR at a public mirror instead.
 publish-models:
   stage: build
   when: manual

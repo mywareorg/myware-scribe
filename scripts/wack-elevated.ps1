@@ -22,7 +22,7 @@ cannot drift apart. Every value below can still be overridden by parameter.
 .\scripts\wack-elevated.ps1
 
 .EXAMPLE
-.\scripts\wack-elevated.ps1 -Msix dist\hippo-transcribe-0.2.0-windows-x64.msix
+.\scripts\wack-elevated.ps1 -Msix dist\myware-scribe-0.2.0-windows-x64.msix
 #>
 [CmdletBinding()]
 param(
@@ -46,7 +46,7 @@ $dist = Join-Path (Split-Path -Parent $PSScriptRoot) "dist"
 $AppcertDefault = "C:\Program Files (x86)\Windows Kits\10\App Certification Kit\appcert.exe"
 
 # Built by: .\scripts\build-windows.ps1 -Gpu -Msix
-$MsixDefault = Join-Path $dist "hippo-transcribe-0.1.0-windows-x64.msix"
+$MsixDefault = Join-Path $dist "myware-scribe-0.1.0-windows-x64.msix"
 $MsixName = [System.IO.Path]::GetFileNameWithoutExtension($MsixDefault)
 $ReportDefault = Join-Path $dist "$MsixName-wack.xml"
 $LogDefault = Join-Path $dist "$MsixName-wack.log"

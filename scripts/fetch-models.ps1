@@ -13,7 +13,7 @@ Destination root. Defaults to vendor\models; the manifest version is appended.
 
 .PARAMETER Mirror
 Try $Mirror\<file> before the pinned upstream mirrors. Defaults to the
-HIPPO_TRANSCRIBE_MODEL_MIRROR environment variable.
+MYWARE_SCRIBE_MODEL_MIRROR environment variable.
 
 .PARAMETER All
 Also fetch models that release packages download on demand (the large
@@ -31,7 +31,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\fetch-models.ps1 -All -Verify
 [CmdletBinding()]
 param(
     [string]$Dest,
-    [string]$Mirror = $env:HIPPO_TRANSCRIBE_MODEL_MIRROR,
+    [string]$Mirror = $env:MYWARE_SCRIBE_MODEL_MIRROR,
     [switch]$All,
     [switch]$Force,
     [switch]$VerifyOnly
@@ -71,13 +71,13 @@ $failed = 0
 # existing install seed a package.
 $seedDirs = @()
 $localModels = if ($env:LOCALAPPDATA) {
-    Join-Path $env:LOCALAPPDATA "hippo-transcribe\models"
+    Join-Path $env:LOCALAPPDATA "myware-scribe\models"
 } else {
     $null
 }
 foreach ($candidate in @(
     (Join-Path $root "vendor\models\$($manifest.version)"),
-    $env:HIPPO_TRANSCRIBE_MODELS_DIR,
+    $env:MYWARE_SCRIBE_MODELS_DIR,
     $env:TRANSIEL_MODELS_DIR,
     $localModels
 )) {

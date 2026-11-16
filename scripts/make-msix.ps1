@@ -13,7 +13,7 @@
   the Partner Center product identity character for character.
 
 .PARAMETER Stage
-  Directory holding hippo-transcribe.exe and the sherpa/ONNX Runtime DLLs.
+  Directory holding myware-scribe.exe and the sherpa/ONNX Runtime DLLs.
 
 .PARAMETER OutDir
   Directory for the .msix and its .sha256.
@@ -31,8 +31,8 @@
   Leave the intermediate layout directory in place.
 
 .EXAMPLE
-  .\scripts\make-msix.ps1 -Stage dist\hippo-transcribe-0.1.0-windows-x64 `
-      -OutDir dist -Name hippo-transcribe-0.1.0-windows-x64 -Version 0.1.0 `
+  .\scripts\make-msix.ps1 -Stage dist\myware-scribe-0.1.0-windows-x64 `
+      -OutDir dist -Name myware-scribe-0.1.0-windows-x64 -Version 0.1.0 `
       -IdentityPath packaging\identity.json
 #>
 [CmdletBinding()]
@@ -92,10 +92,10 @@ New-Item -ItemType Directory -Path $layout -Force | Out-Null
 # first run instead. The Visual C++ runtime DLLs are part of that set: the
 # executable links the DLL CRT, and the certification machine has no
 # redistributable installed.
-Copy-Item (Join-Path $Stage "hippo-transcribe.exe") $layout
+Copy-Item (Join-Path $Stage "myware-scribe.exe") $layout
 # The briefing runs in its own process so llama.cpp's ggml never meets
 # whisper.cpp's inside one binary.
-Copy-Item (Join-Path $Stage "hippo-summarize.exe") $layout
+Copy-Item (Join-Path $Stage "myware-summarize.exe") $layout
 $runtimeDlls = @("sherpa-onnx-c-api.dll", "onnxruntime.dll", "vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll")
 if (Test-Path -LiteralPath (Join-Path $Stage "vcomp140.dll")) {
     $runtimeDlls += "vcomp140.dll"
@@ -226,7 +226,7 @@ if ($absent.Count -gt 0) {
     throw ("The package is missing " + $absent.Count + " file(s) from the layout: " + ($absent -join ", "))
 }
 $required = @(
-    "hippo-transcribe.exe", "hippo-summarize.exe", "AppxManifest.xml", "resources.pri",
+    "myware-scribe.exe", "myware-summarize.exe", "AppxManifest.xml", "resources.pri",
     "sherpa-onnx-c-api.dll", "onnxruntime.dll",
     "vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll",
     "sample-short.mp3", "LICENSES.md", "LICENSE", "Assets\StoreLogo.png"

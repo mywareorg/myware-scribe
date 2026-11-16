@@ -1,7 +1,7 @@
 //! Model downloads (all non-gated, direct files).
 //!
 //! This is the only code path that touches the network. The same implementation
-//! backs `hippo-transcribe --cli models download` (also used by `deploy.bat`) and the
+//! backs `myware-scribe --cli models download` (also used by `deploy.bat`) and the
 //! GUI's first-run download card.
 //!
 //! Files, hashes and mirrors come from `models.lock.json` (see [`models`]).
@@ -20,7 +20,7 @@ use crate::models::{self, ModelSpec};
 
 /// Environment variable holding an extra mirror base URL. Files are fetched as
 /// `{base}/{file_name}` before the pinned upstream mirrors are tried.
-const MIRROR_ENV: (&str, &str) = ("HIPPO_TRANSCRIBE_MODEL_MIRROR", "TRANSIEL_MODEL_MIRROR");
+const MIRROR_ENV: (&str, &str) = ("MYWARE_SCRIBE_MODEL_MIRROR", "TRANSIEL_MODEL_MIRROR");
 
 struct ModelFile {
     spec: &'static ModelSpec,
@@ -360,7 +360,7 @@ fn verify_selected(ids: Option<&[&str]>) -> i32 {
             "\n{missing} model file(s) missing, {wrong} with the wrong size or checksum under {}",
             models::models_dir().display()
         );
-        eprintln!("Run: hippo-transcribe --cli models download");
+        eprintln!("Run: myware-scribe --cli models download");
         1
     } else {
         0
@@ -721,7 +721,7 @@ mod tests {
     #[test]
     fn sha256_of_known_content() {
         let path =
-            std::env::temp_dir().join(format!("hippo-transcribe-sha-{}", std::process::id()));
+            std::env::temp_dir().join(format!("myware-scribe-sha-{}", std::process::id()));
         fs::write(&path, b"abc").unwrap();
         let hash = sha256_file(&path).unwrap();
         let _ = fs::remove_file(&path);

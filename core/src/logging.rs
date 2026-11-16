@@ -20,19 +20,19 @@ static SINK: OnceLock<Mutex<File>> = OnceLock::new();
 /// Where the logs live: `<data dir>/logs`, the same data directory the cache
 /// and models use.
 pub fn log_dir() -> PathBuf {
-    if let Some(dir) = crate::env_compat("HIPPO_TRANSCRIBE_LOG_DIR", "TRANSIEL_LOG_DIR") {
+    if let Some(dir) = crate::env_compat("MYWARE_SCRIBE_LOG_DIR", "TRANSIEL_LOG_DIR") {
         return PathBuf::from(dir);
     }
     if cfg!(windows) {
         if let Ok(base) = std::env::var("LOCALAPPDATA") {
             let base = PathBuf::from(base);
-            let root = crate::adopt_dir(base.join("hippo-transcribe"), base.join("transiel"));
+            let root = crate::adopt_dir(base.join("myware-scribe"), base.join("transiel"));
             return root.join("logs");
         }
     } else if let Ok(home) = std::env::var("HOME") {
         let home = PathBuf::from(home);
         let root = crate::adopt_dir(
-            home.join(".local/share/hippo-transcribe"),
+            home.join(".local/share/myware-scribe"),
             home.join(".local/share/transiel"),
         );
         return root.join("logs");
@@ -50,13 +50,13 @@ pub fn init() -> Option<PathBuf> {
     if fs::create_dir_all(&dir).is_err() {
         return None;
     }
-    let active = dir.join("hippo.log");
+    let active = dir.join("myware.log");
     rotate(&dir, &active);
 
     let file = OpenOptions::new().create(true).append(true).open(&active).ok()?;
     SINK.set(Mutex::new(file)).ok()?;
     info(format!(
-        "Hippo Transcribe {} starting ({} {})",
+        "MyWare Scribe {} starting ({} {})",
         env!("CARGO_PKG_VERSION"),
         std::env::consts::OS,
         std::env::consts::ARCH
@@ -65,10 +65,10 @@ pub fn init() -> Option<PathBuf> {
 }
 
 fn active_path() -> PathBuf {
-    log_dir().join("hippo.log")
+    log_dir().join("myware.log")
 }
 
-/// Shift `hippo.log` to `hippo.1.log`, dropping the oldest copy.
+/// Shift `myware.log` to `myware.1.log`, dropping the oldest copy.
 fn rotate(dir: &std::path::Path, active: &std::path::Path) {
     let full = fs::metadata(active).map(|meta| meta.len()).unwrap_or(0);
     if full < MAX_BYTES {
@@ -76,9 +76,9 @@ fn rotate(dir: &std::path::Path, active: &std::path::Path) {
     }
     let name = |index: usize| {
         if index == 0 {
-            dir.join("hippo.log")
+            dir.join("myware.log")
         } else {
-            dir.join(format!("hippo.{index}.log"))
+            dir.join(format!("myware.{index}.log"))
         }
     };
     for index in (1..LOG_FILES).rev() {

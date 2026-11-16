@@ -490,7 +490,7 @@ function Ensure-SherpaDlls {
     )
 
     if (-not $CacheRoot) {
-        $CacheRoot = Join-Path $env:LOCALAPPDATA "hippo-transcribe\cache"
+        $CacheRoot = Join-Path $env:LOCALAPPDATA "myware-scribe\cache"
     }
 
     $version = "v1.12.9"

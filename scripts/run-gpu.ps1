@@ -1,7 +1,7 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-Run Hippo Transcribe on Windows with the GPU backend and fast iteration profile.
+Run MyWare Scribe on Windows with the GPU backend and fast iteration profile.
 
 .DESCRIPTION
 Enters the Visual Studio developer environment if needed, points bindgen at
@@ -10,7 +10,7 @@ ONNX Runtime, Visual C++ and OpenMP DLLs beside the development binary, and
 builds the briefing worker into the same profile, then runs `cargo run
 --profile release-fast --features gpu`.
 
-The GPU feature is Pro-gated, so this sets HIPPO_TRANSCRIBE_TIER=pro by
+The GPU feature is Pro-gated, so this sets MYWARE_SCRIBE_TIER=pro by
 default. Pass -Free to test the free-tier lock instead.
 
 Use this for the GPU edit/run loop. Use `scripts/build-windows.ps1 -Gpu` for
@@ -72,9 +72,9 @@ try {
     $env:CMAKE_MSVC_RUNTIME_LIBRARY = "MultiThreadedDLL"
 
     if ($Free) {
-        $env:HIPPO_TRANSCRIBE_TIER = "free"
+        $env:MYWARE_SCRIBE_TIER = "free"
     } else {
-        $env:HIPPO_TRANSCRIBE_TIER = "pro"
+        $env:MYWARE_SCRIBE_TIER = "pro"
     }
 
     # Use the short profile-root target directory by default; ggml's nested
@@ -124,9 +124,9 @@ try {
     Copy-Item $vcomp $profileDir -Force
 
     # Built here for the same reason: the briefing worker has its own package.
-    & cargo build --profile $Profile -p hippo-summarize
+    & cargo build --profile $Profile -p myware-summarize
     if ($LASTEXITCODE -ne 0) {
-        throw "building hippo-summarize failed with exit code $LASTEXITCODE"
+        throw "building myware-summarize failed with exit code $LASTEXITCODE"
     }
 
     & cargo run --profile $Profile --features gpu

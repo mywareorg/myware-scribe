@@ -65,7 +65,7 @@ function Show-Var {
     Say ("  " + $Name.PadRight(16) + $Value)
 }
 
-Say "Hippo Transcribe GPU build diagnostics"
+Say "MyWare Scribe GPU build diagnostics"
 Say ("  host           " + [System.Environment]::MachineName)
 Say ("  powershell     " + $PSVersionTable.PSVersion.ToString())
 Say ("  repo           " + $root)
@@ -173,7 +173,7 @@ if ($generators -match "Visual Studio") {
     Say ""
     Say '    $env:CMAKE_GENERATOR = "Ninja"'
     Say ('    Remove-Item -Recurse -Force "' + $buildRoot + '\whisper-rs-sys-*"')
-    Say '    .\scripts\build-windows.ps1 -SkipTests -SkipModels -NoZip -Msix -Sign -Gpu -CertificatePath C:\keys\hippo-test.pfx -CertificatePassword hippo-test'
+    Say '    .\scripts\build-windows.ps1 -SkipTests -SkipModels -NoZip -Msix -Sign -Gpu -CertificatePath C:\keys\myware-test.pfx -CertificatePassword myware-test'
 } elseif ($generators.Count -gt 0) {
     Say ("  Generator: " + ($generators -join ", "))
 } else {

@@ -25,7 +25,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\reinstall-msix.ps1
 .\scripts\reinstall-msix.ps1 -Fresh
 
 .EXAMPLE
-.\scripts\reinstall-msix.ps1 -Msix dist\hippo-transcribe-0.1.0-windows-x64.msix
+.\scripts\reinstall-msix.ps1 -Msix dist\myware-scribe-0.1.0-windows-x64.msix
 #>
 [CmdletBinding()]
 param(
@@ -33,12 +33,12 @@ param(
     # already a -test copy.
     [string]$Msix,
     # Signing certificate. make-test-cert.ps1 writes one here.
-    [string]$PfxPath = "C:\keys\hippo-test.pfx",
-    # PFX password. Left empty, sign-msix.ps1 reads HIPPO_TEST_PFX_PASSWORD and
+    [string]$PfxPath = "C:\keys\myware-test.pfx",
+    # PFX password. Left empty, sign-msix.ps1 reads MYWARE_TEST_PFX_PASSWORD and
     # then its own default, so the password never has to be repeated here.
     [string]$Password,
     # Public certificate to trust before Add-AppxPackage runs.
-    [string]$CerPath = "C:\keys\hippo-test.cer",
+    [string]$CerPath = "C:\keys\myware-test.cer",
     # Also delete the package's data directory, so the app starts as a first
     # run with no downloaded models.
     [switch]$Fresh,
@@ -194,7 +194,7 @@ $requiredDlls = @(
 
 $present = @(Get-ChildItem -Path $installed.InstallLocation -Name -ErrorAction SilentlyContinue)
 $missing = @($requiredDlls | Where-Object { $present -notcontains $_ })
-$required = @("hippo-transcribe.exe", "AppxManifest.xml")
+$required = @("myware-scribe.exe", "AppxManifest.xml")
 
 $missingCore = @($required | Where-Object { $present -notcontains $_ })
 if ($missingCore.Count -gt 0) {

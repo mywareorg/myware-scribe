@@ -1686,74 +1686,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dfa686283ad6dd069f105e5ab091b04c62850d3e4cf5d67debad1933f55023df"
 
 [[package]]
-name = "hippo-briefing"
-version = "1.0.0"
-dependencies = [
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "hippo-summarize"
-version = "1.0.0"
-dependencies = [
- "hippo-briefing",
- "llama-cpp-2",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "hippo-transcribe-core"
-version = "1.0.0"
-dependencies = [
- "libloading 0.8.9",
- "num_cpus",
- "rubato",
- "serde",
- "serde_json",
- "sha2",
- "sherpa-rs-sys",
- "symphonia",
- "symphonia-adapter-libopus",
- "ureq",
- "uuid",
- "whisper-rs",
- "zip",
-]
-
-[[package]]
-name = "hippo-transcribe-gui"
-version = "1.0.0"
-dependencies = [
- "cpal",
- "hippo-briefing",
- "hippo-transcribe-core",
- "hippo-ui",
- "iced",
- "image 0.25.10",
- "notify-rust",
- "rfd",
- "rodio",
- "serde",
- "serde_json",
- "time",
- "windows 0.62.2",
- "windows-collections",
- "windows-sys 0.59.0",
- "winresource",
- "wsola",
-]
-
-[[package]]
-name = "hippo-ui"
-version = "0.1.0"
-dependencies = [
- "iced",
- "serde",
-]
-
-[[package]]
 name = "home"
 version = "0.5.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2547,6 +2479,74 @@ name = "mutate_once"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "13d2233c9842d08cfe13f9eac96e207ca6a2ea10b80259ebe8ad0268be27d2af"
+
+[[package]]
+name = "myware-briefing"
+version = "1.0.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "myware-scribe-core"
+version = "1.0.0"
+dependencies = [
+ "libloading 0.8.9",
+ "num_cpus",
+ "rubato",
+ "serde",
+ "serde_json",
+ "sha2",
+ "sherpa-rs-sys",
+ "symphonia",
+ "symphonia-adapter-libopus",
+ "ureq",
+ "uuid",
+ "whisper-rs",
+ "zip",
+]
+
+[[package]]
+name = "myware-scribe-gui"
+version = "1.0.0"
+dependencies = [
+ "cpal",
+ "iced",
+ "image 0.25.10",
+ "myware-briefing",
+ "myware-scribe-core",
+ "myware-ui",
+ "notify-rust",
+ "rfd",
+ "rodio",
+ "serde",
+ "serde_json",
+ "time",
+ "windows 0.62.2",
+ "windows-collections",
+ "windows-sys 0.59.0",
+ "winresource",
+ "wsola",
+]
+
+[[package]]
+name = "myware-summarize"
+version = "1.0.0"
+dependencies = [
+ "llama-cpp-2",
+ "myware-briefing",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "myware-ui"
+version = "0.1.0"
+dependencies = [
+ "iced",
+ "serde",
+]
 
 [[package]]
 name = "naga"

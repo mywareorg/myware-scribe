@@ -1,5 +1,5 @@
 [package]
-name = "hippo-summarize"
+name = "myware-summarize"
 version = "1.0.0"
 edition = "2021"
 description = "Briefing worker: runs the local model that writes a transcript briefing."
@@ -7,14 +7,14 @@ license = "LGPL-2.1-only"
 
 [features]
 # Offload the briefing model to a GPU. The runtime also needs
-# HIPPO_BRIEFING_GPU_LAYERS set to the number of layers; a CPU-only build
+# MYWARE_BRIEFING_GPU_LAYERS set to the number of layers; a CPU-only build
 # ignores the request. These forward to llama.cpp's own backends.
 vulkan = ["llama-cpp-2/vulkan"]
 metal = ["llama-cpp-2/metal"]
 cuda = ["llama-cpp-2/cuda"]
 
 [dependencies]
-hippo-briefing = { path = "../briefing" }
+myware-briefing = { path = "../briefing" }
 llama-cpp-2 = "0.1.161"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

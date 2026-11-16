@@ -8,18 +8,18 @@ use sha2::{Digest, Sha256};
 use crate::event::Turn;
 
 pub fn cache_dir() -> PathBuf {
-    if let Some(dir) = crate::env_compat("HIPPO_TRANSCRIBE_CACHE_DIR", "TRANSIEL_CACHE_DIR") {
+    if let Some(dir) = crate::env_compat("MYWARE_SCRIBE_CACHE_DIR", "TRANSIEL_CACHE_DIR") {
         return PathBuf::from(dir);
     }
     if cfg!(windows) {
         if let Ok(base) = std::env::var("LOCALAPPDATA") {
             let base = PathBuf::from(base);
-            let root = crate::adopt_dir(base.join("hippo-transcribe"), base.join("transiel"));
+            let root = crate::adopt_dir(base.join("myware-scribe"), base.join("transiel"));
             return root.join("cache").join("diarization");
         }
     } else if let Ok(home) = std::env::var("HOME") {
         let cache = PathBuf::from(home).join(".cache");
-        let root = crate::adopt_dir(cache.join("hippo-transcribe"), cache.join("transiel"));
+        let root = crate::adopt_dir(cache.join("myware-scribe"), cache.join("transiel"));
         return root.join("cache").join("diarization");
     }
     PathBuf::from("cache")

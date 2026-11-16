@@ -482,7 +482,7 @@ mod tests {
 
     fn temp_dir(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
-            "hippo-report-{tag}-{}",
+            "myware-report-{tag}-{}",
             std::process::id()
         ));
         let _ = fs::remove_dir_all(&dir);

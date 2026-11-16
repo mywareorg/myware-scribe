@@ -8,7 +8,7 @@ the square pencil icon, are used as-is so the mark keeps its own silhouette.
 
 Usage:
     python3 scripts/make-store-assets.py
-    python3 scripts/make-store-assets.py --source icons/simple-hippo-square-icon.png
+    python3 scripts/make-store-assets.py --source icons/simple-myware-square-icon.png
 """
 
 import argparse

@@ -7,7 +7,7 @@ pub(crate) fn transcript_backup_path(path: &Path) -> PathBuf {
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_else(|| "transcript".to_string());
-    path.with_file_name(format!("{name}.hippo-transcribe.bak"))
+    path.with_file_name(format!("{name}.myware-scribe.bak"))
 }
 
 /// Write through a temporary file in the same directory, then rename over the
@@ -68,7 +68,7 @@ mod tests {
     use super::*;
 
     fn scratch(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("hippo-files-{tag}-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("myware-files-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
@@ -148,7 +148,7 @@ mod tests {
         std::fs::write(&audio, b"audio").unwrap();
         std::fs::write(dir.join("empty.txt"), "").unwrap();
         std::fs::write(dir.join("empty-unedited.txt"), "old\n").unwrap();
-        std::fs::write(dir.join("empty.txt.hippo-transcribe.bak"), "backup\n").unwrap();
+        std::fs::write(dir.join("empty.txt.myware-scribe.bak"), "backup\n").unwrap();
 
         // Only an empty plain copy and the app's own sidecars: no transcript.
         assert!(find_transcripts(&[audio.clone()], None).is_empty());
@@ -236,7 +236,7 @@ impl DirScan {
 
 /// Files the app writes beside a transcript that must never be taken for it.
 fn is_edit_sidecar(name: &str) -> bool {
-    name.ends_with(".hippo-transcribe.bak") || name.ends_with("-unedited.txt")
+    name.ends_with(".myware-scribe.bak") || name.ends_with("-unedited.txt")
 }
 
 /// The transcript for each added audio file that already has one, as

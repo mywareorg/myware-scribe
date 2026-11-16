@@ -21,7 +21,7 @@ full GPU build, and -Artifact to inspect a finished executable.
 .\scripts\test-gpu-build.ps1 -Build -SkipTests -SkipModels -NoZip
 
 .EXAMPLE
-.\scripts\test-gpu-build.ps1 -Artifact dist\hippo-transcribe-0.1.0-windows-x64\hippo-transcribe.exe
+.\scripts\test-gpu-build.ps1 -Artifact dist\myware-scribe-0.1.0-windows-x64\myware-scribe.exe
 #>
 [CmdletBinding()]
 param(
@@ -129,14 +129,14 @@ function Resolve-Artifact {
 
     $distRoot = Join-Path $root $OutDir
     if (Test-Path -LiteralPath $distRoot) {
-        $found = Get-ChildItem -LiteralPath $distRoot -Recurse -Filter "hippo-transcribe.exe" -ErrorAction SilentlyContinue |
+        $found = Get-ChildItem -LiteralPath $distRoot -Recurse -Filter "myware-scribe.exe" -ErrorAction SilentlyContinue |
             Sort-Object LastWriteTime -Descending |
             Select-Object -First 1
         if ($found) { return $found.FullName }
     }
 
     $targetRoot = Resolve-TargetRoot -Root $root
-    foreach ($name in @("hippo-transcribe.exe", "hippo-transcribe-gui.exe")) {
+    foreach ($name in @("myware-scribe.exe", "myware-scribe-gui.exe")) {
         $candidate = Join-Path $targetRoot "release\$name"
         if (Test-Path -LiteralPath $candidate) { return $candidate }
     }

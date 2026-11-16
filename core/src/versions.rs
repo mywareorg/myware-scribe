@@ -189,7 +189,7 @@ pub fn manifest_path(audio: &Path, output_dir: Option<&Path>, audio_hash: Option
     let suffix = audio_hash
         .map(|hash| &hash[..hash.len().min(8)])
         .unwrap_or("nohash");
-    directory.join(format!("{stem}-{suffix}.hippo.json"))
+    directory.join(format!("{stem}-{suffix}.myware.json"))
 }
 
 /// Read a manifest. `None` when it is missing or not valid.
@@ -302,7 +302,7 @@ pub fn scan_with_paths(directory: &Path) -> Vec<(PathBuf, Manifest)> {
             .file_name()
             .and_then(|name| name.to_str())
             .unwrap_or_default();
-        if !name.ends_with(".hippo.json") {
+        if !name.ends_with(".myware.json") {
             continue;
         }
         if let Some(manifest) = read(&path) {
@@ -454,7 +454,7 @@ mod tests {
 
     #[test]
     fn free_names_do_not_overwrite_an_existing_pair() {
-        let dir = std::env::temp_dir().join(format!("hippo-versions-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("myware-versions-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let plain = dir.join("talk-accuracy-transcription-2speakers.txt");
@@ -476,7 +476,7 @@ mod tests {
 
     #[test]
     fn scan_finds_every_manifest_in_a_directory() {
-        let dir = std::env::temp_dir().join(format!("hippo-scan-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("myware-scan-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let audio = dir.join("talk.mp3");
@@ -496,7 +496,7 @@ mod tests {
 
     #[test]
     fn scanning_and_reserializing_round_trips() {
-        let dir = std::env::temp_dir().join(format!("hippo-roundtrip-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("myware-roundtrip-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         for (name, hash) in [("one.mp3", "aaaaaaaa"), ("two.mp3", "bbbbbbbb")] {
@@ -530,7 +530,7 @@ mod tests {
 
     #[test]
     fn the_orphan_report_ignores_referenced_and_unrelated_files() {
-        let dir = std::env::temp_dir().join(format!("hippo-orphans-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("myware-orphans-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let audio = dir.join("talk.mp3");
@@ -556,7 +556,7 @@ mod tests {
 
     #[test]
     fn a_manifest_round_trips_and_keeps_unknown_keys() {
-        let dir = std::env::temp_dir().join(format!("hippo-manifest-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("myware-manifest-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let audio = dir.join("talk.mp3");

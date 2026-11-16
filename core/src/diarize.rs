@@ -61,12 +61,12 @@ pub fn ensure_available() -> Result<(), String> {
 }
 
 /// Threads used by the segmentation and embedding models. Defaults to every
-/// physical core; `HIPPO_TRANSCRIBE_DIARIZE_THREADS` (or the legacy
+/// physical core; `MYWARE_SCRIBE_DIARIZE_THREADS` (or the legacy
 /// `TRANSIEL_DIARIZE_THREADS`) overrides it, which matters once diarization
 /// shares the machine with ASR workers.
 fn diarize_threads() -> i32 {
     crate::env_compat(
-        "HIPPO_TRANSCRIBE_DIARIZE_THREADS",
+        "MYWARE_SCRIBE_DIARIZE_THREADS",
         "TRANSIEL_DIARIZE_THREADS",
     )
     .and_then(|value| value.parse::<usize>().ok())
@@ -378,7 +378,7 @@ const CENTROID_SAMPLES: usize = 6;
 /// Off by default until it is measured on the eval set.
 pub fn split_enabled() -> bool {
     crate::env_compat(
-        "HIPPO_TRANSCRIBE_DIARIZE_SPLIT",
+        "MYWARE_SCRIBE_DIARIZE_SPLIT",
         "TRANSIEL_DIARIZE_SPLIT",
     )
     .map(|value| {
@@ -507,7 +507,7 @@ fn embed_span(
 }
 
 fn trace() -> bool {
-    crate::env_compat("HIPPO_TRANSCRIBE_DIARIZE_TRACE", "TRANSIEL_DIARIZE_TRACE").is_some()
+    crate::env_compat("MYWARE_SCRIBE_DIARIZE_TRACE", "TRANSIEL_DIARIZE_TRACE").is_some()
 }
 
 fn cosine(a: &[f32], b: &[f32]) -> f32 {

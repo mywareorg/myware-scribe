@@ -31,8 +31,8 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$markerStart = "# >>> hippo-transcribe git shortcuts >>>"
-$markerEnd = "# <<< hippo-transcribe git shortcuts <<<"
+$markerStart = "# >>> myware-scribe git shortcuts >>>"
+$markerEnd = "# <<< myware-scribe git shortcuts <<<"
 
 function Get-DefaultProfilePath {
     # $PROFILE is the path this host actually loads, so prefer it: Documents may

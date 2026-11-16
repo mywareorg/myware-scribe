@@ -1,7 +1,7 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-Build Hippo Transcribe for Windows, stage a release folder, and optionally zip it
+Build MyWare Scribe for Windows, stage a release folder, and optionally zip it
 or package it as an MSIX for the Microsoft Store.
 
 .DESCRIPTION
@@ -38,7 +38,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\build-windows.ps1
 .\scripts\build-windows.ps1 -SkipTests -Version 0.2.0 -OutDir C:\builds
 
 .EXAMPLE
-.\scripts\build-windows.ps1 -SkipTests -Msix -Sign -CertificatePath C:\keys\hippo-test.pfx -CertificatePassword hunter2
+.\scripts\build-windows.ps1 -SkipTests -Msix -Sign -CertificatePath C:\keys\myware-test.pfx -CertificatePassword hunter2
 
 .EXAMPLE
 # Iterate on the step a Vulkan build usually fails in, without compiling.
@@ -600,7 +600,7 @@ try {
     }
 
     $metadata = Get-CargoMetadata
-    $package = $metadata.packages | Where-Object { $_.name -eq "hippo-transcribe-gui" } | Select-Object -First 1
+    $package = $metadata.packages | Where-Object { $_.name -eq "myware-scribe-gui" } | Select-Object -First 1
     if ($Version) {
         $releaseVersion = $Version
     } elseif ($package) {
@@ -609,9 +609,9 @@ try {
         $releaseVersion = "dev"
     }
 
-    $binary = Join-Path $metadata.target_directory "release\hippo-transcribe.exe"
+    $binary = Join-Path $metadata.target_directory "release\myware-scribe.exe"
     if (-not (Test-Path $binary)) {
-        $fallback = Join-Path $metadata.target_directory "release\hippo-transcribe-gui.exe"
+        $fallback = Join-Path $metadata.target_directory "release\myware-scribe-gui.exe"
         if (Test-Path $fallback) {
             $binary = $fallback
         } else {
@@ -630,17 +630,17 @@ try {
     }
     New-Item -ItemType Directory -Path $outRoot -Force | Out-Null
 
-    $name = "hippo-transcribe-$releaseVersion-windows-x64"
+    $name = "myware-scribe-$releaseVersion-windows-x64"
     $stage = Join-Path $outRoot $name
     if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }
     New-Item -ItemType Directory -Path $stage -Force | Out-Null
 
-    Copy-Item $binary (Join-Path $stage "hippo-transcribe.exe")
-    $summarizer = Join-Path (Split-Path $binary) "hippo-summarize.exe"
+    Copy-Item $binary (Join-Path $stage "myware-scribe.exe")
+    $summarizer = Join-Path (Split-Path $binary) "myware-summarize.exe"
     if (-not (Test-Path $summarizer)) {
         throw "Briefing helper not found: $summarizer"
     }
-    Copy-Item $summarizer (Join-Path $stage "hippo-summarize.exe")
+    Copy-Item $summarizer (Join-Path $stage "myware-summarize.exe")
     $sherpaLib = Ensure-SherpaDlls
     foreach ($dll in @("sherpa-onnx-c-api.dll", "onnxruntime.dll")) {
         $source = Join-Path $sherpaLib $dll
@@ -706,7 +706,7 @@ try {
 
     if (-not $KeepQueue -and $env:APPDATA) {
         foreach ($queueFile in @(
-            (Join-Path $env:APPDATA "hippo-transcribe\queue.json"),
+            (Join-Path $env:APPDATA "myware-scribe\queue.json"),
             (Join-Path $env:APPDATA "transiel\queue.json")
         )) {
             if (Test-Path -LiteralPath $queueFile) {

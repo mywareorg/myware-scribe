@@ -56,7 +56,7 @@ New-Item -ItemType Directory -Path $stage -Force | Out-Null
 
 # Empty files are enough for manifest validation and packing; the point is to
 # reach makeappx without compiling anything.
-foreach ($file in @("hippo-transcribe.exe", "sherpa-onnx-c-api.dll", "onnxruntime.dll")) {
+foreach ($file in @("myware-scribe.exe", "sherpa-onnx-c-api.dll", "onnxruntime.dll")) {
     New-Item -ItemType File -Path (Join-Path $stage $file) -Force | Out-Null
 }
 

@@ -19,7 +19,7 @@ audio/*-ts.json
 audio/hour-conversation-full.mp3
 audio/hour-conversation-mid-2.mp3
 
-*.hippo-transcribe.bak
+*.myware-scribe.bak
 *.transiel.bak
 
 # Microsoft Store packaging

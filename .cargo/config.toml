@@ -15,4 +15,4 @@ run-fast = "run --profile release-fast"
 # The GUI alone is not the whole app: the briefing worker has its own package
 # outside the default members, and Summarize Transcript needs it beside the
 # executable. Build both, then `cargo run-fast`.
-build-fast = "build --profile release-fast -p hippo-transcribe-gui -p hippo-summarize"
+build-fast = "build --profile release-fast -p myware-scribe-gui -p myware-summarize"

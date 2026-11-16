@@ -12,7 +12,7 @@ like.
 
 Usage:
     python3 scripts/make-app-icons.py
-    python3 scripts/make-app-icons.py --source icons/simple-hippo-square-icon.png --fill
+    python3 scripts/make-app-icons.py --source icons/simple-myware-square-icon.png --fill
 """
 
 import argparse

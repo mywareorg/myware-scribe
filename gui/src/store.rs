@@ -4,7 +4,7 @@
 //! `Windows.Services.Store` whether it is owned and start the purchase from the
 //! paywall; portable builds keep the no-store provider so development and other
 //! platforms still run. The gating code only ever sees
-//! [`hippo_transcribe_core::license::Provider`].
+//! [`myware_scribe_core::license::Provider`].
 //!
 //! Notes for anyone touching this:
 //!
@@ -17,7 +17,7 @@
 //!   cached value.
 
 #[cfg(not(windows))]
-pub fn provider() -> Option<Box<dyn hippo_transcribe_core::license::Provider>> {
+pub fn provider() -> Option<Box<dyn myware_scribe_core::license::Provider>> {
     None
 }
 
@@ -34,7 +34,7 @@ mod windows_impl {
     use std::sync::{Arc, Mutex};
     use std::task::{Context, Poll, Wake, Waker};
 
-    use hippo_transcribe_core::license::{Provider, PurchaseState};
+    use myware_scribe_core::license::{Provider, PurchaseState};
     use windows::core::{Interface, HSTRING};
     use windows::Services::Store::{StoreContext, StoreProduct, StorePurchaseStatus};
     use windows_collections::IIterable;

@@ -9,7 +9,7 @@ set -euo pipefail
 
 preset="${PRESET:-accuracy}"
 speakers="${SPEAKERS:-2}"
-bin="${BIN:-target/release-fast/hippo-transcribe}"
+bin="${BIN:-target/release-fast/myware-scribe}"
 files=()
 
 while [ $# -gt 0 ]; do
@@ -42,12 +42,12 @@ done
     exit 1
 }
 
-out="${TMPDIR:-/tmp}/hippo-bench"
+out="${TMPDIR:-/tmp}/myware-bench"
 mkdir -p "$out"
 
 for file in "${files[@]}"; do
     echo "== $file (preset $preset, $speakers speakers)"
-    HIPPO_TRANSCRIBE_TIER=pro "$bin" --cli "$file" \
+    MYWARE_SCRIBE_TIER=pro "$bin" --cli "$file" \
         --preset "$preset" --num-speakers "$speakers" --language auto \
         --output-dir "$out" 2>&1 | grep -E '^timing ' || true
 done

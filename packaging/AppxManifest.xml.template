@@ -45,7 +45,7 @@
   <Applications>
     <Application
       Id="{{ApplicationId}}"
-      Executable="hippo-transcribe.exe"
+      Executable="myware-scribe.exe"
       EntryPoint="Windows.FullTrustApplication">
       <uap:VisualElements
         DisplayName="{{DisplayName}}"

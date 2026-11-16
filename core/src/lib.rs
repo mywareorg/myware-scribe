@@ -1,4 +1,4 @@
-//! hippo-transcribe-core: audio, diarization, ASR and the pipeline (no GUI).
+//! myware-scribe-core: audio, diarization, ASR and the pipeline (no GUI).
 
 pub mod asr;
 pub mod audio;
