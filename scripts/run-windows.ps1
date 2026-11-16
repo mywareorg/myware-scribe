@@ -1,11 +1,11 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-Run Hippo Transcribe on Windows with the fast iteration profile.
+Run MyWare Scribe on Windows with the fast iteration profile.
 
 .DESCRIPTION
 Enters the Visual Studio developer environment if needed, points bindgen at
-LLVM, builds the briefing worker (`hippo-summarize`) into the same profile, and
+LLVM, builds the briefing worker (`myware-summarize`) into the same profile, and
 runs `cargo run --profile release-fast`.
 
 Use this for the edit/run loop. Use `scripts/build-windows.ps1` for the final
@@ -87,9 +87,9 @@ try {
     # The briefing worker is a separate package and is not a workspace default
     # member, so `cargo run` alone never builds it. The app looks for it beside
     # its own executable and Summarize Transcript fails without it.
-    & cargo build --profile $Profile -p hippo-summarize
+    & cargo build --profile $Profile -p myware-summarize
     if ($LASTEXITCODE -ne 0) {
-        throw "building hippo-summarize failed with exit code $LASTEXITCODE"
+        throw "building myware-summarize failed with exit code $LASTEXITCODE"
     }
 
     & cargo run --profile $Profile

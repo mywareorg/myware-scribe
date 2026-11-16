@@ -1,28 +1,28 @@
 [package]
-name = "hippo-transcribe-gui"
+name = "myware-scribe-gui"
 version = "1.0.0"
 edition = "2021"
 description = "Private, offline speaker diarization and transcription."
 license = "LGPL-2.1-only"
-repository = "https://gitlab.com/librewarelive/hippo-transcribe"
+repository = "https://gitlab.com/mywareorg/myware-scribe"
 
 [features]
 default = []
 # Forward the accelerator flags to the core crate. The GUI is the workspace's
 # default member, so a bare `--features gpu` resolves against this package;
 # without these the flag fails with "does not contain this feature".
-gpu = ["hippo-transcribe-core/gpu"]
-coreml = ["hippo-transcribe-core/coreml"]
+gpu = ["myware-scribe-core/gpu"]
+coreml = ["myware-scribe-core/coreml"]
 # The always-Pro edition for the direct-download build; see
-# `hippo_transcribe_core::license::UNLOCKED`.
-pro = ["hippo-transcribe-core/pro"]
+# `myware_scribe_core::license::UNLOCKED`.
+pro = ["myware-scribe-core/pro"]
 
 [dependencies]
-hippo-briefing = { path = "../briefing" }
-hippo-transcribe-core = { path = "../core" }
+myware-briefing = { path = "../briefing" }
+myware-scribe-core = { path = "../core" }
 # Shared design tokens and UI vocabulary. During co-development this is a path
 # dependency; it becomes a pinned git dependency once the API settles.
-hippo-ui = { path = "../../hippo-ui/crates/hippo-ui", features = ["serde"] }
+myware-ui = { path = "../../myware-ui/crates/myware-ui", features = ["serde"] }
 iced = { version = "0.13", features = ["tokio", "advanced", "canvas", "image-without-codecs"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
 rfd = "0.15"
@@ -60,6 +60,6 @@ windows-sys = { version = "0.59", features = [
 winresource = "0.1"
 
 [[bin]]
-name = "hippo-transcribe"
+name = "myware-scribe"
 path = "src/main.rs"
 

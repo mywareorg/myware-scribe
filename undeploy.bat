@@ -1,17 +1,17 @@
 @echo off
-rem Hippo Transcribe undeploy - remove the install and its PATH entry.
+rem MyWare Scribe undeploy - remove the install and its PATH entry.
 rem Pass /keepmodels to keep the downloaded models.
 setlocal EnableExtensions EnableDelayedExpansion
 
 set "KEEP="
 if /i "%~1"=="/keepmodels" set "KEEP=1"
-set "INSTALL_DIR=%LOCALAPPDATA%\Programs\hippo-transcribe"
-set "MODELS=%LOCALAPPDATA%\hippo-transcribe\models"
-set "SHORTCUT=%APPDATA%\Microsoft\Windows\Start Menu\Programs\Hippo Transcribe.lnk"
+set "INSTALL_DIR=%LOCALAPPDATA%\Programs\myware-scribe"
+set "MODELS=%LOCALAPPDATA%\myware-scribe\models"
+set "SHORTCUT=%APPDATA%\Microsoft\Windows\Start Menu\Programs\MyWare Scribe.lnk"
 
-tasklist /fi "imagename eq hippo-transcribe.exe" 2>nul | find /i "hippo-transcribe.exe" >nul
+tasklist /fi "imagename eq myware-scribe.exe" 2>nul | find /i "myware-scribe.exe" >nul
 if not errorlevel 1 (
-  echo [!] hippo-transcribe.exe is running. Close it, then re-run undeploy.bat.
+  echo [!] myware-scribe.exe is running. Close it, then re-run undeploy.bat.
   exit /b 1
 )
 

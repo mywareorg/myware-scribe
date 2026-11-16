@@ -1,4 +1,4 @@
-//! Headless CLI (`hippo-transcribe --cli ...`).
+//! Headless CLI (`myware-scribe --cli ...`).
 
 use std::path::{Path, PathBuf};
 
@@ -100,7 +100,7 @@ pub fn run(args: &[String]) -> i32 {
         return 2;
     }
     if inputs.is_empty() {
-        eprintln!("usage: hippo-transcribe --cli <audio>... [--preset speed|balanced|accuracy] [--language <code>] [--asr-only] [--single-speaker] [--progress-json] [--normalize]");
+        eprintln!("usage: myware-scribe --cli <audio>... [--preset speed|balanced|accuracy] [--language <code>] [--asr-only] [--single-speaker] [--progress-json] [--normalize]");
         return 2;
     }
 
@@ -204,7 +204,7 @@ pub fn run(args: &[String]) -> i32 {
 /// counts; `diarize-score.py` treats it as a comment.
 fn diarize_only_run(inputs: &[std::path::PathBuf], num_speakers: Option<i32>) -> i32 {
     let Some(input) = inputs.first() else {
-        eprintln!("usage: hippo-transcribe --cli <audio> --diarize-only");
+        eprintln!("usage: myware-scribe --cli <audio> --diarize-only");
         return 1;
     };
     let (samples, rate) = match crate::audio::decode(input) {
@@ -253,8 +253,8 @@ fn diarize_only_run(inputs: &[std::path::PathBuf], num_speakers: Option<i32>) ->
     0
 }
 
-/// `hippo-transcribe --cli models [download] [--force] [--verify]`
-/// `hippo-transcribe --cli models notice` prints model attribution.
+/// `myware-scribe --cli models [download] [--force] [--verify]`
+/// `myware-scribe --cli models notice` prints model attribution.
 ///
 /// Without a subcommand this verifies the installed files.
 fn run_models(args: &[String]) -> i32 {
@@ -287,12 +287,12 @@ fn run_models(args: &[String]) -> i32 {
     }
 }
 
-/// `hippo-transcribe --cli probe <audio> <buckets>`: duration + RMS waveform.
+/// `myware-scribe --cli probe <audio> <buckets>`: duration + RMS waveform.
 fn run_probe(args: &[String]) -> i32 {
     let path = match args.first() {
         Some(path) => Path::new(path),
         None => {
-            eprintln!("usage: hippo-transcribe --cli probe <audio> <buckets>");
+            eprintln!("usage: myware-scribe --cli probe <audio> <buckets>");
             return 2;
         }
     };

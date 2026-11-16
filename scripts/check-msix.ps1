@@ -26,7 +26,7 @@ param(
     [string]$Msix,
     [string]$Dist = "dist",
     # Certificate to suggest importing when the chain is untrusted.
-    [string]$CerPath = "C:\keys\hippo-test.cer"
+    [string]$CerPath = "C:\keys\myware-test.cer"
 )
 
 $ErrorActionPreference = "Stop"

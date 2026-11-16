@@ -25,14 +25,14 @@ pub fn config_dir() -> Option<PathBuf> {
     if cfg!(windows) {
         std::env::var("APPDATA")
             .ok()
-            .map(|base| PathBuf::from(base).join("hippo-transcribe"))
+            .map(|base| PathBuf::from(base).join("myware-scribe"))
     } else {
         let base = std::env::var("XDG_CONFIG_HOME").ok().or_else(|| {
             std::env::var("HOME")
                 .ok()
                 .map(|home| format!("{home}/.config"))
         })?;
-        Some(PathBuf::from(base).join("hippo-transcribe"))
+        Some(PathBuf::from(base).join("myware-scribe"))
     }
 }
 
@@ -551,7 +551,7 @@ mod tests {
 
     #[test]
     fn state_round_trips_through_disk() {
-        let dir = std::env::temp_dir().join(format!("hippo-license-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("myware-license-{}", std::process::id()));
         let path = dir.join("license.json");
         let mut state = State::default();
         state.grant_pro(at(5_000));

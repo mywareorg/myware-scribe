@@ -1,10 +1,10 @@
 {
-  "_comment": "Copied from Partner Center > Hippo Transcribe > Product identity. The Store matches these character for character.",
-  "packageName": "SeanWu.HippoTranscribe",
+  "_comment": "Copied from Partner Center > MyWare Scribe > Product identity. The Store matches these character for character.",
+  "packageName": "SeanWu.MyWareScribe",
   "publisher": "CN=6862352A-51D9-40F2-9242-0F769B2F87AB",
   "publisherDisplayName": "Sean Wu",
-  "displayName": "Hippo Transcribe",
+  "displayName": "MyWare Scribe",
   "description": "Private, offline transcription and speaker diarization.",
-  "applicationId": "HippoTranscribe",
+  "applicationId": "MyWareScribe",
   "backgroundColor": "#C1CAD0"
 }

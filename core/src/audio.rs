@@ -504,7 +504,7 @@ mod tests {
     }
 
     fn temp_wav(name: &str) -> std::path::PathBuf {
-        std::env::temp_dir().join(format!("hippo-audio-{name}-{}.wav", std::process::id()))
+        std::env::temp_dir().join(format!("myware-audio-{name}-{}.wav", std::process::id()))
     }
 
     #[test]

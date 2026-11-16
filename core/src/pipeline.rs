@@ -33,7 +33,7 @@ fn producer() -> String {
 /// callers that do not want the extra file can set the environment variable to
 /// `0`, `false`, `off` or `no`.
 fn manifest_enabled() -> bool {
-    !crate::env_compat("HIPPO_TRANSCRIBE_MANIFEST", "TRANSIEL_MANIFEST")
+    !crate::env_compat("MYWARE_SCRIBE_MANIFEST", "TRANSIEL_MANIFEST")
         .is_some_and(|value| matches!(value.to_ascii_lowercase().as_str(), "0" | "false" | "off" | "no"))
 }
 
@@ -211,7 +211,7 @@ pub fn checkpoint_path(input: &Path) -> PathBuf {
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_else(|| "transcript".to_string());
-    input.with_file_name(format!(".{name}.hippo-transcribe.partial"))
+    input.with_file_name(format!(".{name}.myware-scribe.partial"))
 }
 
 /// Write the lines produced so far through a temporary file, so a kill during
@@ -715,7 +715,7 @@ const OVERLAP_MIN_CORES: usize = 8;
 
 impl Schedule {
     fn select(physical: usize) -> Self {
-        let setting = crate::env_compat("HIPPO_TRANSCRIBE_PIPELINE", "TRANSIEL_PIPELINE")
+        let setting = crate::env_compat("MYWARE_SCRIBE_PIPELINE", "TRANSIEL_PIPELINE")
             .map(|value| value.trim().to_ascii_lowercase());
         Self::from_setting(setting.as_deref(), physical)
     }
@@ -1074,9 +1074,9 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
             // Fail before diarization/processing: never write an empty
             // transcript just because the ASR model is unavailable.
             let hint = if whisper.is_file() {
-                "run: hippo-transcribe --cli models download --force"
+                "run: myware-scribe --cli models download --force"
             } else {
-                "run: hippo-transcribe --cli models download"
+                "run: myware-scribe --cli models download"
             };
             let name = if opts.preset.eq_ignore_ascii_case("speed") {
                 "Speed"
@@ -1135,10 +1135,10 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
     } else {
         physical.min(4)
     };
-    let workers = env_int("HIPPO_TRANSCRIBE_ASR_WORKERS", "TRANSIEL_ASR_WORKERS")
+    let workers = env_int("MYWARE_SCRIBE_ASR_WORKERS", "TRANSIEL_ASR_WORKERS")
         .unwrap_or(default_workers)
         .max(1);
-    let requested_threads = env_int("HIPPO_TRANSCRIBE_ASR_THREADS", "TRANSIEL_ASR_THREADS")
+    let requested_threads = env_int("MYWARE_SCRIBE_ASR_THREADS", "TRANSIEL_ASR_THREADS")
         .map(|v| v as i32)
         .unwrap_or((physical / workers).max(1) as i32)
         .max(1);
@@ -1164,9 +1164,9 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
     // Prefetching holds two decoded buffers at once (~230 MB per hour of 16 kHz
     // f32 audio), so a blocking decode used to be the cheaper trade for long
     // files. It is not: the blocked decode stalls every ASR worker. The cap is
-    // now opt-in — HIPPO_TRANSCRIBE_PREFETCH_MAX_S=<seconds> restores it.
+    // now opt-in — MYWARE_SCRIBE_PREFETCH_MAX_S=<seconds> restores it.
     let prefetch_max_s =
-        crate::env_compat("HIPPO_TRANSCRIBE_PREFETCH_MAX_S", "TRANSIEL_PREFETCH_MAX_S")
+        crate::env_compat("MYWARE_SCRIBE_PREFETCH_MAX_S", "TRANSIEL_PREFETCH_MAX_S")
             .and_then(|value| value.parse::<f64>().ok())
             .unwrap_or(0.0);
     type Decoded = Result<(Vec<f32>, u32), String>;
@@ -1394,8 +1394,8 @@ pub fn run(opts: &PipelineOptions, emit: &mut dyn FnMut(Event)) {
         let fast_decode = opts.preset.eq_ignore_ascii_case("speed");
         // `best_of` only repeats the decoder; the encoder dominates. One sample
         // is enough for every preset, and it roughly halves the decode stage.
-        // HIPPO_TRANSCRIBE_BEST_OF raises it again for an A/B check.
-        let best_of = env_int("HIPPO_TRANSCRIBE_BEST_OF", "TRANSIEL_BEST_OF")
+        // MYWARE_SCRIBE_BEST_OF raises it again for an A/B check.
+        let best_of = env_int("MYWARE_SCRIBE_BEST_OF", "TRANSIEL_BEST_OF")
             .map(|value| value as i32)
             .unwrap_or(1)
             .max(1);
@@ -2357,7 +2357,7 @@ mod tests {
         let path = checkpoint_path(Path::new("/tmp/interview.mp3"));
         assert_eq!(
             path.file_name().and_then(|name| name.to_str()),
-            Some(".interview.mp3.hippo-transcribe.partial")
+            Some(".interview.mp3.myware-scribe.partial")
         );
         assert_eq!(path.parent(), Some(Path::new("/tmp")));
     }

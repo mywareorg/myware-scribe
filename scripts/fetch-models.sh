@@ -11,7 +11,7 @@
 #   --force       re-download even when a cached copy is valid
 #   --verify-only check the cache without hitting the network
 #   --mirror URL  try URL/<file> before the pinned upstream mirrors; also read
-#                 from HIPPO_TRANSCRIBE_MODEL_MIRROR
+#                 from MYWARE_SCRIBE_MODEL_MIRROR
 #   --dest DIR    stage into DIR (used by packaging); defaults to
 #                 vendor/models/<manifest version>
 set -euo pipefail
@@ -19,7 +19,7 @@ set -euo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 manifest="$root/models.lock.json"
 dest=""
-mirror="${HIPPO_TRANSCRIBE_MODEL_MIRROR:-}"
+mirror="${MYWARE_SCRIBE_MODEL_MIRROR:-}"
 include_all=0
 force=0
 verify_only=0

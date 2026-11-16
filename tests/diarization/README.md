@@ -49,7 +49,7 @@ sample-short                  88.9     10.36%      1.60%     2.11      1.26     
 Reproduce with:
 
 ```
-scripts/diarize-score.py record --bin target/debug/hippo-transcribe --speakers 2 \
+scripts/diarize-score.py record --bin target/debug/myware-scribe --speakers 2 \
     --out audio/eval/baseline <audio>...
 scripts/diarize-score.py report --ref-dir tests/diarization --hyp-dir audio/eval/baseline
 ```
@@ -75,7 +75,7 @@ largest one-directional absorption, short-turn recall, and the worst block
 
 ## Blockwise vs single pass
 
-The blockwise path (`HIPPO_TRANSCRIBE_DIARIZE_BLOCKS=1`) only changes files
+The blockwise path (`MYWARE_SCRIBE_DIARIZE_BLOCKS=1`) only changes files
 longer than one 300 s block. On those it is worse, badly:
 
 ```
@@ -94,7 +94,7 @@ replaced by cluster-mean embedding assignment before this path ships.
 
 ## Turn splitting (opt-in)
 
-`HIPPO_TRANSCRIBE_DIARIZE_SPLIT=1` splits turns of 15 s or more when their
+`MYWARE_SCRIBE_DIARIZE_SPLIT=1` splits turns of 15 s or more when their
 1.5 s windows form two clusters that differ by cosine <= 0.80. Each half is
 assigned by comparing it against per-label centroids built from the nearest
 turns of that label, excluding the turn under test.
@@ -132,7 +132,7 @@ files like `short-1` where one speaker is collapsed for tens of seconds.
 
 ## Embedding model is not a per-family lever
 
-`HIPPO_TRANSCRIBE_EMBEDDING_MODEL` swaps the speaker model with no code change.
+`MYWARE_SCRIBE_EMBEDDING_MODEL` swaps the speaker model with no code change.
 Comparing the default CAM++ against resnet34 across all eight files, same
 pipeline, same `--num-speakers 2`:
 
@@ -223,7 +223,7 @@ Reproduce with the ignored diagnostic:
 DIARIZE_AUDIO=audio/hour-conversation-short-1.mp3 \
 DIARIZE_RTTM=tests/diarization/hour-conversation-short-1.rttm \
 DIARIZE_OUT=/tmp/oracle.tsv \
-cargo test -p hippo-transcribe-core --lib measure_reference_separability \
+cargo test -p myware-scribe-core --lib measure_reference_separability \
     -- --ignored --nocapture
 scripts/diarize-score.py score --ref tests/diarization/hour-conversation-short-1.rttm \
     --hyp /tmp/oracle.tsv

@@ -387,7 +387,7 @@ mod tests {
     #[test]
     fn save_and_load_round_trip() {
         let dir = std::env::temp_dir().join(format!(
-            "hippo-vocabulary-{}-{}",
+            "myware-vocabulary-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)

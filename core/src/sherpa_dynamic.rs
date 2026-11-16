@@ -121,7 +121,7 @@ static API: OnceLock<Result<Api, String>> = OnceLock::new();
 
 fn candidates() -> Vec<PathBuf> {
     let mut paths = Vec::new();
-    if let Some(path) = crate::env_compat("HIPPO_TRANSCRIBE_SHERPA_DLL", "TRANSIEL_SHERPA_DLL")
+    if let Some(path) = crate::env_compat("MYWARE_SCRIBE_SHERPA_DLL", "TRANSIEL_SHERPA_DLL")
         .map(std::ffi::OsString::from)
     {
         paths.push(PathBuf::from(path));
@@ -164,7 +164,7 @@ fn load() -> Result<Api, String> {
                 .and_then(|exe| exe.parent().map(|parent| parent.display().to_string()))
                 .unwrap_or_else(|| "an unknown directory".to_string());
             format!(
-                "sherpa-onnx-c-api.dll was not found in {dir}; reinstall Hippo Transcribe"
+                "sherpa-onnx-c-api.dll was not found in {dir}; reinstall MyWare Scribe"
             )
         })?;
     let path = path.canonicalize().unwrap_or(path);

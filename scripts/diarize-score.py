@@ -34,7 +34,7 @@ Subcommands
         Count distinct speaker labels, and fail when the count is unexpected --
         the phantom-speaker check for a known single-speaker file.
 
-    record --bin <hippo-transcribe> --out <dir> <audio>...
+    record --bin <myware-scribe> --out <dir> <audio>...
         Run `--diarize-only` for each file and store `dir/<stem>.tsv` as the
         baseline for that audio.
 

@@ -63,9 +63,9 @@ pub fn gpu_available() -> bool {
     preferred_backend() != Backend::Cpu
 }
 
-/// `HIPPO_TRANSCRIBE_ACCEL=cpu` forces the CPU path for troubleshooting.
+/// `MYWARE_SCRIBE_ACCEL=cpu` forces the CPU path for troubleshooting.
 fn force_cpu() -> bool {
-    crate::env_compat("HIPPO_TRANSCRIBE_ACCEL", "TRANSIEL_ACCEL")
+    crate::env_compat("MYWARE_SCRIBE_ACCEL", "TRANSIEL_ACCEL")
         .is_some_and(|value| value.eq_ignore_ascii_case("cpu"))
 }
 

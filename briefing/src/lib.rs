@@ -1,6 +1,6 @@
 //! Chunking, prompting and validation for the briefing.
 //!
-//! The model itself lives in the `hippo-summarize` helper: nothing here loads
+//! The model itself lives in the `myware-summarize` helper: nothing here loads
 //! weights or touches the network. That keeps the rules testable without a
 //! model, and keeps the summariser's llama.cpp out of the transcription binary.
 //!

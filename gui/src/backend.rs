@@ -8,9 +8,9 @@ use std::time::{Duration, Instant};
 
 use crate::documents::{line_prefix, line_text, DocLine};
 
-use hippo_transcribe_core::sidecar;
+use myware_scribe_core::sidecar;
 
-pub use hippo_transcribe_core::event::{Event, SpeakerStat, Stats, Turn};
+pub use myware_scribe_core::event::{Event, SpeakerStat, Stats, Turn};
 
 /// Stop Windows from giving a console-subsystem helper its own console window.
 ///
@@ -126,7 +126,7 @@ pub fn write_sidecar_renamed(path: &Path, lines: &[DocLine], mapping: &[(String,
 }
 
 /// Word times for every line of a transcript, from its sidecar.
-pub fn read_all_line_words(path: &Path) -> Vec<Vec<hippo_transcribe_core::sidecar::Word>> {
+pub fn read_all_line_words(path: &Path) -> Vec<Vec<myware_scribe_core::sidecar::Word>> {
     sidecar::read(path)
         .map(|sidecar| sidecar.lines.into_iter().map(|line| line.words).collect())
         .unwrap_or_default()
@@ -140,7 +140,7 @@ pub fn read_all_line_words(path: &Path) -> Vec<Vec<hippo_transcribe_core::sideca
 pub fn export_cues(
     source: Option<&Path>,
     lines: &[DocLine],
-) -> Vec<hippo_transcribe_core::export::Cue> {
+) -> Vec<myware_scribe_core::export::Cue> {
     let stored = source
         .and_then(|path| sidecar::read(path))
         .filter(|sidecar| sidecar.lines.len() == lines.len());
@@ -148,14 +148,14 @@ pub fn export_cues(
         .as_ref()
         .map(|sidecar| sidecar.lines.iter().map(|line| line.end).collect())
         .unwrap_or_default();
-    let words: Vec<Vec<hippo_transcribe_core::sidecar::Word>> = stored
+    let words: Vec<Vec<myware_scribe_core::sidecar::Word>> = stored
         .as_ref()
         .map(|sidecar| sidecar.lines.iter().map(|line| line.words.clone()).collect())
         .unwrap_or_default();
     lines
         .iter()
         .enumerate()
-        .map(|(index, line)| hippo_transcribe_core::export::Cue {
+        .map(|(index, line)| myware_scribe_core::export::Cue {
             start: line.start,
             end: ends.get(index).copied().flatten(),
             speaker: line.speaker.clone(),
@@ -228,7 +228,7 @@ fn sidecar_time(line: &DocLine) -> String {
 
 /// Probe the duration (seconds) of an audio file.
 pub fn probe_duration(path: &Path) -> Option<f64> {
-    hippo_transcribe_core::audio::duration(path).ok()
+    myware_scribe_core::audio::duration(path).ok()
 }
 
 /// Read a completed item's diarization turns back out of the cache.
@@ -246,21 +246,21 @@ pub fn load_turns(
     // preprocessing that produced the audio.
     let diarizer = format!(
         "{}-{}",
-        hippo_transcribe_core::diarize::cache_salt(),
-        hippo_transcribe_core::audio::preprocess_tag(normalize)
+        myware_scribe_core::diarize::cache_salt(),
+        myware_scribe_core::audio::preprocess_tag(normalize)
     );
-    hippo_transcribe_core::cache::key(path, &diarizer, num_speakers)
-        .and_then(|key| hippo_transcribe_core::cache::read(&key))
+    myware_scribe_core::cache::key(path, &diarizer, num_speakers)
+        .and_then(|key| myware_scribe_core::cache::read(&key))
 }
 
 /// The waveform peaks for a transcript, from the cache when they were stored
 /// with the run. Only the first open of an older item decodes the audio.
 pub fn load_waveform(path: PathBuf, buckets: usize) -> Option<(f64, Vec<f32>)> {
-    if let Some(cached) = hippo_transcribe_core::cache::read_waveform(&path, buckets) {
+    if let Some(cached) = myware_scribe_core::cache::read_waveform(&path, buckets) {
         return Some(cached);
     }
-    let probe = hippo_transcribe_core::audio::waveform(&path, buckets).ok()?;
-    hippo_transcribe_core::cache::write_waveform(&path, buckets, probe.0, &probe.1);
+    let probe = myware_scribe_core::audio::waveform(&path, buckets).ok()?;
+    myware_scribe_core::cache::write_waveform(&path, buckets, probe.0, &probe.1);
     Some(probe)
 }
 
@@ -341,8 +341,8 @@ pub fn spawn(
         }
 
         let Some(exe) = executable_path() else {
-            let message = "could not locate the Hippo Transcribe executable".to_string();
-            hippo_transcribe_core::logging::error(&message);
+            let message = "could not locate the MyWare Scribe executable".to_string();
+            myware_scribe_core::logging::error(&message);
             push(&events, Event::Error { message });
             push(&events, Event::AllDone);
             pid.store(0, Ordering::SeqCst);
@@ -376,7 +376,7 @@ pub fn spawn(
         if !gpu_acceleration {
             // The core reads this at model-load time. Setting it here only
             // affects the pipeline child, not the GUI process.
-            command.env("HIPPO_TRANSCRIBE_ACCEL", "cpu");
+            command.env("MYWARE_SCRIBE_ACCEL", "cpu");
         }
         // Pin the data directories to the ones this process resolved. In an
         // MSIX the packaged parent sees its AppData redirected into the package
@@ -384,16 +384,16 @@ pub fn spawn(
         // the GUI could have the models downloaded while the worker looked in an
         // empty folder and failed with "whisper model not found".
         command.env(
-            "HIPPO_TRANSCRIBE_MODELS_DIR",
-            hippo_transcribe_core::models::models_dir(),
+            "MYWARE_SCRIBE_MODELS_DIR",
+            myware_scribe_core::models::models_dir(),
         );
         command.env(
-            "HIPPO_TRANSCRIBE_CACHE_DIR",
-            hippo_transcribe_core::cache::cache_dir(),
+            "MYWARE_SCRIBE_CACHE_DIR",
+            myware_scribe_core::cache::cache_dir(),
         );
         command.env(
-            "HIPPO_TRANSCRIBE_LOG_DIR",
-            hippo_transcribe_core::logging::log_dir(),
+            "MYWARE_SCRIBE_LOG_DIR",
+            myware_scribe_core::logging::log_dir(),
         );
         if let Some(dir) = &output_dir {
             command.arg("--output-dir").arg(dir);
@@ -414,7 +414,7 @@ pub fn spawn(
             Ok(child) => child,
             Err(error) => {
                 let message = format!("could not start the transcription process: {error}");
-                hippo_transcribe_core::logging::error(&message);
+                myware_scribe_core::logging::error(&message);
                 push(&events, Event::Error { message });
                 push(&events, Event::AllDone);
                 pid.store(0, Ordering::SeqCst);
@@ -560,7 +560,7 @@ fn read_stderr(stderr: Option<ChildStderr>) -> Vec<String> {
 
 // ---- briefing worker ----
 
-use hippo_briefing::{Briefing, BriefingLine};
+use myware_briefing::{Briefing, BriefingLine};
 
 /// Progress from the briefing helper, in the order it happened.
 #[derive(Debug, Clone)]
@@ -587,7 +587,7 @@ fn is_llama_log_noise(line: &str) -> bool {
         || line.starts_with("graph_reserve:")
 }
 
-/// Spawn `hippo-summarize` for `lines`.
+/// Spawn `myware-summarize` for `lines`.
 ///
 /// The helper runs in its own process: llama.cpp and whisper.cpp each vendor
 /// ggml, and one binary linking both is a symbol clash waiting to happen. It
@@ -600,7 +600,7 @@ pub fn spawn_briefing(
     pid: Arc<AtomicU32>,
 ) -> Result<PathBuf, String> {
     let helper = briefing_helper()?;
-    let dir = hippo_transcribe_core::license::config_dir()
+    let dir = myware_scribe_core::license::config_dir()
         .ok_or_else(|| "no configuration directory".to_string())?;
     std::fs::create_dir_all(&dir).map_err(|error| format!("create {}: {error}", dir.display()))?;
 
@@ -748,9 +748,9 @@ fn briefing_helper() -> Result<PathBuf, String> {
         .parent()
         .ok_or_else(|| "the executable has no directory".to_string())?;
     let name = if cfg!(windows) {
-        "hippo-summarize.exe"
+        "myware-summarize.exe"
     } else {
-        "hippo-summarize"
+        "myware-summarize"
     };
     let path = dir.join(name);
     if path.is_file() {
@@ -776,7 +776,7 @@ mod tests {
 
     fn scratch(tag: &str) -> PathBuf {
         let dir =
-            std::env::temp_dir().join(format!("hippo-backend-{tag}-{}", std::process::id()));
+            std::env::temp_dir().join(format!("myware-backend-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
@@ -785,13 +785,13 @@ mod tests {
     #[test]
     fn a_replaced_executable_resolves_to_the_new_file() {
         let dir = scratch("replaced-exe");
-        let exe = dir.join("hippo-transcribe");
+        let exe = dir.join("myware-scribe");
         std::fs::write(&exe, b"binary").unwrap();
         assert_eq!(live_executable(&exe), Some(exe.clone()));
 
         // Linux appends this to /proc/self/exe after a rebuild replaces the
         // running file; the path itself no longer exists.
-        let deleted = dir.join("hippo-transcribe (deleted)");
+        let deleted = dir.join("myware-scribe (deleted)");
         assert_eq!(live_executable(&deleted), Some(exe));
 
         let _ = std::fs::remove_dir_all(&dir);

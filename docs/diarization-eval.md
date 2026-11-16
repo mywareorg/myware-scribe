@@ -8,7 +8,7 @@ The tool is `scripts/diarize-score.py` (standard library only).
 
 ## Building a reference (preferred: correct in the app)
 
-Do not hand-edit an RTTM. Transcribe in Hippo Transcribe, fix the speakers there,
+Do not hand-edit an RTTM. Transcribe in MyWare Scribe, fix the speakers there,
 and derive the reference from the corrected transcript.
 
 1. Open the audio in the app and transcribe it (Balanced is fine).
@@ -69,7 +69,7 @@ When no corrected transcript exists, a draft RTTM is still a useful starting
 point for hand correction:
 
 ```
-scripts/diarize-score.py record --bin target/debug/hippo-transcribe \
+scripts/diarize-score.py record --bin target/debug/myware-scribe \
     --speakers 2 --out audio/eval/baseline <audio>
 scripts/diarize-score.py draft audio/eval/baseline/<stem>.tsv <stem> \
     --out tests/diarization/<stem>.rttm
@@ -120,7 +120,7 @@ a 5-minute cut be compared against the matching slice of a longer reference.
 A known single-speaker file must produce one label:
 
 ```
-scripts/diarize-score.py record --bin target/debug/hippo-transcribe \
+scripts/diarize-score.py record --bin target/debug/myware-scribe \
     --speakers 2 --out /tmp/mono audio/monologue.mp3
 scripts/diarize-score.py speakers /tmp/mono/monologue.tsv --expect 1
 ```
@@ -135,7 +135,7 @@ Every pipeline change should reproduce the baseline turn map exactly unless it
 was meant to change it:
 
 ```
-scripts/diarize-score.py record --bin target/debug/hippo-transcribe --out /tmp/run \
+scripts/diarize-score.py record --bin target/debug/myware-scribe --out /tmp/run \
     audio/hour-conversation-short-1.mp3
 scripts/diarize-score.py compare audio/eval/baseline /tmp/run --subset
 ```

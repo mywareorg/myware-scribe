@@ -18,31 +18,31 @@ use rodio::{OutputStream, OutputStreamBuilder, Sink, Source};
 use serde::{Deserialize, Serialize};
 
 use crate::backend::{self, Event};
-use hippo_ui::buttons::{
+use myware_ui::buttons::{
     action, action_text, icon, icon_circle, icon_colored, icon_pill, toggle_button,
 };
-use hippo_ui::dialog::modal_card;
-use hippo_ui::gauges::{CountdownRing, IndeterminateBar, ProgressTrack, RecordingMeter};
-use hippo_ui::menu::{self as menus, MenuRow, MenuSection};
-use hippo_ui::rows::{
+use myware_ui::dialog::modal_card;
+use myware_ui::gauges::{CountdownRing, IndeterminateBar, ProgressTrack, RecordingMeter};
+use myware_ui::menu::{self as menus, MenuRow, MenuSection};
+use myware_ui::rows::{
     day_header, drop_card, info_row, settings_divider, settings_row, shortcut_row, switch_row,
 };
-use hippo_ui::styles::*;
-use hippo_ui::tokens::{
+use myware_ui::styles::*;
+use myware_ui::tokens::{
     self as theme, AppTheme, Scheme, CONTROL_HEIGHT, PILL,
 };
 use crate::{documents::*, files::*, format::*, options::*};
-use hippo_transcribe_core::asr;
-use hippo_transcribe_core::benchmark::{self, BenchmarkEvent};
-use hippo_transcribe_core::download::{self, DownloadEvent, ModelStatus};
-use hippo_transcribe_core::export::{Cue, ExportFormat};
-use hippo_transcribe_core::report::{ReportBlock, ReportFormat};
-use hippo_transcribe_core::license;
-use hippo_transcribe_core::models;
-use hippo_briefing::{Briefing, BriefingLine};
-use hippo_transcribe_core::sidecar::Word;
-use hippo_transcribe_core::playback::AudioStream;
-use hippo_transcribe_core::vocabulary::Vocabulary;
+use myware_scribe_core::asr;
+use myware_scribe_core::benchmark::{self, BenchmarkEvent};
+use myware_scribe_core::download::{self, DownloadEvent, ModelStatus};
+use myware_scribe_core::export::{Cue, ExportFormat};
+use myware_scribe_core::report::{ReportBlock, ReportFormat};
+use myware_scribe_core::license;
+use myware_scribe_core::models;
+use myware_briefing::{Briefing, BriefingLine};
+use myware_scribe_core::sidecar::Word;
+use myware_scribe_core::playback::AudioStream;
+use myware_scribe_core::vocabulary::Vocabulary;
 
 /// The Settings label that means "whatever Windows has as default".
 const SYSTEM_DEFAULT_DEVICE: &str = "System default";
@@ -345,8 +345,8 @@ const FEATURE_DECK: [FeatureSlide; 7] = [
         body: "Playback, line editing, and Speed or Accuracy presets give you control over every transcript.",
     },
     FeatureSlide {
-        eyebrow: "WHY HIPPO",
-        title: "Hippo Transcribe is HIPAA inspired.",
+        eyebrow: "WHY MYWARE",
+        title: "MyWare Scribe is HIPAA inspired.",
         body: "Open source. Built for doctors and medical professionals. \
                Your recordings stay on this machine.",
     },
@@ -490,7 +490,7 @@ struct PendingExport {
     /// The transcript file the text came from, for cue bounds and the sidecar
     /// guard.
     source: Option<PathBuf>,
-    cues: Vec<hippo_transcribe_core::export::Cue>,
+    cues: Vec<myware_scribe_core::export::Cue>,
     turns: Vec<backend::Turn>,
     duration: Option<f32>,
     /// The format the menu offered. A recognised extension the user types
@@ -598,7 +598,7 @@ fn version_lines(entry: &RecentEntry) -> Vec<String> {
         return Vec::new();
     };
     let path = Path::new(path);
-    let Some(manifest) = hippo_transcribe_core::versions::read(path) else {
+    let Some(manifest) = myware_scribe_core::versions::read(path) else {
         return Vec::new();
     };
     manifest
@@ -2492,19 +2492,19 @@ impl App {
         app
     }
 
-    /// Current configuration directory (`.../hippo-transcribe`).
+    /// Current configuration directory (`.../myware-scribe`).
     fn config_dir() -> Option<PathBuf> {
         if cfg!(windows) {
             std::env::var("APPDATA")
                 .ok()
-                .map(|base| PathBuf::from(base).join("hippo-transcribe"))
+                .map(|base| PathBuf::from(base).join("myware-scribe"))
         } else {
             let base = std::env::var("XDG_CONFIG_HOME").ok().or_else(|| {
                 std::env::var("HOME")
                     .ok()
                     .map(|home| format!("{home}/.config"))
             })?;
-            Some(PathBuf::from(base).join("hippo-transcribe"))
+            Some(PathBuf::from(base).join("myware-scribe"))
         }
     }
 
@@ -2710,7 +2710,7 @@ impl App {
             let manifest_path = entry.manifest.clone();
             if let Some(manifest_path) = manifest_path.as_deref() {
                 let path = Path::new(manifest_path);
-                if let Some(manifest) = hippo_transcribe_core::versions::read(path) {
+                if let Some(manifest) = myware_scribe_core::versions::read(path) {
                     if let Some(directory) = path.parent() {
                         if let Some(current) = manifest.current_version() {
                             if let Some(transcript) = manifest.current_transcript(directory) {
@@ -4195,7 +4195,7 @@ impl App {
         #[cfg(windows)]
         const ICON: &[u8] = include_bytes!("../../icons/pencil-icon.png");
         #[cfg(not(windows))]
-        const ICON: &[u8] = include_bytes!("../../icons/simple-hippo-square-icon.png");
+        const ICON: &[u8] = include_bytes!("../../icons/simple-myware-square-icon.png");
         let image = image::load_from_memory(ICON).ok()?.into_rgba8();
         let (width, height) = image.dimensions();
         iced::window::icon::from_rgba(image.into_raw(), width, height).ok()
@@ -4549,7 +4549,7 @@ impl App {
     /// The Pro paywall / license dialog.
     fn paywall_dialog<'a>(&'a self, scheme: &Scheme) -> Element<'a, Message> {
         let scheme = *scheme;
-        let mut body = column![text("Hippo Transcribe Pro").size(20)];
+        let mut body = column![text("MyWare Scribe Pro").size(20)];
         // The preview build has no store client, so it must not advertise a
         // price or a purchase it cannot complete.
         if self.provider.name() != "none" {
@@ -5151,7 +5151,7 @@ impl App {
                 Task::none()
             }
             Message::OpenLogFolder => {
-                let dir = hippo_transcribe_core::logging::log_dir();
+                let dir = myware_scribe_core::logging::log_dir();
                 let _ = std::fs::create_dir_all(&dir);
                 // Failures here are cosmetic: the path is still shown in help.
                 #[cfg(windows)]
@@ -6638,7 +6638,7 @@ impl App {
                         item.status = ItemStatus::Failed("skipped".to_string());
                         if let Some(audio) = &item.audio {
                             let _ = std::fs::remove_file(
-                                hippo_transcribe_core::pipeline::checkpoint_path(audio),
+                                myware_scribe_core::pipeline::checkpoint_path(audio),
                             );
                         }
                         changed = true;
@@ -6677,7 +6677,7 @@ impl App {
                     let live = self.live_buffer_shows_queue_row(index);
                     if let Some(audio) = self.queue[index].audio.clone() {
                         let _ = std::fs::remove_file(
-                            hippo_transcribe_core::pipeline::checkpoint_path(&audio),
+                            myware_scribe_core::pipeline::checkpoint_path(&audio),
                         );
                     }
                     self.queue.remove(index);
@@ -7754,7 +7754,7 @@ impl App {
     fn briefing_cache_key(lines: &[BriefingLine], model: &Path) -> u64 {
         use std::hash::{Hash, Hasher};
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        hippo_briefing::PROMPT_VERSION.hash(&mut hasher);
+        myware_briefing::PROMPT_VERSION.hash(&mut hasher);
         model.hash(&mut hasher);
         for line in lines {
             line.start.to_bits().hash(&mut hasher);
@@ -7773,7 +7773,7 @@ impl App {
         let path = Self::briefing_cache_path(source)?;
         let text = std::fs::read_to_string(path).ok()?;
         let cache: BriefingCache = serde_json::from_str(&text).ok()?;
-        (cache.version == hippo_briefing::PROMPT_VERSION
+        (cache.version == myware_briefing::PROMPT_VERSION
             && cache.key == Self::briefing_cache_key(lines, model))
         .then_some(cache.briefing)
     }
@@ -7788,7 +7788,7 @@ impl App {
             return;
         };
         let cache = BriefingCache {
-            version: hippo_briefing::PROMPT_VERSION,
+            version: myware_briefing::PROMPT_VERSION,
             key: Self::briefing_cache_key(lines, model),
             briefing: briefing.clone(),
         };
@@ -8102,7 +8102,7 @@ impl App {
         if path.extension().is_none() {
             path.set_extension(report.format.extension());
         }
-        match hippo_transcribe_core::report::write(&path, report.format, &report.blocks) {
+        match myware_scribe_core::report::write(&path, report.format, &report.blocks) {
             Ok(()) => self.toast = Some((format!("Saved {}", path.display()), Instant::now())),
             Err(error) => self.toast = Some((
                 format!("Could not save {}: {error}", path.display()),
@@ -8268,7 +8268,7 @@ impl App {
             self.toast = Some(("Set a save location first".to_string(), Instant::now()));
             return;
         };
-        let manifests = hippo_transcribe_core::versions::scan_with_paths(&directory);
+        let manifests = myware_scribe_core::versions::scan_with_paths(&directory);
         let mut imported = 0;
         for (path, manifest) in manifests {
             let Some(version) = manifest.current_version() else {
@@ -8327,7 +8327,7 @@ impl App {
             self.toast = Some(("Set a save location first".to_string(), Instant::now()));
             return;
         };
-        let orphans = hippo_transcribe_core::versions::unreferenced_transcripts(&directory);
+        let orphans = myware_scribe_core::versions::unreferenced_transcripts(&directory);
         let message = match orphans.len() {
             0 => "No orphaned transcripts".to_string(),
             1 => "1 orphaned transcript".to_string(),
@@ -8524,7 +8524,7 @@ impl App {
             return;
         };
         let path = PathBuf::from(manifest_path);
-        let Some(manifest) = hippo_transcribe_core::versions::read(&path) else {
+        let Some(manifest) = myware_scribe_core::versions::read(&path) else {
             self.toast = Some((
                 "Could not read the version records".to_string(),
                 Instant::now(),
@@ -8630,7 +8630,7 @@ impl App {
             return Task::none();
         };
         let path = PathBuf::from(manifest_path);
-        let Some(mut manifest) = hippo_transcribe_core::versions::read(&path) else {
+        let Some(mut manifest) = myware_scribe_core::versions::read(&path) else {
             self.toast = Some((
                 "Could not read the version records".to_string(),
                 Instant::now(),
@@ -8646,7 +8646,7 @@ impl App {
             return Task::none();
         };
         manifest.current = Some(version.id.clone());
-        if let Err(error) = hippo_transcribe_core::versions::write_at(&path, &manifest) {
+        if let Err(error) = myware_scribe_core::versions::write_at(&path, &manifest) {
             self.toast = Some((
                 format!("Could not update versions: {error}"),
                 Instant::now(),
@@ -8690,7 +8690,7 @@ impl App {
             return Task::none();
         };
         let path = PathBuf::from(manifest_path);
-        let Some(manifest) = hippo_transcribe_core::versions::read(&path) else {
+        let Some(manifest) = myware_scribe_core::versions::read(&path) else {
             self.toast = Some((
                 "Could not read the version records".to_string(),
                 Instant::now(),
@@ -8747,7 +8747,7 @@ impl App {
             return Task::none();
         };
         let path = PathBuf::from(&manifest_path);
-        let Some(mut manifest) = hippo_transcribe_core::versions::read(&path) else {
+        let Some(mut manifest) = myware_scribe_core::versions::read(&path) else {
             self.toast = Some((
                 "Could not read the version records".to_string(),
                 Instant::now(),
@@ -8774,13 +8774,13 @@ impl App {
         {
             let _ = std::fs::remove_file(directory.join(relative));
         }
-        let _ = std::fs::remove_file(hippo_transcribe_core::versions::unedited_path(
+        let _ = std::fs::remove_file(myware_scribe_core::versions::unedited_path(
             &directory.join(&version.transcript),
         ));
-        let _ = std::fs::remove_file(hippo_transcribe_core::versions::unedited_path(
+        let _ = std::fs::remove_file(myware_scribe_core::versions::unedited_path(
             &directory.join(&version.plain),
         ));
-        let _ = hippo_transcribe_core::versions::write_at(&path, &manifest);
+        let _ = myware_scribe_core::versions::write_at(&path, &manifest);
         self.version_preview = None;
         self.toast = Some(("Removed version".to_string(), Instant::now()));
         self.open_recent(preview.row, None)
@@ -8800,7 +8800,7 @@ impl App {
         };
         let edited = transcript_differs_from_original(&transcript);
         let path = Path::new(&manifest_path);
-        let Some(mut manifest) = hippo_transcribe_core::versions::read(path) else {
+        let Some(mut manifest) = myware_scribe_core::versions::read(path) else {
             return;
         };
         let Some(version) = manifest
@@ -8812,7 +8812,7 @@ impl App {
         };
         let directory = path.parent().unwrap_or_else(|| Path::new("."));
         let original = edited.then(|| {
-            hippo_transcribe_core::versions::relative(
+            myware_scribe_core::versions::relative(
                 directory,
                 &crate::files::unedited_path(&transcript),
             )
@@ -8822,7 +8822,7 @@ impl App {
         }
         version.edited = edited;
         version.original = original;
-        let _ = hippo_transcribe_core::versions::write_at(path, &manifest);
+        let _ = myware_scribe_core::versions::write_at(path, &manifest);
     }
 
     /// Update the manifest after a transcript file was written.
@@ -9251,7 +9251,7 @@ impl App {
             path = transcript.with_file_name(format!("{stem}-export.{}", format.extension()));
         }
         if format == ExportFormat::Json
-            && hippo_transcribe_core::sidecar::locate(transcript).as_deref() == Some(path.as_path())
+            && myware_scribe_core::sidecar::locate(transcript).as_deref() == Some(path.as_path())
         {
             path = transcript.with_file_name(format!("{stem}-export.{}", format.extension()));
         }
@@ -9427,7 +9427,7 @@ impl App {
         if pending
             .source
             .as_deref()
-            .and_then(hippo_transcribe_core::sidecar::locate)
+            .and_then(myware_scribe_core::sidecar::locate)
             .as_deref()
             == Some(path.as_path())
         {
@@ -9451,7 +9451,7 @@ impl App {
         let result = if saving_over_source && format == ExportFormat::Txt {
             write_transcript_file(&path, &text)
         } else {
-            hippo_transcribe_core::export::write(&path, format, &text, &cues, &turns, duration)
+            myware_scribe_core::export::write(&path, format, &text, &cues, &turns, duration)
         };
         match result {
             Ok(()) => {
@@ -9707,7 +9707,7 @@ impl App {
         self.summary_open = true;
         self.toast = None;
         if self.should_notify_completion() {
-            notify("Hippo Transcribe", "Finished \u{00b7} saved locally");
+            notify("MyWare Scribe", "Finished \u{00b7} saved locally");
         }
         true
     }
@@ -11784,7 +11784,7 @@ impl App {
                         let peaks = peaks;
                         tasks.push(Task::perform(
                             async move {
-                                hippo_transcribe_core::cache::write_waveform(
+                                myware_scribe_core::cache::write_waveform(
                                     &path,
                                     buckets,
                                     duration as f64,
@@ -13170,7 +13170,7 @@ impl App {
         let slide = &FEATURE_DECK[index];
         let accent = match slide.eyebrow {
             "FREE" => scheme.green,
-            "WHY HIPPO" => scheme.pink,
+            "WHY MYWARE" => scheme.pink,
             _ => scheme.blue,
         };
 
@@ -15218,7 +15218,7 @@ impl App {
             .manifest
             .as_deref()
             .map(PathBuf::from)
-            .and_then(|path| hippo_transcribe_core::versions::read(&path))
+            .and_then(|path| myware_scribe_core::versions::read(&path))
             .map(|manifest| manifest.versions.len())
             .unwrap_or(0);
         let version_hint = match version_count {
@@ -18299,7 +18299,7 @@ impl App {
                 }),
             );
             for item in items {
-                let cite = hippo_briefing::citation(item, lines).unwrap_or_default();
+                let cite = myware_briefing::citation(item, lines).unwrap_or_default();
                 content = content.push(
                     row![
                         text("\u{2022}").size(theme::TEXT_SM).color(scheme.muted),
@@ -18506,7 +18506,7 @@ impl App {
             &self.vocab_replacements.text(),
         );
         let (_, dropped) =
-            parsed.prompt_with_dropped(hippo_transcribe_core::vocabulary::PROMPT_BUDGET);
+            parsed.prompt_with_dropped(myware_scribe_core::vocabulary::PROMPT_BUDGET);
         let can_save = bad.is_empty();
 
         let terms = column![
@@ -19493,7 +19493,7 @@ impl App {
         // The toast sits at the header row's centre: equal flexible space on
         // each side keeps it between the fixed identity block and the fixed
         // license/Help controls. The slot is as tall as the logo, so the row's
-        // height never changes and the card shares the hippo's vertical centre.
+        // height never changes and the card shares the myware's vertical centre.
         let toast_slot = container(self.header_toast(scheme))
             .height(Length::Fixed(HEADER_LOGO_SIZE))
             .align_y(iced::Alignment::Center);
@@ -19503,7 +19503,7 @@ impl App {
                 .width(Length::Fixed(HEADER_LOGO_SIZE))
                 .height(Length::Fixed(HEADER_LOGO_SIZE)),
             column![
-                text("Hippo Transcribe").size(theme::TEXT_XL).font(Font {
+                text("MyWare Scribe").size(theme::TEXT_XL).font(Font {
                     weight: font::Weight::Bold,
                     ..Font::DEFAULT
                 }),
@@ -20237,7 +20237,7 @@ fn header_logo_handle() -> iced::widget::image::Handle {
     static LOGO: OnceLock<iced::widget::image::Handle> = OnceLock::new();
     LOGO.get_or_init(|| {
         let image =
-            image::load_from_memory(include_bytes!("../../icons/simple-hippo-square-icon.png"))
+            image::load_from_memory(include_bytes!("../../icons/simple-myware-square-icon.png"))
                 .expect("bundled header icon")
                 .into_rgba8();
         let (width, height) = image.dimensions();
@@ -20836,7 +20836,7 @@ const ICON_STOP_FILL: char = '\u{f592}';
 fn is_process_start_failure(error: &str) -> bool {
     let error = error.to_ascii_lowercase();
     error.contains("could not start the transcription process")
-        || error.contains("could not locate the hippo transcribe executable")
+        || error.contains("could not locate the myware transcribe executable")
 }
 
 /// True when a stored GPU error no longer describes the GPU.
@@ -21243,7 +21243,7 @@ fn help_link<'a>(label: &'a str, message: Message, scheme: Scheme) -> Element<'a
 }
 
 fn about_page(scheme: Scheme) -> Element<'static, Message> {
-    const SOURCE: &str = "https://gitlab.com/librewarelive/hippo-transcribe";
+    const SOURCE: &str = "https://gitlab.com/mywareorg/myware-scribe";
     const LICENCE: &str = "https://www.gnu.org/licenses/old-licenses/lgpl-2.1.html";
     let mut page = column![text(
         "Private, offline speaker diarization and transcription. The name comes \
@@ -21265,7 +21265,7 @@ fn about_page(scheme: Scheme) -> Element<'static, Message> {
         row![
             container(report_label("Source", scheme)).width(Length::Fixed(88.0)),
             link_button(
-                "gitlab.com/librewarelive/hippo-transcribe".to_string(),
+                "gitlab.com/mywareorg/myware-scribe".to_string(),
                 SOURCE.to_string(),
                 scheme,
             ),
@@ -21686,7 +21686,7 @@ fn report_blocks(content: &ReportContent<'_>) -> Vec<ReportBlock> {
             ));
         }
         for item in &briefing.points {
-            let cite = hippo_briefing::citation(item, lines)
+            let cite = myware_briefing::citation(item, lines)
                 .map(|range| format!(" ({range})"))
                 .unwrap_or_default();
             blocks.push(ReportBlock::Bullet(format!(
@@ -21757,7 +21757,7 @@ fn briefing_text(briefing: &Briefing, lines: &[BriefingLine]) -> String {
         for item in &briefing.points {
             out.push_str("- ");
             out.push_str(item.text.trim());
-            if let Some(range) = hippo_briefing::citation(item, lines) {
+            if let Some(range) = myware_briefing::citation(item, lines) {
                 out.push_str(&format!(" ({range})"));
             }
             out.push('\n');
@@ -23616,6 +23616,7 @@ fn styled_spans(
 mod tests {
     use super::*;
     use iced::advanced::widget::tree::{Tag, Tree};
+    use myware_ui::tokens::ICON_SIZE;
     use std::sync::Mutex;
 
     /// Serializes tests that mutate the process environment.
@@ -23630,7 +23631,7 @@ mod tests {
 
     fn temp_dir(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
-            "hippo-transcribe-app-test-{tag}-{}",
+            "myware-scribe-app-test-{tag}-{}",
             std::process::id()
         ));
         let _ = std::fs::remove_dir_all(&dir);
@@ -25251,7 +25252,7 @@ mod tests {
         let _guard = env_lock();
         let config = ConfigEnv::new("first-launch-queue");
         let dir = config.dir.clone();
-        let config_dir = dir.join("hippo-transcribe");
+        let config_dir = dir.join("myware-scribe");
         std::fs::create_dir_all(&config_dir).unwrap();
 
         let audio = dir.join("stale.mp3");
@@ -25327,7 +25328,7 @@ mod tests {
         std::fs::write(&current, "[00:00] A: hi\n").unwrap();
         let stale = dir.join("stale.txt");
         std::fs::write(&stale, "old\n").unwrap();
-        let manifest_path = dir.join("talk-abcdef12.hippo.json");
+        let manifest_path = dir.join("talk-abcdef12.myware.json");
         let manifest = serde_json::json!({
             "schema_version": 1,
             "asset": { "id": "a1", "audio": "talk.mp3" },
@@ -25386,7 +25387,7 @@ mod tests {
         std::fs::write(&current, "[00:00] A: one\n").unwrap();
         let older = dir.join("two-ts.txt");
         std::fs::write(&older, "[00:00] A: two\n").unwrap();
-        let manifest_path = dir.join("talk-hash.hippo.json");
+        let manifest_path = dir.join("talk-hash.myware.json");
         let manifest = serde_json::json!({
             "schema_version": 1,
             "asset": { "id": "a1", "audio": "talk.mp3" },
@@ -25437,7 +25438,7 @@ mod tests {
         let _ = app.update(Message::MakeVersionCurrent);
         assert!(app.version_preview.is_none());
         assert_eq!(app.recent[0].transcript.as_deref(), Some(older.as_path()));
-        let reread = hippo_transcribe_core::versions::read(&manifest_path).unwrap();
+        let reread = myware_scribe_core::versions::read(&manifest_path).unwrap();
         assert_eq!(reread.current.as_deref(), Some("v2"));
         assert_eq!(std::fs::read_to_string(&current).unwrap(), "[00:00] A: one\n");
         assert_eq!(std::fs::read_to_string(&older).unwrap(), "[00:00] A: two\n");
@@ -25454,7 +25455,7 @@ mod tests {
         std::fs::write(&audio, b"audio").unwrap();
         let transcript = dir.join("speed-ts.txt");
         std::fs::write(&transcript, "[00:00] A: hi\n").unwrap();
-        let manifest_path = dir.join("talk-hash.hippo.json");
+        let manifest_path = dir.join("talk-hash.myware.json");
         let manifest = serde_json::json!({
             "schema_version": 1,
             "asset": { "id": "a1", "audio": "talk.mp3" },
@@ -25506,7 +25507,7 @@ mod tests {
         std::fs::write(&transcript, "one\n").unwrap();
         let original = crate::files::unedited_path(&transcript);
         std::fs::write(&original, "one\n").unwrap();
-        let manifest_path = dir.join("talk-hash.hippo.json");
+        let manifest_path = dir.join("talk-hash.myware.json");
         let manifest = serde_json::json!({
             "schema_version": 1,
             "asset": { "id": "a1", "audio": "talk.mp3" },
@@ -25530,7 +25531,7 @@ mod tests {
 
         std::fs::write(&transcript, "two\n").unwrap();
         app.sync_manifest_edit_state(0);
-        let manifest = hippo_transcribe_core::versions::read(&manifest_path).unwrap();
+        let manifest = myware_scribe_core::versions::read(&manifest_path).unwrap();
         assert!(manifest.versions[0].edited);
         assert_eq!(
             manifest.versions[0].original.as_deref(),
@@ -25539,7 +25540,7 @@ mod tests {
 
         std::fs::write(&transcript, "one\n").unwrap();
         app.sync_manifest_edit_state(0);
-        let manifest = hippo_transcribe_core::versions::read(&manifest_path).unwrap();
+        let manifest = myware_scribe_core::versions::read(&manifest_path).unwrap();
         assert!(!manifest.versions[0].edited);
         assert_eq!(manifest.versions[0].original, None);
 
@@ -25557,7 +25558,7 @@ mod tests {
         std::fs::write(&current, "one\n").unwrap();
         let older = dir.join("two-ts.txt");
         std::fs::write(&older, "two\n").unwrap();
-        let manifest_path = dir.join("talk-hash.hippo.json");
+        let manifest_path = dir.join("talk-hash.myware.json");
         let manifest = serde_json::json!({
             "schema_version": 1,
             "asset": { "id": "a1", "audio": "talk.mp3" },
@@ -25591,7 +25592,7 @@ mod tests {
         let _ = app.update(Message::RemoveVersion("v2".to_string()));
 
         assert!(!older.is_file(), "the removed version's transcript survived");
-        let manifest = hippo_transcribe_core::versions::read(&manifest_path).unwrap();
+        let manifest = myware_scribe_core::versions::read(&manifest_path).unwrap();
         assert_eq!(manifest.versions.len(), 1);
         assert_eq!(manifest.current.as_deref(), Some("v1"));
         assert!(app.version_preview.is_none());
@@ -25608,7 +25609,7 @@ mod tests {
         std::fs::write(&audio, b"audio").unwrap();
         let transcript = dir.join("one-ts.txt");
         std::fs::write(&transcript, "one\n").unwrap();
-        let manifest_path = dir.join("talk-hash.hippo.json");
+        let manifest_path = dir.join("talk-hash.myware.json");
         let manifest = serde_json::json!({
             "schema_version": 1,
             "asset": { "id": "a1", "audio": "talk.mp3" },
@@ -26751,7 +26752,7 @@ mod tests {
 
     #[test]
     fn a_menu_row_with_a_key_is_no_wider_than_its_label_plus_key() {
-        let wide = [
+        let wide: [MenuRow<'_, ()>; 2] = [
             MenuRow {
                 label: "Timestamps",
                 key: Some("t"),
@@ -26767,26 +26768,26 @@ mod tests {
                 action: None,
             },
         ];
-        let narrow = [MenuRow {
+        let narrow: [MenuRow<'_, ()>; 1] = [MenuRow {
             label: "Join",
             key: Some("j"),
             checked: false,
             enabled: true,
             action: None,
         }];
-        assert!(hippo_ui::menu::menu_width(&wide) > hippo_ui::menu::menu_width(&narrow));
+        assert!(myware_ui::menu::menu_width(&wide) > myware_ui::menu::menu_width(&narrow));
 
         // The card is sized from the same row value the body is built from: one
         // card padding, one row padding, the check slot, its gap, the label, the
         // minimum gap before a key and the key itself.
         let expected = theme::SPACE_MD * 2.0
             + theme::SPACE_SM * 2.0
-            + hippo_ui::styles::MENU_CHECK_WIDTH
+            + myware_ui::styles::MENU_CHECK_WIDTH
             + theme::SPACE_SM
             + estimated_text_width("Timestamps", 16.0)
             + theme::SPACE_2XL
             + estimated_text_width("t", theme::TEXT_XS);
-        assert!((hippo_ui::menu::menu_width(&wide) - expected).abs() < 0.01);
+        assert!((myware_ui::menu::menu_width(&wide) - expected).abs() < 0.01);
     }
 
     #[test]
@@ -27758,7 +27759,7 @@ mod tests {
             }
             Modal::Versions => {
                 let dir = std::env::temp_dir().join(format!(
-                    "hippo-modal-versions-{}",
+                    "myware-modal-versions-{}",
                     std::process::id()
                 ));
                 let _ = std::fs::create_dir_all(&dir);
@@ -27780,7 +27781,7 @@ mod tests {
                         "origin": "run"
                     }]
                 });
-                let manifest_path = dir.join("talk-hash.hippo.json");
+                let manifest_path = dir.join("talk-hash.myware.json");
                 std::fs::write(&manifest_path, manifest.to_string()).unwrap();
                 app.recent.push(RecentEntry {
                     audio: Some(audio),
@@ -28574,7 +28575,7 @@ mod tests {
         app.queue.push(interrupted_item(audio.clone()));
         assert_eq!(app.transcribe_label(), "Resume");
 
-        let parked = hippo_transcribe_core::pipeline::checkpoint_path(&audio);
+        let parked = myware_scribe_core::pipeline::checkpoint_path(&audio);
         std::fs::write(&parked, "[00:00] SPEAKER 1: hi\n").unwrap();
 
         let _ = app.update(Message::SkipItem(0));
@@ -29200,7 +29201,7 @@ mod tests {
         // samples divided the signal down to around -90 dBFS: the sink ran,
         // the playhead moved, and nothing could be heard.
         let path = std::env::temp_dir().join(format!(
-            "hippo-playback-source-{}.wav",
+            "myware-playback-source-{}.wav",
             std::process::id()
         ));
         let frames = 9_600u32; // 0.2 s, stereo, 48 kHz
@@ -29384,15 +29385,15 @@ mod tests {
         app.briefing = Some(BriefingState::Ready {
             briefing: Briefing {
                 overview: "A short talk.".to_string(),
-                points: vec![hippo_briefing::Item {
+                points: vec![myware_briefing::Item {
                     text: "The sky is blue".to_string(),
                     lines: vec![1],
                 }],
-                decisions: vec![hippo_briefing::Item {
+                decisions: vec![myware_briefing::Item {
                     text: "Ship it".to_string(),
                     lines: vec![1],
                 }],
-                actions: vec![hippo_briefing::Item {
+                actions: vec![myware_briefing::Item {
                     text: "Call Ada".to_string(),
                     lines: vec![1],
                 }],
@@ -29456,7 +29457,7 @@ mod tests {
         app.briefing = Some(BriefingState::Ready {
             briefing: Briefing {
                 overview: "Short talk.".to_string(),
-                points: vec![hippo_briefing::Item {
+                points: vec![myware_briefing::Item {
                     text: "The sky is blue".to_string(),
                     lines: vec![1],
                 }],
@@ -29576,7 +29577,7 @@ mod tests {
         app.briefing = Some(BriefingState::Ready {
             briefing: Briefing {
                 overview: "Short talk.".to_string(),
-                points: vec![hippo_briefing::Item {
+                points: vec![myware_briefing::Item {
                     text: "The sky is blue".to_string(),
                     lines: vec![1],
                 }],
@@ -29635,7 +29636,7 @@ mod tests {
 
         // Keep the real model directory out of the test's way.
         let models_dir = media.join("models");
-        std::env::set_var("HIPPO_TRANSCRIBE_MODELS_DIR", &models_dir);
+        std::env::set_var("MYWARE_SCRIBE_MODELS_DIR", &models_dir);
 
         let mut app = pro_app();
         let audio = media.join("talk.mp3");
@@ -29649,7 +29650,7 @@ mod tests {
         let _ = app.update(Message::CloseBriefing);
         assert!(app.briefing.is_none());
 
-        std::env::remove_var("HIPPO_TRANSCRIBE_MODELS_DIR");
+        std::env::remove_var("MYWARE_SCRIBE_MODELS_DIR");
         let _ = std::fs::remove_dir_all(&media);
     }
 
@@ -30081,8 +30082,8 @@ mod tests {
         let _guard = env_lock();
         let _config = ConfigEnv::new("model-config");
         let models = temp_dir("model-empty");
-        let old_models = std::env::var("HIPPO_TRANSCRIBE_MODELS_DIR").ok();
-        std::env::set_var("HIPPO_TRANSCRIBE_MODELS_DIR", &models);
+        let old_models = std::env::var("MYWARE_SCRIBE_MODELS_DIR").ok();
+        std::env::set_var("MYWARE_SCRIBE_MODELS_DIR", &models);
 
         let mut app = pro_app();
         assert!(!app.models_ready());
@@ -30112,9 +30113,9 @@ mod tests {
         let _ = app.view();
 
         if let Some(old) = old_models {
-            std::env::set_var("HIPPO_TRANSCRIBE_MODELS_DIR", old);
+            std::env::set_var("MYWARE_SCRIBE_MODELS_DIR", old);
         } else {
-            std::env::remove_var("HIPPO_TRANSCRIBE_MODELS_DIR");
+            std::env::remove_var("MYWARE_SCRIBE_MODELS_DIR");
         }
         let _ = std::fs::remove_dir_all(&models);
     }
@@ -32644,7 +32645,7 @@ mod tests {
         std::fs::write(&audio, b"audio").unwrap();
         let transcript = media.join("one-ts.txt");
         std::fs::write(&transcript, "[00:00] A: one\n").unwrap();
-        let manifest_path = media.join("talk-hash.hippo.json");
+        let manifest_path = media.join("talk-hash.myware.json");
         let manifest = serde_json::json!({
             "schema_version": 1,
             "asset": { "id": "a1", "audio": "talk.mp3" },

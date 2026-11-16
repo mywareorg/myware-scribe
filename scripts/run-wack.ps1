@@ -20,7 +20,7 @@ Output lands next to the package: <name>-wack.xml is the WACK report and
 .\scripts\run-wack.ps1
 
 .EXAMPLE
-.\scripts\run-wack.ps1 -Msix dist\hippo-transcribe-0.2.0-windows-x64.msix
+.\scripts\run-wack.ps1 -Msix dist\myware-scribe-0.2.0-windows-x64.msix
 #>
 [CmdletBinding()]
 param(

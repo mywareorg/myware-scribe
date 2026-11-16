@@ -21,7 +21,7 @@ previously signed packages.
 powershell -ExecutionPolicy Bypass -File .\scripts\make-test-cert.ps1
 
 .EXAMPLE
-.\scripts\make-test-cert.ps1 -PfxPath D:\keys\hippo.pfx -Password correct-horse -Force
+.\scripts\make-test-cert.ps1 -PfxPath D:\keys\myware.pfx -Password correct-horse -Force
 #>
 [CmdletBinding()]
 param(
@@ -29,8 +29,8 @@ param(
     # signing certificate's subject exactly, so this defaults to the Publisher
     # in packaging/identity.json rather than a friendly name.
     [string]$Subject,
-    [string]$PfxPath = "C:\keys\hippo-test.pfx",
-    [string]$Password = "hippo-test",
+    [string]$PfxPath = "C:\keys\myware-test.pfx",
+    [string]$Password = "myware-test",
     # Skip the TrustedPeople import when only the .pfx is wanted.
     [switch]$NoTrust,
     [switch]$Force

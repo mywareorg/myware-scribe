@@ -21,7 +21,7 @@ function Set-DevTier {
     if (-not $base) {
         throw "APPDATA is not set; cannot locate the licence record."
     }
-    $dir = Join-Path $base "hippo-transcribe"
+    $dir = Join-Path $base "myware-scribe"
     $path = Join-Path $dir "license.json"
     $now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
     New-Item -ItemType Directory -Path $dir -Force | Out-Null
@@ -534,7 +534,7 @@ function Ensure-SherpaDlls {
     )
 
     if (-not $CacheRoot) {
-        $CacheRoot = Join-Path $env:LOCALAPPDATA "hippo-transcribe\cache"
+        $CacheRoot = Join-Path $env:LOCALAPPDATA "myware-scribe\cache"
     }
 
     $version = "v1.12.9"

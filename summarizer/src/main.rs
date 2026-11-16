@@ -1,4 +1,4 @@
-//! `hippo-summarize`: the briefing worker.
+//! `myware-summarize`: the briefing worker.
 //!
 //! Runs in its own process because whisper.cpp and llama.cpp each vendor ggml;
 //! one binary linking both invites a symbol clash. The GUI writes a request,
@@ -24,7 +24,7 @@ use llama_cpp_2::model::params::LlamaModelParams;
 use llama_cpp_2::model::{LlamaChatMessage, LlamaChatTemplate, LlamaModel};
 use llama_cpp_2::sampling::LlamaSampler;
 
-use hippo_briefing::{
+use myware_briefing::{
     chunk_lines, merge, messages_for, overview_from_parts, parse_reply, Briefing, BriefingLine
 };
 
@@ -85,7 +85,7 @@ fn run() -> Result<(), String> {
     let backend = LlamaBackend::init().map_err(|error| format!("llama backend: {error}"))?;
     // Offload only when the caller asks and the build has a GPU backend.
     // A CPU-only llama.cpp ignores the request, so the knob is safe by default.
-    let gpu_layers = std::env::var("HIPPO_BRIEFING_GPU_LAYERS")
+    let gpu_layers = std::env::var("MYWARE_BRIEFING_GPU_LAYERS")
         .ok()
         .and_then(|value| value.parse::<u32>().ok())
         .unwrap_or(0);
@@ -223,8 +223,8 @@ fn generate(
         .apply_chat_template(template, &messages, true)
         .map_err(|error| format!("chat template: {error}"))?;
     let tokens = model.vocab().tokenize(prompt.as_bytes(), true, true);
-    if std::env::var_os("HIPPO_BRIEFING_DEBUG").is_some() {
-        eprintln!("HIPPO prompt tokens: {}", tokens.len());
+    if std::env::var_os("MYWARE_BRIEFING_DEBUG").is_some() {
+        eprintln!("MYWARE prompt tokens: {}", tokens.len());
     }
     // Reserve the reply as well as the prompt: a chunk that only fits because
     // the check ignored MAX_NEW would overflow context mid-answer.
@@ -271,7 +271,7 @@ fn generate(
         last = 0;
     }
     let text = String::from_utf8_lossy(&output).into_owned();
-    if std::env::var_os("HIPPO_BRIEFING_DEBUG").is_some() {
+    if std::env::var_os("MYWARE_BRIEFING_DEBUG").is_some() {
         eprintln!("--- prompt ---\n{prompt}\n--- reply ---\n{text}");
     }
     Ok(text)

@@ -258,7 +258,7 @@ fn capture(
     let format = chosen.sample_format();
     let channels = chosen.channels() as usize;
     let rate = chosen.sample_rate().0;
-    hippo_transcribe_core::logging::info(format!(
+    myware_scribe_core::logging::info(format!(
         "microphone {}: {format:?}, {channels} channel(s), {rate} Hz",
         device.name().unwrap_or_else(|_| "default".to_string())
     ));
@@ -271,7 +271,7 @@ fn capture(
     let error_meter = meter.clone();
     let error_cb = move |error: cpal::StreamError| {
         error_meter.silence();
-        hippo_transcribe_core::logging::error(format!("microphone stream error: {error}"));
+        myware_scribe_core::logging::error(format!("microphone stream error: {error}"));
     };
 
     let stream = match format {
@@ -684,7 +684,7 @@ mod tests {
 
     fn scratch(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
-            "hippo-recording-{tag}-{}",
+            "myware-recording-{tag}-{}",
             std::process::id()
         ));
         let _ = std::fs::remove_dir_all(&dir);
@@ -888,7 +888,7 @@ mod tests {
         let rate = u32::from_le_bytes(bytes[24..28].try_into().unwrap());
         assert_eq!(rate, 48_000);
 
-        let (decoded, _) = hippo_transcribe_core::audio::decode(&path).unwrap();
+        let (decoded, _) = myware_scribe_core::audio::decode(&path).unwrap();
         assert!((decoded.len() as f32 / 16_000.0 - 0.25).abs() < 0.01);
 
         let _ = std::fs::remove_dir_all(&dir);

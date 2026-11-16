@@ -3,10 +3,16 @@ stages: [build]
 windows-build:
   stage: build
   tags: [windows]
+  interruptible: true
   rules:
+    # A push to the work branch costs nothing; the merge request is the gate.
+    - if: $CI_COMMIT_TAG
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
-    - if: $CI_COMMIT_BRANCH == "main" || $CI_COMMIT_BRANCH == "dev"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
   script:
+    # gui/Cargo.toml depends on ../../myware-ui by path, and a checkout has no
+    # sibling, so the workspace manifest cannot resolve without this.
+    - git clone --depth 1 https://gitlab.com/mywareorg/myware-ui.git ../myware-ui
     - powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/build-windows.ps1 -SkipTests
   artifacts:
     when: always
@@ -26,12 +32,12 @@ windows-build:
 # models.lock.json (not this app project) and MODELS_UPLOAD_TOKEN (a project,
 # group or personal access token with `api` scope, masked). The package project
 # must be public if the app downloads it without credentials; otherwise point
-# HIPPO_TRANSCRIBE_MODEL_MIRROR at a public mirror instead.
+# MYWARE_SCRIBE_MODEL_MIRROR at a public mirror instead.
 publish-models:
   stage: build
   when: manual
   rules:
-    - if: $CI_COMMIT_BRANCH == "main" || $CI_COMMIT_BRANCH == "dev"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
   variables:
     MODELS_PACKAGE_VERSION: "1.0.0"
   script:
@@ -79,7 +85,7 @@ publish-briefing-model:
   stage: build
   when: manual
   rules:
-    - if: $CI_COMMIT_BRANCH == "main" || $CI_COMMIT_BRANCH == "dev"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
   variables:
     MODELS_PACKAGE_VERSION: "1.0.0"
     BRIEFING_MODEL: qwen2.5-1.5b-instruct-q4_k_m.gguf

@@ -136,7 +136,7 @@ full         14.36 / 6.15            -             30.24 / 23.87
 inside an overlap propagates through every later block. Files of 300 s or less
 were unaffected either way, which is why the change looked plausible.
 
-Files, `HIPPO_TRANSCRIBE_DIARIZE_BLOCKS`, the block geometry constants and the
+Files, `MYWARE_SCRIBE_DIARIZE_BLOCKS`, the block geometry constants and the
 progress composition were removed rather than left behind a switch. The
 measurements stay in `tests/diarization/README.md`.
 
@@ -183,7 +183,7 @@ wins on one file and loses by 25 points on another.
 ## Recommended order
 
 1. (done, opt-in) Split collapsed turns by embedding drift:
-   `HIPPO_TRANSCRIBE_DIARIZE_SPLIT=1` takes `hour-conversation-short-1` from
+   `MYWARE_SCRIBE_DIARIZE_SPLIT=1` takes `hour-conversation-short-1` from
    53.89% to 27.18% and `mid-2` from 33.45% to 28.22%, at the cost of +0.7 and
    +0.2 points on `sample-long`/`sample-full`. Two identity rules were measured
    and rejected; see `tests/diarization/README.md`. Promoting it to default

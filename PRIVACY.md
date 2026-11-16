@@ -1,6 +1,6 @@
 # Privacy
 
-Hippo Transcribe processes recordings on the machine where it runs. This
+MyWare Scribe processes recordings on the machine where it runs. This
 document describes exactly what the application stores and what it sends over
 the network.
 
@@ -15,8 +15,8 @@ the network.
 ## What is stored
 
 - **Models** — downloaded once into the model directory
-  (`%LOCALAPPDATA%\hippo-transcribe\models` on Windows,
-  `~/.cache/hippo-transcribe/models` on Linux/macOS). The 1.1 GB summary model
+  (`%LOCALAPPDATA%\myware-scribe\models` on Windows,
+  `~/.cache/myware-scribe/models` on Linux/macOS). The 1.1 GB summary model
   is fetched only when someone asks for a summary in a report.
 - **Diarization cache** — optional local cache keyed by audio content and
   diarization settings.
@@ -25,9 +25,9 @@ the network.
 - **Outputs** — the transcript you generate, its `.json` sidecar holding speaker
   ids, line bounds and confidences, any export (plain text, SubRip, WebVTT,
   Markdown, CSV or Word) and any report (PDF, Word or plain text) you save, plus
-  the `.hippo-transcribe.bak` backup written when a transcript is edited. While a
+  the `.myware-scribe.bak` backup written when a transcript is edited. While a
   run is in progress its lines are parked in a hidden
-  `.<audio>.hippo-transcribe.partial` file beside the audio; it is removed when
+  `.<audio>.myware-scribe.partial` file beside the audio; it is removed when
   the file finishes.
 - **Custom vocabulary** — the terms and replacements you enter, stored as
   `vocabulary.json` beside the settings. It holds only what you typed.
@@ -41,7 +41,7 @@ the network.
   `license.json` beside the settings. It holds no audio, no transcript and no
   file metadata.
 
-- **Logs** — the last five runs write a local log (`%LOCALAPPDATA%\hippo-transcribe\logs`
+- **Logs** — the last five runs write a local log (`%LOCALAPPDATA%\myware-scribe\logs`
   on Windows) recording app events: the version, which model was used, whether the
   GPU or CPU backend was chosen, counts of files processed, and error messages.
   Crashes add a report with a stack trace. Logs never contain audio, transcript
@@ -53,14 +53,14 @@ against the buyer's store account; that record is a purchase, not a transcript.
 
 ## Network use
 
-Hippo Transcribe reaches the network in two cases only: obtaining models, and,
+MyWare Scribe reaches the network in two cases only: obtaining models, and,
 in a store build that has been bought or is being restored, asking the store
 whether the Pro add-on is owned.
 
 ### Model download
 
 - Model files are fetched from the pinned upstream mirrors, or from a mirror you
-  configure with `HIPPO_TRANSCRIBE_MODEL_MIRROR`.
+  configure with `MYWARE_SCRIBE_MODEL_MIRROR`.
 - Downloads resume from a local `.part` file and are verified by SHA-256.
 - No audio, transcript, filename, path, usage event or identifier is sent with
   those requests.
@@ -71,11 +71,11 @@ whether the Pro add-on is owned.
   store: with the models already installed, a free installation generates no
   network traffic at all.
 - The request is made by the store client — the Microsoft Store on Windows — not
-  by Hippo Transcribe. That client supplies the account, device and purchase
+  by MyWare Scribe. That client supplies the account, device and purchase
   records it already holds, under the platform operator's privacy statement.
 - It carries the application and add-on identifiers. It never carries audio,
   transcripts, filenames, file paths, diarization output, timing data or any
-  identifier of Hippo Transcribe's own; the application creates none.
+  identifier of MyWare Scribe's own; the application creates none.
 - The answer is cached on disk, so Pro keeps working offline. The cached answer is
   re-checked after 30 days, or when the store reports that entitlements changed.
 
@@ -84,18 +84,18 @@ After models are installed, transcription itself has no network dependency.
 ## Telemetry and accounts
 
 There is no telemetry, no analytics, no crash reporting, no advertising SDK and
-no Hippo Transcribe account. The application does not assign a device or user
+no MyWare Scribe account. The application does not assign a device or user
 identifier and does not record which features you use.
 
 Pro buyers are signed in to their platform store account, which is how the store
-knows the purchase exists. Hippo Transcribe receives only the resulting
+knows the purchase exists. MyWare Scribe receives only the resulting
 entitlement answer, described above.
 
 ## Retention and deletion
 
 Data remains until you delete it. You can:
 
-- Delete transcript files and their `.hippo-transcribe.bak` backups where you
+- Delete transcript files and their `.myware-scribe.bak` backups where you
   saved them.
 - Clear partial model downloads and remove model files from the model folder.
 - Remove the configuration directory to reset settings and the queue.
@@ -104,7 +104,7 @@ Data remains until you delete it. You can:
 
 ## Security notes
 
-Hippo Transcribe does not encrypt files at rest beyond the protection provided by
+MyWare Scribe does not encrypt files at rest beyond the protection provided by
 your operating system account and disk. For protected health information, use
 full-disk encryption, OS account controls and your organization's retention
 policy.
@@ -113,11 +113,11 @@ policy.
 
 The design follows the data-minimisation idea behind HIPAA: processing stays on
 the device, audio is never uploaded, there is no account holding a transcript,
-and nothing is collected for analytics. That makes Hippo Transcribe HIPAA
+and nothing is collected for analytics. That makes MyWare Scribe HIPAA
 inspired. It does not make it HIPAA compliant.
 
-Hippo Transcribe is not a certified or accredited product, has not been audited
+MyWare Scribe is not a certified or accredited product, has not been audited
 or assessed by a third party, and this document is not a Business Associate
 Agreement. HIPAA obligations apply to covered entities and their business
-associates; assess Hippo Transcribe as part of your own security and compliance
+associates; assess MyWare Scribe as part of your own security and compliance
 program.

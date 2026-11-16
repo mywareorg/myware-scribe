@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <!-- Baseline raised from y=226 to y=194 so its bottom edge sits 44 px from
+       the bottom, matching the 44 px side and top margins; the badge was
+       bottom-heavy at 12 px and nearly bled past rounded tile corners.
+       Optical (ink) margins are now equal at 23 px on all four sides: the
+       square-capped feet of the M reach y=233, like the stroke edges do at
+       x=23/233 and the round joins do at y=23. Bars stay above the M in paint
+       order so the green terminal over the right stem remains visible. -->
+  <path d="M44 212 V44 L128 140 L212 44 V212" fill="none" stroke="#21212B" stroke-width="42" stroke-linecap="square" stroke-linejoin="round"/>
+  <rect x="23" y="194" width="174" height="18" fill="#5BCEFA"/>
+  <rect x="197" y="194" width="36" height="18" fill="#42BE65"/>
+</svg>

@@ -22,7 +22,7 @@ fn set_app_user_model_id() {
         fn SetCurrentProcessExplicitAppUserModelID(app_id: *const u16) -> i32;
     }
 
-    let id: Vec<u16> = OsStr::new("HippoTranscribe")
+    let id: Vec<u16> = OsStr::new("MyWareScribe")
         .encode_wide()
         .chain(Some(0))
         .collect();
@@ -89,7 +89,7 @@ fn install_panic_hook(cli: bool) {
             "no message".to_string()
         };
         let report = format!(
-            "Hippo Transcribe {} stopped unexpectedly\n\
+            "MyWare Scribe {} stopped unexpectedly\n\
              os: {} {}\n\
              location: {location}\n\
              message: {message}\n\n\
@@ -99,8 +99,8 @@ fn install_panic_hook(cli: bool) {
             std::env::consts::ARCH,
             std::backtrace::Backtrace::force_capture()
         );
-        hippo_transcribe_core::logging::error(format!("panic at {location}: {message}"));
-        let saved = hippo_transcribe_core::logging::crash(&report);
+        myware_scribe_core::logging::error(format!("panic at {location}: {message}"));
+        let saved = myware_scribe_core::logging::crash(&report);
         previous(info);
         if cli {
             return;
@@ -114,7 +114,7 @@ fn install_panic_hook(cli: bool) {
             None => "The log folder could not be written to.".to_string(),
         };
         rfd::MessageDialog::new()
-            .set_title("Hippo Transcribe stopped unexpectedly")
+            .set_title("MyWare Scribe stopped unexpectedly")
             .set_description(detail)
             .set_level(rfd::MessageLevel::Error)
             .show();
@@ -126,8 +126,8 @@ fn main() -> iced::Result {
     set_app_user_model_id();
 
     let cli = std::env::args().nth(1).as_deref() == Some("--cli");
-    hippo_transcribe_core::logging::init();
-    hippo_transcribe_core::paths::log_all();
+    myware_scribe_core::logging::init();
+    myware_scribe_core::paths::log_all();
     install_panic_hook(cli);
 
     let args: Vec<String> = std::env::args().collect();
@@ -136,17 +136,17 @@ fn main() -> iced::Result {
     if args.get(1).map(String::as_str) == Some("--paths") {
         #[cfg(windows)]
         attach_console();
-        print!("{}", hippo_transcribe_core::paths::report());
+        print!("{}", myware_scribe_core::paths::report());
         std::process::exit(0);
     }
     if args.get(1).map(String::as_str) == Some("--cli") {
         #[cfg(windows)]
         attach_console();
-        std::process::exit(hippo_transcribe_core::cli::run(&args[2..]));
+        std::process::exit(myware_scribe_core::cli::run(&args[2..]));
     }
 
     iced::application(
-        "Hippo Transcribe \u{2014} Private, offline transcription",
+        "MyWare Scribe \u{2014} Private, offline transcription",
         App::update,
         App::view,
     )

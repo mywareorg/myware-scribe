@@ -1,5 +1,5 @@
 [package]
-name = "hippo-briefing"
+name = "myware-briefing"
 version = "1.0.0"
 edition = "2021"
 description = "Transcript chunking, prompts and validation for the briefing."

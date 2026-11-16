@@ -1,10 +1,10 @@
 # Store listing copy
 
-Paste these into Partner Center > Hippo Transcribe > Store listing. The Store renders plain text only: no markdown, no tables, no emoji. Keep the character counts in mind, they are the limits the form enforces.
+Paste these into Partner Center > MyWare Scribe > Store listing. The Store renders plain text only: no markdown, no tables, no emoji. Keep the character counts in mind, they are the limits the form enforces.
 
 ## Product title
 
-Hippo Transcribe
+MyWare Scribe
 
 ## Short description (under 200 characters)
 
@@ -12,7 +12,7 @@ Turn recordings into speaker-labelled transcripts on your own PC. No account, no
 
 ## Long description
 
-Hippo Transcribe turns interviews, meetings and voice notes into readable, speaker-labelled transcripts without sending anything to a server.
+MyWare Scribe turns interviews, meetings and voice notes into readable, speaker-labelled transcripts without sending anything to a server.
 
 Drop in audio or video and it produces a transcript you can read, search, edit and export. Speech recognition and speaker separation run on your own computer. The models download once on first launch — about 35 MB for the free tier's model — and after that transcription works with the network disconnected. There is no account to create and no usage data to collect.
 
@@ -69,14 +69,14 @@ audio to text
 
 - Support contact: the address registered in Partner Center.
 - Website: optional, leave blank.
-- Privacy policy URL: `https://hippo-transcribe-1f7a72.gitlab.io/` (live; serves the generated privacy page) (the `pages` job in `.gitlab-ci.yml` publishes `PRIVACY.md` there on every push to `main`; confirm Pages is enabled for the project).
+- Privacy policy URL: `https://myware-scribe-1f7a72.gitlab.io/` (live; serves the generated privacy page) (the `pages` job in `.gitlab-ci.yml` publishes `PRIVACY.md` there on every push to `main`; confirm Pages is enabled for the project).
 - Copyright: `(c) 2026 Sean Wu`.
 
 ## Restricted capability and certification notes
 
 Paste the justification into Partner Center > Properties > Restricted capabilities when the `runFullTrust` capability is flagged.
 
-Hippo Transcribe is a packaged Win32 desktop application (Windows.FullTrustApplication). Full trust is needed to read the audio and video files the user picks from any folder, write transcripts, exports and reports beside them or to a folder the user chooses, load its native speech recognition and speaker separation DLLs from the package, and keep the downloaded models in its own local application data. The microphone capability is used only while the user is recording, behind a visible countdown and stop control. Audio is never uploaded; all processing is local.
+MyWare Scribe is a packaged Win32 desktop application (Windows.FullTrustApplication). Full trust is needed to read the audio and video files the user picks from any folder, write transcripts, exports and reports beside them or to a folder the user chooses, load its native speech recognition and speaker separation DLLs from the package, and keep the downloaded models in its own local application data. The microphone capability is used only while the user is recording, behind a visible countdown and stop control. Audio is never uploaded; all processing is local.
 
 Certification notes to paste into the submission:
 
@@ -105,7 +105,7 @@ For any recapture, shoot on the Windows build machine at 100% display scaling wi
 
 - [ ] Pass `-Version` so the package reports a four-part version, for example `-Version 1.0.0` renders `1.0.0.0`. Every later submission must be higher.
 - [ ] Build without `-Sign`: the Store re-signs. `-Sign` is only for sideloading.
-- [ ] Confirm `packaging/identity.json` still matches Partner Center character for character. Current values are `SeanWu.HippoTranscribe`, `CN=6862352A-51D9-40F2-9242-0F769B2F87AB`, display name `Sean Wu`.
+- [ ] Confirm `packaging/identity.json` still matches Partner Center character for character. Current values are `SeanWu.MyWareTranscribe`, `CN=6862352A-51D9-40F2-9242-0F769B2F87AB`, display name `Sean Wu`.
 - [ ] Create the durable Pro add-on in Partner Center before building: give it the product ID `pro` (the client finds the add-on by that ID, so no Store ID is compiled in), set its price and markets, and submit it with the app.
 - [ ] Test the purchase flow once the app and add-on pass certification: keep the listing "not discoverable", install the Store build on the dev machine, then buy, restore, refund and go offline. Make the listing public only after that passes.
 - [ ] Complete the IARC questionnaire, the age-rating section and the system requirements block.

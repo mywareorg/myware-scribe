@@ -21,14 +21,14 @@ Developer Mode enabled.
 powershell -ExecutionPolicy Bypass -File .\scripts\install-msix.ps1
 
 .EXAMPLE
-.\scripts\install-msix.ps1 -Msix dist\hippo-transcribe-0.1.0-windows-x64.msix
+.\scripts\install-msix.ps1 -Msix dist\myware-scribe-0.1.0-windows-x64.msix
 #>
 [CmdletBinding()]
 param(
     # Package to install. Defaults to the newest .msix under dist.
     [string]$Msix,
     # Certificate to trust. make-test-cert.ps1 writes one beside the .pfx.
-    [string]$CerPath = "C:\keys\hippo-test.cer",
+    [string]$CerPath = "C:\keys\myware-test.cer",
     # Install without importing the certificate (needs Developer Mode).
     [switch]$SkipTrust,
     # Also delete the package's private data, so the app starts as a first run
@@ -162,12 +162,12 @@ if (Test-Path $identityFile) {
 
 # An environment override moves the models out of the package, where purging
 # the package data would not touch them.
-$modelsOverride = [Environment]::GetEnvironmentVariable("HIPPO_TRANSCRIBE_MODELS_DIR", "User")
+$modelsOverride = [Environment]::GetEnvironmentVariable("MYWARE_SCRIBE_MODELS_DIR", "User")
 if (-not $modelsOverride) {
-    $modelsOverride = [Environment]::GetEnvironmentVariable("HIPPO_TRANSCRIBE_MODELS_DIR", "Machine")
+    $modelsOverride = [Environment]::GetEnvironmentVariable("MYWARE_SCRIBE_MODELS_DIR", "Machine")
 }
 if ($modelsOverride) {
-    Write-Warn "HIPPO_TRANSCRIBE_MODELS_DIR is set to $modelsOverride; -Fresh does not delete that folder."
+    Write-Warn "MYWARE_SCRIBE_MODELS_DIR is set to $modelsOverride; -Fresh does not delete that folder."
 }
 
 # A stale registration blocks the install with 0x80073CF9, so replace it.
@@ -238,6 +238,6 @@ if ($applicationId) {
 $modelDir = if ($modelsOverride) {
     $modelsOverride
 } else {
-    Join-Path $env:LOCALAPPDATA "Packages\$($installed.PackageFamilyName)\LocalCache\Local\hippo-transcribe\models"
+    Join-Path $env:LOCALAPPDATA "Packages\$($installed.PackageFamilyName)\LocalCache\Local\myware-scribe\models"
 }
 Write-Host "  Models:  $modelDir"
