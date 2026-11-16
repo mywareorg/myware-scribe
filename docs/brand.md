@@ -50,15 +50,15 @@ free tier shows what the purchase adds.
 
 ## Visual system
 
-- **Mark: not yet designed.** Every shipped icon is still the hippo head in a
-  shield, drawn for the previous name. It must not appear on a MyWare release.
-  The replacement has to survive 16 px, read in one colour, and carry no animal
-  or medical allusion.
+- **Mark:** the M monogram — a heavy square-shouldered M on a full-width accent
+  blue baseline that ends in a green terminal, on a light rounded-square field.
+  It survives 16 px, reads in one colour, and carries no animal or medical
+  allusion.
 - Green signals verified-local, privacy and completed states.
 - Pair the mark with the wordmark `MyWare Scribe`; at small sizes the mark
   carries the product on its own and needs no detail.
-- The icon files keep their names during the rename. Replacing their contents
-  is the open task; renaming them again is not needed.
+- The baseline's green terminal is the only element that disappears at 16 px;
+  it never carries meaning on its own.
 
 ## Surfaces
 
