@@ -14,3 +14,10 @@
 - Imperative subject, no prefix, no trailing period, under ~72 characters.
 - The body says what changed and why; call out known gaps explicitly rather
   than letting the commit imply more than it delivers.
+
+## Checks
+
+- `cargo lint` runs clippy over every target, including the tests. Run it before
+  committing. `cargo lint-strict` is the same command with `-D warnings`, which
+  this crate does not pass yet: there is a backlog from the years it was not
+  part of the routine.

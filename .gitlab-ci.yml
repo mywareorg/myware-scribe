@@ -1,3 +1,16 @@
+# Pipelines are off until we decide otherwise. Nothing runs on push, merge
+# request, tag or schedule. To start one deliberately: CI/CD > Pipelines >
+# Run pipeline, and add CI_ENABLED=1 as a variable.
+#
+# The jobs below are kept, not deleted, so the work is not lost. Re-enabling is
+# the variable, not a rewrite. When that day comes, add `changes:` so docs and
+# artwork commits stop triggering a Windows build, and a `resource_group` so a
+# superseded commit cancels instead of finishing.
+workflow:
+  rules:
+    - if: $CI_ENABLED == "1"
+    - when: never
+
 stages: [build]
 
 windows-build:

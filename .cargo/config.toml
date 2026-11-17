@@ -16,3 +16,8 @@ run-fast = "run --profile release-fast"
 # outside the default members, and Summarize Transcript needs it beside the
 # executable. Build both, then `cargo run-fast`.
 build-fast = "build --profile release-fast -p myware-scribe-gui -p myware-summarize"
+# Linting, standing in for the pipeline that no longer runs. `--all-targets`
+# matters: it also compiles the test code, which is where the GUI rotted before.
+# Not `-- -D warnings` yet; see `lint-strict` for the gate to reach.
+lint = "clippy --workspace --all-targets"
+lint-strict = "clippy --workspace --all-targets -- -D warnings"
